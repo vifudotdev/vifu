@@ -81,11 +81,45 @@ For a local client on the same machine:
 vifu --relay 127.0.0.1:48989
 ```
 
+Docker Compose:
+
+```bash
+cp .env.example .env.local
+docker compose up --build
+```
+
+## Vifu Cloud Control Plane
+
+`vifu server` can optionally register itself with a Vifu API control plane. This
+is meant for managed relay deployments where the relay runs as a service
+process and uses service credentials supplied by the deployment environment.
+
+Cloud registration is disabled by default. To enable it, set:
+
+```bash
+VIFU_CLOUD_ENABLED=1
+VIFU_API_BASE_URL=https://api.example.test
+VIFU_SERVICE_ID=vifu-relay-dev
+VIFU_SERVICE_USERNAME=service@example.test
+VIFU_SERVICE_PASSWORD=replace-me
+VIFU_RELAY_ID=local-relay
+VIFU_RELAY_ENDPOINT=tcp://127.0.0.1:48989
+```
+
+When enabled, the relay:
+
+- logs in through `POST /v1/auth/service/login`;
+- registers through `POST /v1/relays/register`;
+- sends heartbeat updates through `POST /v1/relays/heartbeat`.
+
+Real service credentials belong in your runtime secret store or a local
+untracked `.env.local` file, never in source control.
+
 ## Development
 
 Requirements:
 
-- Rust 1.80 or newer
+- Rust 1.90 or newer
 
 Common checks:
 

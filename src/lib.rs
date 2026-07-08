@@ -1,4 +1,5 @@
 pub mod cli;
+pub mod cloud;
 pub mod config;
 pub mod connector;
 pub mod openclaw;

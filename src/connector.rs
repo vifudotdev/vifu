@@ -3,6 +3,7 @@ use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::cli::{help_text, Command, Options};
+use crate::cloud;
 use crate::config::Config;
 use crate::openclaw::{self, ProbeStatus};
 use crate::relay;
@@ -70,6 +71,7 @@ fn server(options: Options) -> Result<(), String> {
         options.relay_addr,
         options.listen_addr,
     )?;
+    let _cloud_control = cloud::start_relay_control(&config.cloud)?;
     relay::run_server(&config.listen_addr)
 }
 
@@ -100,6 +102,14 @@ fn doctor(options: Options) -> Result<(), String> {
     println!("Vifu doctor");
     println!("State directory: {}", config.home_dir.display());
     println!("Server listen: {}", config.listen_addr);
+    println!(
+        "Cloud: {}",
+        if config.cloud.enabled {
+            "enabled"
+        } else {
+            "disabled"
+        }
+    );
     print_openclaw_report(&report);
     print_relay_config(&config);
     print_session_status(&config, None);

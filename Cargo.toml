@@ -9,6 +9,8 @@ homepage = "https://vifu.ai"
 readme = "README.md"
 keywords = ["ai", "cli", "openclaw", "local-first"]
 categories = ["command-line-utilities"]
-rust-version = "1.80"
+rust-version = "1.90"
 
 [dependencies]
+serde_json = "1"
+ureq = { version = "2", features = ["json"] }
