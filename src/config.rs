@@ -1,15 +1,22 @@
 use std::path::PathBuf;
 
 pub const DEFAULT_OPENCLAW_URL: &str = "http://127.0.0.1:18789";
+pub const DEFAULT_RELAY_LISTEN_ADDR: &str = "127.0.0.1:48989";
 
 #[derive(Debug, Clone)]
 pub struct Config {
     pub home_dir: PathBuf,
     pub openclaw_url: String,
+    pub relay_addr: Option<String>,
+    pub listen_addr: String,
 }
 
 impl Config {
-    pub fn load(openclaw_url: String) -> Result<Self, String> {
+    pub fn load(
+        openclaw_url: String,
+        relay_addr: Option<String>,
+        listen_addr: String,
+    ) -> Result<Self, String> {
         let home_dir = match std::env::var_os("VIFU_HOME") {
             Some(value) if !value.is_empty() => PathBuf::from(value),
             _ => default_home_dir()?,
@@ -18,6 +25,8 @@ impl Config {
         Ok(Self {
             home_dir,
             openclaw_url,
+            relay_addr,
+            listen_addr,
         })
     }
 

@@ -2,6 +2,8 @@ pub mod cli;
 pub mod config;
 pub mod connector;
 pub mod openclaw;
+pub mod protocol;
+pub mod relay;
 pub mod session;
 
 pub fn run<I, S>(args: I) -> Result<(), String>

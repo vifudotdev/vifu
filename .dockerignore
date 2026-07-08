@@ -1,0 +1,11 @@
+target
+.git
+.github
+.env
+.env.*
+Dockerfile
+README.md
+CHANGELOG.md
+CONTRIBUTING.md
+CODE_OF_CONDUCT.md
+SECURITY.md
