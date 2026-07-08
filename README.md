@@ -1,12 +1,49 @@
 # Vifu
 
-Vifu is a small local connector and relay for AI agents.
+Vifu is a small local connector for AI agents.
 
 The first preview checks a local OpenClaw Gateway over loopback. It can also
 run a self-hosted relay for local development and private networks.
 
 ```bash
 vifu
+```
+
+## Status
+
+Vifu is an early preview. The local OpenClaw connector and self-hosted relay are
+the current public surface. The relay protocol may change before a stable
+release.
+
+## Install
+
+Build from source:
+
+```bash
+cargo install --path .
+vifu --doctor
+```
+
+Or run without installing:
+
+```bash
+cargo run -- --doctor
+```
+
+## Quickstart
+
+Local OpenClaw check:
+
+```bash
+openclaw gateway --port 18789
+vifu --status
+```
+
+Self-hosted relay smoke test:
+
+```bash
+vifu server --listen 127.0.0.1:48989
+vifu --relay 127.0.0.1:48989
 ```
 
 ## What Vifu Does
@@ -28,13 +65,6 @@ vifu --logout        # Remove local Vifu session state
 vifu --reset         # Remove all local Vifu state
 ```
 
-Self-hosted relay smoke test:
-
-```bash
-vifu server --listen 127.0.0.1:48989
-vifu --relay 127.0.0.1:48989
-```
-
 ## OpenClaw
 
 Vifu currently targets a local OpenClaw Gateway.
@@ -54,12 +84,10 @@ local development, private networks, and early self-hosting tests. Do not expose
 the preview relay directly to the public internet without an external secure
 network layer.
 
-Future managed relay deployments will add account authorization, relay session
-tokens, and service-side permissions before accepting public traffic.
-
-## Security Model
+## Privacy And Security
 
 - OpenClaw credentials stay on the user's machine.
+- Local-only usage does not require a Vifu account.
 - Vifu does not expose a public listener by default.
 - Vifu only accepts loopback OpenClaw URLs by default.
 - The preview relay does not require Docker socket access.
@@ -81,11 +109,20 @@ For a local client on the same machine:
 vifu --relay 127.0.0.1:48989
 ```
 
+Docker Compose:
+
+```bash
+docker compose up --build
+```
+
+To customize the relay listener for Docker Compose, copy `.env.example` to
+`.env.local` and edit `VIFU_LISTEN_ADDR`.
+
 ## Development
 
 Requirements:
 
-- Rust 1.80 or newer
+- Rust 1.90 or newer
 
 Common checks:
 

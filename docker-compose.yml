@@ -1,0 +1,9 @@
+services:
+  vifu-relay:
+    build: .
+    restart: unless-stopped
+    env_file:
+      - path: .env.local
+        required: false
+    ports:
+      - "48989:48989"
