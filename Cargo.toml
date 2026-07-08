@@ -1,0 +1,14 @@
+[package]
+name = "vifu"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "Connect local AI agents to Vifu."
+repository = "https://github.com/vifu-labs/vifu"
+homepage = "https://vifu.ai"
+readme = "README.md"
+keywords = ["ai", "cli", "openclaw", "local-first"]
+categories = ["command-line-utilities"]
+rust-version = "1.80"
+
+[dependencies]

@@ -1,0 +1,39 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+jobs:
+  rust:
+    name: Rust
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy,rustfmt
+      - name: Format
+        run: cargo fmt --check
+      - name: Test
+        run: cargo test
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+      - name: Build
+        run: cargo build
+      - name: Check
+        run: cargo check
+      - name: Public naming guard
+        run: |
+          if grep -R -I -i --exclude-dir=.git --exclude-dir=target 'c[o]nsenger' .; then
+            echo "Public vifu repository must not contain internal product names."
+            exit 1
+          fi
+      - name: Secret pattern guard
+        run: |
+          if grep -R -I -E --exclude-dir=.git --exclude-dir=target '(gh[pousr]_[A-Za-z0-9_]+|github_pat_[A-Za-z0-9_]+|AKIA[0-9A-Z]{16}|ASIA[0-9A-Z]{16}|sk-[A-Za-z0-9_-]{20,}|-----BEGIN (RSA |OPENSSH |EC |DSA )?PRIVATE KEY-----)' .; then
+            echo "Potential secret found in public repository contents."
+            exit 1
+          fi

@@ -1,0 +1,222 @@
+use std::fs;
+use std::path::Path;
+
+use crate::cli::{help_text, Command, Options};
+use crate::config::Config;
+use crate::openclaw::{self, ProbeStatus};
+
+pub fn execute(options: Options) -> Result<(), String> {
+    match options.command {
+        Command::Help => {
+            print!("{}", help_text());
+            Ok(())
+        }
+        Command::Version => {
+            println!("vifu {}", env!("CARGO_PKG_VERSION"));
+            Ok(())
+        }
+        Command::Connect => connect(options),
+        Command::Status => status(options),
+        Command::Doctor => doctor(options),
+        Command::Logout => logout(options),
+        Command::Reset => reset(options),
+    }
+}
+
+fn connect(options: Options) -> Result<(), String> {
+    let config = Config::load(options.openclaw_url)?;
+    ensure_home_dir(&config)?;
+    let report = openclaw::probe(&config.openclaw_url);
+
+    println!("Vifu connector");
+    print_openclaw_report(&report);
+    print_relay_status(&config);
+
+    match report.status {
+        ProbeStatus::Online => Ok(()),
+        ProbeStatus::Offline(_) | ProbeStatus::Unsupported(_) => Err(
+            "OpenClaw Gateway is not reachable. Run `vifu --doctor` for setup checks.".to_string(),
+        ),
+    }
+}
+
+fn status(options: Options) -> Result<(), String> {
+    let config = Config::load(options.openclaw_url)?;
+    let report = openclaw::probe(&config.openclaw_url);
+
+    println!("Vifu status");
+    println!("State: {}", config.home_dir.display());
+    print_openclaw_report(&report);
+    print_relay_status(&config);
+    Ok(())
+}
+
+fn doctor(options: Options) -> Result<(), String> {
+    let config = Config::load(options.openclaw_url)?;
+    let report = openclaw::probe(&config.openclaw_url);
+
+    println!("Vifu doctor");
+    println!("State directory: {}", config.home_dir.display());
+    print_openclaw_report(&report);
+    print_relay_status(&config);
+
+    match report.status {
+        ProbeStatus::Online => {
+            println!("OpenClaw: ready");
+        }
+        ProbeStatus::Offline(_) => {
+            println!("OpenClaw: start the Gateway on loopback, for example:");
+            println!("  openclaw gateway --port 18789");
+        }
+        ProbeStatus::Unsupported(_) => {
+            println!("OpenClaw: use a loopback URL such as http://127.0.0.1:18789");
+        }
+    }
+
+    if config.relay_url.is_none() {
+        println!("Relay: account pairing is not configured in this build yet");
+    }
+
+    Ok(())
+}
+
+fn logout(options: Options) -> Result<(), String> {
+    let config = Config::load(options.openclaw_url)?;
+    match fs::remove_file(config.auth_file()) {
+        Ok(()) => println!("Removed local Vifu session state."),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            println!("No local Vifu session state found.");
+        }
+        Err(error) => return Err(error.to_string()),
+    }
+    Ok(())
+}
+
+fn reset(options: Options) -> Result<(), String> {
+    let config = Config::load(options.openclaw_url)?;
+    ensure_safe_reset_dir(&config.home_dir)?;
+    match fs::remove_dir_all(&config.home_dir) {
+        Ok(()) => println!("Removed all local Vifu state."),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            println!("No local Vifu state found.");
+        }
+        Err(error) => return Err(error.to_string()),
+    }
+    Ok(())
+}
+
+fn ensure_home_dir(config: &Config) -> Result<(), String> {
+    fs::create_dir_all(&config.home_dir).map_err(|error| error.to_string())
+}
+
+fn print_openclaw_report(report: &openclaw::ProbeReport) {
+    match &report.status {
+        ProbeStatus::Online => {
+            println!(
+                "OpenClaw: online at {}:{}",
+                report.endpoint.host, report.endpoint.port
+            );
+        }
+        ProbeStatus::Offline(reason) => {
+            println!(
+                "OpenClaw: offline at {}:{} ({reason})",
+                report.endpoint.host, report.endpoint.port
+            );
+        }
+        ProbeStatus::Unsupported(reason) => {
+            println!("OpenClaw: unsupported configuration ({reason})");
+        }
+    }
+}
+
+fn print_relay_status(config: &Config) {
+    match &config.relay_url {
+        Some(url) => println!("Relay: configured at {}", redacted_relay_url(url)),
+        None => println!("Relay: not paired"),
+    }
+}
+
+fn ensure_safe_reset_dir(path: &Path) -> Result<(), String> {
+    if !path.is_absolute() {
+        return Err(format!(
+            "Refusing to reset '{}'. Vifu reset requires an absolute state directory path.",
+            path.display()
+        ));
+    }
+
+    let file_name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| "Refusing to reset an unnamed Vifu state directory.".to_string())?;
+
+    if file_name != ".vifu" {
+        return Err(format!(
+            "Refusing to reset '{}'. Vifu reset only removes a directory named '.vifu'.",
+            path.display()
+        ));
+    }
+
+    let parent = path
+        .parent()
+        .ok_or_else(|| "Refusing to reset a root-level Vifu state directory.".to_string())?;
+
+    if parent.parent().is_none() {
+        return Err("Refusing to reset a root-level Vifu state directory.".to_string());
+    }
+
+    Ok(())
+}
+
+fn redacted_relay_url(url: &str) -> String {
+    let trimmed = url.trim();
+    let without_fragment = trimmed.split('#').next().unwrap_or(trimmed);
+    let without_query = without_fragment
+        .split('?')
+        .next()
+        .unwrap_or(without_fragment);
+
+    match without_query.split_once("://") {
+        Some((scheme, rest)) => {
+            let authority = rest.split('/').next().unwrap_or(rest);
+            let host = authority.rsplit('@').next().unwrap_or(authority);
+            format!("{scheme}://{host}")
+        }
+        None => "<configured>".to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use super::{ensure_safe_reset_dir, redacted_relay_url};
+
+    #[test]
+    fn reset_allows_default_state_dir_name() {
+        assert!(ensure_safe_reset_dir(&PathBuf::from("/Users/example/.vifu")).is_ok());
+    }
+
+    #[test]
+    fn reset_rejects_unscoped_state_dir() {
+        let error = ensure_safe_reset_dir(&PathBuf::from("/Users/example")).unwrap_err();
+        assert!(error.contains("Refusing to reset"));
+    }
+
+    #[test]
+    fn reset_rejects_relative_state_dir() {
+        let error = ensure_safe_reset_dir(&PathBuf::from(".vifu")).unwrap_err();
+        assert!(error.contains("absolute"));
+    }
+
+    #[test]
+    fn reset_rejects_root_level_state_dir() {
+        let error = ensure_safe_reset_dir(&PathBuf::from("/.vifu")).unwrap_err();
+        assert!(error.contains("root-level"));
+    }
+
+    #[test]
+    fn relay_url_display_removes_credentials_and_query() {
+        let display = redacted_relay_url("https://user:secret@relay.vifu.ai/path?token=abc#debug");
+        assert_eq!(display, "https://relay.vifu.ai");
+    }
+}
