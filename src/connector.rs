@@ -4,6 +4,7 @@ use std::path::Path;
 use crate::cli::{help_text, Command, Options};
 use crate::config::Config;
 use crate::openclaw::{self, ProbeStatus};
+use crate::session::{self, SessionStatus};
 
 pub fn execute(options: Options) -> Result<(), String> {
     match options.command {
@@ -30,7 +31,7 @@ fn connect(options: Options) -> Result<(), String> {
 
     println!("Vifu connector");
     print_openclaw_report(&report);
-    print_relay_status(&config);
+    print_session_status(&config);
 
     match report.status {
         ProbeStatus::Online => Ok(()),
@@ -47,7 +48,7 @@ fn status(options: Options) -> Result<(), String> {
     println!("Vifu status");
     println!("State: {}", config.home_dir.display());
     print_openclaw_report(&report);
-    print_relay_status(&config);
+    print_session_status(&config);
     Ok(())
 }
 
@@ -58,7 +59,7 @@ fn doctor(options: Options) -> Result<(), String> {
     println!("Vifu doctor");
     println!("State directory: {}", config.home_dir.display());
     print_openclaw_report(&report);
-    print_relay_status(&config);
+    print_session_status(&config);
 
     match report.status {
         ProbeStatus::Online => {
@@ -73,16 +74,12 @@ fn doctor(options: Options) -> Result<(), String> {
         }
     }
 
-    if config.relay_url.is_none() {
-        println!("Relay: account pairing is not configured in this build yet");
-    }
-
     Ok(())
 }
 
 fn logout(options: Options) -> Result<(), String> {
     let config = Config::load(options.openclaw_url)?;
-    match fs::remove_file(config.auth_file()) {
+    match fs::remove_file(config.session_file()) {
         Ok(()) => println!("Removed local Vifu session state."),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             println!("No local Vifu session state found.");
@@ -129,10 +126,11 @@ fn print_openclaw_report(report: &openclaw::ProbeReport) {
     }
 }
 
-fn print_relay_status(config: &Config) {
-    match &config.relay_url {
-        Some(url) => println!("Relay: configured at {}", redacted_relay_url(url)),
-        None => println!("Relay: not paired"),
+fn print_session_status(config: &Config) {
+    match session::read_session(&config.session_file()) {
+        SessionStatus::Ready(_) => println!("Session: paired"),
+        SessionStatus::Missing => println!("Session: not paired"),
+        SessionStatus::Invalid(reason) => println!("Session: invalid ({reason})"),
     }
 }
 
@@ -167,29 +165,11 @@ fn ensure_safe_reset_dir(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn redacted_relay_url(url: &str) -> String {
-    let trimmed = url.trim();
-    let without_fragment = trimmed.split('#').next().unwrap_or(trimmed);
-    let without_query = without_fragment
-        .split('?')
-        .next()
-        .unwrap_or(without_fragment);
-
-    match without_query.split_once("://") {
-        Some((scheme, rest)) => {
-            let authority = rest.split('/').next().unwrap_or(rest);
-            let host = authority.rsplit('@').next().unwrap_or(authority);
-            format!("{scheme}://{host}")
-        }
-        None => "<configured>".to_string(),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
 
-    use super::{ensure_safe_reset_dir, redacted_relay_url};
+    use super::ensure_safe_reset_dir;
 
     #[test]
     fn reset_allows_default_state_dir_name() {
@@ -212,11 +192,5 @@ mod tests {
     fn reset_rejects_root_level_state_dir() {
         let error = ensure_safe_reset_dir(&PathBuf::from("/.vifu")).unwrap_err();
         assert!(error.contains("root-level"));
-    }
-
-    #[test]
-    fn relay_url_display_removes_credentials_and_query() {
-        let display = redacted_relay_url("https://user:secret@relay.vifu.ai/path?token=abc#debug");
-        assert_eq!(display, "https://relay.vifu.ai");
     }
 }

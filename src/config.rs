@@ -6,7 +6,6 @@ pub const DEFAULT_OPENCLAW_URL: &str = "http://127.0.0.1:18789";
 pub struct Config {
     pub home_dir: PathBuf,
     pub openclaw_url: String,
-    pub relay_url: Option<String>,
 }
 
 impl Config {
@@ -16,20 +15,14 @@ impl Config {
             _ => default_home_dir()?,
         };
 
-        let relay_url = std::env::var("VIFU_RELAY_URL")
-            .ok()
-            .map(|value| value.trim().to_string())
-            .filter(|value| !value.is_empty());
-
         Ok(Self {
             home_dir,
             openclaw_url,
-            relay_url,
         })
     }
 
-    pub fn auth_file(&self) -> PathBuf {
-        self.home_dir.join("auth.json")
+    pub fn session_file(&self) -> PathBuf {
+        self.home_dir.join("session")
     }
 }
 
