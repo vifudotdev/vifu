@@ -29,4 +29,4 @@ WORKDIR /home/vifu
 
 EXPOSE 48989
 ENTRYPOINT ["vifu"]
-CMD ["server", "--listen", "0.0.0.0:48989"]
+CMD ["deploy", "--listen", "0.0.0.0:48989"]

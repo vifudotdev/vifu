@@ -1,6 +1,7 @@
 pub mod cli;
 pub mod config;
 pub mod connector;
+pub mod deployment;
 pub mod openclaw;
 pub mod protocol;
 pub mod relay;

@@ -3,6 +3,7 @@ use crate::config::{DEFAULT_OPENCLAW_URL, DEFAULT_RELAY_LISTEN_ADDR};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
     Connect,
+    Deploy,
     Server,
     Status,
     Doctor,
@@ -66,6 +67,12 @@ impl Options {
                 value if value.starts_with('-') => {
                     return Err(format!("unknown option: {value}"));
                 }
+                "deploy" => {
+                    if command != Command::Connect {
+                        return Err("only one vifu command can be used at a time".to_string());
+                    }
+                    command = Command::Deploy;
+                }
                 "server" => {
                     if command != Command::Connect {
                         return Err("only one vifu command can be used at a time".to_string());
@@ -96,7 +103,7 @@ Connect local AI agents to Vifu.
 
 Usage:
   vifu                 Start the local connector
-  vifu server          Start a Vifu relay server
+  vifu deploy          Start the selected deployment
   vifu --status        Show local connector status
   vifu --doctor        Diagnose local setup
   vifu --logout        Remove local Vifu session state
@@ -105,7 +112,7 @@ Usage:
 Options:
   --openclaw-url URL   Local OpenClaw Gateway URL
   --relay ADDR         Relay address for the local connector
-  --listen ADDR        Listen address for `vifu server`
+  --listen ADDR        Listen address for `vifu deploy`
   -h, --help           Show help
   -V, --version        Show version
 "
@@ -131,6 +138,13 @@ mod tests {
     fn parses_server_command() {
         let options = Options::parse(["vifu", "server", "--listen", "127.0.0.1:48990"]).unwrap();
         assert_eq!(options.command, Command::Server);
+        assert_eq!(options.listen_addr, "127.0.0.1:48990");
+    }
+
+    #[test]
+    fn parses_deploy_command() {
+        let options = Options::parse(["vifu", "deploy", "--listen", "127.0.0.1:48990"]).unwrap();
+        assert_eq!(options.command, Command::Deploy);
         assert_eq!(options.listen_addr, "127.0.0.1:48990");
     }
 

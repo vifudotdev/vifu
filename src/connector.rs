@@ -4,6 +4,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::cli::{help_text, Command, Options};
 use crate::config::Config;
+use crate::deployment;
 use crate::openclaw::{self, ProbeStatus};
 use crate::relay;
 use crate::session::{self, SessionStatus, SessionSummary};
@@ -19,7 +20,7 @@ pub fn execute(options: Options) -> Result<(), String> {
             Ok(())
         }
         Command::Connect => connect(options),
-        Command::Server => server(options),
+        Command::Deploy | Command::Server => deploy(options),
         Command::Status => status(options),
         Command::Doctor => doctor(options),
         Command::Logout => logout(options),
@@ -64,12 +65,14 @@ fn connect(options: Options) -> Result<(), String> {
     }
 }
 
-fn server(options: Options) -> Result<(), String> {
+fn deploy(options: Options) -> Result<(), String> {
     let config = Config::load(
         options.openclaw_url,
         options.relay_addr,
         options.listen_addr,
     )?;
+    print_deployment_config(&config);
+    let _deployment = deployment::start(&config.deployment)?;
     relay::run_server(&config.listen_addr)
 }
 
@@ -83,6 +86,7 @@ fn status(options: Options) -> Result<(), String> {
 
     println!("Vifu status");
     println!("State: {}", config.home_dir.display());
+    print_deployment_config(&config);
     print_openclaw_report(&report);
     print_relay_config(&config);
     print_session_status(&config, None);
@@ -100,6 +104,7 @@ fn doctor(options: Options) -> Result<(), String> {
     println!("Vifu doctor");
     println!("State directory: {}", config.home_dir.display());
     println!("Server listen: {}", config.listen_addr);
+    print_deployment_config(&config);
     print_openclaw_report(&report);
     print_relay_config(&config);
     print_session_status(&config, None);
@@ -175,6 +180,10 @@ fn print_openclaw_report(report: &openclaw::ProbeReport) {
             println!("OpenClaw: unsupported configuration ({reason})");
         }
     }
+}
+
+fn print_deployment_config(config: &Config) {
+    println!("Deployment: {}", config.deployment.target.label());
 }
 
 fn print_relay_config(config: &Config) {

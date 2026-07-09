@@ -1,9 +1,9 @@
 # Vifu
 
-Vifu is a small local connector for AI agents.
+Vifu is the open-source local connector for AI agents.
 
-The first preview checks a local OpenClaw Gateway over loopback. It can also
-run a self-hosted relay for local development and private networks.
+The first preview checks a local OpenClaw Gateway over loopback. It can also run
+a self-hosted deployment for local development and private networks.
 
 ```bash
 vifu
@@ -11,8 +11,8 @@ vifu
 
 ## Status
 
-Vifu is an early preview. The local OpenClaw connector and self-hosted relay are
-the current public surface. The relay protocol may change before a stable
+Vifu is an early preview. The local OpenClaw connector and self-host deployment
+are the current public surface. The relay protocol may change before a stable
 release.
 
 ## Install
@@ -39,18 +39,30 @@ openclaw gateway --port 18789
 vifu --status
 ```
 
-Self-hosted relay smoke test:
+Self-host deployment smoke test:
 
 ```bash
-vifu server --listen 127.0.0.1:48989
+VIFU_DEPLOYMENT=self-host vifu deploy --listen 127.0.0.1:48989
 vifu --relay 127.0.0.1:48989
 ```
+
+## Self Hosting
+
+By default, Vifu runs locally and does not require an account. To run the relay
+yourself, start a self-hosted deployment:
+
+```bash
+VIFU_DEPLOYMENT=self-host vifu deploy --listen 127.0.0.1:48989
+```
+
+`VIFU_DEPLOYMENT` defaults to `local`. Use `self-host` when you operate the
+relay yourself.
 
 ## What Vifu Does
 
 - Finds a local OpenClaw Gateway on `http://127.0.0.1:18789`.
-- Connects that local capability to a Vifu relay when `--relay` is set.
-- Runs a self-hosted Vifu relay with `vifu server`.
+- Connects that local capability to a relay when `--relay` is set.
+- Runs the selected deployment with `vifu deploy`.
 - Keeps local agent access on your machine by default.
 - Avoids public local-agent URLs in the default configuration.
 
@@ -58,7 +70,7 @@ vifu --relay 127.0.0.1:48989
 
 ```bash
 vifu                 # Start the local connector
-vifu server          # Start a self-hosted relay
+vifu deploy          # Start the selected deployment
 vifu --status        # Show local connector status
 vifu --doctor        # Diagnose local setup
 vifu --logout        # Remove local Vifu session state
@@ -80,9 +92,9 @@ version simple and avoids turning the CLI into a general remote access tool.
 ## Relay Preview
 
 The preview relay transport is a small Vifu protocol over TCP. It is meant for
-local development, private networks, and early self-hosting tests. Do not expose
-the preview relay directly to the public internet without an external secure
-network layer.
+local development, private networks, and early self-host tests. Do not expose the
+preview relay directly to the public internet without an external secure network
+layer.
 
 ## Privacy And Security
 
@@ -96,7 +108,7 @@ network layer.
 
 ## Docker
 
-Build the self-hosted relay image:
+Build the deployment image:
 
 ```bash
 docker build -t vifu:local .
@@ -115,7 +127,7 @@ Docker Compose:
 docker compose up --build
 ```
 
-To customize the relay listener for Docker Compose, copy `.env.example` to
+To customize the listener for Docker Compose, copy `.env.example` to
 `.env.local` and edit `VIFU_LISTEN_ADDR`.
 
 ## Development

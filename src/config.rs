@@ -1,5 +1,7 @@
 use std::path::PathBuf;
 
+use crate::deployment::DeploymentConfig;
+
 pub const DEFAULT_OPENCLAW_URL: &str = "http://127.0.0.1:18789";
 pub const DEFAULT_RELAY_LISTEN_ADDR: &str = "127.0.0.1:48989";
 
@@ -9,6 +11,7 @@ pub struct Config {
     pub openclaw_url: String,
     pub relay_addr: Option<String>,
     pub listen_addr: String,
+    pub deployment: DeploymentConfig,
 }
 
 impl Config {
@@ -27,6 +30,7 @@ impl Config {
             openclaw_url,
             relay_addr,
             listen_addr,
+            deployment: DeploymentConfig::from_env()?,
         })
     }
 
