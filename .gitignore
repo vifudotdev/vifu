@@ -1,7 +1,13 @@
 target/
+node_modules/
+.next/
+.next-e2e/
+test-results/
+.turbo/
 .DS_Store
 *.log
 *.tmp
+*.tsbuildinfo
 .env
 .env.*
 !.env.example

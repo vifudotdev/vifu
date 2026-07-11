@@ -1,0 +1,69 @@
+name: vifu
+
+services:
+  postgres:
+    image: postgres:17-bookworm
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-vifu}
+      POSTGRES_USER: ${POSTGRES_USER:-vifu}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Run sh scripts/init-self-hosted.sh first}
+    ports:
+      - "${VIFU_BIND_HOST:-127.0.0.1}:${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  backend:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+      target: vifu-server
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      VIFU_DEPLOYMENT_MODE: self-hosted
+      VIFU_SERVER_ADDR: 0.0.0.0:6790
+      DATABASE_URL: ${DATABASE_URL:?Run sh scripts/init-self-hosted.sh first}
+      VIFU_ADMIN_KEY: ${VIFU_ADMIN_KEY:?Run sh scripts/init-self-hosted.sh first}
+      VIFU_CONNECTOR_TOKEN: ${VIFU_CONNECTOR_TOKEN:?Run sh scripts/init-self-hosted.sh first}
+      VIFU_API_KEY_PEPPER: ${VIFU_API_KEY_PEPPER:?Run sh scripts/init-self-hosted.sh first}
+      RUST_LOG: ${RUST_LOG:-vifu_server=info,tower_http=info}
+    ports:
+      - "${VIFU_BIND_HOST:-127.0.0.1}:${VIFU_SERVER_PORT:-6790}:6790"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "http://127.0.0.1:6790/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  dashboard:
+    build:
+      context: ../..
+      dockerfile: self-hosted/docker/Dockerfile.dashboard
+    depends_on:
+      backend:
+        condition: service_healthy
+    environment:
+      VIFU_API_BASE_URL: http://backend:6790
+      NEXT_PUBLIC_VIFU_API_BASE_URL: http://localhost:${VIFU_SERVER_PORT:-6790}
+      VIFU_ADMIN_KEY: ${VIFU_ADMIN_KEY:?Run sh scripts/init-self-hosted.sh first}
+      HOSTNAME: 0.0.0.0
+      PORT: 6791
+    ports:
+      - "${VIFU_BIND_HOST:-127.0.0.1}:${VIFU_DASHBOARD_PORT:-6791}:6791"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:6791/dashboard').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+volumes:
+  postgres_data:

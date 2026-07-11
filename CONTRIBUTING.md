@@ -1,40 +1,50 @@
 # Contributing
 
-Thanks for improving Vifu.
+Vifu welcomes focused changes to the Agent Endpoint Runtime, Dashboard, CLI,
+connector protocol, PostgreSQL contract, and self-host packaging.
 
-## Product Boundary
+## Architecture
 
-Vifu is a narrow CLI for local AI agent connectivity. Keep new features within
-that boundary unless the project maintainers explicitly accept a broader scope.
+Keep these ownership boundaries explicit:
 
-Avoid adding complex command trees. Prefer:
+- `crates/vifu` owns the CLI, loopback OpenClaw adapter, resumable connector
+  session, and public connector protocol.
+- `crates/vifu-server` owns HTTP APIs, WebSocket multiplexing, runtime
+  authorization, routing, traces, and PostgreSQL migrations.
+- `npm-packages/dashboard` is the only Dashboard application. Core views use a
+  `DeploymentClient`; account and self-host behavior enter through separate
+  `AuthorityAdapter` implementations selected from server capabilities.
+- `self-hosted/docker` owns the supported PostgreSQL, server, and standalone
+  Dashboard deployment.
 
-```bash
-vifu
-vifu --status
-vifu --doctor
-```
+The browser is never an authority boundary. Profile, endpoint, key, team,
+billing, domain, and provisioning decisions must be enforced by the server that
+owns them. Do not expose admin keys, connector tokens, provider credentials, or
+account access tokens through client-visible environment variables.
 
-## Development
+Public runtime code must remain provider-neutral. Core local and self-host
+behavior uses PostgreSQL, HTTP, and WebSocket contracts and must not require an
+official Vifu account.
 
-Run the focused checks before opening a pull request:
+## Product Terminology
 
-```bash
-cargo fmt --check
-cargo test
-cargo clippy --all-targets -- -D warnings
-cargo build
-cargo check
-```
+Use `Vifu Dashboard`, `Agent Profile`, `Agent Endpoint`, `Agent Runtime`,
+`Binding`, and `Vifu Connector` consistently. Do not introduce a second product
+name for functionality already owned by the Dashboard or runtime.
 
 ## Pull Requests
 
-Please include:
+Before opening a pull request, run the checks in [BUILD.md](BUILD.md). Include:
 
-- what changed
-- why it belongs in the CLI
-- user-visible behavior
-- tests run
+- the user-visible behavior and API contract affected;
+- the runtime, Dashboard, or authority boundary changed;
+- local and self-host behavior tested;
+- exact verification commands and remaining test gaps.
 
-Security-sensitive changes should explain what secrets stay local and what is
-allowed to cross the network boundary.
+Keep generated output, local environment files, screenshots, credentials,
+private planning records, infrastructure identifiers, and internal operating
+notes out of commits. Security reports belong in private GitHub Security
+Advisories, not public issues.
+
+Contributions are accepted under Apache-2.0. Use of Vifu branding remains
+subject to [TRADEMARKS.md](TRADEMARKS.md).

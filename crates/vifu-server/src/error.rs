@@ -1,0 +1,76 @@
+use axum::http::StatusCode;
+use axum::response::{IntoResponse, Response};
+use axum::Json;
+use serde_json::json;
+use thiserror::Error;
+
+#[derive(Debug, Error)]
+pub enum ApiError {
+    #[error("authentication required")]
+    Unauthorized,
+    #[error("forbidden")]
+    Forbidden,
+    #[error("{0}")]
+    Invalid(String),
+    #[error("resource not found")]
+    NotFound,
+    #[error("{0}")]
+    Conflict(String),
+    #[error("connector is not available")]
+    ConnectorUnavailable,
+    #[error("connector is busy")]
+    Backpressure,
+    #[error("agent request timed out")]
+    Timeout,
+    #[error("{0}")]
+    Connector(String),
+    #[error("database request failed")]
+    Database(#[from] sqlx::Error),
+    #[error("migration failed")]
+    Migration(#[from] sqlx::migrate::MigrateError),
+    #[error("internal server error")]
+    Internal,
+}
+
+impl IntoResponse for ApiError {
+    fn into_response(self) -> Response {
+        let (status, code) = match &self {
+            Self::Unauthorized => (StatusCode::UNAUTHORIZED, "UNAUTHORIZED"),
+            Self::Forbidden => (StatusCode::FORBIDDEN, "FORBIDDEN"),
+            Self::Invalid(_) => (StatusCode::BAD_REQUEST, "INVALID_REQUEST"),
+            Self::NotFound => (StatusCode::NOT_FOUND, "NOT_FOUND"),
+            Self::Conflict(_) => (StatusCode::CONFLICT, "CONFLICT"),
+            Self::ConnectorUnavailable => {
+                (StatusCode::SERVICE_UNAVAILABLE, "CONNECTOR_UNAVAILABLE")
+            }
+            Self::Backpressure => (StatusCode::TOO_MANY_REQUESTS, "BACKPRESSURE"),
+            Self::Timeout => (StatusCode::GATEWAY_TIMEOUT, "REQUEST_TIMEOUT"),
+            Self::Connector(_) => (StatusCode::BAD_GATEWAY, "CONNECTOR_ERROR"),
+            Self::Database(_) | Self::Migration(_) | Self::Internal => {
+                (StatusCode::INTERNAL_SERVER_ERROR, "INTERNAL_ERROR")
+            }
+        };
+        let message = if status == StatusCode::INTERNAL_SERVER_ERROR {
+            "Internal server error".to_string()
+        } else {
+            self.to_string()
+        };
+        (
+            status,
+            Json(json!({ "error": { "code": code, "message": message } })),
+        )
+            .into_response()
+    }
+}
+
+pub fn map_database_error(error: sqlx::Error) -> ApiError {
+    if let sqlx::Error::Database(database) = &error {
+        if database.is_unique_violation() {
+            return ApiError::Conflict("resource already exists".to_string());
+        }
+        if database.is_foreign_key_violation() {
+            return ApiError::Invalid("referenced resource does not exist".to_string());
+        }
+    }
+    ApiError::Database(error)
+}

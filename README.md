@@ -1,161 +1,111 @@
 # Vifu
 
-Vifu is the open-source local connector for AI agents.
+Vifu is an open-source endpoint runtime for local AI agents. It turns one
+authenticated connection to a local OpenClaw gateway into independently
+secured HTTP endpoints with profiles, bindings, API keys, connection status,
+and traces.
 
-The first preview checks a local OpenClaw Gateway over loopback. It can also run
-a self-hosted deployment for local development and private networks.
+The runtime, connector protocol, PostgreSQL migrations, dashboard, and Docker
+deployment are all included in this repository under Apache-2.0.
 
-```bash
-vifu
-```
+## Local Demo
 
-## Status
-
-Vifu is an early preview. The local OpenClaw connector and self-host deployment
-are the current public surface. The relay protocol may change before a stable
-release.
-
-## Install
-
-Build from source:
+Start PostgreSQL, `vifu-server`, and the Dashboard:
 
 ```bash
-cargo install --path .
-vifu --doctor
+sh scripts/init-self-hosted.sh
+docker compose -f self-hosted/docker/docker-compose.yml up --build --wait
 ```
 
-Or run without installing:
+Open `http://localhost:6791`. No Vifu account or login is required.
+
+Vifu uses OpenClaw's OpenAI-compatible HTTP surface. Enable
+`gateway.http.endpoints.chatCompletions`, then connect the Gateway in a second
+terminal:
 
 ```bash
-cargo run -- --doctor
+VIFU_OPENCLAW_TOKEN="$OPENCLAW_GATEWAY_TOKEN" sh scripts/dev-connector.sh
 ```
 
-## Quickstart
+No token is needed when the local Gateway is intentionally configured without
+authentication.
 
-Local OpenClaw check:
+The Dashboard will show the connected OpenClaw agents. Create an Agent Profile,
+bind one of those agents, then create as many independently keyed endpoints as
+you need. All endpoints on that connector share one authenticated WebSocket.
 
-```bash
-openclaw gateway --port 18789
-vifu --status
+## No-account Quickstart
+
+The self-hosted core works without an external identity provider:
+
+```text
+application -> vifu-server -> one multiplexed WebSocket -> Vifu Connector -> OpenClaw
+                     |
+                     +-> PostgreSQL profiles, endpoints, keys, sessions, traces
 ```
 
-Self-host deployment smoke test:
+The public invocation contract is:
 
-```bash
-VIFU_DEPLOYMENT=self-host vifu deploy --listen 127.0.0.1:48989
-vifu --relay 127.0.0.1:48989
+```http
+POST /v1/endpoints/{id-or-slug}/invoke
+Authorization: Bearer vifu_ep_...
+Content-Type: application/json
+
+{"message":"Open the north gate"}
 ```
 
-## Self Hosting
+API keys are scoped to one endpoint. The server stores only peppered key
+hashes, and returns the raw key once when it is created.
 
-By default, Vifu runs locally and does not require an account. To run the relay
-yourself, start a self-hosted deployment:
+## Docker Self-hosting
 
-```bash
-VIFU_DEPLOYMENT=self-host vifu deploy --listen 127.0.0.1:48989
+The included Compose stack runs:
+
+- PostgreSQL for durable runtime state;
+- `vifu-server` for HTTP, WebSocket routing, and migrations;
+- the same Next.js Dashboard used by every deployment mode.
+
+Services bind to `127.0.0.1` by default. Configuration, upgrades, persistence,
+and exposure guidance are in [self-hosted/README.md](self-hosted/README.md).
+
+## Architecture And Security
+
+`vifu-server` owns the core runtime contract:
+
+- Agent Profile, Binding, and Endpoint CRUD;
+- endpoint-scoped API keys;
+- authenticated connector sessions and heartbeat;
+- one WebSocket with multiple logical channels;
+- OpenClaw agent discovery and invocation through `/v1/models` and
+  `/v1/chat/completions`;
+- bounded queues, request timeout, cancellation, reconnect, and resume;
+- trace correlation and PostgreSQL persistence.
+
+The Dashboard reads runtime capabilities and keeps deployment authority on its
+server side. In the current self-hosted release, it uses the generated admin
+key without placing that key in HTML, browser logs, or the client bundle.
+
+The connector accepts only loopback OpenClaw URLs. Self-hosted admin access
+should remain on a trusted network or behind TLS and an external identity
+layer. See [SECURITY.md](SECURITY.md) for the full boundary.
+
+## Repository Layout
+
+```text
+crates/
+  vifu/             CLI, OpenClaw adapter, connector, session, protocol
+  vifu-server/      HTTP API, WebSocket relay, PostgreSQL runtime
+npm-packages/
+  dashboard/        One capability-driven Next.js Dashboard
+self-hosted/docker/ PostgreSQL, vifu-server, and Dashboard images
+scripts/            Development, E2E, and public-repository checks
 ```
 
-`VIFU_DEPLOYMENT` defaults to `local`. Use `self-host` when you operate the
-relay yourself.
+## Build And Contribute
 
-## What Vifu Does
+See [BUILD.md](BUILD.md) for source-development and verification commands.
+Read [CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request, and use
+the private process in [SECURITY.md](SECURITY.md) for vulnerability reports.
 
-- Finds a local OpenClaw Gateway on `http://127.0.0.1:18789`.
-- Connects that local capability to a relay when `--relay` is set.
-- Runs the selected deployment with `vifu deploy`.
-- Keeps local agent access on your machine by default.
-- Avoids public local-agent URLs in the default configuration.
-
-## Commands
-
-```bash
-vifu                 # Start the local connector
-vifu deploy          # Start the selected deployment
-vifu --status        # Show local connector status
-vifu --doctor        # Diagnose local setup
-vifu --logout        # Remove local Vifu session state
-vifu --reset         # Remove all local Vifu state
-```
-
-## OpenClaw
-
-Vifu currently targets a local OpenClaw Gateway.
-
-```bash
-openclaw gateway --port 18789
-vifu --status
-```
-
-By default, Vifu accepts only loopback OpenClaw URLs. That keeps the first
-version simple and avoids turning the CLI into a general remote access tool.
-
-## Relay Preview
-
-The preview relay transport is a small Vifu protocol over TCP. It is meant for
-local development, private networks, and early self-host tests. Do not expose the
-preview relay directly to the public internet without an external secure network
-layer.
-
-## Privacy And Security
-
-- OpenClaw credentials stay on the user's machine.
-- Local-only usage does not require a Vifu account.
-- Vifu does not expose a public listener by default.
-- Vifu only accepts loopback OpenClaw URLs by default.
-- The preview relay does not require Docker socket access.
-- Do not post logs or issue reports that include tokens, passwords, or other
-  sensitive data.
-
-## Docker
-
-Build the deployment image:
-
-```bash
-docker build -t vifu:local .
-docker run --rm -p 48989:48989 vifu:local
-```
-
-For a local client on the same machine:
-
-```bash
-vifu --relay 127.0.0.1:48989
-```
-
-Docker Compose:
-
-```bash
-docker compose up --build
-```
-
-To customize the listener for Docker Compose, copy `.env.example` to
-`.env.local` and edit `VIFU_LISTEN_ADDR`.
-
-## Development
-
-Requirements:
-
-- Rust 1.90 or newer
-
-Common checks:
-
-```bash
-cargo fmt --check
-cargo test
-cargo clippy --all-targets -- -D warnings
-cargo build
-cargo check
-```
-
-Run locally:
-
-```bash
-cargo run -- --status
-```
-
-## Project Status
-
-This repository contains the Rust implementation of the public `vifu` CLI.
-
-## License
-
-Apache-2.0. See [LICENSE](LICENSE).
+Vifu is licensed under [Apache-2.0](LICENSE). The license does not grant rights
+to the Vifu name or logos; see [TRADEMARKS.md](TRADEMARKS.md).

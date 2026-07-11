@@ -1,0 +1,27 @@
+{
+  "name": "vifu",
+  "private": true,
+  "packageManager": "bun@1.3.9",
+  "workspaces": [
+    "npm-packages/*"
+  ],
+  "scripts": {
+    "check": "bun run check:boundaries && bun run check:public && bun run typecheck",
+    "check:boundaries": "node scripts/check-dashboard-boundaries.mjs",
+    "check:public": "node scripts/check-public-repo.mjs",
+    "typecheck": "bun run --cwd npm-packages/dashboard typecheck",
+    "build": "bun run --cwd npm-packages/dashboard build",
+    "test:e2e": "playwright test",
+    "test:self-hosted": "sh scripts/run-self-hosted-e2e.sh",
+    "dev:database": "docker compose -f self-hosted/docker/docker-compose.yml up -d postgres",
+    "dev:server": "sh scripts/dev-server.sh",
+    "dev:connector": "sh scripts/dev-connector.sh",
+    "dev:openclaw-mock": "node scripts/mock-openclaw.mjs",
+    "dev:dashboard": "sh scripts/dev-dashboard.sh",
+    "dev:local": "sh scripts/dev-dashboard.sh",
+    "self-host": "docker compose -f self-hosted/docker/docker-compose.yml up --build"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.61.1"
+  }
+}

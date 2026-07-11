@@ -1,16 +1,13 @@
-[package]
-name = "vifu"
-version = "0.1.0"
+[workspace]
+members = [
+  "crates/vifu",
+  "crates/vifu-server",
+]
+resolver = "2"
+
+[workspace.package]
 edition = "2021"
 license = "Apache-2.0"
-description = "Connect local AI agents to Vifu."
-repository = "https://github.com/vifu-labs/vifu"
-homepage = "https://vifu.ai"
-readme = "README.md"
-keywords = ["ai", "cli", "openclaw", "local-first"]
-categories = ["command-line-utilities"]
+repository = "https://github.com/vifudotdev/vifu"
+homepage = "https://vifu.dev"
 rust-version = "1.90"
-
-[dependencies]
-serde_json = "1"
-ureq = { version = "2", features = ["json"] }

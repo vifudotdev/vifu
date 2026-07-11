@@ -15,6 +15,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy,rustfmt
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - name: Format
         run: cargo fmt --check
       - name: Test
@@ -23,17 +26,60 @@ jobs:
         run: cargo clippy --all-targets -- -D warnings
       - name: Build
         run: cargo build
+      - name: Inspect public crate contents
+        run: |
+          cargo package -p vifu --allow-dirty --no-verify --list
+          cargo package -p vifu-server --allow-dirty --no-verify --list
       - name: Check
         run: cargo check
-      - name: Public naming guard
+      - name: Public repository hygiene
+        run: node scripts/check-public-repo.mjs
+        env:
+          VIFU_PRIVATE_TERMS: ${{ secrets.PUBLIC_REPOSITORY_PRIVATE_TERMS }}
+
+  dashboard:
+    name: Dashboard
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.9
+      - name: Install
+        run: bun install --frozen-lockfile
+      - name: Repository checks
+        run: bun run check
+        env:
+          VIFU_PRIVATE_TERMS: ${{ secrets.PUBLIC_REPOSITORY_PRIVATE_TERMS }}
+      - name: Standalone dashboard builds
+        run: bun run build
+      - name: Install browser
+        run: bunx playwright install --with-deps chromium
+      - name: Dashboard account-flow browser tests
+        run: bun run test:e2e
+
+  self-hosted-docker:
+    name: Clean self-hosted Docker smoke
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Initialize self-hosted secrets
+        run: sh scripts/init-self-hosted.sh
+      - name: Build without local caches
+        run: docker compose -f self-hosted/docker/docker-compose.yml build --pull --no-cache
+      - name: Start and wait for health checks
+        run: docker compose -f self-hosted/docker/docker-compose.yml up -d --wait
+      - name: Verify public endpoints
         run: |
-          if grep -R -I -i --exclude-dir=.git --exclude-dir=target 'c[o]nsenger' .; then
-            echo "Public vifu repository must not contain internal product names."
-            exit 1
-          fi
-      - name: Secret pattern guard
-        run: |
-          if grep -R -I -E --exclude-dir=.git --exclude-dir=target '(gh[pousr]_[A-Za-z0-9_]+|github_pat_[A-Za-z0-9_]+|AKIA[0-9A-Z]{16}|ASIA[0-9A-Z]{16}|sk-[A-Za-z0-9_-]{20,}|-----BEGIN (RSA |OPENSSH |EC |DSA )?PRIVATE KEY-----)' .; then
-            echo "Potential secret found in public repository contents."
-            exit 1
-          fi
+          curl --fail --silent http://127.0.0.1:6790/health
+          curl --fail --silent http://127.0.0.1:6790/v1/status
+          curl --fail --silent http://127.0.0.1:6791/dashboard > /dev/null
+      - name: Connector, concurrency, restart, and persistence E2E
+        run: sh scripts/run-self-hosted-e2e.sh
+      - name: Collect service status
+        if: always()
+        run: docker compose -f self-hosted/docker/docker-compose.yml ps
+      - name: Stop services
+        if: always()
+        run: docker compose -f self-hosted/docker/docker-compose.yml down --volumes
