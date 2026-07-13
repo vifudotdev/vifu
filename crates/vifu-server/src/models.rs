@@ -4,36 +4,121 @@ use serde_json::Value;
 use sqlx::FromRow;
 use uuid::Uuid;
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Copy, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Capabilities {
+    pub projects: bool,
     pub profiles: bool,
     pub endpoints: bool,
     pub bindings: bool,
     pub api_keys: bool,
-    pub connections: bool,
+    pub agent_gateways: bool,
     pub traces: bool,
-    pub websocket_relay: bool,
-    pub account: bool,
-    pub teams: bool,
-    pub billing: bool,
-    pub managed_domains: bool,
+    pub json_rpc: bool,
 }
 
 impl Capabilities {
     pub fn self_hosted() -> Self {
         Self {
+            projects: true,
             profiles: true,
             endpoints: true,
             bindings: true,
             api_keys: true,
-            connections: true,
+            agent_gateways: true,
             traces: true,
-            websocket_relay: true,
-            account: false,
-            teams: false,
-            billing: false,
-            managed_domains: false,
+            json_rpc: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, FromRow)]
+#[serde(rename_all = "camelCase")]
+pub struct Project {
+    pub id: Uuid,
+    pub slug: String,
+    pub name: String,
+    pub description: Option<String>,
+    pub gateway_id: String,
+    pub enabled: bool,
+    pub publishable_key_prefix: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateProject {
+    pub slug: Option<String>,
+    pub name: String,
+    pub description: Option<String>,
+    pub gateway_id: String,
+    #[serde(default)]
+    pub binding_ids: Vec<Uuid>,
+    #[serde(default)]
+    pub agent_ids: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateProject {
+    pub slug: Option<String>,
+    pub name: Option<String>,
+    pub description: Option<String>,
+    pub gateway_id: Option<String>,
+    pub enabled: Option<bool>,
+    pub binding_ids: Option<Vec<Uuid>>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectWithBindings {
+    #[serde(flatten)]
+    pub project: Project,
+    pub binding_ids: Vec<Uuid>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreatedProject {
+    #[serde(flatten)]
+    pub project: ProjectWithBindings,
+    pub publishable_key: String,
+}
+
+#[derive(Debug, Clone, FromRow)]
+pub struct ProjectRoute {
+    pub id: Uuid,
+    pub slug: String,
+    pub gateway_id: String,
+    pub publishable_key_hash: Vec<u8>,
+}
+
+#[derive(Debug, Clone, FromRow)]
+pub struct ProjectAgentRoute {
+    pub project_id: Uuid,
+    pub project_slug: String,
+    pub profile_id: Uuid,
+    pub profile_slug: String,
+    pub profile_name: String,
+    pub binding_id: Uuid,
+    pub gateway_id: String,
+    pub agent_id: String,
+    pub binding_config: Value,
+}
+
+impl ProjectAgentRoute {
+    pub fn endpoint_route(&self, request_timeout_ms: i32) -> EndpointRoute {
+        EndpointRoute {
+            endpoint_id: self.project_id,
+            endpoint_slug: self.project_slug.clone(),
+            endpoint_name: self.project_slug.clone(),
+            request_timeout_ms,
+            profile_id: self.profile_id,
+            binding_id: self.binding_id,
+            gateway_id: self.gateway_id.clone(),
+            agent_id: self.agent_id.clone(),
+            binding_config: self.binding_config.clone(),
         }
     }
 }
@@ -45,7 +130,6 @@ pub struct AgentProfile {
     pub slug: String,
     pub name: String,
     pub description: Option<String>,
-    pub instructions: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -56,7 +140,6 @@ pub struct CreateProfile {
     pub slug: Option<String>,
     pub name: String,
     pub description: Option<String>,
-    pub instructions: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -65,7 +148,6 @@ pub struct UpdateProfile {
     pub slug: Option<String>,
     pub name: Option<String>,
     pub description: Option<String>,
-    pub instructions: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, FromRow)]
@@ -74,7 +156,7 @@ pub struct AgentBinding {
     pub id: Uuid,
     pub profile_id: Uuid,
     pub provider: String,
-    pub connector_id: String,
+    pub gateway_id: String,
     pub agent_id: String,
     pub config: Value,
     pub created_at: DateTime<Utc>,
@@ -86,7 +168,7 @@ pub struct AgentBinding {
 pub struct CreateBinding {
     pub profile_id: Uuid,
     pub provider: String,
-    pub connector_id: String,
+    pub gateway_id: String,
     pub agent_id: String,
     #[serde(default = "empty_object")]
     pub config: Value,
@@ -95,7 +177,7 @@ pub struct CreateBinding {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UpdateBinding {
-    pub connector_id: Option<String>,
+    pub gateway_id: Option<String>,
     pub agent_id: Option<String>,
     pub config: Option<Value>,
 }
@@ -164,9 +246,9 @@ pub struct CreateApiKey {
 
 #[derive(Debug, Clone, Serialize, FromRow)]
 #[serde(rename_all = "camelCase")]
-pub struct ConnectorSession {
+pub struct AgentGatewaySession {
     pub id: Uuid,
-    pub connector_id: String,
+    pub gateway_id: String,
     pub session_id: Uuid,
     pub status: String,
     pub agents: Value,
@@ -176,13 +258,24 @@ pub struct ConnectorSession {
     pub disconnected_at: Option<DateTime<Utc>>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AvailableAgent {
+    pub gateway_id: String,
+    pub id: String,
+    pub name: String,
+    pub status: String,
+    pub metadata: Value,
+}
+
 #[derive(Debug, Clone, Serialize, FromRow)]
 #[serde(rename_all = "camelCase")]
 pub struct EndpointTrace {
     pub id: Uuid,
     pub request_id: Uuid,
-    pub endpoint_id: Uuid,
-    pub connector_session_id: Option<Uuid>,
+    pub endpoint_id: Option<Uuid>,
+    pub project_id: Option<Uuid>,
+    pub gateway_session_id: Option<Uuid>,
     pub status: String,
     pub latency_ms: Option<i64>,
     pub request: Value,
@@ -199,10 +292,8 @@ pub struct EndpointRoute {
     pub endpoint_name: String,
     pub request_timeout_ms: i32,
     pub profile_id: Uuid,
-    pub profile_name: String,
-    pub profile_instructions: Option<String>,
     pub binding_id: Uuid,
-    pub connector_id: String,
+    pub gateway_id: String,
     pub agent_id: String,
     pub binding_config: Value,
 }

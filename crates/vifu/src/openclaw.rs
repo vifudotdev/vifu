@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use serde_json::{json, Value};
 
-use crate::protocol::{self, AgentDescriptor, ProfileContext};
+use crate::protocol::{self, AgentDescriptor};
 
 const MAX_HTTP_RESPONSE_BYTES: usize = protocol::MAX_BODY_BYTES;
 
@@ -198,27 +198,23 @@ pub async fn invoke(
     endpoint: &Endpoint,
     token: Option<&str>,
     agent_id: &str,
-    profile: &ProfileContext,
     _binding: &Value,
     input: &Value,
     timeout: Duration,
 ) -> Result<Value, String> {
     protocol::validate_identifier("agent id", agent_id)?;
-    let mut messages = Vec::new();
-    let instructions = profile.instructions.as_deref().map(str::trim).unwrap_or("");
-    if !instructions.is_empty() {
-        messages.push(json!({
-            "role": "system",
-            "content": format!("Agent Profile: {}\n\n{instructions}", profile.name),
-        }));
-    }
-    messages.push(json!({ "role": "user", "content": input_text(input)? }));
-    let body = serde_json::to_vec(&json!({
+    let mut request = json!({
         "model": openclaw_model(agent_id),
         "stream": false,
-        "messages": messages,
-    }))
-    .map_err(|error| error.to_string())?;
+        "messages": [{ "role": "user", "content": input_text(input)? }],
+    });
+    if let Some(user) = conversation_user(input) {
+        request
+            .as_object_mut()
+            .expect("chat completion request is an object")
+            .insert("user".to_string(), Value::String(user));
+    }
+    let body = serde_json::to_vec(&request).map_err(|error| error.to_string())?;
     let response = request_with_auth(
         endpoint,
         "POST",
@@ -322,6 +318,23 @@ fn input_text(input: &Value) -> Result<String, String> {
     Err("OpenClaw invocation requires message or input".to_string())
 }
 
+fn conversation_user(input: &Value) -> Option<String> {
+    let value = input
+        .pointer("/context/conversationId")
+        .or_else(|| input.pointer("/context/sessionId"))?
+        .as_str()?
+        .trim();
+    if value.is_empty()
+        || value.len() > 128
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':'))
+    {
+        return None;
+    }
+    Some(value.to_string())
+}
+
 fn ensure_openclaw_status(response: &GatewayResponse, operation: &str) -> Result<(), String> {
     if (200..=299).contains(&response.status) {
         return Ok(());
@@ -352,7 +365,9 @@ fn ensure_openclaw_status(response: &GatewayResponse, operation: &str) -> Result
 mod tests {
     use serde_json::json;
 
-    use super::{input_text, openclaw_model, parse_endpoint, read_models, ProbeStatus};
+    use super::{
+        conversation_user, input_text, openclaw_model, parse_endpoint, read_models, ProbeStatus,
+    };
 
     #[test]
     fn parses_default_loopback_endpoint() {
@@ -401,6 +416,18 @@ mod tests {
         assert_eq!(
             input_text(&json!({ "input": { "task": 1 } })).unwrap(),
             "{\"task\":1}"
+        );
+    }
+
+    #[test]
+    fn maps_safe_conversation_ids_to_openclaw_users() {
+        assert_eq!(
+            conversation_user(&json!({ "context": { "conversationId": "town-session_1" } })),
+            Some("town-session_1".to_string())
+        );
+        assert_eq!(
+            conversation_user(&json!({ "context": { "conversationId": "not safe/value" } })),
+            None
         );
     }
 }

@@ -1,6 +1,6 @@
+pub mod agent_gateway;
 pub mod cli;
 pub mod config;
-pub mod connector;
 pub mod openclaw;
 pub mod protocol;
 pub mod relay;
@@ -12,5 +12,5 @@ where
     S: Into<String>,
 {
     let options = cli::Options::parse(args)?;
-    connector::execute(options).await
+    agent_gateway::execute(options).await
 }

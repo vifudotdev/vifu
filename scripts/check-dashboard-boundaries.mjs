@@ -10,10 +10,16 @@ const sourceRoots = ["npm-packages/dashboard", "crates/vifu", "crates/vifu-serve
 const ignoredDirectories = new Set(["node_modules", ".next", ".next-e2e", "target"]);
 const violations = [];
 const dashboardForbiddenPatterns = [
-  ["Cloudflare runtime package", /@opennextjs\/cloudflare/],
-  ["Cloudflare request context", /getCloudflareContext/],
+  ["edge-provider runtime package", /@opennextjs\//],
+  ["edge-provider request context", /get[A-Z][A-Za-z]+Context/],
   ["private service binding", /\bAPI_GATEWAY\b/],
   ["deployment CLI configuration", /\bwrangler(?:\.jsonc?)?\b/i],
+];
+const serverForbiddenAuthPatterns = [
+  ["web authentication route", /\/v1\/auth\//],
+  ["Dashboard auth environment", /\bVIFU_AUTH_/],
+  ["password hashing dependency", /\bargon2\b/],
+  ["OIDC dependency", /\bopenidconnect\b/],
 ];
 
 for (const directory of requiredDirectories) {
@@ -27,13 +33,19 @@ for (const root of sourceRoots) {
     const contents = await readFile(file, "utf8");
     if (
       file.startsWith("npm-packages/dashboard/")
+      && file !== "npm-packages/dashboard/lib/dashboard-auth-config.ts"
       && /process\.env\.VIFU_DEPLOYMENT_MODE/.test(contents)
     ) {
-      violations.push(`${file}: dashboard authority must come from server capabilities`);
+      violations.push(`${file}: runtime authority must come from server capabilities; auth provider selection belongs in dashboard-auth-config.ts`);
     }
     if (file.startsWith("npm-packages/dashboard/")) {
       for (const [label, pattern] of dashboardForbiddenPatterns) {
         if (pattern.test(contents)) violations.push(`${file}: ${label} is outside the public HTTP contract`);
+      }
+    }
+    if (file.startsWith("crates/vifu-server/")) {
+      for (const [label, pattern] of serverForbiddenAuthPatterns) {
+        if (pattern.test(contents)) violations.push(`${file}: ${label} belongs to the Dashboard, not vifu-server`);
       }
     }
   }
@@ -44,7 +56,7 @@ if (violations.length > 0) {
   process.exit(1);
 }
 
-console.log("One capability-driven dashboard uses provider-neutral HTTP authority adapters.");
+console.log("One dashboard uses provider-neutral runtime adapters and Next-owned auth provider configuration.");
 
 async function enforceDirectoryAllowlist(root, allowed) {
   for (const entry of await readdir(root, { withFileTypes: true })) {

@@ -3,10 +3,12 @@ import type {
   AgentBinding,
   AgentEndpoint,
   AgentProfile,
+  AgentGateway,
   ApiKeyRecord,
-  ConnectorSession,
-  DeploymentStatus,
+  AvailableAgent,
   EndpointTrace,
+  RuntimeStatus,
+  RuntimeProject,
 } from "./runtime-types";
 
 export type VifuFetch = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
@@ -40,8 +42,12 @@ export class DeploymentClient {
     this.fetcher = options.fetcher ?? fetch;
   }
 
-  status(): Promise<DeploymentStatus> {
-    return this.request<DeploymentStatus>("/v1/status", { method: "GET" }, false);
+  status(): Promise<RuntimeStatus> {
+    return this.request<RuntimeStatus>("/v1/status", { method: "GET" }, false);
+  }
+
+  async projects(): Promise<RuntimeProject[]> {
+    return (await this.request<{ projects: RuntimeProject[] }>("/v1/projects")).projects ?? [];
   }
 
   async profiles(): Promise<AgentProfile[]> {
@@ -60,8 +66,12 @@ export class DeploymentClient {
     return (await this.request<{ apiKeys: ApiKeyRecord[] }>("/v1/api-keys")).apiKeys ?? [];
   }
 
-  async connections(): Promise<ConnectorSession[]> {
-    return (await this.request<{ connections: ConnectorSession[] }>("/v1/connections")).connections ?? [];
+  async agentGateways(): Promise<AgentGateway[]> {
+    return (await this.request<{ agentGateways: AgentGateway[] }>("/v1/agent-gateways")).agentGateways ?? [];
+  }
+
+  async availableAgents(): Promise<AvailableAgent[]> {
+    return (await this.request<{ agents: AvailableAgent[] }>("/v1/agents")).agents ?? [];
   }
 
   async traces(): Promise<EndpointTrace[]> {

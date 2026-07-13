@@ -4,9 +4,75 @@ import type { FormEvent, ReactNode } from "react";
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { Copy, KeyRound, Play, Plus, Save, Trash2, XCircle } from "lucide-react";
-import type { AgentBinding, AgentEndpoint, AgentProfile, ConnectorSession } from "../lib/runtime-types";
+import type { AgentBinding, AgentEndpoint, AgentGateway, AgentProfile, AvailableAgent } from "../lib/runtime-types";
 
 type ActionState = { tone: "error" | "success"; message: string } | null;
+
+export function ProjectCreateForm({ availableAgents, agentGateways }: { availableAgents: AvailableAgent[]; agentGateways: AgentGateway[] }) {
+  const router = useRouter();
+  const [state, setState] = useState<ActionState>(null);
+  const [rawKey, setRawKey] = useState<string | null>(null);
+  const [pending, setPending] = useState(false);
+  const [gatewayId, setGatewayId] = useState("");
+  const connectedGateways = new Set(agentGateways
+    .filter((gateway) => gateway.status === "connected")
+    .map((gateway) => gateway.gatewayId));
+  const selectableAgents = availableAgents.filter((agent) => agent.status === "connected" && connectedGateways.has(agent.gatewayId));
+  const gateways = Array.from(new Set(selectableAgents.map((agent) => agent.gatewayId)));
+  const gatewayAgents = selectableAgents.filter((agent) => agent.gatewayId === gatewayId);
+
+  async function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setPending(true);
+    setState(null);
+    setRawKey(null);
+    const form = new FormData(event.currentTarget);
+    try {
+      const payload = await runtimeRequest<{ project?: { publishableKey?: string } }>("projects", "POST", {
+        name: value(form, "name"),
+        slug: optionalValue(form, "slug"),
+        description: optionalValue(form, "description"),
+        gatewayId: value(form, "gatewayId"),
+        agentIds: form.getAll("agentIds").map(String),
+      });
+      const key = payload.project?.publishableKey;
+      if (!key) throw new Error("The runtime did not return the new publishable project key.");
+      setRawKey(key);
+      setState({ tone: "success", message: "Project created." });
+      router.refresh();
+    } catch (error) {
+      setState({ tone: "error", message: errorMessage(error) });
+    } finally {
+      setPending(false);
+    }
+  }
+
+  return (
+    <form className="runtime-form" onSubmit={submit}>
+      <div className="form-grid">
+        <Field label="Name"><input name="name" required maxLength={128} placeholder="Agentshire" /></Field>
+        <Field label="Slug"><input name="slug" maxLength={64} placeholder="agentshire" /></Field>
+        <Field label="Agent Gateway">
+          <select name="gatewayId" required value={gatewayId} onChange={(event) => setGatewayId(event.target.value)}>
+            <option value="" disabled>{gateways.length > 0 ? "Select Agent Gateway" : "No Agent Gateways connected"}</option>
+            {gateways.map((gatewayId) => <option key={gatewayId} value={gatewayId}>{gatewayId}</option>)}
+          </select>
+        </Field>
+        <Field label="OpenClaw agents" wide>
+          <select name="agentIds" multiple required size={Math.min(Math.max(gatewayAgents.length, 2), 8)}>
+            {gatewayAgents.map((agent) => <option key={`${agent.gatewayId}/${agent.id}`} value={agent.id}>{agent.name}</option>)}
+          </select>
+        </Field>
+        <Field label="Description" wide><input name="description" maxLength={4096} placeholder="Agent runtime for Agentshire" /></Field>
+      </div>
+      <div className="form-actions">
+        <button className="primary-button" type="submit" disabled={pending || selectableAgents.length === 0}><Plus aria-hidden="true" />{pending ? "Creating" : "Create project"}</button>
+        <ActionMessage state={state} />
+      </div>
+      {rawKey ? <KeyReveal value={rawKey} /> : null}
+    </form>
+  );
+}
 
 export function ProfileCreateForm() {
   return (
@@ -19,13 +85,11 @@ export function ProfileCreateForm() {
         name: value(form, "name"),
         slug: optionalValue(form, "slug"),
         description: optionalValue(form, "description"),
-        instructions: optionalValue(form, "instructions"),
       })}
     >
       <Field label="Name"><input name="name" required maxLength={128} placeholder="Town guide" /></Field>
       <Field label="Slug"><input name="slug" maxLength={64} placeholder="town-guide" /></Field>
       <Field label="Description" wide><input name="description" maxLength={4096} placeholder="Guides players through the town" /></Field>
-      <Field label="Instructions" wide><textarea name="instructions" rows={4} maxLength={65536} placeholder="Keep responses concise and grounded in the current scene." /></Field>
     </RuntimeForm>
   );
 }
@@ -43,25 +107,23 @@ export function ProfileEditForm({ profile }: { profile: AgentProfile }) {
         name: value(form, "name"),
         slug: value(form, "slug"),
         description: value(form, "description"),
-        instructions: value(form, "instructions"),
       })}
     >
       <Field label="Name"><input name="name" required defaultValue={profile.name} maxLength={128} /></Field>
       <Field label="Slug"><input name="slug" required defaultValue={profile.slug} maxLength={64} /></Field>
       <Field label="Description" wide><input name="description" defaultValue={profile.description ?? ""} maxLength={4096} /></Field>
-      <Field label="Instructions" wide><textarea name="instructions" rows={3} defaultValue={profile.instructions ?? ""} maxLength={65536} /></Field>
     </RuntimeForm>
   );
 }
 
-export function BindingCreateForm({ profiles, connections }: { profiles: AgentProfile[]; connections: ConnectorSession[] }) {
-  const agents = connections.flatMap((connection) => connection.status === "connected"
-    ? connection.agents.flatMap((agent) => {
+export function BindingCreateForm({ profiles, agentGateways }: { profiles: AgentProfile[]; agentGateways: AgentGateway[] }) {
+  const agents = agentGateways.flatMap((gateway) => gateway.status === "connected"
+    ? gateway.agents.flatMap((agent) => {
       const agentId = typeof agent.id === "string" ? agent.id : "";
       if (!agentId) return [];
       return [{
-        value: `${connection.connectorId}/${agentId}`,
-        label: `${typeof agent.name === "string" ? agent.name : agentId} - ${connection.connectorId}`,
+        value: `${gateway.gatewayId}/${agentId}`,
+        label: `${typeof agent.name === "string" ? agent.name : agentId} - ${gateway.gatewayId}`,
       }];
     })
     : []);
@@ -72,11 +134,11 @@ export function BindingCreateForm({ profiles, connections }: { profiles: AgentPr
       path="bindings"
       icon={<Plus aria-hidden="true" />}
       payload={(form) => {
-        const [connectorId, agentId] = value(form, "connectorAgent").split("/", 2);
+        const [gatewayId, agentId] = value(form, "gatewayAgent").split("/", 2);
         return {
           profileId: value(form, "profileId"),
           provider: "openclaw",
-          connectorId,
+          gatewayId,
           agentId,
           config: {},
         };
@@ -89,7 +151,7 @@ export function BindingCreateForm({ profiles, connections }: { profiles: AgentPr
         </select>
       </Field>
       <Field label="OpenClaw agent">
-        <select name="connectorAgent" required defaultValue="">
+        <select name="gatewayAgent" required defaultValue="">
           <option value="" disabled>{agents.length > 0 ? "Select connected agent" : "No connected agents"}</option>
           {agents.map((agent) => <option key={agent.value} value={agent.value}>{agent.label}</option>)}
         </select>
@@ -108,12 +170,12 @@ export function BindingEditForm({ binding }: { binding: AgentBinding }) {
       icon={<Save aria-hidden="true" />}
       compact
       payload={(form) => ({
-        connectorId: value(form, "connectorId"),
+        gatewayId: value(form, "gatewayId"),
         agentId: value(form, "agentId"),
         config: {},
       })}
     >
-      <Field label="Connector ID"><input name="connectorId" required defaultValue={binding.connectorId} /></Field>
+      <Field label="Agent Gateway ID"><input name="gatewayId" required defaultValue={binding.gatewayId} /></Field>
       <Field label="OpenClaw agent ID"><input name="agentId" required defaultValue={binding.agentId} /></Field>
     </RuntimeForm>
   );
@@ -146,7 +208,7 @@ export function EndpointCreateForm({ profiles, bindings }: { profiles: AgentProf
       <Field label="Binding">
         <select name="bindingId" required defaultValue="">
           <option value="" disabled>Select binding</option>
-          {bindings.map((binding) => <option key={binding.id} value={binding.id}>{binding.connectorId} / {binding.agentId}</option>)}
+          {bindings.map((binding) => <option key={binding.id} value={binding.id}>{binding.gatewayId} / {binding.agentId}</option>)}
         </select>
       </Field>
       <Field label="Timeout (ms)"><input name="requestTimeoutMs" type="number" min={500} max={120000} step={500} defaultValue={30000} /></Field>
@@ -376,7 +438,7 @@ function KeyReveal({ value: key }: { value: string }) {
   return (
     <div className="key-reveal">
       <code>{key}</code>
-      <button className="icon-button" type="button" onClick={copy} title="Copy API key" aria-label="Copy API key"><Copy aria-hidden="true" /></button>
+      <button className="icon-button" type="button" onClick={copy} title="Copy key" aria-label="Copy key"><Copy aria-hidden="true" /></button>
       <span>{copied ? "Copied" : "Shown once"}</span>
     </div>
   );

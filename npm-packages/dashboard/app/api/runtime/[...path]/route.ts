@@ -3,11 +3,12 @@ import { AuthorityError, resolveAuthority } from "../../../../lib/authority";
 import { VifuHttpError } from "../../../../lib/deployment-client";
 
 const ALLOWED_ROOTS = new Set([
+  "projects",
   "profiles",
   "bindings",
   "endpoints",
   "api-keys",
-  "connections",
+  "agent-gateways",
   "traces",
 ]);
 const MAX_BODY_BYTES = 1024 * 1024;

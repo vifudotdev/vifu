@@ -5,7 +5,7 @@ use std::time::Duration;
 use serde_json::Value;
 use tokio::sync::{mpsc, oneshot, Mutex};
 use uuid::Uuid;
-use vifu::protocol::{ConnectorMessage, ProfileContext};
+use vifu::protocol::AgentGatewayMessage;
 
 use crate::models::EndpointRoute;
 
@@ -16,16 +16,16 @@ pub struct RelayHub {
 }
 
 struct RelayState {
-    connections: HashMap<String, ConnectorConnection>,
+    connections: HashMap<String, AgentGatewayConnection>,
     pending: HashMap<Uuid, PendingCall>,
     next_channel_id: u64,
 }
 
 #[derive(Clone)]
-struct ConnectorConnection {
+struct AgentGatewayConnection {
     connection_id: Uuid,
     session_id: Uuid,
-    sender: mpsc::Sender<ConnectorMessage>,
+    sender: mpsc::Sender<AgentGatewayMessage>,
 }
 
 struct PendingCall {
@@ -36,10 +36,10 @@ struct PendingCall {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RelayCallError {
-    ConnectorUnavailable,
+    AgentGatewayUnavailable,
     Backpressure,
     Timeout,
-    Connector(String),
+    AgentGateway(String),
 }
 
 impl RelayHub {
@@ -57,24 +57,24 @@ impl RelayHub {
     pub fn channel(
         &self,
     ) -> (
-        mpsc::Sender<ConnectorMessage>,
-        mpsc::Receiver<ConnectorMessage>,
+        mpsc::Sender<AgentGatewayMessage>,
+        mpsc::Receiver<AgentGatewayMessage>,
     ) {
         mpsc::channel(self.queue_capacity)
     }
 
     pub async fn register(
         &self,
-        connector_id: String,
+        gateway_id: String,
         connection_id: Uuid,
         session_id: Uuid,
-        sender: mpsc::Sender<ConnectorMessage>,
+        sender: mpsc::Sender<AgentGatewayMessage>,
     ) {
         let replaced = {
             let mut state = self.inner.lock().await;
             state.connections.insert(
-                connector_id,
-                ConnectorConnection {
+                gateway_id,
+                AgentGatewayConnection {
                     connection_id,
                     session_id,
                     sender,
@@ -82,24 +82,24 @@ impl RelayHub {
             )
         };
         if let Some(replaced) = replaced {
-            let _ = replaced.sender.try_send(ConnectorMessage::Error {
+            let _ = replaced.sender.try_send(AgentGatewayMessage::Error {
                 request_id: None,
                 channel_id: None,
                 code: "SESSION_REPLACED".to_string(),
-                message: "A newer connection replaced this connector session.".to_string(),
+                message: "A newer connection replaced this agent gateway session.".to_string(),
             });
         }
     }
 
-    pub async fn unregister(&self, connector_id: &str, connection_id: Uuid) -> bool {
+    pub async fn unregister(&self, gateway_id: &str, connection_id: Uuid) -> bool {
         let (removed_current, pending) = {
             let mut state = self.inner.lock().await;
             let removed_current = if state
                 .connections
-                .get(connector_id)
+                .get(gateway_id)
                 .is_some_and(|connection| connection.connection_id == connection_id)
             {
-                state.connections.remove(connector_id);
+                state.connections.remove(gateway_id);
                 true
             } else {
                 false
@@ -121,17 +121,17 @@ impl RelayHub {
         for pending in pending {
             let _ = pending
                 .sender
-                .send(Err(RelayCallError::ConnectorUnavailable));
+                .send(Err(RelayCallError::AgentGatewayUnavailable));
         }
         removed_current
     }
 
-    pub async fn session_for(&self, connector_id: &str) -> Option<Uuid> {
+    pub async fn session_for(&self, gateway_id: &str) -> Option<Uuid> {
         self.inner
             .lock()
             .await
             .connections
-            .get(connector_id)
+            .get(gateway_id)
             .map(|connection| connection.session_id)
     }
 
@@ -151,9 +151,9 @@ impl RelayHub {
             let mut state = self.inner.lock().await;
             let connection = state
                 .connections
-                .get(&route.connector_id)
+                .get(&route.gateway_id)
                 .cloned()
-                .ok_or(RelayCallError::ConnectorUnavailable)?;
+                .ok_or(RelayCallError::AgentGatewayUnavailable)?;
             let channel_id = next_channel_id(&mut state);
             state.pending.insert(
                 request_id,
@@ -166,17 +166,13 @@ impl RelayHub {
             (connection, channel_id)
         };
 
-        let message = ConnectorMessage::Invoke {
+        let message = AgentGatewayMessage::Invoke {
             request_id,
             channel_id,
             endpoint_id: route.endpoint_id,
             profile_id: route.profile_id,
             binding_id: route.binding_id,
             agent_id: route.agent_id.clone(),
-            profile: ProfileContext {
-                name: route.profile_name.clone(),
-                instructions: route.profile_instructions.clone(),
-            },
             binding: route.binding_config.clone(),
             input,
             timeout_ms: timeout.as_millis().try_into().unwrap_or(u64::MAX),
@@ -186,16 +182,18 @@ impl RelayHub {
             self.remove_pending(request_id).await;
             return match error {
                 mpsc::error::TrySendError::Full(_) => Err(RelayCallError::Backpressure),
-                mpsc::error::TrySendError::Closed(_) => Err(RelayCallError::ConnectorUnavailable),
+                mpsc::error::TrySendError::Closed(_) => {
+                    Err(RelayCallError::AgentGatewayUnavailable)
+                }
             };
         }
 
         match tokio::time::timeout(timeout, response_receiver).await {
             Ok(Ok(result)) => result,
-            Ok(Err(_)) => Err(RelayCallError::ConnectorUnavailable),
+            Ok(Err(_)) => Err(RelayCallError::AgentGatewayUnavailable),
             Err(_) => {
                 self.remove_pending(request_id).await;
-                let _ = connection.sender.try_send(ConnectorMessage::Cancel {
+                let _ = connection.sender.try_send(AgentGatewayMessage::Cancel {
                     request_id,
                     channel_id,
                 });
@@ -226,7 +224,7 @@ impl RelayHub {
             connection_id,
             request_id,
             channel_id,
-            Err(RelayCallError::Connector(message)),
+            Err(RelayCallError::AgentGateway(message)),
         )
         .await
     }
@@ -265,7 +263,7 @@ mod tests {
 
     use serde_json::json;
     use uuid::Uuid;
-    use vifu::protocol::ConnectorMessage;
+    use vifu::protocol::AgentGatewayMessage;
 
     use super::{RelayCallError, RelayHub};
     use crate::models::EndpointRoute;
@@ -302,7 +300,7 @@ mod tests {
 
         for _ in 0..10 {
             let message = receiver.recv().await.unwrap();
-            let ConnectorMessage::Invoke {
+            let AgentGatewayMessage::Invoke {
                 request_id,
                 channel_id,
                 input,
@@ -323,7 +321,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn applies_backpressure_to_a_full_connector_queue() {
+    async fn applies_backpressure_to_a_full_agent_gateway_queue() {
         let hub = RelayHub::new(1);
         let (sender, _receiver) = hub.channel();
         hub.register(
@@ -366,10 +364,8 @@ mod tests {
             endpoint_name: "Guide".to_string(),
             request_timeout_ms: 30_000,
             profile_id: Uuid::new_v4(),
-            profile_name: "Guide".to_string(),
-            profile_instructions: None,
             binding_id: Uuid::new_v4(),
-            connector_id: "openclaw-local".to_string(),
+            gateway_id: "openclaw-local".to_string(),
             agent_id: "guide-agent".to_string(),
             binding_config: json!({}),
         }

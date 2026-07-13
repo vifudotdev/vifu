@@ -8,7 +8,6 @@ use serde::Serialize;
 pub enum DeploymentMode {
     Local,
     SelfHosted,
-    Cloud,
 }
 
 #[derive(Debug, Clone)]
@@ -18,11 +17,12 @@ pub struct Config {
     pub database_url: String,
     pub database_max_connections: u32,
     pub admin_key: String,
-    pub connector_token: String,
+    pub agent_gateway_token: String,
     pub api_key_pepper: String,
     pub request_timeout: Duration,
     pub heartbeat_interval: Duration,
     pub queue_capacity: usize,
+    pub project_domain: String,
 }
 
 impl Config {
@@ -43,17 +43,20 @@ impl Config {
             "postgres://vifu@127.0.0.1:5432/vifu",
         );
         let deployment_mode = parse_deployment_mode(lookup("VIFU_DEPLOYMENT_MODE"))?;
+        if deployment_mode == DeploymentMode::Local && !addr.ip().is_loopback() {
+            return Err("local deployments require a loopback VIFU_SERVER_ADDR".to_string());
+        }
         let admin_key = deployment_secret(
             &mut lookup,
             "VIFU_ADMIN_KEY",
             deployment_mode,
             "vifu-local-admin-key",
         )?;
-        let connector_token = deployment_secret(
+        let agent_gateway_token = deployment_secret(
             &mut lookup,
-            "VIFU_CONNECTOR_TOKEN",
+            "VIFU_AGENT_GATEWAY_TOKEN",
             deployment_mode,
-            "vifu-local-connector-token",
+            "vifu-local-agent-gateway-token",
         )?;
         let api_key_pepper = deployment_secret(
             &mut lookup,
@@ -74,7 +77,7 @@ impl Config {
                 100,
             )? as u32,
             admin_key,
-            connector_token,
+            agent_gateway_token,
             api_key_pepper,
             request_timeout: Duration::from_millis(parse_u64(
                 &mut lookup,
@@ -90,10 +93,33 @@ impl Config {
                 1_000,
                 60_000,
             )?),
-            queue_capacity: parse_u64(&mut lookup, "VIFU_CONNECTOR_QUEUE_CAPACITY", 256, 8, 4096)?
-                as usize,
+            queue_capacity: parse_u64(
+                &mut lookup,
+                "VIFU_AGENT_GATEWAY_QUEUE_CAPACITY",
+                256,
+                8,
+                4096,
+            )? as usize,
+            project_domain: validate_domain(&value(
+                &mut lookup,
+                "VIFU_PROJECT_DOMAIN",
+                "localhost",
+            ))?,
         })
     }
+}
+
+fn validate_domain(value: &str) -> Result<String, String> {
+    let value = value.trim().trim_matches('.').to_ascii_lowercase();
+    if value.is_empty()
+        || value.len() > 253
+        || !value.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'-' | b'.')
+        })
+    {
+        return Err("VIFU_PROJECT_DOMAIN must be a valid DNS suffix".to_string());
+    }
+    Ok(value)
 }
 
 fn parse_deployment_mode(value: Option<String>) -> Result<DeploymentMode, String> {
@@ -105,9 +131,8 @@ fn parse_deployment_mode(value: Option<String>) -> Result<DeploymentMode, String
     {
         "local" => Ok(DeploymentMode::Local),
         "self-hosted" => Ok(DeploymentMode::SelfHosted),
-        "cloud" => Ok(DeploymentMode::Cloud),
         other => Err(format!(
-            "VIFU_DEPLOYMENT_MODE must be local, self-hosted, or cloud, got {other}"
+            "VIFU_DEPLOYMENT_MODE must be local or self-hosted, got {other}"
         )),
     }
 }
@@ -152,7 +177,6 @@ fn deployment_mode_name(mode: DeploymentMode) -> &'static str {
     match mode {
         DeploymentMode::Local => "local",
         DeploymentMode::SelfHosted => "self-hosted",
-        DeploymentMode::Cloud => "cloud",
     }
 }
 
@@ -190,9 +214,9 @@ mod tests {
         assert_eq!(config.addr.to_string(), "127.0.0.1:6790");
         assert!(config.database_url.contains("127.0.0.1:5432"));
         assert_eq!(config.deployment_mode, DeploymentMode::Local);
-        assert_ne!(config.admin_key, config.connector_token);
+        assert_ne!(config.admin_key, config.agent_gateway_token);
         assert_ne!(config.admin_key, config.api_key_pepper);
-        assert_ne!(config.connector_token, config.api_key_pepper);
+        assert_ne!(config.agent_gateway_token, config.api_key_pepper);
     }
 
     #[test]
@@ -206,16 +230,13 @@ mod tests {
     }
 
     #[test]
-    fn preserves_cloud_deployment_mode_name() {
-        let config = Config::from_lookup(|key| match key {
-            "VIFU_DEPLOYMENT_MODE" => Some("cloud".to_string()),
-            "VIFU_ADMIN_KEY" => Some("cloud-admin-key-value".to_string()),
-            "VIFU_CONNECTOR_TOKEN" => Some("cloud-connector-token".to_string()),
-            "VIFU_API_KEY_PEPPER" => Some("cloud-api-key-pepper".to_string()),
+    fn rejects_unknown_deployment_mode() {
+        let error = Config::from_lookup(|key| match key {
+            "VIFU_DEPLOYMENT_MODE" => Some("managed".to_string()),
             _ => None,
         })
-        .unwrap();
-        assert_eq!(config.deployment_mode, DeploymentMode::Cloud);
+        .unwrap_err();
+        assert!(error.contains("local or self-hosted"));
     }
 
     #[test]
@@ -225,5 +246,28 @@ mod tests {
         })
         .unwrap_err();
         assert!(error.contains("VIFU_ADMIN_KEY"));
+    }
+
+    #[test]
+    fn self_hosted_accepts_runtime_config_without_auth() {
+        let config = Config::from_lookup(|key| match key {
+            "VIFU_DEPLOYMENT_MODE" => Some("self-hosted".to_string()),
+            "VIFU_ADMIN_KEY" => Some("self-host-admin-key".to_string()),
+            "VIFU_AGENT_GATEWAY_TOKEN" => Some("self-host-agent-gateway-token".to_string()),
+            "VIFU_API_KEY_PEPPER" => Some("self-host-api-key-pepper".to_string()),
+            _ => None,
+        })
+        .unwrap();
+        assert_eq!(config.deployment_mode, DeploymentMode::SelfHosted);
+    }
+
+    #[test]
+    fn local_mode_cannot_bind_to_a_public_address() {
+        let error = Config::from_lookup(|key| match key {
+            "VIFU_SERVER_ADDR" => Some("0.0.0.0:6790".to_string()),
+            _ => None,
+        })
+        .unwrap_err();
+        assert!(error.contains("loopback"));
     }
 }

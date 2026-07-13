@@ -11,6 +11,10 @@ export function configuredBrowserApiBaseUrl(): string {
     ?? DEFAULT_BROWSER_API_BASE_URL;
 }
 
+export function configuredProjectDomain(): string {
+  return process.env.NEXT_PUBLIC_VIFU_PROJECT_DOMAIN?.trim().replace(/^\.+|\.+$/g, "") || "localhost";
+}
+
 export function configuredAdminKey(): string | null {
   const value = process.env.VIFU_ADMIN_KEY?.trim();
   return value || null;
@@ -22,26 +26,16 @@ export function configuredDashboardOrigin(requestUrl: string): string | null {
   return new URL(requestUrl).origin;
 }
 
-export function configuredAuthOrigin(): string {
-  const configured = process.env.VIFU_AUTH_URL?.trim() || process.env.VIFU_MARKETING_URL?.trim();
-  if (configured) return normalizeOrigin(configured) ?? defaultAuthOrigin();
-  return defaultAuthOrigin();
-}
-
-export function authLoginUrl(returnTo?: string): string {
-  const url = new URL("/login", configuredAuthOrigin());
+export function dashboardLoginPath(returnTo?: string): string {
+  const url = new URL("/login", "https://dashboard.invalid");
   if (returnTo) url.searchParams.set("returnTo", sanitizeReturnTo(returnTo));
-  return url.toString();
+  return `${url.pathname}${url.search}`;
 }
 
-export function authSignupUrl(returnTo?: string): string {
-  const url = new URL("/signup", configuredAuthOrigin());
+export function dashboardSignupPath(returnTo?: string): string {
+  const url = new URL("/signup", "https://dashboard.invalid");
   if (returnTo) url.searchParams.set("returnTo", sanitizeReturnTo(returnTo));
-  return url.toString();
-}
-
-export function authOnboardingUrl(): string {
-  return new URL("/onboarding", configuredAuthOrigin()).toString();
+  return `${url.pathname}${url.search}`;
 }
 
 export function sanitizeReturnTo(value: string | null | undefined): string {
@@ -75,10 +69,6 @@ export function normalizeHttpBase(value: string | null | undefined): string | nu
   if (url.protocol !== "https:" && url.protocol !== "http:") return null;
   if (url.username || url.password || url.search || url.hash) return null;
   return url.toString().replace(/\/+$/, "");
-}
-
-function defaultAuthOrigin(): string {
-  return process.env.NODE_ENV === "development" ? "http://localhost:4175" : "https://vifu.dev";
 }
 
 function normalizeOrigin(value: string): string | null {

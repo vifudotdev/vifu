@@ -12,12 +12,12 @@ CREATE TABLE agent_bindings (
     id UUID PRIMARY KEY,
     profile_id UUID NOT NULL REFERENCES agent_profiles(id) ON DELETE CASCADE,
     provider TEXT NOT NULL,
-    connector_id TEXT NOT NULL,
+    gateway_id TEXT NOT NULL,
     agent_id TEXT NOT NULL,
     config JSONB NOT NULL DEFAULT '{}'::jsonb,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    UNIQUE (profile_id, connector_id, agent_id)
+    UNIQUE (profile_id, gateway_id, agent_id)
 );
 
 CREATE TABLE agent_endpoints (
@@ -42,9 +42,9 @@ CREATE TABLE endpoint_api_keys (
     revoked_at TIMESTAMPTZ
 );
 
-CREATE TABLE connector_sessions (
+CREATE TABLE agent_gateway_sessions (
     id UUID PRIMARY KEY,
-    connector_id TEXT NOT NULL,
+    gateway_id TEXT NOT NULL,
     session_id UUID NOT NULL UNIQUE,
     status TEXT NOT NULL,
     agents JSONB NOT NULL DEFAULT '[]'::jsonb,
@@ -54,14 +54,14 @@ CREATE TABLE connector_sessions (
     disconnected_at TIMESTAMPTZ
 );
 
-CREATE INDEX connector_sessions_connector_id_idx
-    ON connector_sessions (connector_id, connected_at DESC);
+CREATE INDEX agent_gateway_sessions_gateway_id_idx
+    ON agent_gateway_sessions (gateway_id, connected_at DESC);
 
 CREATE TABLE endpoint_traces (
     id UUID PRIMARY KEY,
     request_id UUID NOT NULL UNIQUE,
     endpoint_id UUID NOT NULL REFERENCES agent_endpoints(id) ON DELETE CASCADE,
-    connector_session_id UUID REFERENCES connector_sessions(session_id) ON DELETE SET NULL,
+    gateway_session_id UUID REFERENCES agent_gateway_sessions(session_id) ON DELETE SET NULL,
     status TEXT NOT NULL,
     latency_ms BIGINT,
     request JSONB NOT NULL,

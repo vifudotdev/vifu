@@ -1,26 +1,26 @@
 # Contributing
 
 Vifu welcomes focused changes to the Agent Endpoint Runtime, Dashboard, CLI,
-connector protocol, PostgreSQL contract, and self-host packaging.
+Agent Gateway protocol, PostgreSQL contract, and self-host packaging.
 
 ## Architecture
 
 Keep these ownership boundaries explicit:
 
-- `crates/vifu` owns the CLI, loopback OpenClaw adapter, resumable connector
-  session, and public connector protocol.
+- `crates/vifu` owns the CLI, loopback OpenClaw adapter, resumable Agent Gateway
+  session, and public Agent Gateway protocol.
 - `crates/vifu-server` owns HTTP APIs, WebSocket multiplexing, runtime
   authorization, routing, traces, and PostgreSQL migrations.
 - `npm-packages/dashboard` is the only Dashboard application. Core views use a
-  `DeploymentClient`; account and self-host behavior enter through separate
-  `AuthorityAdapter` implementations selected from server capabilities.
+  `DeploymentClient`; local and self-host authority enter through the same
+  `AuthorityAdapter` path selected from server capabilities.
 - `self-hosted/docker` owns the supported PostgreSQL, server, and standalone
   Dashboard deployment.
 
-The browser is never an authority boundary. Profile, endpoint, key, team,
-billing, domain, and provisioning decisions must be enforced by the server that
-owns them. Do not expose admin keys, connector tokens, provider credentials, or
-account access tokens through client-visible environment variables.
+The browser is never an authority boundary. Profile, endpoint, key, Agent Gateway,
+session, and trace decisions must be enforced by the server that owns them. Do
+not expose admin keys, Agent Gateway tokens, provider credentials, or session tokens
+through client-visible environment variables.
 
 Public runtime code must remain provider-neutral. Core local and self-host
 behavior uses PostgreSQL, HTTP, and WebSocket contracts and must not require an
@@ -29,7 +29,7 @@ official Vifu account.
 ## Product Terminology
 
 Use `Vifu Dashboard`, `Agent Profile`, `Agent Endpoint`, `Agent Runtime`,
-`Binding`, and `Vifu Connector` consistently. Do not introduce a second product
+`Binding`, and `Vifu Agent Gateway` consistently. Do not introduce a second product
 name for functionality already owned by the Dashboard or runtime.
 
 ## Pull Requests

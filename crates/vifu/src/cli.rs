@@ -76,10 +76,10 @@ pub fn help_text() -> &'static str {
 Connect local OpenClaw agents to a Vifu Agent Endpoint Runtime.
 
 Usage:
-  vifu                   Start the connector
-  vifu --status          Show connector configuration
+  vifu                   Start the Agent Gateway
+  vifu --status          Show Agent Gateway configuration
   vifu --doctor          Diagnose local setup
-  vifu --logout          Remove the resumable connector session
+  vifu --logout          Remove the resumable Agent Gateway session
   vifu --reset           Remove all local Vifu state
 
 Options:

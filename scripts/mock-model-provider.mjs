@@ -16,10 +16,12 @@ createServer(async (request, response) => {
   }
 
   const body = await readJson(request);
-  const prompt = Array.isArray(body.messages)
-    ? [...body.messages].reverse().find((message) => message?.role === "user")?.content
-    : "";
-  const reply = `Real OpenClaw relayed: ${typeof prompt === "string" ? prompt : ""}`;
+  const userMessage = Array.isArray(body.messages)
+    ? [...body.messages].reverse().find((message) => message?.role === "user")
+    : null;
+  const marker = collectStrings(body).find((value) => value.includes("-vifu-e2e"));
+  const prompt = marker || contentText(userMessage?.content) || contentText(body.input);
+  const reply = `Real OpenClaw relayed: ${prompt}`;
   if (body.stream === true) return stream(response, reply);
   return json(response, 200, completion(reply));
 }).listen(port, host, () => {
@@ -35,6 +37,34 @@ function completion(content) {
     choices: [{ index: 0, message: { role: "assistant", content }, finish_reason: "stop" }],
     usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
   };
+}
+
+function contentText(value) {
+  if (typeof value === "string") return value;
+  if (!Array.isArray(value)) return "";
+  return value
+    .map((part) => {
+      if (typeof part === "string") return part;
+      if (!part || typeof part !== "object") return "";
+      return typeof part.text === "string"
+        ? part.text
+        : typeof part.content === "string"
+          ? part.content
+          : "";
+    })
+    .filter(Boolean)
+    .join("\n");
+}
+
+function collectStrings(value, result = []) {
+  if (typeof value === "string") {
+    result.push(value);
+  } else if (Array.isArray(value)) {
+    for (const item of value) collectStrings(item, result);
+  } else if (value && typeof value === "object") {
+    for (const item of Object.values(value)) collectStrings(item, result);
+  }
+  return result;
 }
 
 function stream(response, content) {

@@ -1,23 +1,23 @@
 import { NextResponse } from "next/server";
-import { createCloudClient } from "../../../lib/client";
-import { authLoginUrl } from "../../../lib/config";
-import {
-  readDashboardSession,
-  sharedAuthSessionCookieOptions,
-  VIFU_AUTH_SESSION_COOKIE,
-  VIFU_DASHBOARD_SESSION_COOKIE,
-} from "../../../lib/session";
+import { dashboardLoginPath } from "../../../lib/config";
+import { revokeSessionToken } from "../../../lib/dashboard-auth-store";
+import { readLocalSessionToken } from "../../../lib/local-session";
+import { isSameOriginRequest } from "../../../lib/request-security";
+import { VIFU_SESSION_COOKIE } from "../../../lib/session";
 
 export const dynamic = "force-dynamic";
 
-export async function GET(request: Request): Promise<Response> {
-  const session = await readDashboardSession();
-  const serverSessionId = session?.serverSessionId;
-  const client = createCloudClient();
-  if (serverSessionId && client) await client.magicLinkSignout(serverSessionId).catch(() => null);
+export async function POST(request: Request): Promise<Response> {
+  if (!isSameOriginRequest(request)) {
+    return NextResponse.json({ error: { code: "INVALID_ORIGIN", message: "Invalid sign-out request origin." } }, { status: 403 });
+  }
+  const localToken = await readLocalSessionToken();
+  if (localToken) await revokeSessionToken(localToken).catch(() => null);
 
-  const response = NextResponse.redirect(new URL(authLoginUrl()));
-  response.cookies.delete(VIFU_DASHBOARD_SESSION_COOKIE);
-  response.cookies.set(VIFU_AUTH_SESSION_COOKIE, "", sharedAuthSessionCookieOptions(new URL(request.url), 0));
+  const response = new NextResponse(null, {
+    status: 303,
+    headers: { location: dashboardLoginPath() },
+  });
+  response.cookies.delete(VIFU_SESSION_COOKIE);
   return response;
 }

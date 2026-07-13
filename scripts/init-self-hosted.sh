@@ -13,7 +13,7 @@ fi
 
 umask 077
 admin_key="$(openssl rand -hex 32)"
-connector_token="$(openssl rand -hex 32)"
+agent_gateway_token="$(openssl rand -hex 32)"
 api_key_pepper="$(openssl rand -hex 32)"
 postgres_password="$(openssl rand -hex 24)"
 database_url_prefix="postgres://vifu:"
@@ -21,8 +21,13 @@ database_url_suffix="@postgres:5432/vifu"
 
 {
   printf '%s\n' "VIFU_DEPLOYMENT_MODE=self-hosted"
+  printf '%s\n' "VIFU_AUTH_MODE=local-password"
+  printf '%s\n' "VIFU_AUTH_PASSWORD_ENABLED=true"
+  printf '%s\n' "VIFU_SIGNUP_ENABLED=true"
+  printf '%s\n' "AUTH_DISABLE_USERNAME_PASSWORD=false"
+  printf '%s\n' "AUTH_DISABLE_SIGNUP=false"
   printf '%s\n' "VIFU_ADMIN_KEY=$admin_key"
-  printf '%s\n' "VIFU_CONNECTOR_TOKEN=$connector_token"
+  printf '%s\n' "VIFU_AGENT_GATEWAY_TOKEN=$agent_gateway_token"
   printf '%s\n' "VIFU_API_KEY_PEPPER=$api_key_pepper"
   printf '%s\n' "POSTGRES_DB=vifu"
   printf '%s\n' "POSTGRES_USER=vifu"

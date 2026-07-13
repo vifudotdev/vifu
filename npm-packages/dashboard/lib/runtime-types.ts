@@ -1,26 +1,72 @@
-export type DeploymentMode = "local" | "self-hosted" | "cloud";
+export type DeploymentMode = "local" | "self-hosted";
+export type AuthMode = "none" | "local-password" | "oidc";
+export type AuthProviderKind = "password" | "oidc";
+
+export type AuthProvider = {
+  id: string;
+  kind: AuthProviderKind;
+  label: string;
+};
 
 export type ServerCapabilities = {
+  projects: boolean;
   profiles: boolean;
   endpoints: boolean;
   bindings: boolean;
   apiKeys: boolean;
-  connections: boolean;
+  agentGateways: boolean;
   traces: boolean;
-  websocketRelay: boolean;
-  account: boolean;
-  teams: boolean;
-  billing: boolean;
-  managedDomains: boolean;
+  jsonRpc: boolean;
 };
 
-export type DeploymentStatus = {
+export type AuthCapability = {
+  required?: boolean;
+  mode: AuthMode;
+  signupEnabled: boolean;
+  providers?: AuthProvider[];
+};
+
+export type Principal = {
+  userId: string;
+  email: string;
+  displayName?: string | null;
+  roles: string[];
+  provider: "local" | "oidc";
+};
+
+export type AuthenticatedSession = {
+  principal: Principal;
+  session: {
+    token: string;
+    expiresAt: string;
+  };
+};
+
+export type RuntimeProject = {
+  id: string;
+  slug: string;
+  name: string;
+  description: string | null;
+  gatewayId: string;
+  enabled: boolean;
+  publishableKeyPrefix: string;
+  bindingIds: string[];
+  publishableKey?: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type RuntimeStatus = {
   service: string;
   status: string;
   version: string;
   mode: DeploymentMode;
   capabilities: ServerCapabilities;
-  connections: number;
+  agentGateways: number;
+};
+
+export type DeploymentStatus = RuntimeStatus & {
+  auth: AuthCapability;
 };
 
 export type AgentProfile = {
@@ -28,7 +74,6 @@ export type AgentProfile = {
   slug: string;
   name: string;
   description: string | null;
-  instructions: string | null;
   createdAt: string;
   updatedAt: string;
 };
@@ -37,7 +82,7 @@ export type AgentBinding = {
   id: string;
   profileId: string;
   provider: string;
-  connectorId: string;
+  gatewayId: string;
   agentId: string;
   config: Record<string, unknown>;
   createdAt: string;
@@ -66,9 +111,9 @@ export type ApiKeyRecord = {
   revokedAt: string | null;
 };
 
-export type ConnectorSession = {
+export type AgentGateway = {
   id: string;
-  connectorId: string;
+  gatewayId: string;
   sessionId: string;
   status: string;
   agents: Array<{ id?: string; name?: string }>;
@@ -78,11 +123,20 @@ export type ConnectorSession = {
   disconnectedAt: string | null;
 };
 
+export type AvailableAgent = {
+  gatewayId: string;
+  id: string;
+  name: string;
+  status: string;
+  metadata: Record<string, unknown>;
+};
+
 export type EndpointTrace = {
   id: string;
   requestId: string;
-  endpointId: string;
-  connectorSessionId: string | null;
+  endpointId: string | null;
+  projectId: string | null;
+  gatewaySessionId: string | null;
   status: string;
   latencyMs: number | null;
   request: Record<string, unknown>;
@@ -93,10 +147,12 @@ export type EndpointTrace = {
 };
 
 export type RuntimeSnapshot = {
+  projects: RuntimeProject[];
   profiles: AgentProfile[];
   bindings: AgentBinding[];
   endpoints: AgentEndpoint[];
   apiKeys: ApiKeyRecord[];
-  connections: ConnectorSession[];
+  agentGateways: AgentGateway[];
+  availableAgents: AvailableAgent[];
   traces: EndpointTrace[];
 };

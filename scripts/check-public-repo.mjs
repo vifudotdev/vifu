@@ -12,7 +12,7 @@ const ignoredDirectories = new Set([
   "test-results",
 ]);
 const checks = [
-  ["cloud access key", /(?:AKIA|ASIA)[0-9A-Z]{16}/],
+  ["provider access key", /(?:AKIA|ASIA)[0-9A-Z]{16}/],
   ["source-control token", /(?:github_pat_|gh[pousr]_)[A-Za-z0-9_]+/],
   ["API key", /\bsk-(?:proj-)?[A-Za-z0-9_-]{20,}/],
   ["infrastructure account ID", /\b\d{12}\b/],

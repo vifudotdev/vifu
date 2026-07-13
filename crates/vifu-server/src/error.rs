@@ -16,14 +16,14 @@ pub enum ApiError {
     NotFound,
     #[error("{0}")]
     Conflict(String),
-    #[error("connector is not available")]
-    ConnectorUnavailable,
-    #[error("connector is busy")]
+    #[error("agent gateway is not available")]
+    AgentGatewayUnavailable,
+    #[error("agent gateway is busy")]
     Backpressure,
     #[error("agent request timed out")]
     Timeout,
     #[error("{0}")]
-    Connector(String),
+    AgentGateway(String),
     #[error("database request failed")]
     Database(#[from] sqlx::Error),
     #[error("migration failed")]
@@ -40,12 +40,12 @@ impl IntoResponse for ApiError {
             Self::Invalid(_) => (StatusCode::BAD_REQUEST, "INVALID_REQUEST"),
             Self::NotFound => (StatusCode::NOT_FOUND, "NOT_FOUND"),
             Self::Conflict(_) => (StatusCode::CONFLICT, "CONFLICT"),
-            Self::ConnectorUnavailable => {
-                (StatusCode::SERVICE_UNAVAILABLE, "CONNECTOR_UNAVAILABLE")
+            Self::AgentGatewayUnavailable => {
+                (StatusCode::SERVICE_UNAVAILABLE, "AGENT_GATEWAY_UNAVAILABLE")
             }
             Self::Backpressure => (StatusCode::TOO_MANY_REQUESTS, "BACKPRESSURE"),
             Self::Timeout => (StatusCode::GATEWAY_TIMEOUT, "REQUEST_TIMEOUT"),
-            Self::Connector(_) => (StatusCode::BAD_GATEWAY, "CONNECTOR_ERROR"),
+            Self::AgentGateway(_) => (StatusCode::BAD_GATEWAY, "AGENT_GATEWAY_ERROR"),
             Self::Database(_) | Self::Migration(_) | Self::Internal => {
                 (StatusCode::INTERNAL_SERVER_ERROR, "INTERNAL_ERROR")
             }

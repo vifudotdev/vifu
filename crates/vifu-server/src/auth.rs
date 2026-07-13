@@ -13,7 +13,7 @@ pub fn require_admin(headers: &HeaderMap, expected: &str) -> Result<(), ApiError
     }
 }
 
-pub fn require_connector(headers: &HeaderMap, expected: &str) -> Result<(), ApiError> {
+pub fn require_agent_gateway(headers: &HeaderMap, expected: &str) -> Result<(), ApiError> {
     require_admin(headers, expected)
 }
 
@@ -37,6 +37,10 @@ pub fn hash_api_key(value: &str, pepper: &str) -> Vec<u8> {
 
 pub fn is_secret_match(actual: &str, expected: &str) -> bool {
     constant_time_eq(actual.as_bytes(), expected.as_bytes())
+}
+
+pub fn is_hash_match(actual: &[u8], expected: &[u8]) -> bool {
+    constant_time_eq(actual, expected)
 }
 
 fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {

@@ -14,47 +14,41 @@ use url::Url;
 use uuid::Uuid;
 
 use crate::openclaw::{self, Endpoint};
-use crate::protocol::{self, AgentDescriptor, ConnectorMessage};
+use crate::protocol::{self, AgentDescriptor, AgentGatewayMessage};
 use crate::session::{self, SessionSummary};
 
 const MAX_CONCURRENT_CALLS: usize = 64;
 const OUTBOUND_QUEUE_CAPACITY: usize = 128;
 const MAX_RECONNECT_DELAY: Duration = Duration::from_secs(30);
 
-pub async fn run_connector(
-    server_url: &str,
-    connector_token: &str,
-    endpoint: &Endpoint,
-    openclaw_token: Option<&str>,
-    agents: &[AgentDescriptor],
-    session_path: &Path,
+pub struct AgentGatewayRuntime<'a> {
+    pub server_url: &'a str,
+    pub agent_gateway_token: &'a str,
+    pub endpoint: &'a Endpoint,
+    pub openclaw_token: Option<&'a str>,
+    pub agents: &'a [AgentDescriptor],
+    pub session_path: &'a Path,
+}
+
+pub async fn run_agent_gateway(
+    runtime: AgentGatewayRuntime<'_>,
     session: &mut SessionSummary,
 ) -> Result<(), String> {
-    let websocket_url = connector_websocket_url(server_url)?;
+    let websocket_url = agent_gateway_websocket_url(runtime.server_url)?;
     let mut reconnect_delay = Duration::from_secs(1);
 
     loop {
-        match run_connection(
-            &websocket_url,
-            connector_token,
-            endpoint,
-            openclaw_token,
-            agents,
-            session_path,
-            session,
-        )
-        .await
-        {
+        match run_connection(&websocket_url, &runtime, session).await {
             Ok(ConnectionOutcome::Shutdown) => return Ok(()),
             Ok(ConnectionOutcome::Disconnected) => {
                 eprintln!(
-                    "Connector disconnected; reconnecting in {}s.",
+                    "Agent Gateway disconnected; reconnecting in {}s.",
                     reconnect_delay.as_secs()
                 );
             }
             Err(error) => {
                 eprintln!(
-                    "Connector connection failed: {}. Retrying in {}s.",
+                    "Agent Gateway connection failed: {}. Retrying in {}s.",
                     sanitize_error(&error),
                     reconnect_delay.as_secs()
                 );
@@ -77,11 +71,7 @@ enum ConnectionOutcome {
 
 async fn run_connection(
     websocket_url: &str,
-    connector_token: &str,
-    endpoint: &Endpoint,
-    openclaw_token: Option<&str>,
-    agents: &[AgentDescriptor],
-    session_path: &Path,
+    runtime: &AgentGatewayRuntime<'_>,
     session: &mut SessionSummary,
 ) -> Result<ConnectionOutcome, String> {
     let mut request = websocket_url
@@ -89,8 +79,8 @@ async fn run_connection(
         .map_err(|error| error.to_string())?;
     request.headers_mut().insert(
         AUTHORIZATION,
-        HeaderValue::from_str(&format!("Bearer {connector_token}"))
-            .map_err(|_| "connector token contains invalid header characters".to_string())?,
+        HeaderValue::from_str(&format!("Bearer {}", runtime.agent_gateway_token))
+            .map_err(|_| "agent gateway token contains invalid header characters".to_string())?,
     );
     let (mut socket, _) = connect_async(request)
         .await
@@ -98,11 +88,11 @@ async fn run_connection(
 
     send_message(
         &mut socket,
-        &ConnectorMessage::Hello {
+        &AgentGatewayMessage::Hello {
             protocol: protocol::VERSION.to_string(),
-            connector_id: session.connector_id.clone(),
+            gateway_id: session.gateway_id.clone(),
             resume_session_id: session.resume_session_id,
-            agents: agents.to_vec(),
+            agents: runtime.agents.to_vec(),
             metadata: serde_json::json!({
                 "adapter": "openclaw",
                 "version": env!("CARGO_PKG_VERSION")
@@ -113,25 +103,25 @@ async fn run_connection(
 
     let welcome = tokio::time::timeout(Duration::from_secs(10), receive_message(&mut socket))
         .await
-        .map_err(|_| "server did not accept the connector in time".to_string())??;
-    let ConnectorMessage::Welcome {
+        .map_err(|_| "server did not accept the agent gateway in time".to_string())??;
+    let AgentGatewayMessage::Welcome {
         connection_id,
         session_id,
         heartbeat_interval_ms: _,
         resumed,
     } = welcome
     else {
-        return Err("server must send welcome after connector hello".to_string());
+        return Err("server must send welcome after agent gateway hello".to_string());
     };
     session.resume_session_id = Some(session_id);
-    session::write_session(session_path, session)?;
+    session::write_session(runtime.session_path, session)?;
     println!(
-        "Connector: connected as {} (connection {}, session {}, resumed: {})",
-        session.connector_id, connection_id, session_id, resumed
+        "Agent Gateway: connected as {} (connection {}, session {}, resumed: {})",
+        session.gateway_id, connection_id, session_id, resumed
     );
 
     let (outbound_sender, mut outbound_receiver) =
-        mpsc::channel::<ConnectorMessage>(OUTBOUND_QUEUE_CAPACITY);
+        mpsc::channel::<AgentGatewayMessage>(OUTBOUND_QUEUE_CAPACITY);
     let semaphore = std::sync::Arc::new(Semaphore::new(MAX_CONCURRENT_CALLS));
     let mut calls = HashMap::<Uuid, JoinHandle<()>>::new();
 
@@ -141,7 +131,7 @@ async fn run_connection(
             _ = tokio::signal::ctrl_c() => break ConnectionOutcome::Shutdown,
             outbound = outbound_receiver.recv() => {
                 let Some(outbound) = outbound else {
-                    return Err("connector output queue closed".to_string());
+                    return Err("agent gateway output queue closed".to_string());
                 };
                 send_message(&mut socket, &outbound).await?;
             }
@@ -152,14 +142,13 @@ async fn run_connection(
                     Err(error) => return Err(error),
                 };
                 match incoming {
-                    ConnectorMessage::Invoke {
+                    AgentGatewayMessage::Invoke {
                         request_id,
                         channel_id,
                         endpoint_id: _,
                         profile_id: _,
                         binding_id: _,
                         agent_id,
-                        profile,
                         binding,
                         input,
                         timeout_ms,
@@ -182,32 +171,31 @@ async fn run_connection(
                                     Some(request_id),
                                     Some(channel_id),
                                     "BACKPRESSURE",
-                                    "The connector has reached its concurrent call limit.",
+                                    "The agent gateway has reached its concurrent call limit.",
                                 ).await?;
                                 continue;
                             }
                         };
-                        let endpoint = endpoint.clone();
-                        let openclaw_token = openclaw_token.map(str::to_string);
+                        let endpoint = runtime.endpoint.clone();
+                        let openclaw_token = runtime.openclaw_token.map(str::to_string);
                         let sender = outbound_sender.clone();
                         let handle = tokio::spawn(async move {
                             let result = openclaw::invoke(
                                 &endpoint,
                                 openclaw_token.as_deref(),
                                 &agent_id,
-                                &profile,
                                 &binding,
                                 &input,
                                 Duration::from_millis(timeout_ms),
                             )
                             .await;
                             let message = match result {
-                                Ok(output) => ConnectorMessage::Result {
+                                Ok(output) => AgentGatewayMessage::Result {
                                     request_id,
                                     channel_id,
                                     output,
                                 },
-                                Err(error) => connector_error(
+                                Err(error) => agent_gateway_error(
                                     request_id,
                                     channel_id,
                                     "OPENCLAW_ERROR",
@@ -219,35 +207,35 @@ async fn run_connection(
                         });
                         calls.insert(request_id, handle);
                     }
-                    ConnectorMessage::Cancel { request_id, .. } => {
+                    AgentGatewayMessage::Cancel { request_id, .. } => {
                         if let Some(call) = calls.remove(&request_id) {
                             call.abort();
                         }
                     }
-                    ConnectorMessage::Heartbeat { session_id: received } => {
+                    AgentGatewayMessage::Heartbeat { session_id: received } => {
                         if received != session_id {
                             return Err("server heartbeat session does not match".to_string());
                         }
                         outbound_sender
-                            .send(ConnectorMessage::HeartbeatAck { session_id })
+                            .send(AgentGatewayMessage::HeartbeatAck { session_id })
                             .await
-                            .map_err(|_| "connector output queue closed".to_string())?;
+                            .map_err(|_| "agent gateway output queue closed".to_string())?;
                     }
-                    ConnectorMessage::Error {
+                    AgentGatewayMessage::Error {
                         request_id: None,
                         code,
                         message,
                         ..
                     } if code == "SESSION_REPLACED" => {
-                        eprintln!("Connector session replaced: {}", sanitize_error(&message));
+                        eprintln!("Agent Gateway session replaced: {}", sanitize_error(&message));
                         break ConnectionOutcome::Disconnected;
                     }
-                    ConnectorMessage::Error {
+                    AgentGatewayMessage::Error {
                         request_id: None,
                         message,
                         ..
-                    } => return Err(format!("server rejected connector: {}", sanitize_error(&message))),
-                    _ => return Err("server sent an unexpected connector message".to_string()),
+                    } => return Err(format!("server rejected agent gateway: {}", sanitize_error(&message))),
+                    _ => return Err("server sent an unexpected agent gateway message".to_string()),
                 }
             }
         }
@@ -260,7 +248,7 @@ async fn run_connection(
     Ok(outcome)
 }
 
-pub fn connector_websocket_url(server_url: &str) -> Result<String, String> {
+pub fn agent_gateway_websocket_url(server_url: &str) -> Result<String, String> {
     let mut url = Url::parse(server_url.trim())
         .map_err(|_| "VIFU_SERVER_URL must be a valid HTTP or HTTPS URL".to_string())?;
     if !url.username().is_empty()
@@ -276,7 +264,7 @@ pub fn connector_websocket_url(server_url: &str) -> Result<String, String> {
         "http" if is_loopback_server(&url) => "ws",
         "http" => {
             return Err(
-                "Remote VIFU_SERVER_URL values must use https so connector credentials are encrypted"
+                "Remote VIFU_SERVER_URL values must use https so agent gateway credentials are encrypted"
                     .to_string(),
             );
         }
@@ -284,14 +272,14 @@ pub fn connector_websocket_url(server_url: &str) -> Result<String, String> {
         _ => return Err("VIFU_SERVER_URL must use http or https".to_string()),
     };
     url.set_scheme(websocket_scheme)
-        .map_err(|_| "could not build connector WebSocket URL".to_string())?;
+        .map_err(|_| "could not build agent gateway WebSocket URL".to_string())?;
     let base_path = url.path().trim_end_matches('/');
-    let connector_path = if base_path.is_empty() {
-        "/v1/connect".to_string()
+    let agent_gateway_path = if base_path.is_empty() {
+        "/v1/agent-gateway/connect".to_string()
     } else {
-        format!("{base_path}/v1/connect")
+        format!("{base_path}/v1/agent-gateway/connect")
     };
-    url.set_path(&connector_path);
+    url.set_path(&agent_gateway_path);
     Ok(url.to_string())
 }
 
@@ -307,7 +295,7 @@ fn is_loopback_server(url: &Url) -> bool {
 
 async fn receive_message<S>(
     socket: &mut tokio_tungstenite::WebSocketStream<S>,
-) -> Result<ConnectorMessage, String>
+) -> Result<AgentGatewayMessage, String>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
@@ -321,7 +309,7 @@ where
             Some(Ok(Message::Pong(_))) | Some(Ok(Message::Frame(_))) => continue,
             Some(Ok(Message::Close(_))) | None => return Err("server disconnected".to_string()),
             Some(Ok(Message::Binary(_))) => {
-                return Err("binary connector messages are not supported".to_string());
+                return Err("binary agent gateway messages are not supported".to_string());
             }
             Some(Err(error)) => return Err(error.to_string()),
         }
@@ -330,7 +318,7 @@ where
 
 async fn send_message<S>(
     socket: &mut tokio_tungstenite::WebSocketStream<S>,
-    message: &ConnectorMessage,
+    message: &AgentGatewayMessage,
 ) -> Result<(), String>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
@@ -342,30 +330,30 @@ where
 }
 
 async fn queue_error(
-    sender: &mpsc::Sender<ConnectorMessage>,
+    sender: &mpsc::Sender<AgentGatewayMessage>,
     request_id: Option<Uuid>,
     channel_id: Option<u64>,
     code: &str,
     message: &str,
 ) -> Result<(), String> {
     sender
-        .send(ConnectorMessage::Error {
+        .send(AgentGatewayMessage::Error {
             request_id,
             channel_id,
             code: code.to_string(),
             message: message.to_string(),
         })
         .await
-        .map_err(|_| "connector output queue closed".to_string())
+        .map_err(|_| "agent gateway output queue closed".to_string())
 }
 
-fn connector_error(
+fn agent_gateway_error(
     request_id: Uuid,
     channel_id: u64,
     code: &str,
     message: &str,
-) -> ConnectorMessage {
-    ConnectorMessage::Error {
+) -> AgentGatewayMessage {
+    AgentGatewayMessage::Error {
         request_id: Some(request_id),
         channel_id: Some(channel_id),
         code: code.to_string(),
@@ -398,42 +386,42 @@ fn sanitize_error(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{connector_websocket_url, sanitize_error};
+    use super::{agent_gateway_websocket_url, sanitize_error};
 
     #[test]
-    fn builds_connector_websocket_url_from_http_base() {
+    fn builds_agent_gateway_websocket_url_from_http_base() {
         assert_eq!(
-            connector_websocket_url("http://127.0.0.1:6790").unwrap(),
-            "ws://127.0.0.1:6790/v1/connect"
+            agent_gateway_websocket_url("http://127.0.0.1:6790").unwrap(),
+            "ws://127.0.0.1:6790/v1/agent-gateway/connect"
         );
         assert_eq!(
-            connector_websocket_url("https://runtime.example.com/api/").unwrap(),
-            "wss://runtime.example.com/api/v1/connect"
+            agent_gateway_websocket_url("https://runtime.example.com/api/").unwrap(),
+            "wss://runtime.example.com/api/v1/agent-gateway/connect"
         );
     }
 
     #[test]
     fn rejects_server_urls_with_credentials() {
         let url = format!("https://{}:{}@example.com", "user", "pass");
-        assert!(connector_websocket_url(&url).is_err());
+        assert!(agent_gateway_websocket_url(&url).is_err());
     }
 
     #[test]
     fn rejects_plaintext_remote_server_urls() {
-        let error = connector_websocket_url("http://relay.example.com").unwrap_err();
+        let error = agent_gateway_websocket_url("http://relay.example.com").unwrap_err();
         assert!(error.contains("must use https"));
     }
 
     #[test]
     fn accepts_secure_remote_server_urls() {
         assert_eq!(
-            connector_websocket_url("https://relay.example.com").unwrap(),
-            "wss://relay.example.com/v1/connect"
+            agent_gateway_websocket_url("https://relay.example.com").unwrap(),
+            "wss://relay.example.com/v1/agent-gateway/connect"
         );
     }
 
     #[test]
-    fn sanitizes_connector_errors() {
+    fn sanitizes_agent_gateway_errors() {
         assert_eq!(sanitize_error("bad\0token"), "bad token");
     }
 }

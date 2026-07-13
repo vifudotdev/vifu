@@ -33,7 +33,7 @@ async fn connect(options: Options) -> Result<(), String> {
     ensure_home_dir(&config)?;
     let report = openclaw::probe(&config.openclaw_url).await;
 
-    println!("Vifu connector");
+    println!("Vifu Agent Gateway");
     print_openclaw_report(&report);
     print_server_config(&config)?;
 
@@ -47,16 +47,16 @@ async fn connect(options: Options) -> Result<(), String> {
     println!("Agents: {} discovered", agents.len());
     let mut session = load_or_create_session(&config)?;
     print_session(&session);
-    relay::run_connector(
-        &config.server_url,
-        &config.connector_token,
-        &report.endpoint,
-        config.openclaw_token.as_deref(),
-        &agents,
-        &config.session_file(),
-        &mut session,
-    )
-    .await
+    let session_file = config.session_file();
+    let runtime = relay::AgentGatewayRuntime {
+        server_url: &config.server_url,
+        agent_gateway_token: &config.agent_gateway_token,
+        endpoint: &report.endpoint,
+        openclaw_token: config.openclaw_token.as_deref(),
+        agents: &agents,
+        session_path: &session_file,
+    };
+    relay::run_agent_gateway(runtime, &mut session).await
 }
 
 async fn status(options: Options) -> Result<(), String> {
@@ -101,9 +101,9 @@ async fn doctor(options: Options) -> Result<(), String> {
 fn logout(options: Options) -> Result<(), String> {
     let config = Config::load(options.openclaw_url, options.server_url)?;
     match fs::remove_file(config.session_file()) {
-        Ok(()) => println!("Removed the local connector session."),
+        Ok(()) => println!("Removed the local agent gateway session."),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            println!("No local connector session found.");
+            println!("No local agent gateway session found.");
         }
         Err(error) => return Err(error.to_string()),
     }
@@ -147,7 +147,7 @@ fn print_server_config(config: &Config) -> Result<(), String> {
     println!("Server: {}", config.server_url);
     println!(
         "WebSocket: {}",
-        relay::connector_websocket_url(&config.server_url)?
+        relay::agent_gateway_websocket_url(&config.server_url)?
     );
     Ok(())
 }
@@ -164,9 +164,9 @@ fn print_session(session: &SessionSummary) {
     match session.resume_session_id {
         Some(session_id) => println!(
             "Session: resumable ({}, {})",
-            session.connector_id, session_id
+            session.gateway_id, session_id
         ),
-        None => println!("Session: new ({})", session.connector_id),
+        None => println!("Session: new ({})", session.gateway_id),
     }
 }
 
@@ -175,7 +175,7 @@ fn load_or_create_session(config: &Config) -> Result<SessionSummary, String> {
         SessionStatus::Ready(summary) => Ok(summary),
         SessionStatus::Missing => {
             let summary = SessionSummary {
-                connector_id: format!("connector-{}", Uuid::new_v4().simple()),
+                gateway_id: format!("gateway-{}", Uuid::new_v4().simple()),
                 resume_session_id: None,
                 created_at_unix: now_unix_seconds()?,
             };
@@ -183,7 +183,7 @@ fn load_or_create_session(config: &Config) -> Result<SessionSummary, String> {
             Ok(summary)
         }
         SessionStatus::Invalid(reason) => Err(format!(
-            "local connector session is invalid: {reason}. Run `vifu --logout` to replace it."
+            "local agent gateway session is invalid: {reason}. Run `vifu --logout` to replace it."
         )),
     }
 }

@@ -2,8 +2,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 
-pub const VERSION: &str = "vifu.connector/1";
-pub const MAX_FRAME_BYTES: usize = 1024 * 1024;
+pub const VERSION: &str = "vifu.agent-gateway/1";
+pub const MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_BODY_BYTES: usize = 512 * 1024;
 pub const MAX_PATH_BYTES: usize = 2 * 1024;
 pub const MAX_AGENTS: usize = 256;
@@ -18,22 +18,15 @@ pub struct AgentDescriptor {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ProfileContext {
-    pub name: String,
-    pub instructions: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(
     tag = "type",
     rename_all = "snake_case",
     rename_all_fields = "camelCase"
 )]
-pub enum ConnectorMessage {
+pub enum AgentGatewayMessage {
     Hello {
         protocol: String,
-        connector_id: String,
+        gateway_id: String,
         resume_session_id: Option<Uuid>,
         agents: Vec<AgentDescriptor>,
         #[serde(default)]
@@ -52,7 +45,6 @@ pub enum ConnectorMessage {
         profile_id: Uuid,
         binding_id: Uuid,
         agent_id: String,
-        profile: ProfileContext,
         binding: Value,
         input: Value,
         timeout_ms: u64,
@@ -80,7 +72,7 @@ pub enum ConnectorMessage {
     },
 }
 
-pub fn encode(message: &ConnectorMessage) -> Result<String, String> {
+pub fn encode(message: &AgentGatewayMessage) -> Result<String, String> {
     validate_message(message)?;
     let encoded = serde_json::to_string(message).map_err(|error| error.to_string())?;
     if encoded.len() > MAX_FRAME_BYTES {
@@ -89,7 +81,7 @@ pub fn encode(message: &ConnectorMessage) -> Result<String, String> {
     Ok(encoded)
 }
 
-pub fn decode(frame: &str) -> Result<ConnectorMessage, String> {
+pub fn decode(frame: &str) -> Result<AgentGatewayMessage, String> {
     if frame.is_empty() {
         return Err("protocol frame is empty".to_string());
     }
@@ -101,30 +93,30 @@ pub fn decode(frame: &str) -> Result<ConnectorMessage, String> {
     Ok(message)
 }
 
-pub fn validate_message(message: &ConnectorMessage) -> Result<(), String> {
+pub fn validate_message(message: &AgentGatewayMessage) -> Result<(), String> {
     match message {
-        ConnectorMessage::Hello {
+        AgentGatewayMessage::Hello {
             protocol,
-            connector_id,
+            gateway_id,
             resume_session_id: _,
             agents,
             metadata,
         } => {
             if protocol != VERSION {
-                return Err(format!("unsupported connector protocol: {protocol}"));
+                return Err(format!("unsupported agent gateway protocol: {protocol}"));
             }
-            validate_identifier("connector id", connector_id)?;
+            validate_identifier("agent gateway id", gateway_id)?;
             if agents.len() > MAX_AGENTS {
-                return Err("too many connector agents".to_string());
+                return Err("too many agent gateway agents".to_string());
             }
             for agent in agents {
                 validate_identifier("agent id", &agent.id)?;
                 validate_text("agent name", &agent.name, 1, 128)?;
                 validate_json("agent metadata", &agent.metadata, 64 * 1024)?;
             }
-            validate_json("connector metadata", metadata, 64 * 1024)
+            validate_json("agent gateway metadata", metadata, 64 * 1024)
         }
-        ConnectorMessage::Welcome {
+        AgentGatewayMessage::Welcome {
             heartbeat_interval_ms,
             ..
         } => {
@@ -133,10 +125,9 @@ pub fn validate_message(message: &ConnectorMessage) -> Result<(), String> {
             }
             Ok(())
         }
-        ConnectorMessage::Invoke {
+        AgentGatewayMessage::Invoke {
             channel_id,
             agent_id,
-            profile,
             binding,
             input,
             timeout_ms,
@@ -144,10 +135,6 @@ pub fn validate_message(message: &ConnectorMessage) -> Result<(), String> {
         } => {
             validate_channel(*channel_id)?;
             validate_identifier("agent id", agent_id)?;
-            validate_text("profile name", &profile.name, 1, 128)?;
-            if let Some(instructions) = &profile.instructions {
-                validate_text("profile instructions", instructions, 0, 64 * 1024)?;
-            }
             validate_json("binding", binding, 64 * 1024)?;
             validate_json("input", input, MAX_BODY_BYTES)?;
             if !(500..=120_000).contains(timeout_ms) {
@@ -155,13 +142,13 @@ pub fn validate_message(message: &ConnectorMessage) -> Result<(), String> {
             }
             Ok(())
         }
-        ConnectorMessage::Result {
+        AgentGatewayMessage::Result {
             channel_id, output, ..
         } => {
             validate_channel(*channel_id)?;
             validate_json("output", output, MAX_BODY_BYTES)
         }
-        ConnectorMessage::Error {
+        AgentGatewayMessage::Error {
             request_id,
             channel_id,
             code,
@@ -176,8 +163,8 @@ pub fn validate_message(message: &ConnectorMessage) -> Result<(), String> {
             validate_code(code)?;
             validate_text("error message", message, 1, 2048)
         }
-        ConnectorMessage::Cancel { channel_id, .. } => validate_channel(*channel_id),
-        ConnectorMessage::Heartbeat { .. } | ConnectorMessage::HeartbeatAck { .. } => Ok(()),
+        AgentGatewayMessage::Cancel { channel_id, .. } => validate_channel(*channel_id),
+        AgentGatewayMessage::Heartbeat { .. } | AgentGatewayMessage::HeartbeatAck { .. } => Ok(()),
     }
 }
 
@@ -269,21 +256,17 @@ mod tests {
     use serde_json::json;
     use uuid::Uuid;
 
-    use super::{decode, encode, AgentDescriptor, ConnectorMessage, ProfileContext, VERSION};
+    use super::{decode, encode, AgentDescriptor, AgentGatewayMessage, VERSION};
 
     #[test]
     fn round_trips_multiplexed_invoke() {
-        let message = ConnectorMessage::Invoke {
+        let message = AgentGatewayMessage::Invoke {
             request_id: Uuid::new_v4(),
             channel_id: 7,
             endpoint_id: Uuid::new_v4(),
             profile_id: Uuid::new_v4(),
             binding_id: Uuid::new_v4(),
             agent_id: "guide-agent".to_string(),
-            profile: ProfileContext {
-                name: "Guide".to_string(),
-                instructions: Some("Be concise".to_string()),
-            },
             binding: json!({}),
             input: json!({ "message": "Hello" }),
             timeout_ms: 30_000,
@@ -295,9 +278,9 @@ mod tests {
 
     #[test]
     fn round_trips_resume_hello() {
-        let message = ConnectorMessage::Hello {
+        let message = AgentGatewayMessage::Hello {
             protocol: VERSION.to_string(),
-            connector_id: "local-connector".to_string(),
+            gateway_id: "local-gateway".to_string(),
             resume_session_id: Some(Uuid::new_v4()),
             agents: vec![AgentDescriptor {
                 id: "default-agent".to_string(),
@@ -311,7 +294,7 @@ mod tests {
 
     #[test]
     fn rejects_zero_channel() {
-        let message = ConnectorMessage::Cancel {
+        let message = AgentGatewayMessage::Cancel {
             request_id: Uuid::new_v4(),
             channel_id: 0,
         };
@@ -320,9 +303,9 @@ mod tests {
 
     #[test]
     fn rejects_unknown_protocol() {
-        let message = ConnectorMessage::Hello {
-            protocol: "vifu.connector/999".to_string(),
-            connector_id: "local-connector".to_string(),
+        let message = AgentGatewayMessage::Hello {
+            protocol: "vifu.agent-gateway/999".to_string(),
+            gateway_id: "local-gateway".to_string(),
             resume_session_id: None,
             agents: Vec::new(),
             metadata: json!({}),

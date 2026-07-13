@@ -4,6 +4,7 @@ pub mod config;
 pub mod db;
 pub mod error;
 pub mod models;
+pub mod project_rpc;
 pub mod relay;
 pub mod websocket;
 
@@ -37,7 +38,7 @@ pub async fn connect(config: Config) -> Result<AppState, ApiError> {
         .connect(&config.database_url)
         .await?;
     db::migrate(&pool).await?;
-    db::mark_connector_sessions_disconnected(&pool).await?;
+    db::mark_agent_gateway_sessions_disconnected(&pool).await?;
     Ok(state(config, pool))
 }
 
@@ -65,7 +66,25 @@ pub fn app(state: AppState) -> Router {
 
     Router::new()
         .route("/health", get(api::health))
+        .route(
+            "/",
+            get(project_rpc::upgrade_by_host).post(project_rpc::post_by_host),
+        )
         .route("/v1/status", get(api::status))
+        .route(
+            "/v1/projects",
+            get(api::list_projects).post(api::create_project),
+        )
+        .route(
+            "/v1/projects/{id}",
+            get(api::get_project)
+                .patch(api::update_project)
+                .delete(api::delete_project),
+        )
+        .route(
+            "/v1/projects/{slug}/rpc",
+            get(project_rpc::upgrade_by_slug).post(project_rpc::post_by_slug),
+        )
         .route(
             "/v1/profiles",
             get(api::list_profiles).post(api::create_profile),
@@ -102,9 +121,10 @@ pub fn app(state: AppState) -> Router {
             get(api::list_api_keys).post(api::create_api_key),
         )
         .route("/v1/api-keys/{id}", delete(api::revoke_api_key))
-        .route("/v1/connections", get(api::list_connections))
+        .route("/v1/agents", get(api::list_available_agents))
+        .route("/v1/agent-gateways", get(api::list_agent_gateways))
         .route("/v1/traces", get(api::list_traces))
-        .route("/v1/connect", get(websocket::upgrade))
+        .route("/v1/agent-gateway/connect", get(websocket::upgrade))
         .fallback(api::fallback)
         .layer(PropagateRequestIdLayer::new(request_id_header.clone()))
         .layer(TraceLayer::new_for_http())
