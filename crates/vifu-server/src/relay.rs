@@ -5,7 +5,7 @@ use std::time::Duration;
 use serde_json::Value;
 use tokio::sync::{mpsc, oneshot, Mutex};
 use uuid::Uuid;
-use vifu::protocol::AgentGatewayMessage;
+use vifu_core::protocol::AgentGatewayMessage;
 
 use crate::models::EndpointRoute;
 
@@ -263,7 +263,7 @@ mod tests {
 
     use serde_json::json;
     use uuid::Uuid;
-    use vifu::protocol::AgentGatewayMessage;
+    use vifu_core::protocol::AgentGatewayMessage;
 
     use super::{RelayCallError, RelayHub};
     use crate::models::EndpointRoute;

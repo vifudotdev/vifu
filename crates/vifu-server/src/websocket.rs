@@ -9,7 +9,7 @@ use serde_json::json;
 use tokio::time::{Instant, MissedTickBehavior};
 use tracing::{info, warn};
 use uuid::Uuid;
-use vifu::protocol::{self, AgentGatewayMessage};
+use vifu_core::protocol::{self, AgentGatewayMessage};
 
 use crate::auth::require_agent_gateway;
 use crate::db;

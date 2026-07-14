@@ -2267,6 +2267,15 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 name = "vifu"
 version = "0.1.0"
 dependencies = [
+ "tokio",
+ "uuid",
+ "vifu-core",
+]
+
+[[package]]
+name = "vifu-core"
+version = "0.1.0"
+dependencies = [
  "futures-util",
  "reqwest",
  "serde",
@@ -2296,7 +2305,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
- "vifu",
+ "vifu-core",
 ]
 
 [[package]]

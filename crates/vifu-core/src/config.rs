@@ -62,12 +62,10 @@ fn default_home_dir() -> Result<PathBuf, String> {
 #[cfg(test)]
 mod tests {
     use super::{DEFAULT_OPENCLAW_URL, DEFAULT_SERVER_URL};
-    use crate::cli::Options;
 
     #[test]
-    fn defaults_to_local_openclaw_and_server() {
-        let options = Options::parse(["vifu"]).unwrap();
-        assert_eq!(options.openclaw_url, DEFAULT_OPENCLAW_URL);
-        assert_eq!(options.server_url, DEFAULT_SERVER_URL);
+    fn default_urls_target_local_services() {
+        assert_eq!(DEFAULT_OPENCLAW_URL, "http://127.0.0.1:18789");
+        assert_eq!(DEFAULT_SERVER_URL, "http://127.0.0.1:6790");
     }
 }

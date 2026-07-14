@@ -1,0 +1,24 @@
+[package]
+name = "vifu-core"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Shared Rust protocol and runtime primitives for Vifu."
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+
+[lib]
+crate-type = ["lib"]
+name = "vifu_core"
+
+[dependencies]
+futures-util = "0.3"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "sync", "time"] }
+tokio-tungstenite = { version = "0.29", features = ["rustls-tls-webpki-roots"] }
+url = "2"
+uuid = { version = "1", features = ["serde", "v4"] }

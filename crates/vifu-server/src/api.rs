@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tracing::warn;
 use uuid::Uuid;
-use vifu::protocol::validate_identifier;
+use vifu_core::protocol::validate_identifier;
 
 use crate::auth::{bearer_token, hash_api_key, is_secret_match};
 use crate::config::DeploymentMode;

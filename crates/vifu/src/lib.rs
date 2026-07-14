@@ -1,10 +1,7 @@
 pub mod agent_gateway;
 pub mod cli;
-pub mod config;
-pub mod openclaw;
-pub mod protocol;
-pub mod relay;
-pub mod session;
+
+pub use vifu_core::{config, openclaw, protocol, relay, session};
 
 pub async fn run<I, S>(args: I) -> Result<(), String>
 where
