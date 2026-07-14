@@ -1,0 +1,10 @@
+# UniFFI configuration for the Vifu mobile megazord.
+# Component crates provide the actual UniFFI declarations.
+
+[bindings.swift]
+ffi_module_name = "VifuMobileFFI"
+ffi_module_filename = "vifu_mobile_ffiFFI"
+generate_module_map = false
+
+[bindings.kotlin]
+package_name = "dev.vifu.runtime"
