@@ -8,7 +8,9 @@ use uuid::Uuid;
 use crate::error::{map_database_error, ApiError};
 use crate::models::{
     slugify, validate_slug, AgentBinding, AgentEndpoint, AgentGatewaySession, AgentProfile,
-    ApiKeyRecord, AvailableAgent, EndpointRoute, EndpointTrace, Project, ProjectWithBindings,
+    ApiKeyRecord, AvailableAgent, EndpointRoute, EndpointTrace, Project, ProjectCanvas,
+    ProjectCanvasEdge, ProjectCanvasNode, ProjectWithBindings, ProviderConnection,
+    ProviderConnectionSecret,
 };
 
 pub async fn migrate(pool: &PgPool) -> Result<(), ApiError> {
@@ -34,8 +36,8 @@ pub async fn mark_agent_gateway_sessions_disconnected(pool: &PgPool) -> Result<(
 
 pub async fn list_projects(pool: &PgPool) -> Result<Vec<ProjectWithBindings>, ApiError> {
     let projects = sqlx::query_as::<_, Project>(
-        "SELECT id, slug, name, description, gateway_id, enabled, created_at,
-                updated_at
+        "SELECT id, slug, name, description, gateway_id, enabled,
+                created_at, updated_at
          FROM projects ORDER BY created_at ASC",
     )
     .fetch_all(pool)
@@ -45,11 +47,30 @@ pub async fn list_projects(pool: &PgPool) -> Result<Vec<ProjectWithBindings>, Ap
 
 pub async fn get_project(pool: &PgPool, id: Uuid) -> Result<ProjectWithBindings, ApiError> {
     let project = sqlx::query_as::<_, Project>(
-        "SELECT id, slug, name, description, gateway_id, enabled, created_at,
-                updated_at
+        "SELECT id, slug, name, description, gateway_id, enabled,
+                created_at, updated_at
          FROM projects WHERE id = $1",
     )
     .bind(id)
+    .fetch_optional(pool)
+    .await?
+    .ok_or(ApiError::NotFound)?;
+    Ok(ProjectWithBindings {
+        binding_ids: project_binding_ids(pool, project.id).await?,
+        project,
+    })
+}
+
+pub async fn get_project_by_slug(
+    pool: &PgPool,
+    slug: &str,
+) -> Result<ProjectWithBindings, ApiError> {
+    let project = sqlx::query_as::<_, Project>(
+        "SELECT id, slug, name, description, gateway_id, enabled,
+                created_at, updated_at
+         FROM projects WHERE slug = $1",
+    )
+    .bind(slug)
     .fetch_optional(pool)
     .await?
     .ok_or(ApiError::NotFound)?;
@@ -69,8 +90,8 @@ pub async fn create_project(
         "INSERT INTO projects
             (id, slug, name, description, gateway_id)
          VALUES ($1, $2, $3, $4, $5)
-         RETURNING id, slug, name, description, gateway_id, enabled, created_at,
-                   updated_at",
+         RETURNING id, slug, name, description, gateway_id, enabled,
+                   created_at, updated_at",
     )
     .bind(project.id)
     .bind(project.slug)
@@ -176,6 +197,360 @@ pub async fn delete_project(pool: &PgPool, id: Uuid) -> Result<(), ApiError> {
     delete_by_id(pool, "projects", id).await
 }
 
+pub struct NewProviderConnection<'a> {
+    pub provider_key: &'a str,
+    pub name: &'a str,
+    pub provider_type: &'a str,
+    pub base_url: &'a str,
+    pub config: &'a Value,
+    pub encrypted_secret_json: &'a str,
+    pub secret_keys: &'a [String],
+    pub display_secret: Option<&'a str>,
+    pub status: &'a str,
+}
+
+pub async fn list_provider_connections(
+    pool: &PgPool,
+    project_slug: &str,
+) -> Result<Vec<ProviderConnection>, ApiError> {
+    let project = get_project_by_slug(pool, project_slug).await?;
+    let connections = sqlx::query_as::<_, ProviderConnection>(
+        "SELECT id, project_id, provider_key, name, provider_type, base_url, config,
+                secret_keys, display_secret, status, last_checked_at, created_at, updated_at
+         FROM provider_connections
+         WHERE project_id = $1
+         ORDER BY created_at ASC",
+    )
+    .bind(project.project.id)
+    .fetch_all(pool)
+    .await?;
+    Ok(connections)
+}
+
+pub async fn upsert_provider_connection(
+    pool: &PgPool,
+    project_slug: &str,
+    connection: NewProviderConnection<'_>,
+) -> Result<ProviderConnection, ApiError> {
+    let project = get_project_by_slug(pool, project_slug).await?;
+    sqlx::query_as::<_, ProviderConnection>(
+        "INSERT INTO provider_connections
+            (id, project_id, provider_key, name, provider_type, base_url, config,
+             encrypted_secret_json, secret_keys, display_secret, status)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+         ON CONFLICT (project_id, provider_key) DO UPDATE SET
+            name = EXCLUDED.name,
+            provider_type = EXCLUDED.provider_type,
+            base_url = EXCLUDED.base_url,
+            config = EXCLUDED.config,
+            encrypted_secret_json = EXCLUDED.encrypted_secret_json,
+            secret_keys = EXCLUDED.secret_keys,
+            display_secret = EXCLUDED.display_secret,
+            status = EXCLUDED.status,
+            updated_at = NOW()
+         RETURNING id, project_id, provider_key, name, provider_type, base_url, config,
+                   secret_keys, display_secret, status, last_checked_at, created_at, updated_at",
+    )
+    .bind(Uuid::new_v4())
+    .bind(project.project.id)
+    .bind(connection.provider_key)
+    .bind(connection.name)
+    .bind(connection.provider_type)
+    .bind(connection.base_url)
+    .bind(connection.config)
+    .bind(connection.encrypted_secret_json)
+    .bind(connection.secret_keys)
+    .bind(connection.display_secret)
+    .bind(connection.status)
+    .fetch_one(pool)
+    .await
+    .map_err(map_database_error)
+}
+
+pub async fn get_provider_connection_secret(
+    pool: &PgPool,
+    id: Uuid,
+) -> Result<ProviderConnectionSecret, ApiError> {
+    sqlx::query_as::<_, ProviderConnectionSecret>(
+        "SELECT id, project_id, provider_key, name, provider_type, base_url, config,
+                encrypted_secret_json, secret_keys, display_secret, status,
+                last_checked_at, created_at, updated_at
+         FROM provider_connections
+         WHERE id = $1",
+    )
+    .bind(id)
+    .fetch_optional(pool)
+    .await?
+    .ok_or(ApiError::NotFound)
+}
+
+pub async fn get_provider_connection_secret_by_key(
+    pool: &PgPool,
+    project_slug: &str,
+    provider_key: &str,
+) -> Result<ProviderConnectionSecret, ApiError> {
+    let project = get_project_by_slug(pool, project_slug).await?;
+    sqlx::query_as::<_, ProviderConnectionSecret>(
+        "SELECT id, project_id, provider_key, name, provider_type, base_url, config,
+                encrypted_secret_json, secret_keys, display_secret, status,
+                last_checked_at, created_at, updated_at
+         FROM provider_connections
+         WHERE project_id = $1 AND provider_key = $2",
+    )
+    .bind(project.project.id)
+    .bind(provider_key)
+    .fetch_optional(pool)
+    .await?
+    .ok_or(ApiError::NotFound)
+}
+
+pub async fn update_provider_connection_status(
+    pool: &PgPool,
+    id: Uuid,
+    status: &str,
+) -> Result<ProviderConnection, ApiError> {
+    sqlx::query_as::<_, ProviderConnection>(
+        "UPDATE provider_connections SET status = $2, last_checked_at = NOW(), updated_at = NOW()
+         WHERE id = $1
+         RETURNING id, project_id, provider_key, name, provider_type, base_url, config,
+                   secret_keys, display_secret, status, last_checked_at, created_at, updated_at",
+    )
+    .bind(id)
+    .bind(status)
+    .fetch_optional(pool)
+    .await?
+    .ok_or(ApiError::NotFound)
+}
+
+pub async fn delete_provider_connection(pool: &PgPool, id: Uuid) -> Result<(), ApiError> {
+    delete_by_id(pool, "provider_connections", id).await
+}
+
+pub async fn delete_provider_connection_by_key(
+    pool: &PgPool,
+    project_slug: &str,
+    provider_key: &str,
+) -> Result<(), ApiError> {
+    let project = get_project_by_slug(pool, project_slug).await?;
+    let result =
+        sqlx::query("DELETE FROM provider_connections WHERE project_id = $1 AND provider_key = $2")
+            .bind(project.project.id)
+            .bind(provider_key)
+            .execute(pool)
+            .await?;
+    if result.rows_affected() == 0 {
+        Err(ApiError::NotFound)
+    } else {
+        Ok(())
+    }
+}
+
+pub async fn get_project_canvas(pool: &PgPool, slug: &str) -> Result<ProjectCanvas, ApiError> {
+    let project = get_project_by_slug(pool, slug).await?;
+    ensure_project_canvas_seeded(pool, project.project.id).await?;
+    let project = get_project(pool, project.project.id).await?;
+    Ok(ProjectCanvas {
+        nodes: list_canvas_nodes(pool, project.project.id).await?,
+        edges: list_canvas_edges(pool, project.project.id).await?,
+        project,
+    })
+}
+
+pub async fn create_canvas_node(
+    pool: &PgPool,
+    project_slug: &str,
+    node: NewCanvasNode<'_>,
+) -> Result<ProjectCanvasNode, ApiError> {
+    let project = get_project_by_slug(pool, project_slug).await?;
+    let mut binding_id = node.binding_id;
+    let mut profile_id = node.profile_id;
+    if binding_id.is_none() {
+        if let (Some(gateway_id), Some(resource_id)) = (node.gateway_id, node.resource_id) {
+            let agent_name = node
+                .config
+                .get("agentName")
+                .and_then(Value::as_str)
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or(resource_id);
+            let discovered_binding_id =
+                ensure_discovered_binding(pool, gateway_id, resource_id, agent_name).await?;
+            let binding = get_binding(pool, discovered_binding_id).await?;
+            binding_id = Some(binding.id);
+            profile_id = Some(binding.profile_id);
+        }
+    }
+    if let Some(binding_id) = binding_id {
+        validate_project_bindings(pool, &project.project.gateway_id, &[binding_id]).await?;
+        sqlx::query("INSERT INTO project_bindings (project_id, binding_id) VALUES ($1, $2) ON CONFLICT DO NOTHING")
+            .bind(project.project.id)
+            .bind(binding_id)
+            .execute(pool)
+            .await?;
+    }
+    sqlx::query_as::<_, ProjectCanvasNode>(
+        "INSERT INTO project_canvas_nodes
+            (id, project_id, kind, position, profile_id, binding_id, gateway_id,
+             resource_id, config, inputs, outputs, exposed)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+         RETURNING id, project_id, kind, position, profile_id, binding_id, gateway_id,
+                   resource_id, config, inputs, outputs, exposed, created_at, updated_at",
+    )
+    .bind(Uuid::new_v4())
+    .bind(project.project.id)
+    .bind(node.kind)
+    .bind(node.position)
+    .bind(profile_id)
+    .bind(binding_id)
+    .bind(node.gateway_id)
+    .bind(node.resource_id)
+    .bind(node.config)
+    .bind(node.inputs)
+    .bind(node.outputs)
+    .bind(node.exposed)
+    .fetch_one(pool)
+    .await
+    .map_err(map_database_error)
+}
+
+pub struct NewCanvasNode<'a> {
+    pub kind: &'a str,
+    pub position: &'a Value,
+    pub profile_id: Option<Uuid>,
+    pub binding_id: Option<Uuid>,
+    pub gateway_id: Option<&'a str>,
+    pub resource_id: Option<&'a str>,
+    pub config: &'a Value,
+    pub inputs: &'a Value,
+    pub outputs: &'a Value,
+    pub exposed: bool,
+}
+
+pub async fn update_canvas_node(
+    pool: &PgPool,
+    project_slug: &str,
+    node_id: Uuid,
+    patch: CanvasNodePatch<'_>,
+) -> Result<ProjectCanvasNode, ApiError> {
+    let project = get_project_by_slug(pool, project_slug).await?;
+    sqlx::query_as::<_, ProjectCanvasNode>(
+        "UPDATE project_canvas_nodes SET
+            position = COALESCE($3, position),
+            config = COALESCE($4, config),
+            inputs = COALESCE($5, inputs),
+            outputs = COALESCE($6, outputs),
+            exposed = COALESCE($7, exposed),
+            updated_at = NOW()
+         WHERE project_id = $1 AND id = $2
+         RETURNING id, project_id, kind, position, profile_id, binding_id, gateway_id,
+                   resource_id, config, inputs, outputs, exposed, created_at, updated_at",
+    )
+    .bind(project.project.id)
+    .bind(node_id)
+    .bind(patch.position)
+    .bind(patch.config)
+    .bind(patch.inputs)
+    .bind(patch.outputs)
+    .bind(patch.exposed)
+    .fetch_optional(pool)
+    .await
+    .map_err(map_database_error)?
+    .ok_or(ApiError::NotFound)
+}
+
+pub struct CanvasNodePatch<'a> {
+    pub position: Option<&'a Value>,
+    pub config: Option<&'a Value>,
+    pub inputs: Option<&'a Value>,
+    pub outputs: Option<&'a Value>,
+    pub exposed: Option<bool>,
+}
+
+pub async fn delete_canvas_node(
+    pool: &PgPool,
+    project_slug: &str,
+    node_id: Uuid,
+) -> Result<(), ApiError> {
+    let project = get_project_by_slug(pool, project_slug).await?;
+    let mut transaction = pool.begin().await?;
+    let binding_id = sqlx::query_scalar::<_, Option<Uuid>>(
+        "DELETE FROM project_canvas_nodes
+         WHERE project_id = $1 AND id = $2
+         RETURNING binding_id",
+    )
+    .bind(project.project.id)
+    .bind(node_id)
+    .fetch_optional(&mut *transaction)
+    .await?
+    .ok_or(ApiError::NotFound)?;
+    if let Some(binding_id) = binding_id {
+        sqlx::query("DELETE FROM project_bindings WHERE project_id = $1 AND binding_id = $2")
+            .bind(project.project.id)
+            .bind(binding_id)
+            .execute(&mut *transaction)
+            .await?;
+    }
+    transaction.commit().await?;
+    Ok(())
+}
+
+pub async fn create_canvas_edge(
+    pool: &PgPool,
+    project_slug: &str,
+    edge: NewCanvasEdge<'_>,
+) -> Result<ProjectCanvasEdge, ApiError> {
+    let project = get_project_by_slug(pool, project_slug).await?;
+    sqlx::query_as::<_, ProjectCanvasEdge>(
+        "INSERT INTO project_canvas_edges
+            (id, project_id, source_node_id, source_handle, target_node_id,
+             target_handle, kind, config)
+         SELECT $1, $2, $3, $4, $5, $6, $7, $8
+         WHERE EXISTS(SELECT 1 FROM project_canvas_nodes WHERE project_id = $2 AND id = $3)
+           AND EXISTS(SELECT 1 FROM project_canvas_nodes WHERE project_id = $2 AND id = $5)
+         RETURNING id, project_id, source_node_id, source_handle, target_node_id,
+                   target_handle, kind, config, created_at, updated_at",
+    )
+    .bind(Uuid::new_v4())
+    .bind(project.project.id)
+    .bind(edge.source_node_id)
+    .bind(edge.source_handle)
+    .bind(edge.target_node_id)
+    .bind(edge.target_handle)
+    .bind(edge.kind)
+    .bind(edge.config)
+    .fetch_optional(pool)
+    .await
+    .map_err(map_database_error)?
+    .ok_or_else(|| ApiError::Invalid("edge nodes must belong to the project".to_string()))
+}
+
+pub struct NewCanvasEdge<'a> {
+    pub source_node_id: Uuid,
+    pub source_handle: Option<&'a str>,
+    pub target_node_id: Uuid,
+    pub target_handle: Option<&'a str>,
+    pub kind: &'a str,
+    pub config: &'a Value,
+}
+
+pub async fn delete_canvas_edge(
+    pool: &PgPool,
+    project_slug: &str,
+    edge_id: Uuid,
+) -> Result<(), ApiError> {
+    let project = get_project_by_slug(pool, project_slug).await?;
+    let result = sqlx::query("DELETE FROM project_canvas_edges WHERE project_id = $1 AND id = $2")
+        .bind(project.project.id)
+        .bind(edge_id)
+        .execute(pool)
+        .await
+        .map_err(map_database_error)?;
+    if result.rows_affected() == 0 {
+        Err(ApiError::NotFound)
+    } else {
+        Ok(())
+    }
+}
+
 async fn projects_with_bindings(
     pool: &PgPool,
     projects: Vec<Project>,
@@ -200,9 +575,121 @@ async fn project_binding_ids(pool: &PgPool, project_id: Uuid) -> Result<Vec<Uuid
     .map_err(ApiError::from)
 }
 
+async fn list_canvas_nodes(
+    pool: &PgPool,
+    project_id: Uuid,
+) -> Result<Vec<ProjectCanvasNode>, ApiError> {
+    sqlx::query_as::<_, ProjectCanvasNode>(
+        "SELECT id, project_id, kind, position, profile_id, binding_id, gateway_id,
+                resource_id, config, inputs, outputs, exposed, created_at, updated_at
+         FROM project_canvas_nodes
+         WHERE project_id = $1
+         ORDER BY created_at ASC",
+    )
+    .bind(project_id)
+    .fetch_all(pool)
+    .await
+    .map_err(ApiError::from)
+}
+
+async fn list_canvas_edges(
+    pool: &PgPool,
+    project_id: Uuid,
+) -> Result<Vec<ProjectCanvasEdge>, ApiError> {
+    sqlx::query_as::<_, ProjectCanvasEdge>(
+        "SELECT id, project_id, source_node_id, source_handle, target_node_id,
+                target_handle, kind, config, created_at, updated_at
+         FROM project_canvas_edges
+         WHERE project_id = $1
+         ORDER BY created_at ASC",
+    )
+    .bind(project_id)
+    .fetch_all(pool)
+    .await
+    .map_err(ApiError::from)
+}
+
+async fn ensure_project_canvas_seeded(pool: &PgPool, project_id: Uuid) -> Result<(), ApiError> {
+    let existing_nodes = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM project_canvas_nodes WHERE project_id = $1",
+    )
+    .bind(project_id)
+    .fetch_one(pool)
+    .await?;
+    if existing_nodes > 0 {
+        return Ok(());
+    }
+
+    let project = get_project(pool, project_id).await?;
+    let mut binding_ids = project.binding_ids.clone();
+    if binding_ids.is_empty() {
+        let available_agents = list_available_agents(pool).await?;
+        for agent in available_agents {
+            if agent.status != "connected" {
+                continue;
+            }
+            let binding_id =
+                ensure_discovered_binding(pool, &agent.gateway_id, &agent.id, &agent.name).await?;
+            sqlx::query(
+                "INSERT INTO project_bindings (project_id, binding_id)
+                 VALUES ($1, $2)
+                 ON CONFLICT DO NOTHING",
+            )
+            .bind(project_id)
+            .bind(binding_id)
+            .execute(pool)
+            .await?;
+            binding_ids.push(binding_id);
+        }
+        binding_ids.sort_unstable();
+        binding_ids.dedup();
+    }
+
+    seed_canvas_nodes_for_bindings(pool, project_id, &binding_ids).await
+}
+
+async fn seed_canvas_nodes_for_bindings(
+    pool: &PgPool,
+    project_id: Uuid,
+    binding_ids: &[Uuid],
+) -> Result<(), ApiError> {
+    for (index, binding_id) in binding_ids.iter().enumerate() {
+        let binding = get_binding(pool, *binding_id).await?;
+        let position = default_canvas_position(index);
+        sqlx::query(
+            "INSERT INTO project_canvas_nodes
+                (id, project_id, kind, position, profile_id, binding_id, gateway_id,
+                 resource_id, config, inputs, outputs, exposed)
+             VALUES ($1, $2, 'agent', $3, $4, $5, $6, $7, $8, '{}'::jsonb, '{}'::jsonb, TRUE)
+             ON CONFLICT DO NOTHING",
+        )
+        .bind(Uuid::new_v4())
+        .bind(project_id)
+        .bind(position)
+        .bind(binding.profile_id)
+        .bind(binding.id)
+        .bind(binding.gateway_id)
+        .bind(binding.agent_id)
+        .bind(binding.config)
+        .execute(pool)
+        .await
+        .map_err(map_database_error)?;
+    }
+    Ok(())
+}
+
+fn default_canvas_position(index: usize) -> Value {
+    let column = index % 3;
+    let row = index / 3;
+    json!({
+        "x": 360 + (column as i64 * 280),
+        "y": 160 + (row as i64 * 190),
+    })
+}
+
 async fn validate_project_bindings(
     pool: &PgPool,
-    gateway_id: &str,
+    _gateway_id: &str,
     binding_ids: &[Uuid],
 ) -> Result<(), ApiError> {
     if binding_ids.len() > 256 {
@@ -212,18 +699,15 @@ async fn validate_project_bindings(
     }
     let count = sqlx::query_scalar::<_, i64>(
         "SELECT COUNT(*) FROM agent_bindings
-         WHERE id = ANY($1) AND gateway_id = $2",
+         WHERE id = ANY($1)",
     )
     .bind(binding_ids)
-    .bind(gateway_id)
     .fetch_one(pool)
     .await?;
     if usize::try_from(count).ok() == Some(binding_ids.len()) {
         Ok(())
     } else {
-        Err(ApiError::Invalid(
-            "project bindings must exist on the selected agent gateway".to_string(),
-        ))
+        Err(ApiError::Invalid("project bindings must exist".to_string()))
     }
 }
 
@@ -907,14 +1391,38 @@ pub async fn list_traces(
     limit: i64,
 ) -> Result<Vec<EndpointTrace>, ApiError> {
     let mut query = QueryBuilder::<Postgres>::new(
-        "SELECT id, request_id, endpoint_id, project_id, gateway_session_id, status, latency_ms,
-                request, response, error, created_at, completed_at
-         FROM endpoint_traces",
+        "SELECT trace.id, trace.request_id, trace.endpoint_id,
+                COALESCE(trace.project_id, (
+                    SELECT binding_project.project_id
+                    FROM agent_endpoints endpoint
+                    JOIN project_bindings binding_project
+                        ON binding_project.binding_id = endpoint.binding_id
+                    WHERE endpoint.id = trace.endpoint_id
+                    ORDER BY binding_project.created_at ASC
+                    LIMIT 1
+                )) AS project_id,
+                trace.gateway_session_id, trace.status, trace.latency_ms,
+                trace.request, trace.response, trace.error, trace.created_at, trace.completed_at
+         FROM endpoint_traces trace",
     );
     if let Some(endpoint_id) = endpoint_id {
-        query.push(" WHERE endpoint_id = ").push_bind(endpoint_id);
+        query
+            .push(" WHERE trace.endpoint_id = ")
+            .push_bind(endpoint_id);
     } else if let Some(project_id) = project_id {
-        query.push(" WHERE project_id = ").push_bind(project_id);
+        query
+            .push(" WHERE trace.project_id = ")
+            .push_bind(project_id)
+            .push(
+                " OR trace.endpoint_id IN (
+                    SELECT endpoint.id
+                    FROM agent_endpoints endpoint
+                    JOIN project_bindings binding_project
+                        ON binding_project.binding_id = endpoint.binding_id
+                    WHERE binding_project.project_id = ",
+            )
+            .push_bind(project_id)
+            .push(")");
     }
     query
         .push(" ORDER BY created_at DESC LIMIT ")
@@ -945,6 +1453,7 @@ fn delete_statement(table: &str) -> Result<&'static str, ApiError> {
         "agent_bindings" => "DELETE FROM agent_bindings WHERE id = $1",
         "agent_endpoints" => "DELETE FROM agent_endpoints WHERE id = $1",
         "projects" => "DELETE FROM projects WHERE id = $1",
+        "provider_connections" => "DELETE FROM provider_connections WHERE id = $1",
         _ => return Err(ApiError::Internal),
     };
     Ok(statement)

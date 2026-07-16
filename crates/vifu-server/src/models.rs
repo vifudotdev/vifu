@@ -12,7 +12,9 @@ pub struct Capabilities {
     pub endpoints: bool,
     pub bindings: bool,
     pub api_keys: bool,
+    pub canvas: bool,
     pub agent_gateways: bool,
+    pub provider_connections: bool,
     pub traces: bool,
 }
 
@@ -24,7 +26,9 @@ impl Capabilities {
             endpoints: true,
             bindings: true,
             api_keys: true,
+            canvas: true,
             agent_gateways: true,
+            provider_connections: true,
             traces: true,
         }
     }
@@ -49,7 +53,7 @@ pub struct CreateProject {
     pub slug: Option<String>,
     pub name: String,
     pub description: Option<String>,
-    pub gateway_id: String,
+    pub gateway_id: Option<String>,
     #[serde(default)]
     pub binding_ids: Vec<Uuid>,
     #[serde(default)]
@@ -73,6 +77,196 @@ pub struct ProjectWithBindings {
     #[serde(flatten)]
     pub project: Project,
     pub binding_ids: Vec<Uuid>,
+}
+
+#[derive(Debug, Clone, Serialize, FromRow)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectCanvasNode {
+    pub id: Uuid,
+    pub project_id: Uuid,
+    pub kind: String,
+    pub position: Value,
+    pub profile_id: Option<Uuid>,
+    pub binding_id: Option<Uuid>,
+    pub gateway_id: Option<String>,
+    pub resource_id: Option<String>,
+    pub config: Value,
+    pub inputs: Value,
+    pub outputs: Value,
+    pub exposed: bool,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, FromRow)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectCanvasEdge {
+    pub id: Uuid,
+    pub project_id: Uuid,
+    pub source_node_id: Uuid,
+    pub source_handle: Option<String>,
+    pub target_node_id: Uuid,
+    pub target_handle: Option<String>,
+    pub kind: String,
+    pub config: Value,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectCanvas {
+    pub project: ProjectWithBindings,
+    pub nodes: Vec<ProjectCanvasNode>,
+    pub edges: Vec<ProjectCanvasEdge>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderAdapter {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    pub fields: Vec<ProviderAdapterField>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderAdapterField {
+    pub key: String,
+    pub label: String,
+    pub kind: String,
+    pub required: bool,
+    pub secret: bool,
+}
+
+#[derive(Debug, Clone, Serialize, FromRow)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderConnection {
+    pub id: Uuid,
+    pub project_id: Uuid,
+    pub provider_key: String,
+    pub name: String,
+    pub provider_type: String,
+    pub base_url: String,
+    pub config: Value,
+    pub secret_keys: Vec<String>,
+    pub display_secret: Option<String>,
+    pub status: String,
+    pub last_checked_at: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, FromRow)]
+pub struct ProviderConnectionSecret {
+    pub id: Uuid,
+    pub project_id: Uuid,
+    pub provider_key: String,
+    pub name: String,
+    pub provider_type: String,
+    pub base_url: String,
+    pub config: Value,
+    pub encrypted_secret_json: String,
+    pub secret_keys: Vec<String>,
+    pub display_secret: Option<String>,
+    pub status: String,
+    pub last_checked_at: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+impl From<ProviderConnectionSecret> for ProviderConnection {
+    fn from(value: ProviderConnectionSecret) -> Self {
+        Self {
+            id: value.id,
+            project_id: value.project_id,
+            provider_key: value.provider_key,
+            name: value.name,
+            provider_type: value.provider_type,
+            base_url: value.base_url,
+            config: value.config,
+            secret_keys: value.secret_keys,
+            display_secret: value.display_secret,
+            status: value.status,
+            last_checked_at: value.last_checked_at,
+            created_at: value.created_at,
+            updated_at: value.updated_at,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpsertProviderConnection {
+    pub name: Option<String>,
+    pub provider_type: String,
+    pub base_url: String,
+    #[serde(default = "empty_object")]
+    pub config: Value,
+    #[serde(default = "empty_object")]
+    pub secrets: Value,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportProviderConnections {
+    #[serde(default)]
+    pub providers: Vec<ImportProviderConnection>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportProviderConnection {
+    pub key: String,
+    pub name: Option<String>,
+    pub provider_type: String,
+    pub base_url: String,
+    #[serde(default = "empty_object")]
+    pub config: Value,
+    #[serde(default = "empty_object")]
+    pub secrets: Value,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateCanvasNode {
+    pub kind: String,
+    #[serde(default = "empty_object")]
+    pub position: Value,
+    pub profile_id: Option<Uuid>,
+    pub binding_id: Option<Uuid>,
+    pub gateway_id: Option<String>,
+    pub resource_id: Option<String>,
+    #[serde(default = "empty_object")]
+    pub config: Value,
+    #[serde(default = "empty_object")]
+    pub inputs: Value,
+    #[serde(default = "empty_object")]
+    pub outputs: Value,
+    pub exposed: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateCanvasNode {
+    pub position: Option<Value>,
+    pub config: Option<Value>,
+    pub inputs: Option<Value>,
+    pub outputs: Option<Value>,
+    pub exposed: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateCanvasEdge {
+    pub source_node_id: Uuid,
+    pub source_handle: Option<String>,
+    pub target_node_id: Uuid,
+    pub target_handle: Option<String>,
+    pub kind: String,
+    #[serde(default = "empty_object")]
+    pub config: Value,
 }
 
 #[derive(Debug, Clone, Serialize, FromRow)]

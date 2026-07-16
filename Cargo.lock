@@ -2761,8 +2761,10 @@ name = "vifu-server"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "base64",
  "chrono",
  "futures-util",
+ "ring",
  "serde",
  "serde_json",
  "sha2",

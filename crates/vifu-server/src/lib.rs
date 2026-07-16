@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 use axum::http::header::{AUTHORIZATION, CONTENT_TYPE};
 use axum::http::{HeaderName, Method};
-use axum::routing::{delete, get, post};
+use axum::routing::{delete, get, post, put};
 use axum::Router;
 use config::Config;
 use error::ApiError;
@@ -58,6 +58,7 @@ pub fn app(state: AppState) -> Router {
         .allow_methods([
             Method::GET,
             Method::POST,
+            Method::PUT,
             Method::PATCH,
             Method::DELETE,
             Method::OPTIONS,
@@ -75,6 +76,73 @@ pub fn app(state: AppState) -> Router {
             get(api::get_project)
                 .patch(api::update_project)
                 .delete(api::delete_project),
+        )
+        .route("/v1/projects/{slug}/canvas", get(api::get_project_canvas))
+        .route("/v1/project/{slug}/canvas", get(api::get_project_canvas))
+        .route(
+            "/v1/projects/{slug}/canvas/nodes",
+            post(api::create_canvas_node),
+        )
+        .route(
+            "/v1/project/{slug}/canvas/nodes",
+            post(api::create_canvas_node),
+        )
+        .route(
+            "/v1/projects/{slug}/canvas/nodes/{id}",
+            axum::routing::patch(api::update_canvas_node).delete(api::delete_canvas_node),
+        )
+        .route(
+            "/v1/project/{slug}/canvas/nodes/{id}",
+            axum::routing::patch(api::update_canvas_node).delete(api::delete_canvas_node),
+        )
+        .route(
+            "/v1/projects/{slug}/canvas/edges",
+            post(api::create_canvas_edge),
+        )
+        .route(
+            "/v1/project/{slug}/canvas/edges",
+            post(api::create_canvas_edge),
+        )
+        .route(
+            "/v1/projects/{slug}/canvas/edges/{id}",
+            delete(api::delete_canvas_edge),
+        )
+        .route(
+            "/v1/project/{slug}/canvas/edges/{id}",
+            delete(api::delete_canvas_edge),
+        )
+        .route("/v1/provider-adapters", get(api::list_provider_adapters))
+        .route(
+            "/v1/project/{slug}/provider-connections",
+            get(api::list_provider_connections),
+        )
+        .route(
+            "/v1/project/{slug}/provider-connections/import",
+            post(api::import_provider_connections),
+        )
+        .route(
+            "/v1/project/{slug}/provider-connections/{provider_key}",
+            put(api::upsert_provider_connection).delete(api::delete_project_provider_connection),
+        )
+        .route(
+            "/v1/project/{slug}/provider-connections/{provider_key}/test",
+            post(api::test_project_provider_connection),
+        )
+        .route(
+            "/v1/project/{slug}/provider-connections/{provider_key}/discover-agents",
+            post(api::discover_project_provider_agents),
+        )
+        .route(
+            "/v1/provider-connections/{id}",
+            delete(api::delete_provider_connection),
+        )
+        .route(
+            "/v1/provider-connections/{id}/test",
+            post(api::test_provider_connection),
+        )
+        .route(
+            "/v1/provider-connections/{id}/discover-agents",
+            post(api::discover_provider_agents),
         )
         .route(
             "/v1/profiles",

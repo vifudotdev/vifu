@@ -1,4 +1,5 @@
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::time::Duration;
 
 use serde::Serialize;
@@ -19,10 +20,12 @@ pub struct Config {
     pub admin_key: String,
     pub agent_gateway_token: String,
     pub api_key_pepper: String,
+    pub provider_secret_key: String,
     pub request_timeout: Duration,
     pub heartbeat_interval: Duration,
     pub queue_capacity: usize,
-    pub project_domain: String,
+    pub provider_home_dir: PathBuf,
+    pub provider_registry_file: Option<PathBuf>,
 }
 
 impl Config {
@@ -34,15 +37,16 @@ impl Config {
     where
         F: FnMut(&str) -> Option<String>,
     {
-        let addr = value(&mut lookup, "VIFU_SERVER_ADDR", "127.0.0.1:6790")
+        let addr = value(&mut lookup, "VIFU_SERVER_ADDR", "127.0.0.1:6790")?
             .parse::<SocketAddr>()
             .map_err(|error| format!("VIFU_SERVER_ADDR is invalid: {error}"))?;
         let database_url = value(
             &mut lookup,
             "DATABASE_URL",
             "postgres://vifu@127.0.0.1:5432/vifu",
-        );
-        let deployment_mode = parse_deployment_mode(lookup("VIFU_DEPLOYMENT_MODE"))?;
+        )?;
+        let deployment_mode =
+            parse_deployment_mode(configured_value(&mut lookup, "VIFU_DEPLOYMENT_MODE")?)?;
         if deployment_mode == DeploymentMode::Local && !addr.ip().is_loopback() {
             return Err("local deployments require a loopback VIFU_SERVER_ADDR".to_string());
         }
@@ -64,6 +68,15 @@ impl Config {
             deployment_mode,
             "vifu-local-api-key-pepper",
         )?;
+        let provider_secret_key = deployment_secret(
+            &mut lookup,
+            "VIFU_PROVIDER_SECRET_KEY",
+            deployment_mode,
+            "vifu-local-provider-secret-key",
+        )?;
+        let provider_home_dir = provider_home_dir(&mut lookup)?;
+        let provider_registry_file =
+            vifu_core::config::discover_provider_registry_file(&provider_home_dir);
 
         Ok(Self {
             addr,
@@ -79,6 +92,7 @@ impl Config {
             admin_key,
             agent_gateway_token,
             api_key_pepper,
+            provider_secret_key,
             request_timeout: Duration::from_millis(parse_u64(
                 &mut lookup,
                 "VIFU_REQUEST_TIMEOUT_MS",
@@ -100,26 +114,29 @@ impl Config {
                 8,
                 4096,
             )? as usize,
-            project_domain: validate_domain(&value(
-                &mut lookup,
-                "VIFU_PROJECT_DOMAIN",
-                "localhost",
-            ))?,
+            provider_home_dir,
+            provider_registry_file,
         })
     }
 }
 
-fn validate_domain(value: &str) -> Result<String, String> {
-    let value = value.trim().trim_matches('.').to_ascii_lowercase();
-    if value.is_empty()
-        || value.len() > 253
-        || !value.bytes().all(|byte| {
-            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'-' | b'.')
-        })
+fn provider_home_dir<F>(lookup: &mut F) -> Result<PathBuf, String>
+where
+    F: FnMut(&str) -> Option<String>,
+{
+    if let Some(value) = lookup("VIFU_HOME")
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
     {
-        return Err("VIFU_PROJECT_DOMAIN must be a valid DNS suffix".to_string());
+        return Ok(PathBuf::from(value));
     }
-    Ok(value)
+    if let Some(value) = std::env::var_os("VIFU_HOME").filter(|value| !value.is_empty()) {
+        return Ok(PathBuf::from(value));
+    }
+    let home = std::env::var_os("HOME").ok_or_else(|| {
+        "HOME is not set. Set VIFU_HOME to choose where vifu stores local state.".to_string()
+    })?;
+    Ok(PathBuf::from(home).join(".vifu"))
 }
 
 fn parse_deployment_mode(value: Option<String>) -> Result<DeploymentMode, String> {
@@ -137,14 +154,38 @@ fn parse_deployment_mode(value: Option<String>) -> Result<DeploymentMode, String
     }
 }
 
-fn value<F>(lookup: &mut F, key: &str, fallback: &str) -> String
+fn configured_value<F>(lookup: &mut F, key: &str) -> Result<Option<String>, String>
 where
     F: FnMut(&str) -> Option<String>,
 {
-    lookup(key)
+    if let Some(value) = lookup(key)
         .map(|item| item.trim().to_string())
         .filter(|item| !item.is_empty())
-        .unwrap_or_else(|| fallback.to_string())
+    {
+        return Ok(Some(value));
+    }
+    let file_key = format!("{key}_FILE");
+    let Some(file_path) = lookup(&file_key)
+        .map(|item| item.trim().to_string())
+        .filter(|item| !item.is_empty())
+    else {
+        return Ok(None);
+    };
+    let value = std::fs::read_to_string(&file_path)
+        .map_err(|error| format!("{file_key} could not be read: {error}"))?
+        .trim()
+        .to_string();
+    if value.is_empty() {
+        return Err(format!("{file_key} is empty"));
+    }
+    Ok(Some(value))
+}
+
+fn value<F>(lookup: &mut F, key: &str, fallback: &str) -> Result<String, String>
+where
+    F: FnMut(&str) -> Option<String>,
+{
+    Ok(configured_value(lookup, key)?.unwrap_or_else(|| fallback.to_string()))
 }
 
 fn deployment_secret<F>(
@@ -156,9 +197,7 @@ fn deployment_secret<F>(
 where
     F: FnMut(&str) -> Option<String>,
 {
-    let configured = lookup(key)
-        .map(|item| item.trim().to_string())
-        .filter(|item| !item.is_empty());
+    let configured = configured_value(lookup, key)?;
     let secret = match (configured, deployment_mode) {
         (Some(secret), _) => secret,
         (None, DeploymentMode::Local) => local_fallback.to_string(),
@@ -207,6 +246,8 @@ fn validate_secret(name: &str, value: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::{Config, DeploymentMode};
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
     fn defaults_to_local_postgres_and_loopback() {
@@ -216,7 +257,10 @@ mod tests {
         assert_eq!(config.deployment_mode, DeploymentMode::Local);
         assert_ne!(config.admin_key, config.agent_gateway_token);
         assert_ne!(config.admin_key, config.api_key_pepper);
+        assert_ne!(config.admin_key, config.provider_secret_key);
         assert_ne!(config.agent_gateway_token, config.api_key_pepper);
+        assert_ne!(config.agent_gateway_token, config.provider_secret_key);
+        assert_ne!(config.api_key_pepper, config.provider_secret_key);
     }
 
     #[test]
@@ -255,10 +299,55 @@ mod tests {
             "VIFU_ADMIN_KEY" => Some("self-host-admin-key".to_string()),
             "VIFU_AGENT_GATEWAY_TOKEN" => Some("self-host-agent-gateway-token".to_string()),
             "VIFU_API_KEY_PEPPER" => Some("self-host-api-key-pepper".to_string()),
+            "VIFU_PROVIDER_SECRET_KEY" => Some("self-host-provider-secret-key".to_string()),
             _ => None,
         })
         .unwrap();
         assert_eq!(config.deployment_mode, DeploymentMode::SelfHosted);
+    }
+
+    #[test]
+    fn self_hosted_accepts_runtime_config_from_files() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("vifu-config-test-{stamp}"));
+        fs::create_dir_all(&dir).unwrap();
+        let database_url = dir.join("database_url");
+        let admin_key = dir.join("admin_key");
+        let agent_gateway_token = dir.join("agent_gateway_token");
+        let api_key_pepper = dir.join("api_key_pepper");
+        let provider_secret_key = dir.join("provider_secret_key");
+        fs::write(&database_url, "postgres://vifu@postgres:5432/vifu\n").unwrap();
+        fs::write(&admin_key, "self-host-admin-key-from-file\n").unwrap();
+        fs::write(
+            &agent_gateway_token,
+            "self-host-agent-gateway-token-from-file\n",
+        )
+        .unwrap();
+        fs::write(&api_key_pepper, "self-host-api-key-pepper-from-file\n").unwrap();
+        fs::write(
+            &provider_secret_key,
+            "self-host-provider-secret-key-from-file\n",
+        )
+        .unwrap();
+
+        let config = Config::from_lookup(|key| match key {
+            "VIFU_DEPLOYMENT_MODE" => Some("self-hosted".to_string()),
+            "DATABASE_URL_FILE" => Some(database_url.display().to_string()),
+            "VIFU_ADMIN_KEY_FILE" => Some(admin_key.display().to_string()),
+            "VIFU_AGENT_GATEWAY_TOKEN_FILE" => Some(agent_gateway_token.display().to_string()),
+            "VIFU_API_KEY_PEPPER_FILE" => Some(api_key_pepper.display().to_string()),
+            "VIFU_PROVIDER_SECRET_KEY_FILE" => Some(provider_secret_key.display().to_string()),
+            _ => None,
+        })
+        .unwrap();
+
+        assert_eq!(config.deployment_mode, DeploymentMode::SelfHosted);
+        assert_eq!(config.admin_key, "self-host-admin-key-from-file");
+        assert!(config.database_url.contains("postgres://vifu@postgres"));
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

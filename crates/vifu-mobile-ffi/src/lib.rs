@@ -66,11 +66,8 @@ pub fn default_vifu_runtime_config() -> VifuRuntimeConfig {
 
 #[uniffi::export]
 pub fn vifu_agent_gateway_websocket_url(server_url: String) -> Result<String, VifuRuntimeError> {
-    relay::agent_gateway_websocket_url(&server_url).map_err(|message| {
-        VifuRuntimeError::InvalidConfig {
-            message,
-        }
-    })
+    relay::agent_gateway_websocket_url(&server_url)
+        .map_err(|message| VifuRuntimeError::InvalidConfig { message })
 }
 
 #[uniffi::export]

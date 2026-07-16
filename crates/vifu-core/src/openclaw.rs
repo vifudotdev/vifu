@@ -56,8 +56,8 @@ pub fn parse_endpoint(url: &str) -> Result<Endpoint, String> {
     let authority = rest.split('/').next().unwrap_or(rest);
     let (host, port) = parse_authority(authority)?;
 
-    if !is_loopback_host(&host) {
-        return Err("only loopback OpenClaw Gateway hosts are supported".to_string());
+    if !is_local_openclaw_host(&host) {
+        return Err("only local OpenClaw Gateway hosts are supported".to_string());
     }
 
     Ok(Endpoint { host, port })
@@ -98,8 +98,11 @@ fn parse_port(value: &str) -> Result<u16, String> {
         .map_err(|_| format!("invalid OpenClaw Gateway port: {value}"))
 }
 
-fn is_loopback_host(host: &str) -> bool {
-    matches!(host, "127.0.0.1" | "localhost" | "::1")
+fn is_local_openclaw_host(host: &str) -> bool {
+    matches!(
+        host,
+        "127.0.0.1" | "localhost" | "::1" | "host.docker.internal"
+    )
 }
 
 async fn probe_endpoint(endpoint: &Endpoint) -> ProbeStatus {
@@ -340,7 +343,9 @@ fn ensure_openclaw_status(response: &GatewayResponse, operation: &str) -> Result
         return Ok(());
     }
     if matches!(response.status, 401 | 403) {
-        return Err(format!("OpenClaw {operation} requires VIFU_OPENCLAW_TOKEN"));
+        return Err(format!(
+            "OpenClaw {operation} requires an agent provider token"
+        ));
     }
     let message = serde_json::from_slice::<Value>(&response.body)
         .ok()
@@ -377,9 +382,16 @@ mod tests {
     }
 
     #[test]
+    fn parses_docker_host_endpoint() {
+        let endpoint = parse_endpoint("http://host.docker.internal:18789").unwrap();
+        assert_eq!(endpoint.host, "host.docker.internal");
+        assert_eq!(endpoint.port, 18789);
+    }
+
+    #[test]
     fn rejects_remote_hosts() {
         let error = parse_endpoint("http://example.com:18789").unwrap_err();
-        assert!(error.contains("loopback"));
+        assert!(error.contains("local"));
     }
 
     #[test]

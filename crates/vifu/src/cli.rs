@@ -1,4 +1,4 @@
-use crate::config::{DEFAULT_OPENCLAW_URL, DEFAULT_SERVER_URL};
+use crate::config::DEFAULT_SERVER_URL;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
@@ -14,7 +14,6 @@ pub enum Command {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Options {
     pub command: Command,
-    pub openclaw_url: String,
     pub server_url: String,
 }
 
@@ -25,8 +24,6 @@ impl Options {
         S: Into<String>,
     {
         let mut command = Command::Connect;
-        let mut openclaw_url =
-            std::env::var("VIFU_OPENCLAW_URL").unwrap_or_else(|_| DEFAULT_OPENCLAW_URL.to_string());
         let mut server_url =
             std::env::var("VIFU_SERVER_URL").unwrap_or_else(|_| DEFAULT_SERVER_URL.to_string());
 
@@ -41,11 +38,6 @@ impl Options {
                 "--doctor" => command = Command::Doctor,
                 "--logout" => command = Command::Logout,
                 "--reset" => command = Command::Reset,
-                "--openclaw-url" => {
-                    openclaw_url = args
-                        .next()
-                        .ok_or_else(|| "--openclaw-url requires a value".to_string())?;
-                }
                 "--server-url" => {
                     server_url = args
                         .next()
@@ -64,7 +56,6 @@ impl Options {
 
         Ok(Self {
             command,
-            openclaw_url,
             server_url,
         })
     }
@@ -73,7 +64,7 @@ impl Options {
 pub fn help_text() -> &'static str {
     "vifu
 
-Connect local OpenClaw agents to a Vifu Agent Endpoint Runtime.
+Connect local agent providers to a Vifu Agent Endpoint Runtime.
 
 Usage:
   vifu                   Start the Agent Gateway
@@ -83,7 +74,6 @@ Usage:
   vifu --reset           Remove all local Vifu state
 
 Options:
-  --openclaw-url URL     Local OpenClaw Gateway URL
   --server-url URL       Vifu server HTTP base URL
   -h, --help             Show help
   -V, --version          Show version

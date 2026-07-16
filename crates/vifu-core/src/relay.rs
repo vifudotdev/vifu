@@ -25,6 +25,7 @@ const MAX_RECONNECT_DELAY: Duration = Duration::from_secs(30);
 pub struct AgentGatewayRuntime<'a> {
     pub server_url: &'a str,
     pub agent_gateway_token: &'a str,
+    pub provider_id: &'a str,
     pub endpoint: &'a Endpoint,
     pub openclaw_token: Option<&'a str>,
     pub agents: &'a [AgentDescriptor],
@@ -96,6 +97,7 @@ async fn run_connection(
             agents: runtime.agents.to_vec(),
             metadata: serde_json::json!({
                 "adapter": "openclaw",
+                "providerId": runtime.provider_id,
                 "version": env!("CARGO_PKG_VERSION")
             }),
         },
@@ -262,7 +264,7 @@ pub fn agent_gateway_websocket_url(server_url: &str) -> Result<String, String> {
         );
     }
     let websocket_scheme = match url.scheme() {
-        "http" if is_loopback_server(&url) => "ws",
+        "http" if is_local_plaintext_server(&url) => "ws",
         "http" => {
             return Err(
                 "Remote VIFU_SERVER_URL values must use https so agent gateway credentials are encrypted"
@@ -284,7 +286,7 @@ pub fn agent_gateway_websocket_url(server_url: &str) -> Result<String, String> {
     Ok(url.to_string())
 }
 
-fn is_loopback_server(url: &Url) -> bool {
+fn is_local_plaintext_server(url: &Url) -> bool {
     let Some(host) = url.host_str() else {
         return false;
     };
@@ -292,6 +294,15 @@ fn is_loopback_server(url: &Url) -> bool {
         || host
             .parse::<IpAddr>()
             .is_ok_and(|address| address.is_loopback())
+        || is_single_label_hostname(host)
+}
+
+fn is_single_label_hostname(host: &str) -> bool {
+    !host.is_empty()
+        && !host.contains('.')
+        && host
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || character == '-')
 }
 
 async fn receive_command<S>(
@@ -404,6 +415,10 @@ mod tests {
         assert_eq!(
             agent_gateway_websocket_url("http://127.0.0.1:6790").unwrap(),
             "ws://127.0.0.1:6790/v1/agent-gateway/connect"
+        );
+        assert_eq!(
+            agent_gateway_websocket_url("http://backend:6790").unwrap(),
+            "ws://backend:6790/v1/agent-gateway/connect"
         );
         assert_eq!(
             agent_gateway_websocket_url("https://runtime.example.com/api/").unwrap(),
