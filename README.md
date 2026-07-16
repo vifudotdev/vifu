@@ -64,7 +64,7 @@ Content-Type: application/json
 {"jsonrpc":"2.0","id":1,"method":"agent.invoke","params":{"agent":"town-guide","message":"Open the north gate"}}
 ```
 
-Use `rpc.discover` for the OpenRPC document and `agent.list` for the bindings
+Use `rpc.discover` for the Vifu discovery payload and `agent.list` for the bindings
 available through a Project. The development path
 `/v1/projects/{slug}/rpc` provides the same protocol when wildcard localhost
 names are unavailable.

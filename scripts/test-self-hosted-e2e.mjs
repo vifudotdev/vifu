@@ -130,7 +130,10 @@ async function setup() {
   const apiUrl = new URL(apiBaseUrl);
   const projectHost = `${project.slug}.${process.env.VIFU_PROJECT_DOMAIN || "localhost"}${apiUrl.port ? `:${apiUrl.port}` : ""}`;
   const discovery = await jsonRpc(projectRpcPath, project.publishableKey, "rpc.discover", {}, "discover");
-  assert(discovery.openrpc === "1.3.2", "Project RPC did not return its OpenRPC document");
+  assert(discovery.protocol?.name === "vifu.project", "Project RPC did not return its Vifu discovery payload");
+  assert(discovery.transports?.jsonrpc === "2.0", "Project RPC discovery did not advertise JSON-RPC transport");
+  assert(discovery.transports?.websocketProtocol === "jsonrpc", "Project RPC discovery did not advertise the WebSocket subprotocol");
+  assert(discovery.protocol?.methods?.includes("agent.invoke"), "Project RPC discovery did not list agent.invoke");
   const listedAgents = await jsonRpc(projectRpcPath, project.publishableKey, "agent.list", {}, "list");
   assert(listedAgents.agents?.length === 1, "Project RPC did not list its bound agent");
   const httpInvocation = await jsonRpc(

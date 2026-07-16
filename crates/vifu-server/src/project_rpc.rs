@@ -347,7 +347,7 @@ async fn dispatch(
     match method {
         "rpc.discover" => {
             require_empty_params(params)?;
-            Ok(openrpc_document(project, origin))
+            Ok(project_discovery(project, origin))
         }
         "agent.list" => {
             require_empty_params(params)?;
@@ -589,49 +589,25 @@ fn internal_error(error: ApiError) -> RpcError {
     RpcError::internal()
 }
 
-fn openrpc_document(project: &ProjectRoute, origin: &ProjectOrigin) -> Value {
+fn project_discovery(project: &ProjectRoute, origin: &ProjectOrigin) -> Value {
     json!({
-        "openrpc": "1.3.2",
-        "info": {
-            "title": format!("{} Vifu Agent Endpoint", project.slug),
-            "version": "1.0.0"
+        "project": {
+            "id": project.id,
+            "slug": project.slug,
+            "gatewayId": project.gateway_id
         },
-        "servers": [
-            { "name": "HTTPS", "url": origin.http },
-            { "name": "WebSocket", "url": origin.websocket }
-        ],
-        "methods": [
-            {
-                "name": "rpc.discover",
-                "summary": "Discover this endpoint's OpenRPC contract",
-                "params": [],
-                "result": { "name": "document", "schema": { "type": "object" } }
-            },
-            {
-                "name": "agent.list",
-                "summary": "List agents bound to this project",
-                "params": [],
-                "result": { "name": "agents", "schema": { "type": "object" } }
-            },
-            {
-                "name": "agent.invoke",
-                "summary": "Invoke an agent bound to this project",
-                "paramStructure": "by-name",
-                "params": [
-                    { "name": "agent", "required": false, "schema": { "type": "string" } },
-                    { "name": "message", "required": false, "schema": { "type": "string" } },
-                    { "name": "input", "required": false, "schema": {} },
-                    { "name": "context", "required": false, "schema": {} },
-                    { "name": "metadata", "required": false, "schema": {} },
-                    {
-                        "name": "timeoutMs",
-                        "required": false,
-                        "schema": { "type": "integer", "minimum": 500, "maximum": 120000 }
-                    }
-                ],
-                "result": { "name": "output", "schema": {} }
-            }
-        ]
+        "protocol": {
+            "name": "vifu.project",
+            "version": "0.1",
+            "methods": ["rpc.discover", "agent.list", "agent.invoke"]
+        },
+        "transports": {
+            "http": origin.http,
+            "websocket": origin.websocket,
+            "jsonrpc": JSON_RPC_VERSION,
+            "websocketProtocol": JSON_RPC_PROTOCOL
+        },
+        "capabilities": ["agent.list", "agent.invoke"]
     })
 }
 
@@ -681,8 +657,12 @@ fn error_response(id: Value, error: RpcError) -> Value {
 #[cfg(test)]
 mod tests {
     use serde_json::json;
+    use uuid::Uuid;
 
-    use super::{parse_request, select_agent, ProjectAgentRoute};
+    use super::{
+        parse_request, project_discovery, select_agent, ProjectAgentRoute, ProjectOrigin,
+        ProjectRoute,
+    };
 
     #[test]
     fn parses_named_json_rpc_requests() {
@@ -701,6 +681,37 @@ mod tests {
     fn rejects_non_json_rpc_requests() {
         assert!(parse_request(json!({ "method": "agent.list" })).is_err());
         assert!(parse_request(json!([])).is_err());
+    }
+
+    #[test]
+    fn discovery_uses_vifu_protocol_shape_instead_of_openrpc() {
+        let project = ProjectRoute {
+            id: Uuid::new_v4(),
+            slug: "demo".to_string(),
+            gateway_id: "openclaw-local".to_string(),
+            publishable_key_hash: Vec::new(),
+        };
+        let origin = ProjectOrigin {
+            http: "http://demo.localhost:6790".to_string(),
+            websocket: "ws://demo.localhost:6790".to_string(),
+        };
+        let discovery = project_discovery(&project, &origin);
+
+        assert!(discovery.get("openrpc").is_none());
+        assert_eq!(discovery["project"]["slug"], "demo");
+        assert_eq!(discovery["project"]["gatewayId"], "openclaw-local");
+        assert_eq!(discovery["protocol"]["name"], "vifu.project");
+        assert_eq!(discovery["protocol"]["version"], "0.1");
+        assert_eq!(
+            discovery["protocol"]["methods"],
+            json!(["rpc.discover", "agent.list", "agent.invoke"])
+        );
+        assert_eq!(discovery["transports"]["jsonrpc"], "2.0");
+        assert_eq!(discovery["transports"]["websocketProtocol"], "jsonrpc");
+        assert_eq!(
+            discovery["capabilities"],
+            json!(["agent.list", "agent.invoke"])
+        );
     }
 
     #[test]
