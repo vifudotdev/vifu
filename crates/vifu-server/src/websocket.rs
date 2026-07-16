@@ -9,6 +9,7 @@ use serde_json::json;
 use tokio::time::{Instant, MissedTickBehavior};
 use tracing::{info, warn};
 use uuid::Uuid;
+use vifu_core::gateway_frame;
 use vifu_core::protocol::{self, AgentGatewayMessage};
 
 use crate::auth::require_agent_gateway;
@@ -23,8 +24,8 @@ pub async fn upgrade(
 ) -> Result<Response, ApiError> {
     require_agent_gateway(&headers, &state.config.agent_gateway_token)?;
     Ok(ws
-        .max_message_size(protocol::MAX_FRAME_BYTES)
-        .max_frame_size(protocol::MAX_FRAME_BYTES)
+        .max_message_size(gateway_frame::MAX_GATEWAY_FRAME_BYTES)
+        .max_frame_size(gateway_frame::MAX_GATEWAY_FRAME_BYTES)
         .on_upgrade(move |socket| handle_socket(state, socket))
         .into_response())
 }
@@ -38,7 +39,7 @@ async fn handle_socket(state: AppState, mut socket: WebSocket) {
             code: "PROTOCOL_ERROR".to_string(),
             message: public_error(&error),
         };
-        if let Ok(encoded) = protocol::encode(&protocol_error) {
+        if let Ok(encoded) = encode_message(&protocol_error) {
             let _ = socket.send(Message::Text(encoded.into())).await;
         }
     }
@@ -174,7 +175,7 @@ async fn run_socket(state: &AppState, socket: &mut WebSocket) -> Result<(), Stri
 async fn receive_message(socket: &mut WebSocket) -> Result<AgentGatewayMessage, String> {
     loop {
         match socket.next().await {
-            Some(Ok(Message::Text(frame))) => return protocol::decode(frame.as_str()),
+            Some(Ok(Message::Text(frame))) => return decode_message(frame.as_str()),
             Some(Ok(Message::Ping(payload))) => {
                 socket
                     .send(Message::Pong(payload))
@@ -194,11 +195,21 @@ async fn receive_message(socket: &mut WebSocket) -> Result<AgentGatewayMessage, 
 }
 
 async fn send_message(socket: &mut WebSocket, message: &AgentGatewayMessage) -> Result<(), String> {
-    let encoded = protocol::encode(message)?;
+    let encoded = encode_message(message)?;
     socket
         .send(Message::Text(encoded.into()))
         .await
         .map_err(|error| error.to_string())
+}
+
+fn decode_message(source: &str) -> Result<AgentGatewayMessage, String> {
+    let frame = gateway_frame::decode(source)?;
+    protocol::from_gateway_frame(frame)
+}
+
+fn encode_message(message: &AgentGatewayMessage) -> Result<String, String> {
+    let frame = protocol::to_gateway_frame(message)?;
+    gateway_frame::encode(&frame)
 }
 
 fn public_error(error: &str) -> String {

@@ -9,4 +9,5 @@ This package currently includes gateway frame types:
 - `type: "event"` with `event` and optional `payload`
 
 It also includes helper types for the current Project JSON-RPC endpoint and
-discovery payload.
+discovery payload, plus Vifu Agent Gateway method, event, and payload
+definitions for the frame transport.

@@ -13,6 +13,7 @@ use tokio_tungstenite::tungstenite::Message;
 use url::Url;
 use uuid::Uuid;
 
+use crate::gateway_frame;
 use crate::openclaw::{self, Endpoint};
 use crate::protocol::{self, AgentDescriptor, AgentGatewayMessage};
 use crate::session::{self, SessionSummary};
@@ -301,7 +302,7 @@ where
 {
     loop {
         match socket.next().await {
-            Some(Ok(Message::Text(frame))) => return protocol::decode(frame.as_str()),
+            Some(Ok(Message::Text(frame))) => return decode_message(frame.as_str()),
             Some(Ok(Message::Ping(payload))) => socket
                 .send(Message::Pong(payload))
                 .await
@@ -324,9 +325,19 @@ where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
     socket
-        .send(Message::Text(protocol::encode(message)?.into()))
+        .send(Message::Text(encode_message(message)?.into()))
         .await
         .map_err(|error| error.to_string())
+}
+
+fn decode_message(source: &str) -> Result<AgentGatewayMessage, String> {
+    let frame = gateway_frame::decode(source)?;
+    protocol::from_gateway_frame(frame)
+}
+
+fn encode_message(message: &AgentGatewayMessage) -> Result<String, String> {
+    let frame = protocol::to_gateway_frame(message)?;
+    gateway_frame::encode(&frame)
 }
 
 async fn queue_error(
