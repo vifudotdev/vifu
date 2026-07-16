@@ -230,3 +230,249 @@ fn public_error(error: &str) -> String {
         sanitized
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use axum::body::{to_bytes, Body};
+    use axum::http::header::{AUTHORIZATION, CONTENT_TYPE};
+    use axum::http::{Request, StatusCode};
+    use futures_util::{SinkExt, StreamExt};
+    use serde_json::{json, Value};
+    use sqlx::postgres::PgPoolOptions;
+    use sqlx::PgPool;
+    use tokio::net::TcpListener;
+    use tokio_tungstenite::connect_async;
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+    use tokio_tungstenite::tungstenite::Message;
+    use tower::ServiceExt;
+    use uuid::Uuid;
+    use vifu_core::gateway_frame::{
+        self, GatewayFrame, RequestFrame, RequestFrameType, ResponseFrame, ResponseFrameType,
+    };
+    use vifu_core::protocol::{
+        AGENT_GATEWAY_HELLO_METHOD, AGENT_GATEWAY_HELLO_REQUEST_ID, AGENT_GATEWAY_INVOKE_METHOD,
+        VERSION,
+    };
+
+    use crate::auth::hash_api_key;
+    use crate::config::Config;
+    use crate::db::{self, NewEndpoint};
+    use crate::{app, state};
+
+    #[tokio::test]
+    async fn agent_gateway_websocket_uses_frame_transport_for_invocations() {
+        let Some(pool) = maybe_test_pool().await else {
+            return;
+        };
+        let raw_api_key = "test-endpoint-api-key";
+        let endpoint_id = seed_endpoint(&pool, raw_api_key).await;
+        let mut config = Config::from_env().unwrap();
+        config.heartbeat_interval = std::time::Duration::from_secs(30);
+        let agent_gateway_token = config.agent_gateway_token.clone();
+        let state = state(config, pool);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server_state = state.clone();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app(server_state)).await.unwrap();
+        });
+
+        let mut socket = connect_agent_gateway(addr, &agent_gateway_token).await;
+        send_gateway_frame(
+            &mut socket,
+            GatewayFrame::Request(RequestFrame {
+                frame_type: RequestFrameType::Req,
+                id: AGENT_GATEWAY_HELLO_REQUEST_ID.to_string(),
+                method: AGENT_GATEWAY_HELLO_METHOD.to_string(),
+                params: Some(json!({
+                    "protocol": VERSION,
+                    "gatewayId": "openclaw-local",
+                    "agents": [
+                        {
+                            "id": "guide-agent",
+                            "name": "Guide",
+                            "metadata": {}
+                        }
+                    ],
+                    "metadata": {
+                        "adapter": "test"
+                    }
+                })),
+            }),
+        )
+        .await;
+
+        let welcome = receive_json_frame(&mut socket).await;
+        assert_eq!(welcome["type"], "res");
+        assert_eq!(welcome["id"], AGENT_GATEWAY_HELLO_REQUEST_ID);
+        assert_eq!(welcome["ok"], true);
+        assert!(welcome["payload"]["sessionId"].is_string());
+        assert!(welcome.get("type").is_some());
+        assert!(welcome.get("method").is_none());
+
+        let request = invoke_endpoint_request(endpoint_id, raw_api_key);
+        let invoke_task =
+            tokio::spawn(
+                async move { app(state).oneshot(request).await.expect("invoke response") },
+            );
+
+        let invoke = receive_json_frame(&mut socket).await;
+        assert_eq!(invoke["type"], "req");
+        assert_eq!(invoke["method"], AGENT_GATEWAY_INVOKE_METHOD);
+        assert!(invoke["id"]
+            .as_str()
+            .is_some_and(|value| Uuid::parse_str(value).is_ok()));
+        assert!(invoke.get("requestId").is_none());
+        assert_eq!(invoke["params"]["channelId"], 1);
+        assert_eq!(invoke["params"]["endpointId"], endpoint_id.to_string());
+        assert_eq!(invoke["params"]["agentId"], "guide-agent");
+        assert_eq!(invoke["params"]["input"]["message"], "Hello");
+
+        let request_id = invoke["id"].as_str().unwrap();
+        let channel_id = invoke["params"]["channelId"].as_u64().unwrap();
+        send_gateway_frame(
+            &mut socket,
+            GatewayFrame::Response(ResponseFrame {
+                frame_type: ResponseFrameType::Res,
+                id: request_id.to_string(),
+                ok: true,
+                payload: Some(json!({
+                    "channelId": channel_id,
+                    "output": {
+                        "text": "Hi from frame transport"
+                    }
+                })),
+                error: None,
+            }),
+        )
+        .await;
+
+        let response = invoke_task.await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+        let payload: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(payload["endpointId"], endpoint_id.to_string());
+        assert_eq!(payload["output"]["text"], "Hi from frame transport");
+
+        let _ = socket.close(None).await;
+        server.abort();
+    }
+
+    async fn maybe_test_pool() -> Option<PgPool> {
+        let config = Config::from_env().unwrap();
+        let pool = match PgPoolOptions::new()
+            .max_connections(5)
+            .connect(&config.database_url)
+            .await
+        {
+            Ok(pool) => pool,
+            Err(error) => {
+                eprintln!(
+                    "skipping agent gateway wire integration test: database unavailable ({error})"
+                );
+                return None;
+            }
+        };
+        if let Err(error) = db::migrate(&pool).await {
+            eprintln!("skipping agent gateway wire integration test: migration failed ({error})");
+            return None;
+        }
+        Some(pool)
+    }
+
+    async fn seed_endpoint(pool: &PgPool, raw_api_key: &str) -> Uuid {
+        let config = Config::from_env().unwrap();
+        let profile_id = Uuid::new_v4();
+        let binding_id = Uuid::new_v4();
+        let endpoint_id = Uuid::new_v4();
+        let suffix = Uuid::new_v4().simple().to_string();
+        let profile_slug = format!("wire-test-profile-{suffix}");
+        let endpoint_slug = format!("wire-test-endpoint-{suffix}");
+        db::create_profile(pool, profile_id, &profile_slug, "Wire Test", None)
+            .await
+            .unwrap();
+        db::create_binding(
+            pool,
+            binding_id,
+            profile_id,
+            "openclaw",
+            "openclaw-local",
+            "guide-agent",
+            &json!({}),
+        )
+        .await
+        .unwrap();
+        db::create_endpoint(
+            pool,
+            NewEndpoint {
+                id: endpoint_id,
+                slug: &endpoint_slug,
+                name: "Wire Test",
+                profile_id,
+                binding_id,
+                enabled: true,
+                request_timeout_ms: 30_000,
+            },
+        )
+        .await
+        .unwrap();
+        let key_hash = hash_api_key(raw_api_key, &config.api_key_pepper);
+        db::create_api_key(
+            pool,
+            Uuid::new_v4(),
+            endpoint_id,
+            "Wire Test Key",
+            "test",
+            &key_hash,
+        )
+        .await
+        .unwrap();
+        endpoint_id
+    }
+
+    async fn connect_agent_gateway(
+        addr: std::net::SocketAddr,
+        token: &str,
+    ) -> tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>
+    {
+        let mut request = format!("ws://{addr}/v1/agent-gateway/connect")
+            .into_client_request()
+            .unwrap();
+        request
+            .headers_mut()
+            .insert(AUTHORIZATION, format!("Bearer {token}").parse().unwrap());
+        connect_async(request).await.unwrap().0
+    }
+
+    fn invoke_endpoint_request(endpoint_id: Uuid, raw_api_key: &str) -> Request<Body> {
+        Request::post(format!("/v1/endpoints/{endpoint_id}/invoke"))
+            .header(AUTHORIZATION, format!("Bearer {raw_api_key}"))
+            .header(CONTENT_TYPE, "application/json")
+            .body(Body::from(json!({ "message": "Hello" }).to_string()))
+            .unwrap()
+    }
+
+    async fn send_gateway_frame<S>(
+        socket: &mut tokio_tungstenite::WebSocketStream<S>,
+        frame: GatewayFrame,
+    ) where
+        S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+    {
+        let encoded = gateway_frame::encode(&frame).unwrap();
+        socket.send(Message::Text(encoded.into())).await.unwrap();
+    }
+
+    async fn receive_json_frame<S>(socket: &mut tokio_tungstenite::WebSocketStream<S>) -> Value
+    where
+        S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+    {
+        loop {
+            match socket.next().await.unwrap().unwrap() {
+                Message::Text(value) => return serde_json::from_str(value.as_str()).unwrap(),
+                Message::Ping(payload) => socket.send(Message::Pong(payload)).await.unwrap(),
+                Message::Pong(_) => {}
+                other => panic!("unexpected websocket message: {other:?}"),
+            }
+        }
+    }
+}
