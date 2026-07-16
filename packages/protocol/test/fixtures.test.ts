@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 
 import { describe, expect, it } from "vitest";
 
@@ -19,17 +19,17 @@ function fixture(name: string): unknown {
   return JSON.parse(readFileSync(new URL(name, fixtureUrl), "utf8"));
 }
 
+function fixtureNames(): string[] {
+  return readdirSync(fixtureUrl)
+    .filter((name) => name.endsWith(".json"))
+    .sort();
+}
+
 describe("@vifu/protocol shared gateway frame fixtures", () => {
   it("accepts every shared gateway frame fixture", () => {
-    for (const name of [
-      "request.json",
-      "response-ok.json",
-      "response-error.json",
-      "event.json",
-      "event-state-version.json",
-      "node-invoke-request.json",
-      "node-invoke-result.json",
-    ]) {
+    const names = fixtureNames();
+    expect(names.length).toBeGreaterThan(0);
+    for (const name of names) {
       expect(isGatewayFrame(fixture(name)), name).toBe(true);
     }
   });

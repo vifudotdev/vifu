@@ -272,44 +272,26 @@ fn validate_non_empty(name: &str, value: &str) -> Result<(), String> {
 mod tests {
     use serde::de::DeserializeOwned;
     use serde_json::{json, Value};
+    use std::fs;
+    use std::path::PathBuf;
 
     use super::{
         decode, encode, EventFrame, NodeInvokeRequestPayload, NodeInvokeResultParams, RequestFrame,
     };
 
-    const REQUEST: &str =
-        include_str!("../../../packages/protocol/fixtures/gateway-frame/request.json");
-    const RESPONSE_OK: &str =
-        include_str!("../../../packages/protocol/fixtures/gateway-frame/response-ok.json");
-    const RESPONSE_ERROR: &str =
-        include_str!("../../../packages/protocol/fixtures/gateway-frame/response-error.json");
-    const EVENT: &str =
-        include_str!("../../../packages/protocol/fixtures/gateway-frame/event.json");
-    const EVENT_STATE_VERSION: &str =
-        include_str!("../../../packages/protocol/fixtures/gateway-frame/event-state-version.json");
-    const NODE_INVOKE_REQUEST: &str =
-        include_str!("../../../packages/protocol/fixtures/gateway-frame/node-invoke-request.json");
-    const NODE_INVOKE_RESULT: &str =
-        include_str!("../../../packages/protocol/fixtures/gateway-frame/node-invoke-result.json");
-
     #[test]
     fn round_trips_shared_gateway_frame_fixtures() {
-        for source in [
-            REQUEST,
-            RESPONSE_OK,
-            RESPONSE_ERROR,
-            EVENT,
-            EVENT_STATE_VERSION,
-            NODE_INVOKE_REQUEST,
-            NODE_INVOKE_RESULT,
-        ] {
-            assert_gateway_frame_round_trip(source);
+        let fixtures = gateway_frame_fixtures();
+        assert!(!fixtures.is_empty(), "gateway frame fixtures must exist");
+        for (name, source) in fixtures {
+            assert_gateway_frame_round_trip(&name, &source);
         }
     }
 
     #[test]
     fn parses_node_invoke_fixture_payloads() {
-        let event = decode_json::<EventFrame>(NODE_INVOKE_REQUEST);
+        let request_source = read_gateway_frame_fixture("node-invoke-request.json");
+        let event = decode_json::<EventFrame>(&request_source);
         let payload = event.payload.expect("node invoke event payload");
         let request = serde_json::from_value::<NodeInvokeRequestPayload>(payload).unwrap();
         assert_eq!(request.node_id, "ios-node-1");
@@ -319,7 +301,8 @@ mod tests {
             Some("{\"quality\":\"medium\"}")
         );
 
-        let frame = decode_json::<RequestFrame>(NODE_INVOKE_RESULT);
+        let result_source = read_gateway_frame_fixture("node-invoke-result.json");
+        let frame = decode_json::<RequestFrame>(&result_source);
         let params = frame.params.expect("node invoke result params");
         let result = serde_json::from_value::<NodeInvokeResultParams>(params).unwrap();
         assert_eq!(result.node_id, "ios-node-1");
@@ -422,11 +405,15 @@ mod tests {
         }));
     }
 
-    fn assert_gateway_frame_round_trip(source: &str) {
+    fn assert_gateway_frame_round_trip(name: &str, source: &str) {
         let value = serde_json::from_str::<Value>(source).unwrap();
-        let frame = decode(source).unwrap();
-        let encoded = encode(&frame).unwrap();
-        assert_eq!(serde_json::from_str::<Value>(&encoded).unwrap(), value);
+        let frame = decode(source).unwrap_or_else(|error| panic!("{name}: {error}"));
+        let encoded = encode(&frame).unwrap_or_else(|error| panic!("{name}: {error}"));
+        assert_eq!(
+            serde_json::from_str::<Value>(&encoded).unwrap(),
+            value,
+            "{name}"
+        );
     }
 
     fn assert_gateway_frame_rejected(value: Value) {
@@ -438,5 +425,33 @@ mod tests {
         T: DeserializeOwned,
     {
         serde_json::from_str(source).unwrap()
+    }
+
+    fn gateway_frame_fixtures() -> Vec<(String, String)> {
+        let mut fixtures = fs::read_dir(gateway_frame_fixture_dir())
+            .unwrap()
+            .filter_map(|entry| {
+                let entry = entry.unwrap();
+                let path = entry.path();
+                if path.extension().and_then(|value| value.to_str()) != Some("json") {
+                    return None;
+                }
+                let name = path.file_name().unwrap().to_string_lossy().into_owned();
+                let source = fs::read_to_string(path).unwrap();
+                Some((name, source))
+            })
+            .collect::<Vec<_>>();
+        fixtures.sort_by(|left, right| left.0.cmp(&right.0));
+        fixtures
+    }
+
+    fn read_gateway_frame_fixture(name: &str) -> String {
+        fs::read_to_string(gateway_frame_fixture_dir().join(name)).unwrap()
+    }
+
+    fn gateway_frame_fixture_dir() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join("packages/protocol/fixtures/gateway-frame")
     }
 }
