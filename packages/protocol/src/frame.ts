@@ -6,6 +6,8 @@ export const GATEWAY_FRAME_TYPES = {
   EVENT: "event",
 } as const;
 
+export const MAX_GATEWAY_FRAME_BYTES = 16 * 1024 * 1024;
+
 export type GatewayFrameType = (typeof GATEWAY_FRAME_TYPES)[keyof typeof GATEWAY_FRAME_TYPES];
 
 export type GatewayFrameId = string;
@@ -164,6 +166,38 @@ export function createEventFrame<Event extends string, Payload = unknown>(
     : { type: GATEWAY_FRAME_TYPES.EVENT, event, payload };
 }
 
+export function encodeGatewayFrame(frame: GatewayFrame): string {
+  if (!isGatewayFrame(frame)) {
+    throw new TypeError("invalid gateway frame");
+  }
+  const encoded = JSON.stringify(frame);
+  if (utf8ByteLength(encoded) > MAX_GATEWAY_FRAME_BYTES) {
+    throw new RangeError("gateway frame is too large");
+  }
+  return encoded;
+}
+
+export function decodeGatewayFrame(source: string): GatewayFrame {
+  if (source.length === 0) {
+    throw new TypeError("gateway frame is empty");
+  }
+  if (utf8ByteLength(source) > MAX_GATEWAY_FRAME_BYTES) {
+    throw new RangeError("gateway frame is too large");
+  }
+
+  let value: unknown;
+  try {
+    value = JSON.parse(source);
+  } catch {
+    throw new TypeError("invalid gateway frame");
+  }
+
+  if (!isGatewayFrame(value)) {
+    throw new TypeError("invalid gateway frame");
+  }
+  return value;
+}
+
 export function isRequestFrame(value: unknown): value is RequestFrame {
   return (
     isRecord(value) &&
@@ -234,4 +268,27 @@ function isNonEmptyString(value: unknown): value is string {
 
 function isNonNegativeInteger(value: unknown): value is number {
   return typeof value === "number" && Number.isInteger(value) && value >= 0;
+}
+
+function utf8ByteLength(value: string): number {
+  let bytes = 0;
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    if (code < 0x80) {
+      bytes += 1;
+    } else if (code < 0x800) {
+      bytes += 2;
+    } else if (code >= 0xd800 && code <= 0xdbff && index + 1 < value.length) {
+      const next = value.charCodeAt(index + 1);
+      if (next >= 0xdc00 && next <= 0xdfff) {
+        bytes += 4;
+        index += 1;
+      } else {
+        bytes += 3;
+      }
+    } else {
+      bytes += 3;
+    }
+  }
+  return bytes;
 }

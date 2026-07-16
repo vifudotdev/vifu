@@ -9,12 +9,14 @@ import {
   createNodeInvokeResultRequest,
   createRequestFrame,
   createResponseFrame,
+  decodeGatewayFrame,
+  encodeGatewayFrame,
   isGatewayFrame,
   isRequestFrame,
 } from "../src";
 
-describe("@vifu/protocol OpenClaw-compatible frames", () => {
-  it("creates req frames with OpenClaw field names", () => {
+describe("@vifu/protocol gateway frames", () => {
+  it("creates req frames with stable field names", () => {
     const frame = createRequestFrame("req-1", "runtime.ping", { ok: true });
 
     expect(frame).toEqual({
@@ -52,7 +54,7 @@ describe("@vifu/protocol OpenClaw-compatible frames", () => {
     });
   });
 
-  it("creates event frames with OpenClaw field names", () => {
+  it("creates event frames with stable field names", () => {
     expect(createEventFrame("runtime.ready", { ready: true })).toEqual({
       type: "event",
       event: "runtime.ready",
@@ -60,7 +62,7 @@ describe("@vifu/protocol OpenClaw-compatible frames", () => {
     });
   });
 
-  it("keeps node invoke compatible with OpenClaw payloads", () => {
+  it("keeps node invoke payload field names stable", () => {
     expect(
       createNodeInvokeRequestEvent({
         id: "invoke-1",
@@ -107,6 +109,25 @@ describe("@vifu/protocol OpenClaw-compatible frames", () => {
     expect(isGatewayFrame({ type: "event", event: "tick" })).toBe(true);
     expect(isGatewayFrame({ type: "request", id: "1", method: "ping" })).toBe(false);
     expect(isGatewayFrame({ type: "event", name: "tick" })).toBe(false);
+  });
+
+  it("encodes and decodes gateway frame text", () => {
+    const frame = createRequestFrame("req-1", "runtime.ping", { ok: true });
+    const encoded = encodeGatewayFrame(frame);
+
+    expect(encoded).toBe('{"type":"req","id":"req-1","method":"runtime.ping","params":{"ok":true}}');
+    expect(decodeGatewayFrame(encoded)).toEqual(frame);
+  });
+
+  it("rejects invalid gateway frame text", () => {
+    expect(() => decodeGatewayFrame("")).toThrow("gateway frame is empty");
+    expect(() => decodeGatewayFrame("{")).toThrow("invalid gateway frame");
+    expect(() =>
+      decodeGatewayFrame('{"type":"req","id":"","method":"runtime.ping"}'),
+    ).toThrow("invalid gateway frame");
+    expect(() =>
+      encodeGatewayFrame({ type: "req", id: "", method: "runtime.ping" }),
+    ).toThrow("invalid gateway frame");
   });
 
   it("rejects extra frame fields like the schema", () => {
