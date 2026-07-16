@@ -19,14 +19,17 @@ test("session remains valid across sidebar navigation on the bind address", asyn
   expect(session?.httpOnly).toBe(true);
   expect(session?.path).toBe("/");
   expect(session?.domain).toBe("0.0.0.0");
-  await expect(page).toHaveURL(/\/dashboard$/);
+  await expect(page).toHaveURL(/\/project\/[^/]+\/health$/);
 
-  for (const section of ["Projects", "Profiles", "Bindings", "Endpoints"]) {
-    await page.getByRole("link", { name: section, exact: true }).click();
-    await expect(page).toHaveURL(new RegExp(`/dashboard/${section.toLowerCase()}$`));
-    await expect(page.getByRole("heading", {
-      level: 1,
-      name: section === "Profiles" ? "Agent profiles" : section,
-    })).toBeVisible();
+  for (const [label, path] of [
+    ["Gameplay", "gameplay"],
+    ["API Keys", "api-keys"],
+    ["Logs", "logs"],
+    ["Settings", "settings"],
+    ["Health", "health"],
+  ] as const) {
+    await page.getByRole("link", { name: label, exact: true }).click();
+    await expect(page).toHaveURL(new RegExp(`/project/[^/]+/${path}$`));
+    await expect(page.getByRole("heading", { level: 1, name: label })).toBeVisible();
   }
 });

@@ -21,13 +21,10 @@
     "dev:agent-gateway": "sh scripts/dev-agent-gateway.sh",
     "dev:openclaw-mock": "node scripts/mock-openclaw.mjs",
     "dev:dashboard": "sh scripts/dev-dashboard.sh",
-    "dev:local": "sh scripts/local.sh",
     "local": "sh scripts/local.sh",
     "local:stop": "sh scripts/local-stop.sh",
-    "local:restart": "sh scripts/local-stop.sh && sh scripts/local.sh",
     "self-host": "sh scripts/self-host.sh",
     "self-host:stop": "docker compose stop",
-    "self-host:restart": "docker compose restart",
     "self-host:logs": "docker compose logs -f"
   },
   "devDependencies": {

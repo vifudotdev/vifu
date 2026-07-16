@@ -15,11 +15,47 @@ json_escape() {
   node -e 'process.stdout.write(JSON.stringify(process.argv[1]).slice(1, -1));' "$1"
 }
 
+rand_hex() {
+  openssl rand -hex "$1"
+}
+
+write_e2e_env() {
+  target="$1"
+  if ! command -v openssl >/dev/null 2>&1; then
+    printf '%s\n' "openssl is required to generate E2E secrets." >&2
+    exit 1
+  fi
+
+  umask 077
+  admin_key="$(rand_hex 32)"
+  agent_gateway_token="$(rand_hex 32)"
+  api_key_pepper="$(rand_hex 32)"
+  provider_secret_key="$(rand_hex 32)"
+  postgres_password="$(rand_hex 24)"
+  {
+    printf '%s\n' "VIFU_DEPLOYMENT_MODE=self-hosted"
+    printf '%s\n' "VIFU_AUTH_MODE=local-password"
+    printf '%s\n' "VIFU_AUTH_PASSWORD_ENABLED=true"
+    printf '%s\n' "VIFU_SIGNUP_ENABLED=true"
+    printf '%s\n' "AUTH_DISABLE_USERNAME_PASSWORD=false"
+    printf '%s\n' "AUTH_DISABLE_SIGNUP=false"
+    printf '%s\n' "VIFU_ADMIN_KEY=$admin_key"
+    printf '%s\n' "VIFU_AGENT_GATEWAY_TOKEN=$agent_gateway_token"
+    printf '%s\n' "VIFU_API_KEY_PEPPER=$api_key_pepper"
+    printf '%s\n' "VIFU_PROVIDER_SECRET_KEY=$provider_secret_key"
+    printf '%s\n' "POSTGRES_DB=vifu"
+    printf '%s\n' "POSTGRES_USER=vifu"
+    printf '%s\n' "POSTGRES_PASSWORD=$postgres_password"
+    printf '%s%s%s\n' "DATABASE_URL=postgres://vifu:" "$postgres_password" "@postgres:5432/vifu"
+    printf '%s\n' "VIFU_BIND_HOST=127.0.0.1"
+  } > "$target"
+}
+
 if [ -n "${VIFU_E2E_ENV_FILE:-}" ]; then
   env_file="$VIFU_E2E_ENV_FILE"
 else
   env_file="$state_dir/.env"
-  sh scripts/init-self-hosted.sh "$env_file" >/dev/null
+  write_e2e_env "$env_file"
   server_port="$(free_port)"
   dashboard_port="$(free_port)"
   browser_dashboard_port="$dashboard_port"
