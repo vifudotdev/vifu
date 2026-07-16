@@ -1,0 +1,11 @@
+{
+  "type": "req",
+  "id": "ack-1",
+  "method": "node.invoke.result",
+  "params": {
+    "id": "invoke-1",
+    "nodeId": "ios-node-1",
+    "ok": true,
+    "payloadJSON": "{\"imageId\":\"img_123\"}"
+  }
+}

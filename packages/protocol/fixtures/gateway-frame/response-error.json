@@ -1,0 +1,14 @@
+{
+  "type": "res",
+  "id": "req-1",
+  "ok": false,
+  "error": {
+    "code": "BAD_REQUEST",
+    "message": "invalid request",
+    "details": {
+      "field": "method"
+    },
+    "retryable": false,
+    "retryAfterMs": 250
+  }
+}

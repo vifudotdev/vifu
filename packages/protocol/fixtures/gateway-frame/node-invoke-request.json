@@ -1,0 +1,12 @@
+{
+  "type": "event",
+  "event": "node.invoke.request",
+  "payload": {
+    "id": "invoke-1",
+    "nodeId": "ios-node-1",
+    "command": "camera.snap",
+    "paramsJSON": "{\"quality\":\"medium\"}",
+    "timeoutMs": 5000,
+    "idempotencyKey": "idem-1"
+  }
+}

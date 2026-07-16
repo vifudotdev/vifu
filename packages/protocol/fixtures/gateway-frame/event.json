@@ -1,0 +1,7 @@
+{
+  "type": "event",
+  "event": "runtime.ready",
+  "payload": {
+    "ready": true
+  }
+}

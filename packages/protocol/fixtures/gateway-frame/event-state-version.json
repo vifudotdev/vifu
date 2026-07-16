@@ -1,0 +1,12 @@
+{
+  "type": "event",
+  "event": "tick",
+  "payload": {
+    "ts": 1737264015000
+  },
+  "seq": 12,
+  "stateVersion": {
+    "presence": 1,
+    "health": 1
+  }
+}

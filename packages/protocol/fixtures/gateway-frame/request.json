@@ -1,0 +1,8 @@
+{
+  "type": "req",
+  "id": "req-1",
+  "method": "runtime.ping",
+  "params": {
+    "ok": true
+  }
+}
