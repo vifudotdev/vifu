@@ -10,7 +10,7 @@ export default async function LoginPage({ searchParams }: {
   searchParams: Promise<Record<string, string | string[] | undefined>>;
 }) {
   const [params, auth] = await Promise.all([searchParams, loadAuthCapability()]);
-  const returnTo = sanitizeReturnTo(readParam(params.returnTo) ?? "/dashboard");
+  const returnTo = sanitizeReturnTo(readParam(params.returnTo) ?? "/project");
   if (!authRequired(auth)) redirect(returnTo);
   return (
     <AuthScreen

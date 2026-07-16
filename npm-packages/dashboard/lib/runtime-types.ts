@@ -14,9 +14,10 @@ export type ServerCapabilities = {
   endpoints: boolean;
   bindings: boolean;
   apiKeys: boolean;
+  canvas: boolean;
   agentGateways: boolean;
+  providerConnections: boolean;
   traces: boolean;
-  jsonRpc: boolean;
 };
 
 export type AuthCapability = {
@@ -49,9 +50,74 @@ export type RuntimeProject = {
   description: string | null;
   gatewayId: string;
   enabled: boolean;
-  publishableKeyPrefix: string;
   bindingIds: string[];
-  publishableKey?: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type ProjectCanvasNode = {
+  id: string;
+  projectId: string;
+  kind: string;
+  position: Record<string, unknown>;
+  profileId: string | null;
+  bindingId: string | null;
+  gatewayId: string | null;
+  resourceId: string | null;
+  config: Record<string, unknown>;
+  inputs: Record<string, unknown>;
+  outputs: Record<string, unknown>;
+  exposed: boolean;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type ProjectCanvasEdge = {
+  id: string;
+  projectId: string;
+  sourceNodeId: string;
+  sourceHandle: string | null;
+  targetNodeId: string;
+  targetHandle: string | null;
+  kind: string;
+  config: Record<string, unknown>;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type ProjectCanvas = {
+  project: RuntimeProject;
+  nodes: ProjectCanvasNode[];
+  edges: ProjectCanvasEdge[];
+};
+
+export type ProviderAdapterField = {
+  key: string;
+  label: string;
+  kind: string;
+  required: boolean;
+  secret: boolean;
+};
+
+export type ProviderAdapter = {
+  id: string;
+  name: string;
+  description: string;
+  fields: ProviderAdapterField[];
+};
+
+export type ProviderConnection = {
+  id: string;
+  projectId: string;
+  providerKey: string;
+  name: string;
+  providerType: string;
+  baseUrl: string;
+  config: Record<string, unknown>;
+  secretKeys: string[];
+  displaySecret: string | null;
+  status: string;
+  lastCheckedAt: string | null;
   createdAt: string;
   updatedAt: string;
 };
@@ -154,5 +220,6 @@ export type RuntimeSnapshot = {
   apiKeys: ApiKeyRecord[];
   agentGateways: AgentGateway[];
   availableAgents: AvailableAgent[];
+  providerAdapters: ProviderAdapter[];
   traces: EndpointTrace[];
 };

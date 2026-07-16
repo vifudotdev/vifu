@@ -9,6 +9,9 @@ const ALLOWED_ROOTS = new Set([
   "endpoints",
   "api-keys",
   "agent-gateways",
+  "project",
+  "provider-adapters",
+  "provider-connections",
   "traces",
 ]);
 const MAX_BODY_BYTES = 1024 * 1024;
@@ -31,6 +34,10 @@ export async function PATCH(request: Request, context: RuntimeRouteContext): Pro
   return proxyRuntimeRequest(request, context, "PATCH");
 }
 
+export async function PUT(request: Request, context: RuntimeRouteContext): Promise<Response> {
+  return proxyRuntimeRequest(request, context, "PUT");
+}
+
 export async function DELETE(request: Request, context: RuntimeRouteContext): Promise<Response> {
   return proxyRuntimeRequest(request, context, "DELETE");
 }
@@ -38,7 +45,7 @@ export async function DELETE(request: Request, context: RuntimeRouteContext): Pr
 async function proxyRuntimeRequest(
   request: Request,
   context: RuntimeRouteContext,
-  method: "GET" | "POST" | "PATCH" | "DELETE",
+  method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE",
 ): Promise<Response> {
   try {
     const { path } = await context.params;
@@ -53,7 +60,7 @@ async function proxyRuntimeRequest(
     return response === undefined
       ? new Response(null, { status: 204 })
       : NextResponse.json(response, {
-        status: method === "POST" && path[2] !== "invoke" ? 201 : 200,
+        status: method === "POST" && !["invoke", "test", "discover-agents"].includes(path.at(-1) ?? "") ? 201 : 200,
       });
   } catch (error) {
     if (error instanceof AuthorityError || error instanceof VifuHttpError) {
@@ -78,8 +85,32 @@ async function readBody(request: Request): Promise<ArrayBuffer> {
 }
 
 function isAllowedPath(path: string[]): boolean {
-  if (path.length < 1 || path.length > 3 || !ALLOWED_ROOTS.has(path[0] ?? "")) return false;
+  if (path.length < 1 || path.length > 5 || !ALLOWED_ROOTS.has(path[0] ?? "")) return false;
   if (!path.every((segment) => /^[A-Za-z0-9._:-]{1,128}$/.test(segment))) return false;
+  if (path[0] === "provider-adapters") return path.length === 1;
+  if (path[0] === "provider-connections") {
+    return path.length === 2 || (path.length === 3 && (path[2] === "test" || path[2] === "discover-agents"));
+  }
+  if (path[0] === "project") {
+    if (path.length < 3) return false;
+    if (path[2] === "canvas") {
+      if (path.length === 3) return true;
+      if (path.length === 4) return path[3] === "nodes" || path[3] === "edges";
+      return (path[3] === "nodes" || path[3] === "edges") && Boolean(path[4]);
+    }
+    if (path[2] === "provider-connections") {
+      if (path.length === 3) return true;
+      if (path.length === 4) return path[3] === "import" || Boolean(path[3]);
+      return path.length === 5 && (path[4] === "test" || path[4] === "discover-agents");
+    }
+    return false;
+  }
+  if (path[0] === "projects" && path.length >= 3) {
+    if (path[2] !== "canvas") return false;
+    if (path.length === 3) return true;
+    if (path.length === 4) return path[3] === "nodes" || path[3] === "edges";
+    return (path[3] === "nodes" || path[3] === "edges") && Boolean(path[4]);
+  }
   if (path.length === 3) return path[0] === "endpoints" && path[2] === "invoke";
   if (path.length === 2 && path[0] === "traces") return false;
   return true;

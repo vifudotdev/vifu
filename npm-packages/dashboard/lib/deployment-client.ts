@@ -7,6 +7,9 @@ import type {
   ApiKeyRecord,
   AvailableAgent,
   EndpointTrace,
+  ProjectCanvas,
+  ProviderAdapter,
+  ProviderConnection,
   RuntimeStatus,
   RuntimeProject,
 } from "./runtime-types";
@@ -50,6 +53,10 @@ export class DeploymentClient {
     return (await this.request<{ projects: RuntimeProject[] }>("/v1/projects")).projects ?? [];
   }
 
+  async projectCanvas(slug: string): Promise<ProjectCanvas> {
+    return (await this.request<{ canvas: ProjectCanvas }>(`/v1/project/${encodeURIComponent(slug)}/canvas`)).canvas;
+  }
+
   async profiles(): Promise<AgentProfile[]> {
     return (await this.request<{ profiles: AgentProfile[] }>("/v1/profiles")).profiles ?? [];
   }
@@ -72,6 +79,14 @@ export class DeploymentClient {
 
   async availableAgents(): Promise<AvailableAgent[]> {
     return (await this.request<{ agents: AvailableAgent[] }>("/v1/agents")).agents ?? [];
+  }
+
+  async providerAdapters(): Promise<ProviderAdapter[]> {
+    return (await this.request<{ providerAdapters: ProviderAdapter[] }>("/v1/provider-adapters")).providerAdapters ?? [];
+  }
+
+  async providerConnections(slug: string): Promise<ProviderConnection[]> {
+    return (await this.request<{ providerConnections: ProviderConnection[] }>(`/v1/project/${encodeURIComponent(slug)}/provider-connections`)).providerConnections ?? [];
   }
 
   async traces(): Promise<EndpointTrace[]> {

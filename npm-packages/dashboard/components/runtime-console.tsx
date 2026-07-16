@@ -3,53 +3,46 @@ import Link from "next/link";
 import type { LucideIcon } from "lucide-react";
 import {
   Activity,
-  Boxes,
-  Cable,
+  ChevronDown,
   FolderKanban,
-  Gauge,
+  Gamepad2,
+  HeartPulse,
   KeyRound,
   LogOut,
-  Network,
-  RadioTower,
-  Route,
+  Plus,
   ScrollText,
+  Search,
+  Settings,
 } from "lucide-react";
 import type { DashboardData } from "../lib/dashboard-data";
 import { authRequired } from "../lib/auth-providers";
 import type {
   AgentBinding,
   AgentEndpoint,
+  AgentGateway,
   AgentProfile,
   ApiKeyRecord,
-  AvailableAgent,
-  AgentGateway,
   EndpointTrace,
-  ServerCapabilities,
+  ProjectCanvas,
+  ProjectCanvasNode,
+  ProviderConnection,
   RuntimeProject,
+  ServerCapabilities,
 } from "../lib/runtime-types";
+import { RuntimeTraceWorkbench } from "./runtime-trace-workbench";
+import { AppLayout } from "./console-shell";
+import { DismissibleDetails } from "./dismissible-details";
 import {
   ApiKeyCreateForm,
-  BindingCreateForm,
-  BindingEditForm,
   DeleteResourceButton,
-  EndpointCreateForm,
-  EndpointEditForm,
-  InvokeEndpointForm,
-  ProfileCreateForm,
-  ProfileEditForm,
   ProjectCreateForm,
+  ProviderConnectionActions,
+  ProviderConnectionForm,
   RevokeApiKeyButton,
 } from "./runtime-actions";
+import { RuntimeGameplayCanvas } from "./runtime-gameplay-canvas";
 
-export type DashboardSection =
-  | "overview"
-  | "projects"
-  | "profiles"
-  | "bindings"
-  | "endpoints"
-  | "api-keys"
-  | "gateways"
-  | "traces";
+export type DashboardSection = "health" | "gameplay" | "api-keys" | "logs" | "settings";
 
 type NavigationItem = {
   id: DashboardSection;
@@ -58,240 +51,304 @@ type NavigationItem = {
   capability?: keyof ServerCapabilities;
 };
 
-const CORE_NAVIGATION: NavigationItem[] = [
-  { id: "overview", label: "Overview", icon: Gauge },
-  { id: "projects", label: "Projects", icon: FolderKanban, capability: "projects" },
-  { id: "profiles", label: "Profiles", icon: Boxes, capability: "profiles" },
-  { id: "bindings", label: "Bindings", icon: Cable, capability: "bindings" },
-  { id: "endpoints", label: "Endpoints", icon: Route, capability: "endpoints" },
-  { id: "api-keys", label: "API keys", icon: KeyRound, capability: "apiKeys" },
-  { id: "gateways", label: "Agent Gateways", icon: RadioTower, capability: "agentGateways" },
-  { id: "traces", label: "Traces", icon: ScrollText, capability: "traces" },
+const PROJECT_NAVIGATION: NavigationItem[] = [
+  { id: "health", label: "Health", icon: HeartPulse },
+  { id: "gameplay", label: "Gameplay", icon: Gamepad2, capability: "canvas" },
+  { id: "api-keys", label: "API Keys", icon: KeyRound, capability: "apiKeys" },
+  { id: "logs", label: "Logs", icon: ScrollText, capability: "traces" },
+  { id: "settings", label: "Settings", icon: Settings },
 ];
 
-const SECTION_TITLES: Record<DashboardSection, { eyebrow: string; title: string }> = {
-  overview: { eyebrow: "Runtime", title: "Overview" },
-  projects: { eyebrow: "Runtime", title: "Projects" },
-  profiles: { eyebrow: "Agents", title: "Agent profiles" },
-  bindings: { eyebrow: "Routing", title: "Bindings" },
-  endpoints: { eyebrow: "Runtime", title: "Agent endpoints" },
-  "api-keys": { eyebrow: "Access", title: "API keys" },
-  gateways: { eyebrow: "Agents", title: "Agent Gateways" },
-  traces: { eyebrow: "Observability", title: "Traces" },
+const SECTION_TITLES: Record<DashboardSection, string> = {
+  health: "Health",
+  gameplay: "Gameplay",
+  "api-keys": "API Keys",
+  logs: "Logs",
+  settings: "Settings",
 };
 
-export function RuntimeConsole({ section, data, browserApiBaseUrl, projectDomain }: {
+export function RuntimeConsole({
+  section,
+  projectSlug,
+  data,
+  browserApiBaseUrl,
+}: {
   section: DashboardSection;
+  projectSlug?: string;
   data: DashboardData;
   browserApiBaseUrl: string;
-  projectDomain: string;
 }) {
   const capabilities = data.authority.status.capabilities;
-  const activeSection = isSectionAvailable(section, capabilities) ? section : "overview";
+  const activeSection = isSectionAvailable(section, capabilities) ? section : "health";
+  const selectedProject = selectProject(data.runtime.projects, projectSlug, data.canvas);
   const title = SECTION_TITLES[activeSection];
   return (
-    <main className="console-app">
-      <aside className="console-sidebar">
-        <Link className="console-brand" href="/dashboard" aria-label="Vifu Dashboard">
-          <Image src="/brand/vifu-icon-512.png" width={32} height={32} alt="" priority />
-          <span>Vifu</span>
-        </Link>
-        <Navigation title="Runtime" items={CORE_NAVIGATION} active={activeSection} capabilities={capabilities} />
-        <div className="sidebar-footer">
-          <span>{dashboardIdentity(data)}</span>
-          <small>Runtime</small>
-          {authRequired(data.authority.status.auth) ? (
-            <form action="/auth/logout" method="post">
-              <button className="sidebar-signout" type="submit"><LogOut aria-hidden="true" />Sign out</button>
-            </form>
+    <AppLayout
+      sidebar={(
+        <>
+          <Link className="console-brand" href="/project" aria-label="Vifu Dashboard">
+            <Image src="/brand/vifu-icon-512.png" width={32} height={32} alt="" priority />
+            <span>Vifu</span>
+          </Link>
+          {selectedProject ? (
+            <Navigation project={selectedProject} items={PROJECT_NAVIGATION} active={activeSection} capabilities={capabilities} />
           ) : null}
-        </div>
-      </aside>
-
-      <section className="console-main">
-        <header className="console-topbar">
-          <div className="runtime-state"><span className="status-dot" />{data.authority.status.status}</div>
-          <div className="topbar-meta"><span>v{data.authority.status.version}</span><span>{data.authority.status.agentGateways} gateways</span></div>
-        </header>
-        <header className="page-header">
-          <p>{title.eyebrow}</p>
-          <h1>{title.title}</h1>
-        </header>
-        <div className="console-content">
-          <DashboardSectionView section={activeSection} data={data} browserApiBaseUrl={browserApiBaseUrl} projectDomain={projectDomain} />
-        </div>
-      </section>
-    </main>
+          {authRequired(data.authority.status.auth) ? (
+            <div className="sidebar-footer">
+              <form action="/auth/logout" method="post">
+                <button className="sidebar-signout" type="submit"><LogOut aria-hidden="true" /><span>Sign out</span></button>
+              </form>
+            </div>
+          ) : null}
+        </>
+      )}
+      header={(
+        <>
+          <ProjectBreadcrumb
+            projects={data.runtime.projects}
+            selectedProject={selectedProject}
+            activeSection={activeSection}
+            availableAgents={data.runtime.availableAgents}
+            agentGateways={data.runtime.agentGateways}
+          />
+          <div className="app-header-meta">
+            <div className="runtime-state"><span className="status-dot" />{runtimeStatusLabel(data.authority.status.status)}</div>
+            <div className="topbar-meta"><span>v{data.authority.status.version}</span><span>{gatewayCountLabel(data.authority.status.agentGateways)}</span></div>
+          </div>
+        </>
+      )}
+    >
+      {selectedProject ? (
+        <>
+          <header className="page-header project-page-header">
+            <h1>{title}</h1>
+          </header>
+          <div className={`console-content ${activeSection}-content`}>
+            <ProjectSectionView
+              section={activeSection}
+              project={selectedProject}
+              data={data}
+              browserApiBaseUrl={browserApiBaseUrl}
+            />
+          </div>
+        </>
+      ) : (
+        <NoProjectView data={data} />
+      )}
+    </AppLayout>
   );
 }
 
-function Navigation({ title, items, active, capabilities }: {
-  title: string;
+function ProjectBreadcrumb({
+  projects,
+  selectedProject,
+  activeSection,
+  availableAgents,
+  agentGateways,
+}: {
+  projects: RuntimeProject[];
+  selectedProject: RuntimeProject | null;
+  activeSection: DashboardSection;
+  availableAgents: DashboardData["runtime"]["availableAgents"];
+  agentGateways: AgentGateway[];
+}) {
+  return (
+    <nav className="project-breadcrumb" aria-label="Project">
+      <DismissibleDetails className="project-switcher">
+        <summary>
+          <span className="project-avatar"><FolderKanban aria-hidden="true" /></span>
+          <strong>{selectedProject?.name ?? "Create project"}</strong>
+          <ChevronDown aria-hidden="true" />
+        </summary>
+        <div className="project-menu">
+          <label className="project-search">
+            <Search aria-hidden="true" />
+            <input type="search" placeholder="Search projects..." />
+          </label>
+          <span>Projects</span>
+          <div className="project-menu-list">
+            {projects.map((project) => (
+              <Link key={project.id} href={`/project/${project.slug}/${activeSection}`} prefetch={false} title={project.name}>
+                <strong>{project.name}</strong>
+              </Link>
+            ))}
+          </div>
+          <section className="project-create-panel">
+            <div className="project-create-header"><Plus aria-hidden="true" /><span>Create project</span></div>
+            <ProjectCreateForm availableAgents={availableAgents} agentGateways={agentGateways} variant="menu" />
+          </section>
+        </div>
+      </DismissibleDetails>
+    </nav>
+  );
+}
+
+function Navigation({ project, items, active, capabilities }: {
+  project: RuntimeProject;
   items: NavigationItem[];
   active: DashboardSection;
   capabilities: ServerCapabilities;
 }) {
   const visible = items.filter((item) => !item.capability || capabilities[item.capability]);
-  if (visible.length === 0) return null;
   return (
-    <nav className="console-nav" aria-label={`${title} navigation`}>
-      <span>{title}</span>
+    <nav className="console-nav" aria-label="Project navigation">
       {visible.map((item) => {
         const Icon = item.icon;
-        const href = item.id === "overview" ? "/dashboard" : `/dashboard/${item.id}`;
-        return <Link className={active === item.id ? "active" : ""} href={href} key={item.id} prefetch={false}><Icon aria-hidden="true" />{item.label}</Link>;
+        const href = `/project/${project.slug}/${item.id}`;
+        return (
+          <Link className={active === item.id ? "active" : ""} href={href} key={item.id} prefetch={false} title={item.label}>
+            <Icon aria-hidden="true" />
+            <span>{item.label}</span>
+          </Link>
+        );
       })}
     </nav>
   );
 }
 
-function DashboardSectionView({ section, data, browserApiBaseUrl, projectDomain }: {
+function ProjectSectionView({
+  section,
+  project,
+  data,
+  browserApiBaseUrl,
+}: {
   section: DashboardSection;
+  project: RuntimeProject;
   data: DashboardData;
   browserApiBaseUrl: string;
-  projectDomain: string;
 }) {
-  if (section === "projects") return <ProjectsView projects={data.runtime.projects} availableAgents={data.runtime.availableAgents} agentGateways={data.runtime.agentGateways} browserApiBaseUrl={browserApiBaseUrl} projectDomain={projectDomain} />;
-  if (section === "profiles") return <ProfilesView profiles={data.runtime.profiles} />;
-  if (section === "bindings") return <BindingsView profiles={data.runtime.profiles} bindings={data.runtime.bindings} agentGateways={data.runtime.agentGateways} />;
-  if (section === "endpoints") return <EndpointsView profiles={data.runtime.profiles} bindings={data.runtime.bindings} endpoints={data.runtime.endpoints} browserApiBaseUrl={browserApiBaseUrl} />;
-  if (section === "api-keys") return <ApiKeysView keys={data.runtime.apiKeys} endpoints={data.runtime.endpoints} />;
-  if (section === "gateways") return <AgentGatewaysView agentGateways={data.runtime.agentGateways} availableAgents={data.runtime.availableAgents} />;
-  if (section === "traces") return <TracesView traces={data.runtime.traces} endpoints={data.runtime.endpoints} projects={data.runtime.projects} />;
-  return <OverviewView data={data} />;
+  const endpoints = projectEndpoints(project, data.runtime.endpoints);
+  if (section === "gameplay") {
+    return (
+      <RuntimeGameplayCanvas
+        project={project}
+        canvas={data.canvas}
+        profiles={data.runtime.profiles}
+        bindings={data.runtime.bindings}
+        agentGateways={data.runtime.agentGateways}
+        availableAgents={data.runtime.availableAgents}
+        endpoints={endpoints}
+        traces={projectTraces(data.runtime.traces, project)}
+        browserApiBaseUrl={browserApiBaseUrl}
+      />
+    );
+  }
+  if (section === "api-keys") return <ApiKeysView project={project} keys={data.runtime.apiKeys} endpoints={endpoints} />;
+  if (section === "logs") return <LogsView project={project} traces={projectTraces(data.runtime.traces, project)} />;
+  if (section === "settings") {
+    return (
+      <SettingsView
+        project={project}
+        endpoints={endpoints}
+        browserApiBaseUrl={browserApiBaseUrl}
+        providerAdapters={data.runtime.providerAdapters}
+        providerConnections={data.providerConnections}
+      />
+    );
+  }
+  return <HealthView project={project} canvas={data.canvas} data={data} endpoints={endpoints} browserApiBaseUrl={browserApiBaseUrl} />;
 }
 
-function OverviewView({ data }: { data: DashboardData }) {
-  const online = data.runtime.agentGateways.filter((gateway) => gateway.status === "connected").length;
-  const completed = data.runtime.traces.filter((trace) => trace.status === "completed").length;
-  return (
-    <>
-      <section className="metric-strip" aria-label="Runtime totals">
-        <Metric label="Projects" value={data.runtime.projects.length} icon={FolderKanban} />
-        <Metric label="Profiles" value={data.runtime.profiles.length} icon={Boxes} />
-        <Metric label="Detected agents" value={data.runtime.availableAgents.filter((agent) => agent.status === "connected").length} icon={Route} />
-        <Metric label="Agent gateways" value={online} icon={Network} />
-        <Metric label="Completed calls" value={completed} icon={Activity} />
-      </section>
-      <section className="content-section">
-        <SectionHeading title="Runtime status" />
-        <dl className="definition-grid">
-          <div><dt>Runtime</dt><dd>{data.authority.status.status === "ok" ? "Ready" : data.authority.status.status}</dd></div>
-          <div><dt>Agent connection</dt><dd>{online > 0 ? `${online} online` : "Waiting for an agent"}</dd></div>
-          <div><dt>Game access</dt><dd>{data.authority.status.capabilities.jsonRpc ? "Ready" : "Unavailable"}</dd></div>
-          <div><dt>Run history</dt><dd>{data.authority.status.capabilities.traces ? "Ready" : "Unavailable"}</dd></div>
-        </dl>
-      </section>
-      <section className="content-section">
-        <SectionHeading title="Recent traces" action={<Link href="/dashboard/traces">View all</Link>} />
-        <TraceTable traces={data.runtime.traces.slice(0, 8)} endpoints={data.runtime.endpoints} projects={data.runtime.projects} />
-      </section>
-    </>
-  );
-}
-
-function ProjectsView({ projects, availableAgents, agentGateways, browserApiBaseUrl, projectDomain }: {
-  projects: RuntimeProject[];
-  availableAgents: AvailableAgent[];
-  agentGateways: AgentGateway[];
-  browserApiBaseUrl: string;
-  projectDomain: string;
-}) {
-  return (
-    <>
-      <section className="content-section create-section"><SectionHeading title="New project" /><ProjectCreateForm availableAgents={availableAgents} agentGateways={agentGateways} /></section>
-      <section className="content-section"><SectionHeading title="Projects" count={projects.length} />
-        <ResourceList empty="No projects yet.">{projects.map((project) => (
-          <article className="resource-row" key={project.id}>
-            <ResourceIdentity title={project.name} code={projectRpcUrl(project.slug, browserApiBaseUrl, projectDomain)} description={project.description} />
-            <div className="resource-meta"><span className={project.enabled ? "status-label ready" : "status-label off"}>{project.enabled ? "Enabled" : "Disabled"}</span><span>{project.bindingIds.length} agents</span><span>JSON-RPC over HTTPS/WSS</span><span>{project.publishableKeyPrefix}...</span></div>
-            <DeleteResourceButton path={`projects/${project.id}`} label={project.name} />
-          </article>
-        ))}</ResourceList>
-      </section>
-    </>
-  );
-}
-
-function projectRpcUrl(slug: string, browserApiBaseUrl: string, projectDomain: string): string {
-  const url = new URL(browserApiBaseUrl);
-  url.hostname = `${slug}.${projectDomain}`;
-  url.pathname = "/";
-  url.search = "";
-  return url.toString().replace(/\/$/, "");
-}
-
-function ProfilesView({ profiles }: { profiles: AgentProfile[] }) {
-  return (
-    <>
-      <section className="content-section create-section"><SectionHeading title="New profile" /><ProfileCreateForm /></section>
-      <section className="content-section"><SectionHeading title="Profiles" count={profiles.length} />
-        <ResourceList empty="No profiles yet.">{profiles.map((profile) => (
-          <article className="resource-row" key={profile.id}>
-            <ResourceIdentity title={profile.name} code={profile.slug} description={profile.description} />
-            <div className="resource-meta"><span>Routing profile</span><time>{formatDate(profile.updatedAt)}</time></div>
-            <details className="row-editor"><summary>Edit</summary><ProfileEditForm profile={profile} /></details>
-            <DeleteResourceButton path={`profiles/${profile.id}`} label={profile.name} />
-          </article>
-        ))}</ResourceList>
-      </section>
-    </>
-  );
-}
-
-function BindingsView({ profiles, bindings, agentGateways }: { profiles: AgentProfile[]; bindings: AgentBinding[]; agentGateways: AgentGateway[] }) {
-  const profileNames = new Map(profiles.map((profile) => [profile.id, profile.name]));
-  return (
-    <>
-      <section className="content-section create-section"><SectionHeading title="New OpenClaw binding" /><BindingCreateForm profiles={profiles} agentGateways={agentGateways} /></section>
-      <section className="content-section"><SectionHeading title="Bindings" count={bindings.length} />
-        <ResourceList empty="No bindings yet.">{bindings.map((binding) => (
-          <article className="resource-row" key={binding.id}>
-            <ResourceIdentity title={profileNames.get(binding.profileId) ?? "Unknown profile"} code={`${binding.gatewayId} / ${binding.agentId}`} description={binding.provider} />
-            <div className="resource-meta"><span>OpenClaw HTTP</span><time>{formatDate(binding.updatedAt)}</time></div>
-            <details className="row-editor"><summary>Edit</summary><BindingEditForm binding={binding} /></details>
-            <DeleteResourceButton path={`bindings/${binding.id}`} label={`${binding.gatewayId} binding`} />
-          </article>
-        ))}</ResourceList>
-      </section>
-    </>
-  );
-}
-
-function EndpointsView({ profiles, bindings, endpoints, browserApiBaseUrl }: {
-  profiles: AgentProfile[];
-  bindings: AgentBinding[];
+function HealthView({
+  project,
+  canvas,
+  data,
+  endpoints,
+  browserApiBaseUrl,
+}: {
+  project: RuntimeProject;
+  canvas?: ProjectCanvas;
+  data: DashboardData;
   endpoints: AgentEndpoint[];
   browserApiBaseUrl: string;
 }) {
-  const profileNames = new Map(profiles.map((profile) => [profile.id, profile.name]));
+  const nodes = projectCanvasNodes(project, canvas);
+  const primaryEndpoint = endpoints[0];
+  const gateways = new Map(data.runtime.agentGateways.map((gateway) => [gateway.gatewayId, gateway]));
+  const exposed = nodes.filter((node) => node.exposed).length;
+  const connected = nodes.filter((node) => node.gatewayId && gateways.get(node.gatewayId)?.status === "connected").length;
+  const failures = projectTraces(data.runtime.traces, project).filter((trace) => trace.status !== "completed" && trace.status !== "pending");
+  const connectedGateways = data.runtime.agentGateways.filter((gateway) => gateway.status === "connected").length;
   return (
     <>
-      <section className="content-section create-section"><SectionHeading title="New endpoint" /><EndpointCreateForm profiles={profiles} bindings={bindings} /></section>
-      <section className="content-section"><SectionHeading title="Endpoints" count={endpoints.length} />
-        <ResourceList empty="No endpoints yet.">{endpoints.map((endpoint) => (
-          <article className="resource-row endpoint-row" key={endpoint.id}>
-            <ResourceIdentity title={endpoint.name} code={`${browserApiBaseUrl}/v1/endpoints/${endpoint.slug}/invoke`} description={profileNames.get(endpoint.profileId) ?? "Unknown profile"} />
-            <div className="resource-meta"><span className={endpoint.enabled ? "status-label ready" : "status-label off"}>{endpoint.enabled ? "Enabled" : "Disabled"}</span><span>{endpoint.requestTimeoutMs} ms</span></div>
-            <InvokeEndpointForm endpoint={endpoint} />
-            <details className="row-editor"><summary>Edit</summary><EndpointEditForm endpoint={endpoint} /></details>
-            <DeleteResourceButton path={`endpoints/${endpoint.id}`} label={endpoint.name} />
-          </article>
-        ))}</ResourceList>
+      <section className="health-summary">
+        <div className="summary-card endpoint-summary">
+          <div>
+            <span className="status-label ready">Endpoint</span>
+            <strong>Endpoint invoke API</strong>
+            {primaryEndpoint ? (
+              <code>{endpointInvokeUrl(primaryEndpoint, browserApiBaseUrl)}</code>
+            ) : (
+              <code>No endpoint yet</code>
+            )}
+          </div>
+          <dl>
+            <div><dt>Agents</dt><dd>{exposed}</dd></div>
+            <div><dt>Connected</dt><dd>{connected}</dd></div>
+            <div><dt>Failures</dt><dd>{failures.length}</dd></div>
+          </dl>
+        </div>
+        <Metric label="Canvas nodes" value={nodes.length} icon={Gamepad2} />
+        <Metric label="Gateways" value={connectedGateways} icon={Activity} />
+        <Metric label="Recent logs" value={projectTraces(data.runtime.traces, project).length} icon={ScrollText} />
+      </section>
+      {nodes.length === 0 || connectedGateways === 0 ? (
+        <SetupRail
+          project={project}
+          providerCount={data.providerConnections.length}
+          agentCount={data.runtime.availableAgents.length}
+          exposedCount={exposed}
+          connectedGatewayCount={connectedGateways}
+        />
+      ) : null}
+      <section className="content-section">
+        <SectionHeading title="Agents exposed by this project" count={nodes.length} action={<Link href={`/project/${project.slug}/gameplay`}>Open Gameplay</Link>} />
+        <ResourceList empty="No agents on this project canvas yet.">
+          {nodes.map((node) => {
+            const title = nodeTitle(node, data.runtime.profiles);
+            const resourceId = node.resourceId ?? node.id;
+            return (
+              <article className="resource-row health-agent-row" key={node.id}>
+                <ResourceIdentity title={title} code={resourceId === title ? undefined : resourceId} description={node.gatewayId ? gatewayDisplayLabel(node.gatewayId) : "unbound"} />
+                <div className="resource-meta">
+                  <span className={node.exposed ? "status-label ready" : "status-label pending"}>{node.exposed ? "Exposed" : "Hidden"}</span>
+                  <span className={node.gatewayId && gateways.get(node.gatewayId)?.status === "connected" ? "status-label ready" : "status-label off"}>
+                    {node.gatewayId && gateways.get(node.gatewayId)?.status === "connected" ? "Connected" : "Offline"}
+                  </span>
+                </div>
+              </article>
+            );
+          })}
+        </ResourceList>
+      </section>
+      <section className="content-section">
+        <SectionHeading title="Latest logs" action={<Link href={`/project/${project.slug}/logs`}>View logs</Link>} />
+        <TraceTable traces={projectTraces(data.runtime.traces, project).slice(0, 8)} project={project} />
       </section>
     </>
   );
 }
 
-function ApiKeysView({ keys, endpoints }: { keys: ApiKeyRecord[]; endpoints: AgentEndpoint[] }) {
-  const endpointNames = new Map(endpoints.map((endpoint) => [endpoint.id, endpoint.name]));
+function ApiKeysView({ project, keys, endpoints }: { project: RuntimeProject; keys: ApiKeyRecord[]; endpoints: AgentEndpoint[] }) {
+  const endpointIds = new Set(endpoints.map((endpoint) => endpoint.id));
+  const scopedKeys = keys.filter((key) => endpointIds.has(key.endpointId));
   return (
     <>
-      <section className="content-section create-section"><SectionHeading title="New API key" /><ApiKeyCreateForm endpoints={endpoints} /></section>
-      <section className="content-section"><SectionHeading title="API keys" count={keys.length} />
-        <ResourceList empty="No API keys yet.">{keys.map((key) => (
+      <section className="content-section">
+        <SectionHeading title="Endpoint access" />
+        <div className="definition-grid compact-definition-grid">
+          <div><dt>Project</dt><dd>{project.name}</dd></div>
+          <div><dt>Endpoints</dt><dd>{endpoints.length}</dd></div>
+          <div><dt>Status</dt><dd>{project.enabled ? "Enabled" : "Disabled"}</dd></div>
+        </div>
+      </section>
+      {endpoints.length > 0 ? (
+        <section className="content-section create-section"><SectionHeading title="New endpoint API key" /><ApiKeyCreateForm endpoints={endpoints} /></section>
+      ) : null}
+      <section className="content-section"><SectionHeading title="Endpoint API keys" count={scopedKeys.length} />
+        <ResourceList empty="No endpoint API keys for this project.">{scopedKeys.map((key) => (
           <article className="resource-row" key={key.id}>
-            <ResourceIdentity title={key.name} code={`${key.keyPrefix}...`} description={endpointNames.get(key.endpointId) ?? "Unknown endpoint"} />
+            <ResourceIdentity title={key.name} code={`${key.keyPrefix}...`} description={endpoints.find((endpoint) => endpoint.id === key.endpointId)?.name ?? "Unknown endpoint"} />
             <div className="resource-meta"><span className={key.revokedAt ? "status-label off" : "status-label ready"}>{key.revokedAt ? "Revoked" : "Active"}</span><time>{formatDate(key.createdAt)}</time></div>
             {!key.revokedAt ? <RevokeApiKeyButton id={key.id} name={key.name} /> : null}
           </article>
@@ -301,43 +358,158 @@ function ApiKeysView({ keys, endpoints }: { keys: ApiKeyRecord[]; endpoints: Age
   );
 }
 
-function AgentGatewaysView({ agentGateways, availableAgents }: { agentGateways: AgentGateway[]; availableAgents: AvailableAgent[] }) {
+function LogsView({ project, traces }: { project: RuntimeProject; traces: EndpointTrace[] }) {
+  return (
+    <section className="content-section trace-section convex-trace-section">
+      <RuntimeTraceWorkbench projectId={project.id} traces={traces} />
+    </section>
+  );
+}
+
+function SettingsView({
+  project,
+  endpoints,
+  browserApiBaseUrl,
+  providerAdapters,
+  providerConnections,
+}: {
+  project: RuntimeProject;
+  endpoints: AgentEndpoint[];
+  browserApiBaseUrl: string;
+  providerAdapters: DashboardData["runtime"]["providerAdapters"];
+  providerConnections: ProviderConnection[];
+}) {
+  const primaryEndpoint = endpoints[0];
   return (
     <>
-      <section className="content-section"><SectionHeading title="Detected agents" count={availableAgents.length} />
-        <ResourceList empty="No agents reported by an Agent Gateway yet.">{availableAgents.map((agent) => (
-          <article className="resource-row" key={`${agent.gatewayId}/${agent.id}`}>
-            <ResourceIdentity title={agent.name} code={agent.id} description={agent.gatewayId} />
-            <div className="resource-meta"><span className={agent.status === "connected" ? "status-label ready" : "status-label off"}>{agent.status}</span></div>
-          </article>
-        ))}</ResourceList>
+      <section className="content-section">
+        <SectionHeading title="Project settings" />
+        <dl className="definition-grid">
+          <div><dt>Name</dt><dd>{project.name}</dd></div>
+          <div><dt>Slug</dt><dd>{project.slug}</dd></div>
+          <div><dt>Invoke endpoint</dt><dd>{primaryEndpoint ? <code>{endpointInvokeUrl(primaryEndpoint, browserApiBaseUrl)}</code> : "No endpoint yet"}</dd></div>
+          <div><dt>Status</dt><dd>{project.enabled ? "Enabled" : "Disabled"}</dd></div>
+        </dl>
       </section>
-      <section className="content-section"><SectionHeading title="Agent Gateway sessions" count={agentGateways.length} />
-        <ResourceList empty="No Agent Gateway sessions yet.">{agentGateways.map((gateway) => (
-          <article className="resource-row" key={gateway.id}>
-            <ResourceIdentity title={gateway.gatewayId} code={gateway.sessionId} description={`${gateway.agents.length} agents`} />
-            <div className="resource-meta"><span className={gateway.status === "connected" ? "status-label ready" : "status-label off"}>{gateway.status}</span><time>{formatDate(gateway.lastSeenAt)}</time></div>
-          </article>
-        ))}</ResourceList>
+      <section className="content-section create-section">
+        <SectionHeading title="Provider settings" />
+        <ProviderConnectionForm project={project} adapters={providerAdapters} />
+      </section>
+      <section className="content-section">
+        <SectionHeading title="Configured providers" count={providerConnections.length} />
+        <ResourceList empty="No providers configured for this project.">
+          {providerConnections.map((connection) => (
+            <article className="resource-row" key={connection.id}>
+              <ResourceIdentity title={connection.name} code={connection.providerKey} description={connection.baseUrl} />
+              <div className="resource-meta">
+                <span className={connection.status === "online" ? "status-label ready" : connection.status === "configured" ? "status-label pending" : "status-label off"}>{connection.status}</span>
+                {connection.secretKeys.length > 0 ? <span>{connection.secretKeys.join(", ")}</span> : null}
+                {connection.displaySecret ? <code>{connection.displaySecret}</code> : null}
+              </div>
+              <ProviderConnectionActions project={project} connection={connection} />
+            </article>
+          ))}
+        </ResourceList>
+      </section>
+      <section className="content-section danger-section">
+        <SectionHeading title="Danger zone" />
+        <div className="settings-danger-row">
+          <div>
+            <strong>Delete project</strong>
+            <p>Remove this project from the dashboard. Detected gateway agents are not deleted.</p>
+          </div>
+          <DeleteResourceButton path={`projects/${project.id}`} label={project.name} />
+        </div>
       </section>
     </>
   );
 }
 
-function TracesView({ traces, endpoints, projects }: { traces: EndpointTrace[]; endpoints: AgentEndpoint[]; projects: RuntimeProject[] }) {
-  return <section className="content-section"><SectionHeading title="Invocation traces" count={traces.length} /><TraceTable traces={traces} endpoints={endpoints} projects={projects} /></section>;
+function NoProjectView({ data }: { data: DashboardData }) {
+  return (
+    <div className="console-content no-project-content">
+      <div className="first-run-layout">
+        <FirstRunRail />
+        <section className="content-section create-section">
+          <SectionHeading title="Create your first project" />
+          <ProjectCreateForm availableAgents={data.runtime.availableAgents} agentGateways={data.runtime.agentGateways} />
+        </section>
+      </div>
+    </div>
+  );
 }
 
-function TraceTable({ traces, endpoints, projects }: { traces: EndpointTrace[]; endpoints: AgentEndpoint[]; projects: RuntimeProject[] }) {
-  const resourceNames = new Map([
-    ...endpoints.map((endpoint) => [endpoint.id, endpoint.name] as const),
-    ...projects.map((project) => [project.id, project.name] as const),
-  ]);
-  if (traces.length === 0) return <EmptyState>No traces yet.</EmptyState>;
+function FirstRunRail() {
   return (
-    <div className="table-scroll"><table className="runtime-table"><thead><tr><th>Status</th><th>Endpoint</th><th>Request</th><th>Latency</th><th>Created</th></tr></thead>
-      <tbody>{traces.map((trace) => { const resourceId = trace.endpointId ?? trace.projectId; return <tr key={trace.id}><td><span className={trace.status === "completed" ? "status-label ready" : trace.status === "pending" ? "status-label pending" : "status-label off"}>{trace.status}</span></td><td>{resourceId ? resourceNames.get(resourceId) ?? shortId(resourceId) : "-"}</td><td><code>{shortId(trace.requestId)}</code></td><td>{trace.latencyMs === null ? "-" : `${trace.latencyMs} ms`}</td><td>{formatDate(trace.createdAt)}</td></tr>; })}</tbody>
-    </table></div>
+    <aside className="setup-rail first-run-rail" aria-label="Setup path">
+      <span>Setup path</span>
+      <ol>
+        <li className="active"><strong>Project</strong><small>Name the game or app you are building.</small></li>
+        <li><strong>Provider</strong><small>Connect OpenClaw or another agent provider.</small></li>
+        <li><strong>Agents</strong><small>Discover agents and place them on Gameplay.</small></li>
+        <li><strong>Endpoint</strong><small>Call this project from your game over HTTP or WebSocket.</small></li>
+      </ol>
+    </aside>
+  );
+}
+
+function SetupRail({ project, providerCount, agentCount, exposedCount, connectedGatewayCount }: {
+  project: RuntimeProject;
+  providerCount: number;
+  agentCount: number;
+  exposedCount: number;
+  connectedGatewayCount: number;
+}) {
+  const providerReady = providerCount > 0;
+  const agentsReady = agentCount > 0;
+  const endpointReady = exposedCount > 0;
+  const gatewayReady = connectedGatewayCount > 0;
+  const nextStep = !providerReady
+    ? "Connect an agent provider"
+    : !agentsReady
+      ? "Discover provider agents"
+      : !endpointReady
+        ? "Expose an agent endpoint"
+        : !gatewayReady
+          ? "Reconnect agent gateway"
+          : "Project is ready to call";
+  return (
+    <section className="setup-rail project-setup-rail" aria-label="Project setup">
+      <div>
+        <span>Next setup step</span>
+        <strong>{nextStep}</strong>
+      </div>
+      <ol>
+        <li className="ready"><strong>Project</strong><small>{project.slug}</small></li>
+        <li className={providerReady ? "ready" : "active"}><strong>Provider</strong><small>{providerReady ? `${providerCount} configured` : "Add one in Settings"}</small></li>
+        <li className={agentsReady ? "ready" : providerReady ? "active" : undefined}><strong>Agents</strong><small>{agentsReady ? `${agentCount} detected` : "Discover agents"}</small></li>
+        <li className={endpointReady ? "ready" : agentsReady ? "active" : undefined}><strong>Endpoint</strong><small>{endpointReady ? `${exposedCount} exposed` : "Add agents to Gameplay"}</small></li>
+        <li className={gatewayReady ? "ready" : endpointReady ? "active" : undefined}><strong>Gateway</strong><small>{gatewayReady ? `${connectedGatewayCount} online` : "Start gateway"}</small></li>
+      </ol>
+      <div className="setup-actions">
+        {!providerReady ? <Link className="primary-button" href={`/project/${project.slug}/settings`}>Connect provider</Link> : null}
+        {providerReady && !endpointReady ? <Link className="secondary-button" href={`/project/${project.slug}/gameplay`}>Open Gameplay</Link> : null}
+      </div>
+    </section>
+  );
+}
+
+function TraceTable({ traces, project: _project, detailed = false }: { traces: EndpointTrace[]; project: RuntimeProject; detailed?: boolean }) {
+  if (traces.length === 0) return <EmptyState>No logs yet.</EmptyState>;
+  if (detailed) {
+    return <RuntimeTraceWorkbench projectId={_project.id} traces={traces} />;
+  }
+  return (
+    <div className="trace-compact-list">
+      {traces.map((trace) => (
+        <article className="trace-compact-row" key={trace.id}>
+          <span className={trace.status === "completed" ? "status-label ready" : trace.status === "pending" ? "status-label pending" : "status-label off"}>{trace.status}</span>
+          <strong>{shortId(trace.requestId)}</strong>
+          <span>{trace.latencyMs === null ? "-" : `${trace.latencyMs} ms`}</span>
+          <time>{formatDate(trace.createdAt)}</time>
+        </article>
+      ))}
+    </div>
   );
 }
 
@@ -354,33 +526,79 @@ function ResourceList({ empty, children }: { empty: string; children: React.Reac
   return <div className="resource-list">{hasChildren ? children : <EmptyState>{empty}</EmptyState>}</div>;
 }
 
-function ResourceIdentity({ title, code, description }: { title: string; code: string; description?: string | null }) {
-  return <div className="resource-identity"><strong>{title}</strong><code>{code}</code>{description ? <span>{description}</span> : null}</div>;
+function ResourceIdentity({ title, code, description }: { title: string; code?: string; description?: string | null }) {
+  return <div className="resource-identity"><strong>{title}</strong>{code ? <code>{code}</code> : null}{description ? <span>{description}</span> : null}</div>;
 }
 
 function EmptyState({ children }: { children: React.ReactNode }) {
   return <div className="empty-state">{children}</div>;
 }
 
-function isSectionAvailable(section: DashboardSection, capabilities: ServerCapabilities): boolean {
-  const item = CORE_NAVIGATION.find((entry) => entry.id === section);
-  if (!item) return false;
-  return !item.capability || capabilities[item.capability];
+function selectProject(projects: RuntimeProject[], projectSlug: string | undefined, canvas: ProjectCanvas | undefined): RuntimeProject | null {
+  if (canvas?.project) return canvas.project;
+  return projects.find((project) => project.slug === projectSlug) ?? projects[0] ?? null;
 }
 
-function dashboardIdentity(data: DashboardData): string {
-  const principal = data.authority.principal;
-  return principal?.displayName
-    || principal?.email
-    || data.authority.displayName
-    || "Vifu";
+function isSectionAvailable(section: DashboardSection, capabilities: ServerCapabilities): boolean {
+  const item = PROJECT_NAVIGATION.find((entry) => entry.id === section);
+  return Boolean(item && (!item.capability || capabilities[item.capability]));
+}
+
+function projectCanvasNodes(project: RuntimeProject, canvas?: ProjectCanvas): ProjectCanvasNode[] {
+  if (canvas?.project.id === project.id) return canvas.nodes;
+  return [];
+}
+
+function projectEndpoints(project: RuntimeProject, endpoints: AgentEndpoint[]): AgentEndpoint[] {
+  const bindingIds = new Set(project.bindingIds);
+  return endpoints.filter((endpoint) => bindingIds.has(endpoint.bindingId));
+}
+
+function projectTraces(traces: EndpointTrace[], project: RuntimeProject): EndpointTrace[] {
+  return traces.filter((trace) => trace.projectId === project.id);
+}
+
+function nodeTitle(node: ProjectCanvasNode, profiles: AgentProfile[]): string {
+  const profileName = node.profileId ? profiles.find((profile) => profile.id === node.profileId)?.name : null;
+  const resourceName = String(node.config.agentName ?? node.resourceId ?? "Agent").trim();
+  if (profileName && profileName !== "Agent") return profileName;
+  return resourceName || "Agent";
+}
+
+function runtimeStatusLabel(status: string): string {
+  return `Runtime ${status.toLowerCase()}`;
+}
+
+function gatewayCountLabel(count: number): string {
+  return `${count} ${count === 1 ? "gateway" : "gateways"} online`;
+}
+
+function endpointInvokeUrl(endpoint: AgentEndpoint, browserApiBaseUrl: string): string {
+  const url = new URL(browserApiBaseUrl);
+  url.pathname = `/v1/endpoints/${encodeURIComponent(endpoint.slug || endpoint.id)}/invoke`;
+  url.search = "";
+  return url.toString().replace(/\/$/, "");
 }
 
 function formatDate(value: string): string {
   const date = new Date(value);
-  return Number.isNaN(date.valueOf()) ? "-" : new Intl.DateTimeFormat("en", { dateStyle: "medium", timeStyle: "short" }).format(date);
+  return Number.isNaN(date.valueOf())
+    ? "-"
+    : new Intl.DateTimeFormat("en", {
+      day: "numeric",
+      hour: "numeric",
+      minute: "2-digit",
+      month: "short",
+      timeZone: "UTC",
+      timeZoneName: "short",
+      year: "numeric",
+    }).format(date);
 }
 
 function shortId(value: string): string {
   return value.length > 12 ? `${value.slice(0, 8)}...` : value;
+}
+
+function gatewayDisplayLabel(value: string): string {
+  return value.startsWith("gateway-") ? `Gateway ${shortId(value.replace(/^gateway-/, ""))}` : shortId(value);
 }

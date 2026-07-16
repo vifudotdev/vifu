@@ -1,6 +1,7 @@
 import { randomBytes, randomUUID, createHash } from "node:crypto";
 import { compare, hash } from "bcryptjs";
 import postgres, { type Sql, type TransactionSql } from "postgres";
+import { configuredDatabaseUrl } from "./config";
 import type { AuthenticatedSession, Principal } from "./runtime-types";
 
 const SESSION_TTL_SECONDS = 30 * 24 * 60 * 60;
@@ -366,7 +367,7 @@ async function readSignupSettings(tx: QuerySql, lock: boolean): Promise<{ signup
 }
 
 function database(): Sql {
-  const databaseUrl = process.env.DATABASE_URL?.trim();
+  const databaseUrl = configuredDatabaseUrl();
   if (!databaseUrl) throw new DashboardAuthError(503, "DATABASE_URL is not configured for dashboard authentication.");
   sqlClient ??= postgres(databaseUrl, {
     max: 5,
@@ -538,7 +539,7 @@ function normalizeProviderSubject(value: string): string {
 function normalizeReturnTo(value: string | null | undefined): string {
   const returnTo = value?.trim() ?? "";
   if (!returnTo || !returnTo.startsWith("/") || returnTo.startsWith("//") || returnTo.length > 2048 || /[\u0000-\u001f\u007f]/.test(returnTo)) {
-    return "/dashboard";
+    return "/project";
   }
   return returnTo;
 }

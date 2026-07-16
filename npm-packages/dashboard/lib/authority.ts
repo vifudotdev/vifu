@@ -25,7 +25,7 @@ export async function resolveAuthority(options: {
   if (hasAuthProvider(auth, "password") || hasAuthProvider(auth, "oidc")) {
     const token = await readLocalSessionToken();
     if (!token) {
-      if (options.redirectToLogin !== false) redirect(dashboardLoginPath(options.returnTo ?? "/dashboard"));
+      if (options.redirectToLogin !== false) redirect(dashboardLoginPath(options.returnTo ?? "/project"));
       throw new AuthorityError(401, "Local session required.");
     }
     const adminKey = configuredAdminKey();
@@ -33,7 +33,7 @@ export async function resolveAuthority(options: {
     try {
       const principal = await principalForSessionToken(token);
       if (!principal) {
-        if (options.redirectToLogin !== false) redirect(dashboardLoginPath(options.returnTo ?? "/dashboard"));
+        if (options.redirectToLogin !== false) redirect(dashboardLoginPath(options.returnTo ?? "/project"));
         throw new AuthorityError(401, "Local session is invalid or expired.");
       }
       const deployment = new DeploymentClient({ apiBaseUrl, credential: adminKey });
@@ -42,16 +42,16 @@ export async function resolveAuthority(options: {
     } catch (error) {
       if (error instanceof AuthorityError) throw error;
       if (error instanceof DashboardAuthError && (error.status === 401 || error.status === 403)) {
-        if (options.redirectToLogin !== false) redirect(dashboardLoginPath(options.returnTo ?? "/dashboard"));
+        if (options.redirectToLogin !== false) redirect(dashboardLoginPath(options.returnTo ?? "/project"));
         throw new AuthorityError(401, "Local session is invalid or expired.");
       }
-      if (options.redirectToLogin !== false) redirect(dashboardLoginPath(options.returnTo ?? "/dashboard"));
+      if (options.redirectToLogin !== false) redirect(dashboardLoginPath(options.returnTo ?? "/project"));
       throw new AuthorityError(503, "The dashboard authentication store is temporarily unavailable.");
     }
   }
 
   if (authRequired(auth)) {
-    if (options.redirectToLogin !== false) redirect(dashboardLoginPath(options.returnTo ?? "/dashboard"));
+    if (options.redirectToLogin !== false) redirect(dashboardLoginPath(options.returnTo ?? "/project"));
     throw new AuthorityError(401, "A dashboard session is required.");
   }
 
@@ -98,7 +98,7 @@ export function createSelfHostedAuthorityAdapter(
 
 export async function loadRuntimeSnapshot(authority: AuthorityAdapter): Promise<RuntimeSnapshot> {
   const { capabilities } = authority.status;
-  const [projects, profiles, bindings, endpoints, apiKeys, agentGateways, availableAgents, traces] = await Promise.all([
+  const [projects, profiles, bindings, endpoints, apiKeys, agentGateways, availableAgents, providerAdapters, traces] = await Promise.all([
     capabilities.projects ? authority.deployment.projects() : Promise.resolve([]),
     capabilities.profiles ? authority.deployment.profiles() : Promise.resolve([]),
     capabilities.bindings ? authority.deployment.bindings() : Promise.resolve([]),
@@ -106,9 +106,10 @@ export async function loadRuntimeSnapshot(authority: AuthorityAdapter): Promise<
     capabilities.apiKeys ? authority.deployment.apiKeys() : Promise.resolve([]),
     capabilities.agentGateways ? authority.deployment.agentGateways() : Promise.resolve([]),
     capabilities.agentGateways ? authority.deployment.availableAgents() : Promise.resolve([]),
+    capabilities.providerConnections ? authority.deployment.providerAdapters() : Promise.resolve([]),
     capabilities.traces ? authority.deployment.traces() : Promise.resolve([]),
   ]);
-  return { projects, profiles, bindings, endpoints, apiKeys, agentGateways, availableAgents, traces };
+  return { projects, profiles, bindings, endpoints, apiKeys, agentGateways, availableAgents, providerAdapters, traces };
 }
 
 export class AuthorityError extends Error {

@@ -1,8 +1,10 @@
+import { readFileSync } from "node:fs";
+
 const DEFAULT_LOCAL_API_BASE_URL = "http://127.0.0.1:6790";
 const DEFAULT_BROWSER_API_BASE_URL = "http://localhost:6790";
 
 export function configuredApiBaseUrl(): string {
-  return normalizeHttpBase(process.env.VIFU_API_BASE_URL) ?? DEFAULT_LOCAL_API_BASE_URL;
+  return normalizeHttpBase(configuredValue("VIFU_API_BASE_URL")) ?? DEFAULT_LOCAL_API_BASE_URL;
 }
 
 export function configuredBrowserApiBaseUrl(): string {
@@ -11,13 +13,12 @@ export function configuredBrowserApiBaseUrl(): string {
     ?? DEFAULT_BROWSER_API_BASE_URL;
 }
 
-export function configuredProjectDomain(): string {
-  return process.env.NEXT_PUBLIC_VIFU_PROJECT_DOMAIN?.trim().replace(/^\.+|\.+$/g, "") || "localhost";
+export function configuredAdminKey(): string | null {
+  return configuredValue("VIFU_ADMIN_KEY");
 }
 
-export function configuredAdminKey(): string | null {
-  const value = process.env.VIFU_ADMIN_KEY?.trim();
-  return value || null;
+export function configuredDatabaseUrl(): string | null {
+  return configuredValue("DATABASE_URL");
 }
 
 export function configuredDashboardOrigin(requestUrl: string): string | null {
@@ -39,15 +40,15 @@ export function dashboardSignupPath(returnTo?: string): string {
 }
 
 export function sanitizeReturnTo(value: string | null | undefined): string {
-  if (!value || !value.startsWith("/") || value.startsWith("//")) return "/dashboard";
-  if (/[\u0000-\u001f\u007f]/.test(value)) return "/dashboard";
+  if (!value || !value.startsWith("/") || value.startsWith("//")) return "/project";
+  if (/[\u0000-\u001f\u007f]/.test(value)) return "/project";
   try {
     const base = new URL("https://dashboard.invalid");
     const target = new URL(value, base);
-    if (target.origin !== base.origin) return "/dashboard";
+    if (target.origin !== base.origin) return "/project";
     return `${target.pathname}${target.search}${target.hash}`;
   } catch {
-    return "/dashboard";
+    return "/project";
   }
 }
 
@@ -69,6 +70,19 @@ export function normalizeHttpBase(value: string | null | undefined): string | nu
   if (url.protocol !== "https:" && url.protocol !== "http:") return null;
   if (url.username || url.password || url.search || url.hash) return null;
   return url.toString().replace(/\/+$/, "");
+}
+
+function configuredValue(name: string): string | null {
+  const direct = process.env[name]?.trim();
+  if (direct) return direct;
+  const filePath = process.env[`${name}_FILE`]?.trim();
+  if (!filePath) return null;
+  try {
+    const value = readFileSync(filePath, "utf8").trim();
+    return value || null;
+  } catch {
+    return null;
+  }
 }
 
 function normalizeOrigin(value: string): string | null {

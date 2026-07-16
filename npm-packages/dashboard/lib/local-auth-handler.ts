@@ -23,7 +23,7 @@ export async function handleLocalAuth(request: Request, intent: "login" | "signu
       : jsonError(400, "INVALID_AUTH_REQUEST", "Unable to read authentication request.");
   }
 
-  const returnTo = sanitizeReturnTo(form.get("returnTo") ?? "/dashboard");
+  const returnTo = sanitizeReturnTo(form.get("returnTo") ?? "/project");
   const email = (form.get("email") ?? "").trim();
   const password = form.get("password") ?? "";
   const displayName = (form.get("displayName") ?? "").trim();

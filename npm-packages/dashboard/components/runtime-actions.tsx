@@ -3,17 +3,36 @@
 import type { FormEvent, ReactNode } from "react";
 import { useState } from "react";
 import { useRouter } from "next/navigation";
-import { Copy, KeyRound, Play, Plus, Save, Trash2, XCircle } from "lucide-react";
-import type { AgentBinding, AgentEndpoint, AgentGateway, AgentProfile, AvailableAgent } from "../lib/runtime-types";
+import { Copy, KeyRound, Play, PlugZap, Plus, RefreshCw, Save, Trash2, XCircle } from "lucide-react";
+import type {
+  AgentBinding,
+  AgentEndpoint,
+  AgentGateway,
+  AgentProfile,
+  AvailableAgent,
+  ProviderAdapter,
+  ProviderConnection,
+  RuntimeProject,
+} from "../lib/runtime-types";
 
 type ActionState = { tone: "error" | "success"; message: string } | null;
 
-export function ProjectCreateForm({ availableAgents, agentGateways }: { availableAgents: AvailableAgent[]; agentGateways: AgentGateway[] }) {
+export function ProjectCreateForm({
+  availableAgents,
+  agentGateways,
+  variant = "full",
+}: {
+  availableAgents: AvailableAgent[];
+  agentGateways: AgentGateway[];
+  variant?: "full" | "menu";
+}) {
   const router = useRouter();
   const [state, setState] = useState<ActionState>(null);
-  const [rawKey, setRawKey] = useState<string | null>(null);
+  const [createdSlug, setCreatedSlug] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
+  const [projectName, setProjectName] = useState("");
   const [gatewayId, setGatewayId] = useState("");
+  const isMenu = variant === "menu";
   const connectedGateways = new Set(agentGateways
     .filter((gateway) => gateway.status === "connected")
     .map((gateway) => gateway.gatewayId));
@@ -25,21 +44,20 @@ export function ProjectCreateForm({ availableAgents, agentGateways }: { availabl
     event.preventDefault();
     setPending(true);
     setState(null);
-    setRawKey(null);
+    setCreatedSlug(null);
     const form = new FormData(event.currentTarget);
+    const agentIds = form.getAll("agentIds").map(String).filter(Boolean);
     try {
-      const payload = await runtimeRequest<{ project?: { publishableKey?: string } }>("projects", "POST", {
+      const payload = await runtimeRequest<{ project?: { slug?: string } }>("projects", "POST", {
         name: value(form, "name"),
-        slug: optionalValue(form, "slug"),
         description: optionalValue(form, "description"),
-        gatewayId: value(form, "gatewayId"),
-        agentIds: form.getAll("agentIds").map(String),
+        gatewayId: optionalValue(form, "gatewayId"),
+        agentIds,
       });
-      const key = payload.project?.publishableKey;
-      if (!key) throw new Error("The runtime did not return the new publishable project key.");
-      setRawKey(key);
+      const slug = payload.project?.slug ?? null;
+      setCreatedSlug(slug);
       setState({ tone: "success", message: "Project created." });
-      router.refresh();
+      if (isMenu && slug) router.push(`/project/${slug}/health`);
     } catch (error) {
       setState({ tone: "error", message: errorMessage(error) });
     } finally {
@@ -48,28 +66,41 @@ export function ProjectCreateForm({ availableAgents, agentGateways }: { availabl
   }
 
   return (
-    <form className="runtime-form" onSubmit={submit}>
+    <form className={`runtime-form project-create-form${isMenu ? " menu" : ""}`} onSubmit={submit}>
       <div className="form-grid">
-        <Field label="Name"><input name="name" required maxLength={128} placeholder="Agentshire" /></Field>
-        <Field label="Slug"><input name="slug" maxLength={64} placeholder="agentshire" /></Field>
-        <Field label="Agent Gateway">
-          <select name="gatewayId" required value={gatewayId} onChange={(event) => setGatewayId(event.target.value)}>
-            <option value="" disabled>{gateways.length > 0 ? "Select Agent Gateway" : "No Agent Gateways connected"}</option>
-            {gateways.map((gatewayId) => <option key={gatewayId} value={gatewayId}>{gatewayId}</option>)}
-          </select>
+        <Field label="Name">
+          <input
+            name="name"
+            required
+            maxLength={128}
+            placeholder="My game"
+            value={projectName}
+            onChange={(event) => setProjectName(event.target.value)}
+          />
         </Field>
-        <Field label="OpenClaw agents" wide>
-          <select name="agentIds" multiple required size={Math.min(Math.max(gatewayAgents.length, 2), 8)}>
-            {gatewayAgents.map((agent) => <option key={`${agent.gatewayId}/${agent.id}`} value={agent.id}>{agent.name}</option>)}
-          </select>
-        </Field>
-        <Field label="Description" wide><input name="description" maxLength={4096} placeholder="Agent runtime for Agentshire" /></Field>
+        {isMenu ? null : <Field label="Description" wide><input name="description" maxLength={4096} placeholder="Agent runtime for your game" /></Field>}
+        {gateways.length > 0 ? (
+          <>
+            <Field label={isMenu ? "Gateway" : "Start with gateway"} wide={isMenu}>
+              <select name="gatewayId" value={gatewayId} onChange={(event) => setGatewayId(event.target.value)}>
+                <option value="">Create empty project</option>
+                {gateways.map((gatewayId) => <option key={gatewayId} value={gatewayId}>{gatewayId}</option>)}
+              </select>
+            </Field>
+            {isMenu ? null : <Field label="Detected agents" wide>
+              <select name="agentIds" multiple size={Math.min(Math.max(gatewayAgents.length, 2), 8)} disabled={!gatewayId}>
+                {gatewayAgents.map((agent) => <option key={`${agent.gatewayId}/${agent.id}`} value={agent.id}>{agent.name}</option>)}
+              </select>
+            </Field>}
+          </>
+        ) : null}
       </div>
+      {gateways.length === 0 ? <p className="form-hint">{isMenu ? "Provider setup lives in project Settings." : "Create the project first. You can connect an agent provider from Settings after the project exists."}</p> : null}
       <div className="form-actions">
-        <button className="primary-button" type="submit" disabled={pending || selectableAgents.length === 0}><Plus aria-hidden="true" />{pending ? "Creating" : "Create project"}</button>
+        <button className="primary-button" type="submit" disabled={pending}><Plus aria-hidden="true" />{pending ? "Creating" : "Create project"}</button>
+        {createdSlug && !isMenu ? <button className="secondary-button" type="button" onClick={() => router.push(`/project/${createdSlug}/health`)}>Open project</button> : null}
         <ActionMessage state={state} />
       </div>
-      {rawKey ? <KeyReveal value={rawKey} /> : null}
     </form>
   );
 }
@@ -289,6 +320,97 @@ export function ApiKeyCreateForm({ endpoints }: { endpoints: AgentEndpoint[] }) 
   );
 }
 
+export function ProviderConnectionForm({ project, adapters }: { project: RuntimeProject; adapters: ProviderAdapter[] }) {
+  const router = useRouter();
+  const adapter = adapters[0];
+  const [pending, setPending] = useState(false);
+  const [state, setState] = useState<ActionState>(null);
+
+  async function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setPending(true);
+    setState(null);
+    const form = new FormData(event.currentTarget);
+    const providerKey = value(form, "providerKey");
+    const secrets: Record<string, string> = {};
+    const token = optionalValue(form, "token");
+    if (token) secrets.token = token;
+    try {
+      await runtimeRequest(`project/${project.slug}/provider-connections/${providerKey}`, "PUT", {
+        name: optionalValue(form, "name") ?? adapter?.name ?? providerKey,
+        providerType: value(form, "providerType") || adapter?.id || "openclaw",
+        baseUrl: value(form, "baseUrl"),
+        config: {},
+        secrets,
+      });
+      setState({ tone: "success", message: "Provider saved." });
+      router.refresh();
+    } catch (error) {
+      setState({ tone: "error", message: errorMessage(error) });
+    } finally {
+      setPending(false);
+    }
+  }
+
+  return (
+    <form className="runtime-form" onSubmit={submit}>
+      <div className="form-grid">
+        <Field label="Provider key"><input name="providerKey" required maxLength={64} defaultValue="openclaw-local" /></Field>
+        <Field label="Provider">
+          <select name="providerType" required defaultValue={adapter?.id ?? "openclaw"}>
+            {adapters.length > 0 ? adapters.map((item) => <option key={item.id} value={item.id}>{item.name}</option>) : <option value="openclaw">OpenClaw</option>}
+          </select>
+        </Field>
+        <Field label="Name"><input name="name" maxLength={128} placeholder={adapter?.name ?? "OpenClaw"} /></Field>
+        <Field label="Gateway URL"><input name="baseUrl" required placeholder="http://host.docker.internal:18789" /></Field>
+        <Field label="Token"><input name="token" type="password" autoComplete="off" placeholder="Paste token" /></Field>
+      </div>
+      <div className="form-actions">
+        <button className="primary-button" type="submit" disabled={pending}><PlugZap aria-hidden="true" />{pending ? "Saving" : "Save provider"}</button>
+        <ActionMessage state={state} />
+      </div>
+    </form>
+  );
+}
+
+export function ProviderConnectionActions({ project, connection }: { project: RuntimeProject; connection: ProviderConnection }) {
+  return (
+    <span className="row-action-wrap">
+      <ProviderConnectionActionButton project={project} connection={connection} action="test" label="Test" icon={<RefreshCw aria-hidden="true" />} />
+      <ProviderConnectionActionButton project={project} connection={connection} action="discover-agents" label="Discover agents" icon={<Play aria-hidden="true" />} />
+      <DeleteResourceButton path={`project/${project.slug}/provider-connections/${connection.providerKey}`} label={connection.name} />
+    </span>
+  );
+}
+
+function ProviderConnectionActionButton({ project, connection, action, label, icon }: { project: RuntimeProject; connection: ProviderConnection; action: "test" | "discover-agents"; label: string; icon: ReactNode }) {
+  const router = useRouter();
+  const [pending, setPending] = useState(false);
+  const [state, setState] = useState<ActionState>(null);
+
+  async function run() {
+    setPending(true);
+    setState(null);
+    try {
+      const payload = await runtimeRequest<{ agents?: unknown[]; message?: string }>(`project/${project.slug}/provider-connections/${connection.providerKey}/${action}`, "POST");
+      const count = Array.isArray(payload.agents) ? ` ${payload.agents.length} agents found.` : "";
+      setState({ tone: "success", message: `${label} complete.${count}` });
+      router.refresh();
+    } catch (error) {
+      setState({ tone: "error", message: errorMessage(error) });
+    } finally {
+      setPending(false);
+    }
+  }
+
+  return (
+    <span className="row-action-wrap">
+      <button className="icon-text-button" type="button" onClick={run} disabled={pending}>{icon}{pending ? "Running" : label}</button>
+      <ActionMessage state={state} />
+    </span>
+  );
+}
+
 export function DeleteResourceButton({ path, label }: { path: string; label: string }) {
   const router = useRouter();
   const [pending, setPending] = useState(false);
@@ -381,7 +503,7 @@ function RuntimeForm({
   children,
 }: {
   path: string;
-  method?: "POST" | "PATCH";
+  method?: "POST" | "PUT" | "PATCH";
   submitLabel: string;
   successMessage: string;
   icon: ReactNode;

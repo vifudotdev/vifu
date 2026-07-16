@@ -19,7 +19,8 @@
     "incremental": true,
     "paths": {
       "@vifu/runtime": ["./packages/runtime/src/index.ts"],
-      "@vifu/runtime/*": ["./packages/runtime/src/*.ts"]
+      "@vifu/runtime/*": ["./packages/runtime/src/*.ts"],
+      "@vifu/sdk": ["./packages/sdk/src/index.d.ts"]
     }
   }
 }

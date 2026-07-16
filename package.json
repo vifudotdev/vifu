@@ -15,15 +15,23 @@
     "test:e2e": "playwright test",
     "test:oidc": "sh scripts/run-oidc-e2e.sh",
     "test:self-hosted": "sh scripts/run-self-hosted-e2e.sh",
-    "dev:database": "docker compose -f self-hosted/docker/docker-compose.yml up -d postgres",
+    "dev:database": "docker compose --env-file .env.local -f self-hosted/docker/docker-compose.yml -f self-hosted/docker/docker-compose.local.yml up -d postgres",
+    "dev:database:down": "docker compose --env-file .env.local -f self-hosted/docker/docker-compose.yml -f self-hosted/docker/docker-compose.local.yml down",
     "dev:server": "sh scripts/dev-server.sh",
     "dev:agent-gateway": "sh scripts/dev-agent-gateway.sh",
     "dev:openclaw-mock": "node scripts/mock-openclaw.mjs",
     "dev:dashboard": "sh scripts/dev-dashboard.sh",
-    "dev:local": "sh scripts/dev-dashboard.sh",
-    "self-host": "docker compose -f self-hosted/docker/docker-compose.yml up --build"
+    "dev:local": "sh scripts/local.sh",
+    "local": "sh scripts/local.sh",
+    "local:stop": "sh scripts/local-stop.sh",
+    "local:restart": "sh scripts/local-stop.sh && sh scripts/local.sh",
+    "self-host": "sh scripts/self-host.sh",
+    "self-host:stop": "docker compose stop",
+    "self-host:restart": "docker compose restart",
+    "self-host:logs": "docker compose logs -f"
   },
   "devDependencies": {
-    "@playwright/test": "^1.61.1"
+    "@playwright/test": "^1.61.1",
+    "vitest": "^3.2.4"
   }
 }
