@@ -1,13 +1,13 @@
 # @vifu/protocol
 
-Shared TypeScript definitions for Vifu protocol messages.
+Shared TypeScript definitions for Vifu gateway protocol messages.
 
-This package currently includes gateway frame types:
+Vifu uses a small JSON frame model for gateway transports:
 
 - `type: "req"` with `id`, `method`, and optional `params`
 - `type: "res"` with `id`, `ok`, and optional `payload` or `error`
 - `type: "event"` with `event` and optional `payload`
 
-It also includes helper types for the current Project JSON-RPC endpoint and
-discovery payload, plus Vifu Agent Gateway method, event, and payload
-definitions for the frame transport.
+This package also defines the current Vifu Agent Gateway method, event, and
+payload shapes. Product APIs such as endpoint invocation are HTTP contracts and
+are intentionally kept outside this gateway frame package.
