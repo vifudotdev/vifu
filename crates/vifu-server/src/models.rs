@@ -14,7 +14,6 @@ pub struct Capabilities {
     pub api_keys: bool,
     pub agent_gateways: bool,
     pub traces: bool,
-    pub json_rpc: bool,
 }
 
 impl Capabilities {
@@ -27,7 +26,6 @@ impl Capabilities {
             api_keys: true,
             agent_gateways: true,
             traces: true,
-            json_rpc: true,
         }
     }
 }
@@ -41,7 +39,6 @@ pub struct Project {
     pub description: Option<String>,
     pub gateway_id: String,
     pub enabled: bool,
-    pub publishable_key_prefix: String,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -76,51 +73,6 @@ pub struct ProjectWithBindings {
     #[serde(flatten)]
     pub project: Project,
     pub binding_ids: Vec<Uuid>,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CreatedProject {
-    #[serde(flatten)]
-    pub project: ProjectWithBindings,
-    pub publishable_key: String,
-}
-
-#[derive(Debug, Clone, FromRow)]
-pub struct ProjectRoute {
-    pub id: Uuid,
-    pub slug: String,
-    pub gateway_id: String,
-    pub publishable_key_hash: Vec<u8>,
-}
-
-#[derive(Debug, Clone, FromRow)]
-pub struct ProjectAgentRoute {
-    pub project_id: Uuid,
-    pub project_slug: String,
-    pub profile_id: Uuid,
-    pub profile_slug: String,
-    pub profile_name: String,
-    pub binding_id: Uuid,
-    pub gateway_id: String,
-    pub agent_id: String,
-    pub binding_config: Value,
-}
-
-impl ProjectAgentRoute {
-    pub fn endpoint_route(&self, request_timeout_ms: i32) -> EndpointRoute {
-        EndpointRoute {
-            endpoint_id: self.project_id,
-            endpoint_slug: self.project_slug.clone(),
-            endpoint_name: self.project_slug.clone(),
-            request_timeout_ms,
-            profile_id: self.profile_id,
-            binding_id: self.binding_id,
-            gateway_id: self.gateway_id.clone(),
-            agent_id: self.agent_id.clone(),
-            binding_config: self.binding_config.clone(),
-        }
-    }
 }
 
 #[derive(Debug, Clone, Serialize, FromRow)]

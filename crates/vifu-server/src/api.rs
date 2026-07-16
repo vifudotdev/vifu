@@ -16,7 +16,7 @@ use crate::db::{self, EndpointPatch, NewEndpoint, NewProject, ProfilePatch, Proj
 use crate::error::ApiError;
 use crate::models::{
     slugify, validate_slug, Capabilities, CreateApiKey, CreateBinding, CreateEndpoint,
-    CreateProfile, CreateProject, CreatedApiKey, CreatedProject, InvokeEndpoint, UpdateBinding,
+    CreateProfile, CreateProject, CreatedApiKey, InvokeEndpoint, UpdateBinding,
     UpdateEndpoint, UpdateProfile, UpdateProject,
 };
 use crate::relay::RelayCallError;
@@ -109,9 +109,6 @@ pub async fn create_project(
     }
     binding_ids.sort_unstable();
     binding_ids.dedup();
-    let publishable_key = generate_publishable_project_key();
-    let publishable_key_prefix = publishable_key.chars().take(18).collect::<String>();
-    let publishable_key_hash = hash_api_key(&publishable_key, &state.config.api_key_pepper);
     let project = db::create_project(
         &state.pool,
         NewProject {
@@ -120,16 +117,11 @@ pub async fn create_project(
             name,
             description,
             gateway_id,
-            publishable_key_prefix: &publishable_key_prefix,
-            publishable_key_hash: &publishable_key_hash,
             binding_ids: &binding_ids,
         },
     )
     .await?;
-    Ok((
-        StatusCode::CREATED,
-        Json(json!({ "project": CreatedProject { project, publishable_key } })),
-    ))
+    Ok((StatusCode::CREATED, Json(json!({ "project": project }))))
 }
 
 pub async fn get_project(
@@ -771,14 +763,6 @@ fn validate_json_object(name: &str, value: &Value, max: usize) -> Result<(), Api
 fn generate_api_key() -> String {
     format!(
         "vifu_ep_{}{}",
-        Uuid::new_v4().simple(),
-        Uuid::new_v4().simple()
-    )
-}
-
-fn generate_publishable_project_key() -> String {
-    format!(
-        "vifu_pk_{}{}",
         Uuid::new_v4().simple(),
         Uuid::new_v4().simple()
     )

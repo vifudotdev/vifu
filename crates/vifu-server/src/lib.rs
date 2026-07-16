@@ -4,7 +4,6 @@ pub mod config;
 pub mod db;
 pub mod error;
 pub mod models;
-pub mod project_rpc;
 pub mod relay;
 pub mod websocket;
 
@@ -66,10 +65,6 @@ pub fn app(state: AppState) -> Router {
 
     Router::new()
         .route("/health", get(api::health))
-        .route(
-            "/",
-            get(project_rpc::upgrade_by_host).post(project_rpc::post_by_host),
-        )
         .route("/v1/status", get(api::status))
         .route(
             "/v1/projects",
@@ -80,10 +75,6 @@ pub fn app(state: AppState) -> Router {
             get(api::get_project)
                 .patch(api::update_project)
                 .delete(api::delete_project),
-        )
-        .route(
-            "/v1/projects/{slug}/rpc",
-            get(project_rpc::upgrade_by_slug).post(project_rpc::post_by_slug),
         )
         .route(
             "/v1/profiles",

@@ -8,8 +8,7 @@ use uuid::Uuid;
 use crate::error::{map_database_error, ApiError};
 use crate::models::{
     slugify, validate_slug, AgentBinding, AgentEndpoint, AgentGatewaySession, AgentProfile,
-    ApiKeyRecord, AvailableAgent, EndpointRoute, EndpointTrace, Project, ProjectAgentRoute,
-    ProjectRoute, ProjectWithBindings,
+    ApiKeyRecord, AvailableAgent, EndpointRoute, EndpointTrace, Project, ProjectWithBindings,
 };
 
 pub async fn migrate(pool: &PgPool) -> Result<(), ApiError> {
@@ -35,8 +34,8 @@ pub async fn mark_agent_gateway_sessions_disconnected(pool: &PgPool) -> Result<(
 
 pub async fn list_projects(pool: &PgPool) -> Result<Vec<ProjectWithBindings>, ApiError> {
     let projects = sqlx::query_as::<_, Project>(
-        "SELECT id, slug, name, description, gateway_id, enabled,
-                publishable_key_prefix, created_at, updated_at
+        "SELECT id, slug, name, description, gateway_id, enabled, created_at,
+                updated_at
          FROM projects ORDER BY created_at ASC",
     )
     .fetch_all(pool)
@@ -46,8 +45,8 @@ pub async fn list_projects(pool: &PgPool) -> Result<Vec<ProjectWithBindings>, Ap
 
 pub async fn get_project(pool: &PgPool, id: Uuid) -> Result<ProjectWithBindings, ApiError> {
     let project = sqlx::query_as::<_, Project>(
-        "SELECT id, slug, name, description, gateway_id, enabled,
-                publishable_key_prefix, created_at, updated_at
+        "SELECT id, slug, name, description, gateway_id, enabled, created_at,
+                updated_at
          FROM projects WHERE id = $1",
     )
     .bind(id)
@@ -68,19 +67,16 @@ pub async fn create_project(
     let mut transaction = pool.begin().await?;
     let created = sqlx::query_as::<_, Project>(
         "INSERT INTO projects
-            (id, slug, name, description, gateway_id,
-             publishable_key_prefix, publishable_key_hash)
-         VALUES ($1, $2, $3, $4, $5, $6, $7)
-         RETURNING id, slug, name, description, gateway_id, enabled,
-                   publishable_key_prefix, created_at, updated_at",
+            (id, slug, name, description, gateway_id)
+         VALUES ($1, $2, $3, $4, $5)
+         RETURNING id, slug, name, description, gateway_id, enabled, created_at,
+                   updated_at",
     )
     .bind(project.id)
     .bind(project.slug)
     .bind(project.name)
     .bind(project.description)
     .bind(project.gateway_id)
-    .bind(project.publishable_key_prefix)
-    .bind(project.publishable_key_hash)
     .fetch_one(&mut *transaction)
     .await
     .map_err(map_database_error)?;
@@ -104,8 +100,6 @@ pub struct NewProject<'a> {
     pub name: &'a str,
     pub description: Option<&'a str>,
     pub gateway_id: &'a str,
-    pub publishable_key_prefix: &'a str,
-    pub publishable_key_hash: &'a [u8],
     pub binding_ids: &'a [Uuid],
 }
 
@@ -132,7 +126,7 @@ pub async fn update_project(
             updated_at = NOW()
          WHERE id = $1
          RETURNING id, slug, name, description, gateway_id, enabled,
-                   publishable_key_prefix, created_at, updated_at",
+                   created_at, updated_at",
     )
     .bind(id)
     .bind(patch.slug)
@@ -180,40 +174,6 @@ pub struct ProjectPatch<'a> {
 
 pub async fn delete_project(pool: &PgPool, id: Uuid) -> Result<(), ApiError> {
     delete_by_id(pool, "projects", id).await
-}
-
-pub async fn resolve_project_route(pool: &PgPool, slug: &str) -> Result<ProjectRoute, ApiError> {
-    sqlx::query_as::<_, ProjectRoute>(
-        "SELECT id, slug, gateway_id, publishable_key_hash
-         FROM projects WHERE slug = $1 AND enabled = TRUE",
-    )
-    .bind(slug)
-    .fetch_optional(pool)
-    .await?
-    .ok_or(ApiError::NotFound)
-}
-
-pub async fn list_project_agent_routes(
-    pool: &PgPool,
-    project_id: Uuid,
-) -> Result<Vec<ProjectAgentRoute>, ApiError> {
-    sqlx::query_as::<_, ProjectAgentRoute>(
-        "SELECT project.id AS project_id, project.slug AS project_slug,
-                profile.id AS profile_id, profile.slug AS profile_slug,
-                profile.name AS profile_name,
-                binding.id AS binding_id, binding.gateway_id, binding.agent_id,
-                binding.config AS binding_config
-         FROM projects project
-         JOIN project_bindings project_binding ON project_binding.project_id = project.id
-         JOIN agent_bindings binding ON binding.id = project_binding.binding_id
-         JOIN agent_profiles profile ON profile.id = binding.profile_id
-         WHERE project.id = $1 AND project.enabled = TRUE
-         ORDER BY project_binding.created_at ASC",
-    )
-    .bind(project_id)
-    .fetch_all(pool)
-    .await
-    .map_err(ApiError::from)
 }
 
 async fn projects_with_bindings(
@@ -909,29 +869,6 @@ pub async fn create_trace(
     .bind(Uuid::new_v4())
     .bind(request_id)
     .bind(endpoint_id)
-    .bind(gateway_session_id)
-    .bind(request)
-    .execute(pool)
-    .await
-    .map_err(map_database_error)?;
-    Ok(())
-}
-
-pub async fn create_project_trace(
-    pool: &PgPool,
-    request_id: Uuid,
-    project_id: Uuid,
-    gateway_session_id: Option<Uuid>,
-    request: &Value,
-) -> Result<(), ApiError> {
-    sqlx::query(
-        "INSERT INTO endpoint_traces
-            (id, request_id, project_id, gateway_session_id, status, request)
-         VALUES ($1, $2, $3, $4, 'pending', $5)",
-    )
-    .bind(Uuid::new_v4())
-    .bind(request_id)
-    .bind(project_id)
     .bind(gateway_session_id)
     .bind(request)
     .execute(pool)
