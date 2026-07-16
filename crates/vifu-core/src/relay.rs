@@ -15,7 +15,7 @@ use uuid::Uuid;
 
 use crate::gateway_frame;
 use crate::openclaw::{self, Endpoint};
-use crate::protocol::{self, AgentDescriptor, AgentGatewayMessage};
+use crate::protocol::{self, AgentDescriptor, AgentGatewayCommand};
 use crate::session::{self, SessionSummary};
 
 const MAX_CONCURRENT_CALLS: usize = 64;
@@ -87,9 +87,9 @@ async fn run_connection(
         .await
         .map_err(|error| error.to_string())?;
 
-    send_message(
+    send_command(
         &mut socket,
-        &AgentGatewayMessage::Hello {
+        &AgentGatewayCommand::Hello {
             protocol: protocol::VERSION.to_string(),
             gateway_id: session.gateway_id.clone(),
             resume_session_id: session.resume_session_id,
@@ -102,10 +102,10 @@ async fn run_connection(
     )
     .await?;
 
-    let welcome = tokio::time::timeout(Duration::from_secs(10), receive_message(&mut socket))
+    let welcome = tokio::time::timeout(Duration::from_secs(10), receive_command(&mut socket))
         .await
         .map_err(|_| "server did not accept the agent gateway in time".to_string())??;
-    let AgentGatewayMessage::Welcome {
+    let AgentGatewayCommand::Welcome {
         connection_id,
         session_id,
         heartbeat_interval_ms: _,
@@ -122,7 +122,7 @@ async fn run_connection(
     );
 
     let (outbound_sender, mut outbound_receiver) =
-        mpsc::channel::<AgentGatewayMessage>(OUTBOUND_QUEUE_CAPACITY);
+        mpsc::channel::<AgentGatewayCommand>(OUTBOUND_QUEUE_CAPACITY);
     let semaphore = std::sync::Arc::new(Semaphore::new(MAX_CONCURRENT_CALLS));
     let mut calls = HashMap::<Uuid, JoinHandle<()>>::new();
 
@@ -134,16 +134,16 @@ async fn run_connection(
                 let Some(outbound) = outbound else {
                     return Err("agent gateway output queue closed".to_string());
                 };
-                send_message(&mut socket, &outbound).await?;
+                send_command(&mut socket, &outbound).await?;
             }
-            incoming = receive_message(&mut socket) => {
+            incoming = receive_command(&mut socket) => {
                 let incoming = match incoming {
                     Ok(message) => message,
                     Err(error) if error == "server disconnected" => break ConnectionOutcome::Disconnected,
                     Err(error) => return Err(error),
                 };
                 match incoming {
-                    AgentGatewayMessage::Invoke {
+                    AgentGatewayCommand::Invoke {
                         request_id,
                         channel_id,
                         endpoint_id: _,
@@ -191,7 +191,7 @@ async fn run_connection(
                             )
                             .await;
                             let message = match result {
-                                Ok(output) => AgentGatewayMessage::Result {
+                                Ok(output) => AgentGatewayCommand::Result {
                                     request_id,
                                     channel_id,
                                     output,
@@ -208,21 +208,21 @@ async fn run_connection(
                         });
                         calls.insert(request_id, handle);
                     }
-                    AgentGatewayMessage::Cancel { request_id, .. } => {
+                    AgentGatewayCommand::Cancel { request_id, .. } => {
                         if let Some(call) = calls.remove(&request_id) {
                             call.abort();
                         }
                     }
-                    AgentGatewayMessage::Heartbeat { session_id: received } => {
+                    AgentGatewayCommand::Heartbeat { session_id: received } => {
                         if received != session_id {
                             return Err("server heartbeat session does not match".to_string());
                         }
                         outbound_sender
-                            .send(AgentGatewayMessage::HeartbeatAck { session_id })
+                            .send(AgentGatewayCommand::HeartbeatAck { session_id })
                             .await
                             .map_err(|_| "agent gateway output queue closed".to_string())?;
                     }
-                    AgentGatewayMessage::Error {
+                    AgentGatewayCommand::Error {
                         request_id: None,
                         code,
                         message,
@@ -231,7 +231,7 @@ async fn run_connection(
                         eprintln!("Agent Gateway session replaced: {}", sanitize_error(&message));
                         break ConnectionOutcome::Disconnected;
                     }
-                    AgentGatewayMessage::Error {
+                    AgentGatewayCommand::Error {
                         request_id: None,
                         message,
                         ..
@@ -294,15 +294,15 @@ fn is_loopback_server(url: &Url) -> bool {
             .is_ok_and(|address| address.is_loopback())
 }
 
-async fn receive_message<S>(
+async fn receive_command<S>(
     socket: &mut tokio_tungstenite::WebSocketStream<S>,
-) -> Result<AgentGatewayMessage, String>
+) -> Result<AgentGatewayCommand, String>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
     loop {
         match socket.next().await {
-            Some(Ok(Message::Text(frame))) => return decode_message(frame.as_str()),
+            Some(Ok(Message::Text(frame))) => return decode_command(frame.as_str()),
             Some(Ok(Message::Ping(payload))) => socket
                 .send(Message::Pong(payload))
                 .await
@@ -317,38 +317,38 @@ where
     }
 }
 
-async fn send_message<S>(
+async fn send_command<S>(
     socket: &mut tokio_tungstenite::WebSocketStream<S>,
-    message: &AgentGatewayMessage,
+    message: &AgentGatewayCommand,
 ) -> Result<(), String>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
     socket
-        .send(Message::Text(encode_message(message)?.into()))
+        .send(Message::Text(encode_command(message)?.into()))
         .await
         .map_err(|error| error.to_string())
 }
 
-fn decode_message(source: &str) -> Result<AgentGatewayMessage, String> {
+fn decode_command(source: &str) -> Result<AgentGatewayCommand, String> {
     let frame = gateway_frame::decode(source)?;
     protocol::from_gateway_frame(frame)
 }
 
-fn encode_message(message: &AgentGatewayMessage) -> Result<String, String> {
+fn encode_command(message: &AgentGatewayCommand) -> Result<String, String> {
     let frame = protocol::to_gateway_frame(message)?;
     gateway_frame::encode(&frame)
 }
 
 async fn queue_error(
-    sender: &mpsc::Sender<AgentGatewayMessage>,
+    sender: &mpsc::Sender<AgentGatewayCommand>,
     request_id: Option<Uuid>,
     channel_id: Option<u64>,
     code: &str,
     message: &str,
 ) -> Result<(), String> {
     sender
-        .send(AgentGatewayMessage::Error {
+        .send(AgentGatewayCommand::Error {
             request_id,
             channel_id,
             code: code.to_string(),
@@ -363,8 +363,8 @@ fn agent_gateway_error(
     channel_id: u64,
     code: &str,
     message: &str,
-) -> AgentGatewayMessage {
-    AgentGatewayMessage::Error {
+) -> AgentGatewayCommand {
+    AgentGatewayCommand::Error {
         request_id: Some(request_id),
         channel_id: Some(channel_id),
         code: code.to_string(),

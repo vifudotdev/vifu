@@ -31,8 +31,11 @@ pub struct AgentDescriptor {
     pub metadata: Value,
 }
 
+/// Internal semantic command for relay state machines.
+///
+/// The WebSocket wire contract is `GatewayFrame`; do not serialize this enum directly.
 #[derive(Debug, Clone, PartialEq)]
-pub enum AgentGatewayMessage {
+pub enum AgentGatewayCommand {
     Hello {
         protocol: String,
         gateway_id: String,
@@ -147,20 +150,10 @@ struct ErrorEventPayload {
     message: String,
 }
 
-pub fn encode(message: &AgentGatewayMessage) -> Result<String, String> {
-    let frame = to_gateway_frame(message)?;
-    gateway_frame::encode(&frame)
-}
-
-pub fn decode(source: &str) -> Result<AgentGatewayMessage, String> {
-    let frame = gateway_frame::decode(source)?;
-    from_gateway_frame(frame)
-}
-
-pub fn to_gateway_frame(message: &AgentGatewayMessage) -> Result<GatewayFrame, String> {
-    validate_message(message)?;
-    match message {
-        AgentGatewayMessage::Hello {
+pub fn to_gateway_frame(command: &AgentGatewayCommand) -> Result<GatewayFrame, String> {
+    validate_command(command)?;
+    match command {
+        AgentGatewayCommand::Hello {
             protocol,
             gateway_id,
             resume_session_id,
@@ -177,7 +170,7 @@ pub fn to_gateway_frame(message: &AgentGatewayMessage) -> Result<GatewayFrame, S
                 metadata: metadata.clone(),
             },
         ),
-        AgentGatewayMessage::Welcome {
+        AgentGatewayCommand::Welcome {
             connection_id,
             session_id,
             heartbeat_interval_ms,
@@ -191,7 +184,7 @@ pub fn to_gateway_frame(message: &AgentGatewayMessage) -> Result<GatewayFrame, S
                 resumed: *resumed,
             },
         ),
-        AgentGatewayMessage::Invoke {
+        AgentGatewayCommand::Invoke {
             request_id,
             channel_id,
             endpoint_id,
@@ -215,7 +208,7 @@ pub fn to_gateway_frame(message: &AgentGatewayMessage) -> Result<GatewayFrame, S
                 timeout_ms: *timeout_ms,
             },
         ),
-        AgentGatewayMessage::Result {
+        AgentGatewayCommand::Result {
             request_id,
             channel_id,
             output,
@@ -226,7 +219,7 @@ pub fn to_gateway_frame(message: &AgentGatewayMessage) -> Result<GatewayFrame, S
                 output: output.clone(),
             },
         ),
-        AgentGatewayMessage::Error {
+        AgentGatewayCommand::Error {
             request_id: Some(request_id),
             channel_id: Some(channel_id),
             code,
@@ -244,7 +237,7 @@ pub fn to_gateway_frame(message: &AgentGatewayMessage) -> Result<GatewayFrame, S
                 retry_after_ms: None,
             }),
         })),
-        AgentGatewayMessage::Error {
+        AgentGatewayCommand::Error {
             request_id: None,
             channel_id: None,
             code,
@@ -256,10 +249,10 @@ pub fn to_gateway_frame(message: &AgentGatewayMessage) -> Result<GatewayFrame, S
                 message: message.clone(),
             },
         ),
-        AgentGatewayMessage::Error { .. } => {
+        AgentGatewayCommand::Error { .. } => {
             Err("request and channel ids must be provided together".to_string())
         }
-        AgentGatewayMessage::Cancel {
+        AgentGatewayCommand::Cancel {
             request_id,
             channel_id,
         } => event_frame(
@@ -269,13 +262,13 @@ pub fn to_gateway_frame(message: &AgentGatewayMessage) -> Result<GatewayFrame, S
                 channel_id: *channel_id,
             },
         ),
-        AgentGatewayMessage::Heartbeat { session_id } => event_frame(
+        AgentGatewayCommand::Heartbeat { session_id } => event_frame(
             AGENT_GATEWAY_HEARTBEAT_EVENT,
             &HeartbeatPayload {
                 session_id: *session_id,
             },
         ),
-        AgentGatewayMessage::HeartbeatAck { session_id } => event_frame(
+        AgentGatewayCommand::HeartbeatAck { session_id } => event_frame(
             AGENT_GATEWAY_HEARTBEAT_ACK_EVENT,
             &HeartbeatPayload {
                 session_id: *session_id,
@@ -284,21 +277,21 @@ pub fn to_gateway_frame(message: &AgentGatewayMessage) -> Result<GatewayFrame, S
     }
 }
 
-pub fn from_gateway_frame(frame: GatewayFrame) -> Result<AgentGatewayMessage, String> {
-    let message = match frame {
+pub fn from_gateway_frame(frame: GatewayFrame) -> Result<AgentGatewayCommand, String> {
+    let command = match frame {
         GatewayFrame::Request(request) => from_request_frame(request)?,
         GatewayFrame::Response(response) => from_response_frame(response)?,
         GatewayFrame::Event(event) => from_event_frame(event)?,
     };
-    validate_message(&message)?;
-    Ok(message)
+    validate_command(&command)?;
+    Ok(command)
 }
 
-fn from_request_frame(request: RequestFrame) -> Result<AgentGatewayMessage, String> {
+fn from_request_frame(request: RequestFrame) -> Result<AgentGatewayCommand, String> {
     match request.method.as_str() {
         AGENT_GATEWAY_HELLO_METHOD => {
             let params = decode_required::<HelloParams>(request.params, "gateway.hello params")?;
-            Ok(AgentGatewayMessage::Hello {
+            Ok(AgentGatewayCommand::Hello {
                 protocol: params.protocol,
                 gateway_id: params.gateway_id,
                 resume_session_id: params.resume_session_id,
@@ -309,7 +302,7 @@ fn from_request_frame(request: RequestFrame) -> Result<AgentGatewayMessage, Stri
         AGENT_GATEWAY_INVOKE_METHOD => {
             let request_id = parse_uuid("request id", &request.id)?;
             let params = decode_required::<InvokeParams>(request.params, "agent.invoke params")?;
-            Ok(AgentGatewayMessage::Invoke {
+            Ok(AgentGatewayCommand::Invoke {
                 request_id,
                 channel_id: params.channel_id,
                 endpoint_id: params.endpoint_id,
@@ -328,13 +321,13 @@ fn from_request_frame(request: RequestFrame) -> Result<AgentGatewayMessage, Stri
     }
 }
 
-fn from_response_frame(response: ResponseFrame) -> Result<AgentGatewayMessage, String> {
+fn from_response_frame(response: ResponseFrame) -> Result<AgentGatewayCommand, String> {
     if response.id == AGENT_GATEWAY_HELLO_REQUEST_ID {
         if !response.ok {
             let error = response
                 .error
                 .ok_or_else(|| "gateway.hello error is required".to_string())?;
-            return Ok(AgentGatewayMessage::Error {
+            return Ok(AgentGatewayCommand::Error {
                 request_id: None,
                 channel_id: None,
                 code: error.code,
@@ -342,7 +335,7 @@ fn from_response_frame(response: ResponseFrame) -> Result<AgentGatewayMessage, S
             });
         }
         let payload = decode_required::<WelcomePayload>(response.payload, "gateway.hello payload")?;
-        return Ok(AgentGatewayMessage::Welcome {
+        return Ok(AgentGatewayCommand::Welcome {
             connection_id: payload.connection_id,
             session_id: payload.session_id,
             heartbeat_interval_ms: payload.heartbeat_interval_ms,
@@ -354,7 +347,7 @@ fn from_response_frame(response: ResponseFrame) -> Result<AgentGatewayMessage, S
     if response.ok {
         let payload =
             decode_required::<InvokeResultPayload>(response.payload, "agent.invoke payload")?;
-        return Ok(AgentGatewayMessage::Result {
+        return Ok(AgentGatewayCommand::Result {
             request_id,
             channel_id: payload.channel_id,
             output: payload.output,
@@ -366,7 +359,7 @@ fn from_response_frame(response: ResponseFrame) -> Result<AgentGatewayMessage, S
         .ok_or_else(|| "agent.invoke error is required".to_string())?;
     let details =
         decode_required::<ResponseErrorDetails>(error.details, "agent.invoke error details")?;
-    Ok(AgentGatewayMessage::Error {
+    Ok(AgentGatewayCommand::Error {
         request_id: Some(request_id),
         channel_id: Some(details.channel_id),
         code: error.code,
@@ -374,11 +367,11 @@ fn from_response_frame(response: ResponseFrame) -> Result<AgentGatewayMessage, S
     })
 }
 
-fn from_event_frame(event: EventFrame) -> Result<AgentGatewayMessage, String> {
+fn from_event_frame(event: EventFrame) -> Result<AgentGatewayCommand, String> {
     match event.event.as_str() {
         AGENT_GATEWAY_CANCEL_EVENT => {
             let payload = decode_required::<CancelPayload>(event.payload, "agent.cancel payload")?;
-            Ok(AgentGatewayMessage::Cancel {
+            Ok(AgentGatewayCommand::Cancel {
                 request_id: payload.request_id,
                 channel_id: payload.channel_id,
             })
@@ -386,21 +379,21 @@ fn from_event_frame(event: EventFrame) -> Result<AgentGatewayMessage, String> {
         AGENT_GATEWAY_HEARTBEAT_EVENT => {
             let payload =
                 decode_required::<HeartbeatPayload>(event.payload, "gateway.heartbeat payload")?;
-            Ok(AgentGatewayMessage::Heartbeat {
+            Ok(AgentGatewayCommand::Heartbeat {
                 session_id: payload.session_id,
             })
         }
         AGENT_GATEWAY_HEARTBEAT_ACK_EVENT => {
             let payload =
                 decode_required::<HeartbeatPayload>(event.payload, "gateway.heartbeatAck payload")?;
-            Ok(AgentGatewayMessage::HeartbeatAck {
+            Ok(AgentGatewayCommand::HeartbeatAck {
                 session_id: payload.session_id,
             })
         }
         AGENT_GATEWAY_ERROR_EVENT => {
             let payload =
                 decode_required::<ErrorEventPayload>(event.payload, "gateway.error payload")?;
-            Ok(AgentGatewayMessage::Error {
+            Ok(AgentGatewayCommand::Error {
                 request_id: None,
                 channel_id: None,
                 code: payload.code,
@@ -461,9 +454,9 @@ fn parse_uuid(name: &str, value: &str) -> Result<Uuid, String> {
     Uuid::parse_str(value).map_err(|_| format!("invalid {name}"))
 }
 
-pub fn validate_message(message: &AgentGatewayMessage) -> Result<(), String> {
-    match message {
-        AgentGatewayMessage::Hello {
+pub fn validate_command(command: &AgentGatewayCommand) -> Result<(), String> {
+    match command {
+        AgentGatewayCommand::Hello {
             protocol,
             gateway_id,
             resume_session_id: _,
@@ -484,7 +477,7 @@ pub fn validate_message(message: &AgentGatewayMessage) -> Result<(), String> {
             }
             validate_json("agent gateway metadata", metadata, 64 * 1024)
         }
-        AgentGatewayMessage::Welcome {
+        AgentGatewayCommand::Welcome {
             heartbeat_interval_ms,
             ..
         } => {
@@ -493,7 +486,7 @@ pub fn validate_message(message: &AgentGatewayMessage) -> Result<(), String> {
             }
             Ok(())
         }
-        AgentGatewayMessage::Invoke {
+        AgentGatewayCommand::Invoke {
             channel_id,
             agent_id,
             binding,
@@ -510,13 +503,13 @@ pub fn validate_message(message: &AgentGatewayMessage) -> Result<(), String> {
             }
             Ok(())
         }
-        AgentGatewayMessage::Result {
+        AgentGatewayCommand::Result {
             channel_id, output, ..
         } => {
             validate_channel(*channel_id)?;
             validate_json("output", output, MAX_BODY_BYTES)
         }
-        AgentGatewayMessage::Error {
+        AgentGatewayCommand::Error {
             request_id,
             channel_id,
             code,
@@ -531,8 +524,8 @@ pub fn validate_message(message: &AgentGatewayMessage) -> Result<(), String> {
             validate_code(code)?;
             validate_text("error message", message, 1, 2048)
         }
-        AgentGatewayMessage::Cancel { channel_id, .. } => validate_channel(*channel_id),
-        AgentGatewayMessage::Heartbeat { .. } | AgentGatewayMessage::HeartbeatAck { .. } => Ok(()),
+        AgentGatewayCommand::Cancel { channel_id, .. } => validate_channel(*channel_id),
+        AgentGatewayCommand::Heartbeat { .. } | AgentGatewayCommand::HeartbeatAck { .. } => Ok(()),
     }
 }
 
@@ -621,14 +614,17 @@ fn validate_json(name: &str, value: &Value, max: usize) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use serde_json::json;
+    use serde_json::{json, Value};
     use uuid::Uuid;
 
-    use super::{decode, encode, AgentDescriptor, AgentGatewayMessage, VERSION};
+    use super::{
+        from_gateway_frame, to_gateway_frame, AgentDescriptor, AgentGatewayCommand, VERSION,
+    };
+    use crate::gateway_frame;
 
     #[test]
-    fn round_trips_multiplexed_invoke() {
-        let message = AgentGatewayMessage::Invoke {
+    fn round_trips_multiplexed_invoke_command_over_gateway_frame() {
+        let command = AgentGatewayCommand::Invoke {
             request_id: Uuid::new_v4(),
             channel_id: 7,
             endpoint_id: Uuid::new_v4(),
@@ -640,19 +636,17 @@ mod tests {
             timeout_ms: 30_000,
         };
 
-        let encoded = encode(&message).unwrap();
-        let value = serde_json::from_str::<serde_json::Value>(&encoded).unwrap();
+        let value = round_trip_command_over_gateway_frame(&command);
         assert_eq!(value["type"], "req");
         assert_eq!(value["method"], "agent.invoke");
-        assert_eq!(value["id"], message_request_id(&message).to_string());
+        assert_eq!(value["id"], command_request_id(&command).to_string());
         assert_eq!(value["params"]["channelId"], 7);
         assert!(value.get("requestId").is_none());
-        assert_eq!(decode(&encoded).unwrap(), message);
     }
 
     #[test]
-    fn round_trips_resume_hello() {
-        let message = AgentGatewayMessage::Hello {
+    fn round_trips_resume_hello_command_over_gateway_frame() {
+        let command = AgentGatewayCommand::Hello {
             protocol: VERSION.to_string(),
             gateway_id: "local-gateway".to_string(),
             resume_session_id: Some(Uuid::new_v4()),
@@ -663,44 +657,38 @@ mod tests {
             }],
             metadata: json!({ "adapter": "openclaw" }),
         };
-        let encoded = encode(&message).unwrap();
-        let value = serde_json::from_str::<serde_json::Value>(&encoded).unwrap();
+        let value = round_trip_command_over_gateway_frame(&command);
         assert_eq!(value["type"], "req");
         assert_eq!(value["id"], "gateway.hello");
         assert_eq!(value["method"], "gateway.hello");
         assert_eq!(value["params"]["protocol"], VERSION);
-        assert_eq!(decode(&encoded).unwrap(), message);
     }
 
     #[test]
     fn encodes_results_and_errors_as_responses() {
         let request_id = Uuid::new_v4();
-        let result = AgentGatewayMessage::Result {
+        let result = AgentGatewayCommand::Result {
             request_id,
             channel_id: 7,
             output: json!({ "text": "Hi" }),
         };
-        let encoded = encode(&result).unwrap();
-        let value = serde_json::from_str::<serde_json::Value>(&encoded).unwrap();
+        let value = round_trip_command_over_gateway_frame(&result);
         assert_eq!(value["type"], "res");
         assert_eq!(value["id"], request_id.to_string());
         assert_eq!(value["ok"], true);
         assert_eq!(value["payload"]["channelId"], 7);
-        assert_eq!(decode(&encoded).unwrap(), result);
 
-        let error = AgentGatewayMessage::Error {
+        let error = AgentGatewayCommand::Error {
             request_id: Some(request_id),
             channel_id: Some(7),
             code: "OPENCLAW_ERROR".to_string(),
             message: "failed".to_string(),
         };
-        let encoded = encode(&error).unwrap();
-        let value = serde_json::from_str::<serde_json::Value>(&encoded).unwrap();
+        let value = round_trip_command_over_gateway_frame(&error);
         assert_eq!(value["type"], "res");
         assert_eq!(value["id"], request_id.to_string());
         assert_eq!(value["ok"], false);
         assert_eq!(value["error"]["details"]["channelId"], 7);
-        assert_eq!(decode(&encoded).unwrap(), error);
     }
 
     #[test]
@@ -708,50 +696,59 @@ mod tests {
         let request_id = Uuid::new_v4();
         let session_id = Uuid::new_v4();
 
-        let cancel = AgentGatewayMessage::Cancel {
+        let cancel = AgentGatewayCommand::Cancel {
             request_id,
             channel_id: 7,
         };
-        let encoded = encode(&cancel).unwrap();
-        let value = serde_json::from_str::<serde_json::Value>(&encoded).unwrap();
+        let value = round_trip_command_over_gateway_frame(&cancel);
         assert_eq!(value["type"], "event");
         assert_eq!(value["event"], "agent.cancel");
         assert_eq!(value["payload"]["requestId"], request_id.to_string());
-        assert_eq!(decode(&encoded).unwrap(), cancel);
 
-        let heartbeat = AgentGatewayMessage::Heartbeat { session_id };
-        let encoded = encode(&heartbeat).unwrap();
-        let value = serde_json::from_str::<serde_json::Value>(&encoded).unwrap();
+        let heartbeat = AgentGatewayCommand::Heartbeat { session_id };
+        let value = round_trip_command_over_gateway_frame(&heartbeat);
         assert_eq!(value["type"], "event");
         assert_eq!(value["event"], "gateway.heartbeat");
         assert_eq!(value["payload"]["sessionId"], session_id.to_string());
-        assert_eq!(decode(&encoded).unwrap(), heartbeat);
     }
 
     #[test]
     fn rejects_zero_channel() {
-        let message = AgentGatewayMessage::Cancel {
+        let command = AgentGatewayCommand::Cancel {
             request_id: Uuid::new_v4(),
             channel_id: 0,
         };
-        assert!(encode(&message).unwrap_err().contains("channel id"));
+        assert!(to_gateway_frame(&command)
+            .unwrap_err()
+            .contains("channel id"));
     }
 
     #[test]
     fn rejects_unknown_protocol() {
-        let message = AgentGatewayMessage::Hello {
+        let command = AgentGatewayCommand::Hello {
             protocol: "vifu.agent-gateway/999".to_string(),
             gateway_id: "local-gateway".to_string(),
             resume_session_id: None,
             agents: Vec::new(),
             metadata: json!({}),
         };
-        assert!(encode(&message).unwrap_err().contains("unsupported"));
+        assert!(to_gateway_frame(&command)
+            .unwrap_err()
+            .contains("unsupported"));
     }
 
-    fn message_request_id(message: &AgentGatewayMessage) -> Uuid {
-        let AgentGatewayMessage::Invoke { request_id, .. } = message else {
-            panic!("expected invoke message");
+    fn round_trip_command_over_gateway_frame(command: &AgentGatewayCommand) -> Value {
+        let frame = to_gateway_frame(command).unwrap();
+        let encoded = gateway_frame::encode(&frame).unwrap();
+        let value = serde_json::from_str::<Value>(&encoded).unwrap();
+        let decoded_frame = gateway_frame::decode(&encoded).unwrap();
+        assert_eq!(from_gateway_frame(decoded_frame).unwrap(), command.clone());
+        value
+    }
+
+    fn command_request_id(command: &AgentGatewayCommand) -> Uuid {
+        let AgentGatewayCommand::Invoke { request_id, .. } = command else {
+            panic!("expected invoke command");
         };
         *request_id
     }

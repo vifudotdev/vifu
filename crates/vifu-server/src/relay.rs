@@ -5,7 +5,7 @@ use std::time::Duration;
 use serde_json::Value;
 use tokio::sync::{mpsc, oneshot, Mutex};
 use uuid::Uuid;
-use vifu_core::protocol::AgentGatewayMessage;
+use vifu_core::protocol::AgentGatewayCommand;
 
 use crate::models::EndpointRoute;
 
@@ -25,7 +25,7 @@ struct RelayState {
 struct AgentGatewayConnection {
     connection_id: Uuid,
     session_id: Uuid,
-    sender: mpsc::Sender<AgentGatewayMessage>,
+    sender: mpsc::Sender<AgentGatewayCommand>,
 }
 
 struct PendingCall {
@@ -57,8 +57,8 @@ impl RelayHub {
     pub fn channel(
         &self,
     ) -> (
-        mpsc::Sender<AgentGatewayMessage>,
-        mpsc::Receiver<AgentGatewayMessage>,
+        mpsc::Sender<AgentGatewayCommand>,
+        mpsc::Receiver<AgentGatewayCommand>,
     ) {
         mpsc::channel(self.queue_capacity)
     }
@@ -68,7 +68,7 @@ impl RelayHub {
         gateway_id: String,
         connection_id: Uuid,
         session_id: Uuid,
-        sender: mpsc::Sender<AgentGatewayMessage>,
+        sender: mpsc::Sender<AgentGatewayCommand>,
     ) {
         let replaced = {
             let mut state = self.inner.lock().await;
@@ -82,7 +82,7 @@ impl RelayHub {
             )
         };
         if let Some(replaced) = replaced {
-            let _ = replaced.sender.try_send(AgentGatewayMessage::Error {
+            let _ = replaced.sender.try_send(AgentGatewayCommand::Error {
                 request_id: None,
                 channel_id: None,
                 code: "SESSION_REPLACED".to_string(),
@@ -166,7 +166,7 @@ impl RelayHub {
             (connection, channel_id)
         };
 
-        let message = AgentGatewayMessage::Invoke {
+        let message = AgentGatewayCommand::Invoke {
             request_id,
             channel_id,
             endpoint_id: route.endpoint_id,
@@ -193,7 +193,7 @@ impl RelayHub {
             Ok(Err(_)) => Err(RelayCallError::AgentGatewayUnavailable),
             Err(_) => {
                 self.remove_pending(request_id).await;
-                let _ = connection.sender.try_send(AgentGatewayMessage::Cancel {
+                let _ = connection.sender.try_send(AgentGatewayCommand::Cancel {
                     request_id,
                     channel_id,
                 });
@@ -263,7 +263,7 @@ mod tests {
 
     use serde_json::json;
     use uuid::Uuid;
-    use vifu_core::protocol::AgentGatewayMessage;
+    use vifu_core::protocol::AgentGatewayCommand;
 
     use super::{RelayCallError, RelayHub};
     use crate::models::EndpointRoute;
@@ -300,7 +300,7 @@ mod tests {
 
         for _ in 0..10 {
             let message = receiver.recv().await.unwrap();
-            let AgentGatewayMessage::Invoke {
+            let AgentGatewayCommand::Invoke {
                 request_id,
                 channel_id,
                 input,

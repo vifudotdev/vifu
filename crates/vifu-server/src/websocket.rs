@@ -10,7 +10,7 @@ use tokio::time::{Instant, MissedTickBehavior};
 use tracing::{info, warn};
 use uuid::Uuid;
 use vifu_core::gateway_frame;
-use vifu_core::protocol::{self, AgentGatewayMessage};
+use vifu_core::protocol::{self, AgentGatewayCommand};
 
 use crate::auth::require_agent_gateway;
 use crate::db;
@@ -33,13 +33,13 @@ pub async fn upgrade(
 async fn handle_socket(state: AppState, mut socket: WebSocket) {
     if let Err(error) = run_socket(&state, &mut socket).await {
         warn!(error = %error, "agent gateway websocket closed with an error");
-        let protocol_error = AgentGatewayMessage::Error {
+        let protocol_error = AgentGatewayCommand::Error {
             request_id: None,
             channel_id: None,
             code: "PROTOCOL_ERROR".to_string(),
             message: public_error(&error),
         };
-        if let Ok(encoded) = encode_message(&protocol_error) {
+        if let Ok(encoded) = encode_command(&protocol_error) {
             let _ = socket.send(Message::Text(encoded.into())).await;
         }
     }
@@ -47,10 +47,10 @@ async fn handle_socket(state: AppState, mut socket: WebSocket) {
 }
 
 async fn run_socket(state: &AppState, socket: &mut WebSocket) -> Result<(), String> {
-    let hello = tokio::time::timeout(Duration::from_secs(5), receive_message(socket))
+    let hello = tokio::time::timeout(Duration::from_secs(5), receive_command(socket))
         .await
         .map_err(|_| "agent gateway did not send hello in time".to_string())??;
-    let AgentGatewayMessage::Hello {
+    let AgentGatewayCommand::Hello {
         protocol: _,
         gateway_id,
         resume_session_id,
@@ -78,7 +78,7 @@ async fn run_socket(state: &AppState, socket: &mut WebSocket) -> Result<(), Stri
         .register(gateway_id.clone(), connection_id, session_id, sender)
         .await;
 
-    let welcome = AgentGatewayMessage::Welcome {
+    let welcome = AgentGatewayCommand::Welcome {
         connection_id,
         session_id,
         heartbeat_interval_ms: state
@@ -89,7 +89,7 @@ async fn run_socket(state: &AppState, socket: &mut WebSocket) -> Result<(), Stri
             .unwrap_or(60_000),
         resumed,
     };
-    send_message(socket, &welcome).await?;
+    send_command(socket, &welcome).await?;
     info!(%gateway_id, %connection_id, %session_id, resumed, "agent gateway connected");
 
     let mut heartbeat = tokio::time::interval_at(
@@ -107,16 +107,16 @@ async fn run_socket(state: &AppState, socket: &mut WebSocket) -> Result<(), Stri
                 };
                 let replaced = matches!(
                     &outbound,
-                    AgentGatewayMessage::Error { code, .. } if code == "SESSION_REPLACED"
+                    AgentGatewayCommand::Error { code, .. } if code == "SESSION_REPLACED"
                 );
-                if let Err(error) = send_message(socket, &outbound).await {
+                if let Err(error) = send_command(socket, &outbound).await {
                     break Err(error);
                 }
                 if replaced {
                     break Ok(());
                 }
             }
-            incoming = receive_message(socket) => {
+            incoming = receive_command(socket) => {
                 let incoming = match incoming {
                     Ok(message) => message,
                     Err(error) if error == "agent gateway disconnected" => break Ok(()),
@@ -124,10 +124,10 @@ async fn run_socket(state: &AppState, socket: &mut WebSocket) -> Result<(), Stri
                 };
                 last_seen = Instant::now();
                 match incoming {
-                    AgentGatewayMessage::Result { request_id, channel_id, output } => {
+                    AgentGatewayCommand::Result { request_id, channel_id, output } => {
                         state.relay.complete_result(connection_id, request_id, channel_id, output).await;
                     }
-                    AgentGatewayMessage::Error {
+                    AgentGatewayCommand::Error {
                         request_id: Some(request_id),
                         channel_id: Some(channel_id),
                         message,
@@ -135,19 +135,19 @@ async fn run_socket(state: &AppState, socket: &mut WebSocket) -> Result<(), Stri
                     } => {
                         state.relay.complete_error(connection_id, request_id, channel_id, message).await;
                     }
-                    AgentGatewayMessage::Heartbeat { session_id: received }
-                    | AgentGatewayMessage::HeartbeatAck { session_id: received } => {
+                    AgentGatewayCommand::Heartbeat { session_id: received }
+                    | AgentGatewayCommand::HeartbeatAck { session_id: received } => {
                         if received != session_id {
                             break Err("heartbeat session does not match this connection".to_string());
                         }
                         if let Err(error) = db::touch_agent_gateway_session(&state.pool, session_id).await {
                             warn!(error = %error, %session_id, "could not persist agent gateway heartbeat");
                         }
-                        if matches!(incoming, AgentGatewayMessage::Heartbeat { .. }) {
-                            send_message(socket, &AgentGatewayMessage::HeartbeatAck { session_id }).await?;
+                        if matches!(incoming, AgentGatewayCommand::Heartbeat { .. }) {
+                            send_command(socket, &AgentGatewayCommand::HeartbeatAck { session_id }).await?;
                         }
                     }
-                    AgentGatewayMessage::Error { request_id: None, .. } => {}
+                    AgentGatewayCommand::Error { request_id: None, .. } => {}
                     _ => break Err("agent gateway sent an unexpected message".to_string()),
                 }
             }
@@ -155,7 +155,7 @@ async fn run_socket(state: &AppState, socket: &mut WebSocket) -> Result<(), Stri
                 if last_seen.elapsed() > state.config.heartbeat_interval.saturating_mul(3) {
                     break Err("agent gateway heartbeat timed out".to_string());
                 }
-                if let Err(error) = send_message(socket, &AgentGatewayMessage::Heartbeat { session_id }).await {
+                if let Err(error) = send_command(socket, &AgentGatewayCommand::Heartbeat { session_id }).await {
                     break Err(error);
                 }
             }
@@ -172,10 +172,10 @@ async fn run_socket(state: &AppState, socket: &mut WebSocket) -> Result<(), Stri
     result
 }
 
-async fn receive_message(socket: &mut WebSocket) -> Result<AgentGatewayMessage, String> {
+async fn receive_command(socket: &mut WebSocket) -> Result<AgentGatewayCommand, String> {
     loop {
         match socket.next().await {
-            Some(Ok(Message::Text(frame))) => return decode_message(frame.as_str()),
+            Some(Ok(Message::Text(frame))) => return decode_command(frame.as_str()),
             Some(Ok(Message::Ping(payload))) => {
                 socket
                     .send(Message::Pong(payload))
@@ -194,20 +194,20 @@ async fn receive_message(socket: &mut WebSocket) -> Result<AgentGatewayMessage, 
     }
 }
 
-async fn send_message(socket: &mut WebSocket, message: &AgentGatewayMessage) -> Result<(), String> {
-    let encoded = encode_message(message)?;
+async fn send_command(socket: &mut WebSocket, message: &AgentGatewayCommand) -> Result<(), String> {
+    let encoded = encode_command(message)?;
     socket
         .send(Message::Text(encoded.into()))
         .await
         .map_err(|error| error.to_string())
 }
 
-fn decode_message(source: &str) -> Result<AgentGatewayMessage, String> {
+fn decode_command(source: &str) -> Result<AgentGatewayCommand, String> {
     let frame = gateway_frame::decode(source)?;
     protocol::from_gateway_frame(frame)
 }
 
-fn encode_message(message: &AgentGatewayMessage) -> Result<String, String> {
+fn encode_command(message: &AgentGatewayCommand) -> Result<String, String> {
     let frame = protocol::to_gateway_frame(message)?;
     gateway_frame::encode(&frame)
 }
