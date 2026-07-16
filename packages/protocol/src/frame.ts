@@ -167,6 +167,7 @@ export function createEventFrame<Event extends string, Payload = unknown>(
 export function isRequestFrame(value: unknown): value is RequestFrame {
   return (
     isRecord(value) &&
+    hasOnlyKeys(value, ["type", "id", "method", "params"]) &&
     value.type === GATEWAY_FRAME_TYPES.REQUEST &&
     isNonEmptyString(value.id) &&
     isNonEmptyString(value.method)
@@ -176,6 +177,7 @@ export function isRequestFrame(value: unknown): value is RequestFrame {
 export function isResponseFrame(value: unknown): value is ResponseFrame {
   return (
     isRecord(value) &&
+    hasOnlyKeys(value, ["type", "id", "ok", "payload", "error"]) &&
     value.type === GATEWAY_FRAME_TYPES.RESPONSE &&
     isNonEmptyString(value.id) &&
     typeof value.ok === "boolean" &&
@@ -186,6 +188,7 @@ export function isResponseFrame(value: unknown): value is ResponseFrame {
 export function isEventFrame(value: unknown): value is EventFrame {
   return (
     isRecord(value) &&
+    hasOnlyKeys(value, ["type", "event", "payload", "seq", "stateVersion"]) &&
     value.type === GATEWAY_FRAME_TYPES.EVENT &&
     isNonEmptyString(value.event) &&
     (value.seq === undefined || isNonNegativeInteger(value.seq)) &&
@@ -200,6 +203,7 @@ export function isGatewayFrame(value: unknown): value is GatewayFrame {
 export function isErrorShape(value: unknown): value is ErrorShape {
   return (
     isRecord(value) &&
+    hasOnlyKeys(value, ["code", "message", "details", "retryable", "retryAfterMs"]) &&
     isNonEmptyString(value.code) &&
     isNonEmptyString(value.message) &&
     (value.retryable === undefined || typeof value.retryable === "boolean") &&
@@ -210,6 +214,7 @@ export function isErrorShape(value: unknown): value is ErrorShape {
 export function isStateVersion(value: unknown): value is StateVersion {
   return (
     isRecord(value) &&
+    hasOnlyKeys(value, ["presence", "health"]) &&
     isNonNegativeInteger(value.presence) &&
     isNonNegativeInteger(value.health)
   );
@@ -217,6 +222,10 @@ export function isStateVersion(value: unknown): value is StateVersion {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function hasOnlyKeys(value: Record<string, unknown>, allowedKeys: readonly string[]): boolean {
+  return Object.keys(value).every((key) => allowedKeys.includes(key));
 }
 
 function isNonEmptyString(value: unknown): value is string {

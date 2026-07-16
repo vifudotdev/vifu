@@ -14,7 +14,7 @@ export type NodeInvokeRequestPayload = {
   id: string;
   nodeId: string;
   command: string;
-  paramsJSON?: string | null;
+  paramsJSON?: string;
   timeoutMs?: number;
   idempotencyKey?: string;
 };
@@ -29,8 +29,8 @@ export type NodeInvokeResultParams = {
   nodeId: string;
   ok: boolean;
   payload?: unknown;
-  payloadJSON?: string | null;
-  error?: NodeInvokeResultError | null;
+  payloadJSON?: string;
+  error?: NodeInvokeResultError;
 };
 
 export type NodeInvokeRequestEventFrame = EventFrame<
@@ -51,7 +51,7 @@ export const NodeInvokeRequestPayloadSchema = {
     id: NonEmptyStringSchema,
     nodeId: NonEmptyStringSchema,
     command: NonEmptyStringSchema,
-    paramsJSON: { oneOf: [{ type: "string" }, { type: "null" }] },
+    paramsJSON: { type: "string" },
     timeoutMs: { type: "integer", minimum: 0 },
     idempotencyKey: NonEmptyStringSchema,
   },
@@ -75,8 +75,8 @@ export const NodeInvokeResultParamsSchema = {
     nodeId: NonEmptyStringSchema,
     ok: { type: "boolean" },
     payload: {},
-    payloadJSON: { oneOf: [{ type: "string" }, { type: "null" }] },
-    error: { oneOf: [NodeInvokeResultErrorSchema, { type: "null" }] },
+    payloadJSON: { type: "string" },
+    error: NodeInvokeResultErrorSchema,
   },
 } as const satisfies JsonSchema;
 

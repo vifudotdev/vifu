@@ -10,6 +10,7 @@ import {
   createRequestFrame,
   createResponseFrame,
   isGatewayFrame,
+  isRequestFrame,
 } from "../src";
 
 describe("@vifu/protocol OpenClaw-compatible frames", () => {
@@ -106,5 +107,34 @@ describe("@vifu/protocol OpenClaw-compatible frames", () => {
     expect(isGatewayFrame({ type: "event", event: "tick" })).toBe(true);
     expect(isGatewayFrame({ type: "request", id: "1", method: "ping" })).toBe(false);
     expect(isGatewayFrame({ type: "event", name: "tick" })).toBe(false);
+  });
+
+  it("rejects extra frame fields like the schema", () => {
+    expect(isRequestFrame({ type: "req", id: "1", method: "ping", extra: true })).toBe(false);
+    expect(isGatewayFrame({ type: "res", id: "1", ok: true, extra: true })).toBe(false);
+    expect(isGatewayFrame({ type: "event", event: "tick", extra: true })).toBe(false);
+    expect(
+      isGatewayFrame({
+        type: "res",
+        id: "1",
+        ok: false,
+        error: {
+          code: "BAD_REQUEST",
+          message: "invalid request",
+          extra: true,
+        },
+      }),
+    ).toBe(false);
+    expect(
+      isGatewayFrame({
+        type: "event",
+        event: "tick",
+        stateVersion: {
+          presence: 1,
+          health: 1,
+          extra: true,
+        },
+      }),
+    ).toBe(false);
   });
 });
