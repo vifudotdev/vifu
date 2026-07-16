@@ -11,6 +11,10 @@ free_port() {
   node -e 'const net=require("node:net");const server=net.createServer();server.listen(0,"127.0.0.1",()=>{console.log(server.address().port);server.close();});'
 }
 
+json_escape() {
+  node -e 'process.stdout.write(JSON.stringify(process.argv[1]).slice(1, -1));' "$1"
+}
+
 if [ -n "${VIFU_E2E_ENV_FILE:-}" ]; then
   env_file="$VIFU_E2E_ENV_FILE"
 else
@@ -40,7 +44,7 @@ if [ -z "$browser_dashboard_port" ]; then
   browser_dashboard_port="${VIFU_DASHBOARD_PORT:-6791}"
 fi
 if [ -z "${VIFU_ADMIN_KEY:-}" ]; then
-  printf '%s\n' "VIFU_ADMIN_KEY is missing. Run sh scripts/init-self-hosted.sh first." >&2
+  printf '%s\n' "VIFU_ADMIN_KEY is missing. Set VIFU_E2E_ADMIN_KEY or use an E2E env file with an explicit admin key." >&2
   exit 1
 fi
 if [ -n "${VIFU_E2E_OPENCLAW_PORT:-}" ]; then
@@ -106,10 +110,28 @@ until curl --fail --silent "http://127.0.0.1:$openclaw_port/health" >/dev/null; 
   sleep 1
 done
 
+mkdir -p "$state_dir/vifu-home"
+{
+  printf '%s\n' '{'
+  printf '%s\n' '  "providers": ['
+  printf '%s\n' '    {'
+  printf '%s\n' '      "key": "openclaw-e2e",'
+  printf '%s\n' '      "type": "openclaw",'
+  printf '%s' "      \"url\": \"http://127.0.0.1:$openclaw_port\""
+  if [ -n "${OPENCLAW_GATEWAY_TOKEN:-}" ]; then
+    printf '%s\n' ','
+    printf '%s\n' "      \"auth\": { \"token\": \"$(json_escape "$OPENCLAW_GATEWAY_TOKEN")\" }"
+  else
+    printf '%s\n' ''
+  fi
+  printf '%s\n' '    }'
+  printf '%s\n' '  ]'
+  printf '%s\n' '}'
+} > "$state_dir/vifu-home/providers.json"
+
 VIFU_HOME="$state_dir/vifu-home" \
 VIFU_AGENT_GATEWAY_TOKEN="${VIFU_E2E_AGENT_GATEWAY_TOKEN:-$VIFU_AGENT_GATEWAY_TOKEN}" \
 cargo run -p vifu -- \
-  --openclaw-url "http://127.0.0.1:$openclaw_port" \
   --server-url "${VIFU_E2E_API_URL:-http://127.0.0.1:6790}" \
   >"$agent_gateway_log" 2>&1 &
 agent_gateway_pid=$!
@@ -141,7 +163,7 @@ until curl --fail --silent "${VIFU_E2E_API_URL:-http://127.0.0.1:6790}/v1/status
 done
 
 attempt=0
-until curl --fail --silent "${VIFU_E2E_DASHBOARD_URL:-http://127.0.0.1:6791}/dashboard" >/dev/null; do
+until curl --fail --silent "${VIFU_E2E_DASHBOARD_URL:-http://127.0.0.1:6791}/project" >/dev/null; do
   attempt=$((attempt + 1))
   if [ "$attempt" -ge 60 ]; then exit 1; fi
   sleep 1

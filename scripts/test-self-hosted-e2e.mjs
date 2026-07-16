@@ -1,6 +1,4 @@
 import { readFile, writeFile } from "node:fs/promises";
-import { request as httpRequest } from "node:http";
-import { request as httpsRequest } from "node:https";
 
 const apiBaseUrl = (process.env.VIFU_E2E_API_URL || "http://127.0.0.1:6790").replace(/\/+$/, "");
 const dashboardBaseUrl = (process.env.VIFU_E2E_DASHBOARD_URL || "http://127.0.0.1:6791").replace(/\/+$/, "");
@@ -21,7 +19,8 @@ async function setup() {
   assert(adminKey, "VIFU_E2E_ADMIN_KEY or VIFU_ADMIN_KEY is required");
   const suffix = Date.now().toString(36);
   const status = await request("/v1/status");
-  assert(status.capabilities?.jsonRpc === true, "JSON-RPC capability is required");
+  assert(status.capabilities?.agentGateways === true, "Agent Gateway capability is required");
+  assert(status.capabilities?.endpoints === true, "Endpoint capability is required");
   const signupProbe = await fetch(`${dashboardBaseUrl}/signup`, { redirect: "manual" });
   const signupHtml = signupProbe.status === 200 ? await signupProbe.text() : "";
   const signupOpen = signupProbe.status === 200 && signupHtml.includes("Create your account");
@@ -36,18 +35,18 @@ async function setup() {
       email: authEmail,
       password: authPassword,
       displayName: "Self-hosted Admin",
-      returnTo: "/dashboard",
+      returnTo: "/project",
     })
     : await dashboardForm("/api/auth/local/login", {
       email: authEmail,
       password: authPassword,
-      returnTo: "/dashboard",
+      returnTo: "/project",
     });
   if (initialAuthResponse.status === 303 && initialAuthResponse.headers.get("location")?.includes("auth_error")) {
     initialAuthResponse = await dashboardForm("/api/auth/local/login", {
       email: authEmail,
       password: authPassword,
-      returnTo: "/dashboard",
+      returnTo: "/project",
     });
   }
   assert(initialAuthResponse.status === 303, `Dashboard authentication returned HTTP ${initialAuthResponse.status}`);
@@ -55,19 +54,19 @@ async function setup() {
   assert(signupCookie.httpOnly, "Dashboard local session cookie is not HttpOnly");
   assert(signupCookie.sameSite === "lax", "Dashboard local session cookie must use SameSite=Lax");
   assert(!signupCookie.domain, "Dashboard local session cookie must be host-only");
-  const dashboardAfterSignup = await fetch(`${dashboardBaseUrl}/dashboard`, {
+  const dashboardAfterSignup = await fetch(`${dashboardBaseUrl}/project`, {
     headers: { cookie: `vifu_session=${signupCookie.cookieValue}` },
   });
   assert(dashboardAfterSignup.ok, "Dashboard did not accept the local session cookie");
   const dashboardHtml = await dashboardAfterSignup.text();
-  assert(dashboardHtml.includes("Overview"), "Dashboard did not render after local signup");
+  assert(dashboardHtml.includes("Create your first project"), "Dashboard did not render after local signup");
   assert(!dashboardHtml.includes(adminKey), "Dashboard HTML exposed the bootstrap admin key");
   const getLogoutResponse = await fetch(`${dashboardBaseUrl}/auth/logout`, {
     headers: { cookie: `vifu_session=${signupCookie.cookieValue}` },
     redirect: "manual",
   });
   assert(getLogoutResponse.status === 405, "Dashboard logout accepted a GET request");
-  const dashboardAfterGetLogout = await fetch(`${dashboardBaseUrl}/dashboard`, {
+  const dashboardAfterGetLogout = await fetch(`${dashboardBaseUrl}/project`, {
     headers: { cookie: `vifu_session=${signupCookie.cookieValue}` },
   });
   assert(dashboardAfterGetLogout.ok, "Dashboard GET logout invalidated the web session");
@@ -83,13 +82,13 @@ async function setup() {
   const invalidLogin = await dashboardForm("/api/auth/local/login", {
     email: authEmail,
     password: "incorrect password",
-    returnTo: "/dashboard",
+    returnTo: "/project",
   });
   assert(invalidLogin.status === 303 && invalidLogin.headers.get("location")?.includes("auth_error"), "An invalid password was accepted");
   const loginResponse = await dashboardForm("/api/auth/local/login", {
     email: authEmail,
     password: authPassword,
-    returnTo: "/dashboard",
+    returnTo: "/project",
   });
   assert(loginResponse.status === 303, `Dashboard login returned HTTP ${loginResponse.status}`);
   const loginCookie = sessionCookie(loginResponse);
@@ -101,7 +100,7 @@ async function setup() {
     email: `second-${suffix}@self-hosted.example`,
     password: authPassword,
     displayName: "Second Operator",
-    returnTo: "/dashboard",
+    returnTo: "/project",
   });
   assert(secondSignup.status === 303 && !secondSignup.headers.get("location")?.includes("auth_error"), "Open self-hosted signup rejected another account");
 
@@ -126,30 +125,6 @@ async function setup() {
   const profiles = (await request("/v1/profiles")).profiles ?? [];
   const profile = profiles.find((item) => item.id === binding.profileId);
   assert(profile, "Project creation did not create a profile for the selected agent");
-  const projectRpcPath = `/v1/projects/${project.slug}/rpc`;
-  const apiUrl = new URL(apiBaseUrl);
-  const projectHost = `${project.slug}.${process.env.VIFU_PROJECT_DOMAIN || "localhost"}${apiUrl.port ? `:${apiUrl.port}` : ""}`;
-  const discovery = await jsonRpc(projectRpcPath, project.publishableKey, "rpc.discover", {}, "discover");
-  assert(discovery.protocol?.name === "vifu.project", "Project RPC did not return its Vifu discovery payload");
-  assert(discovery.transports?.jsonrpc === "2.0", "Project RPC discovery did not advertise JSON-RPC transport");
-  assert(discovery.transports?.websocketProtocol === "jsonrpc", "Project RPC discovery did not advertise the WebSocket subprotocol");
-  assert(discovery.protocol?.methods?.includes("agent.invoke"), "Project RPC discovery did not list agent.invoke");
-  const listedAgents = await jsonRpc(projectRpcPath, project.publishableKey, "agent.list", {}, "list");
-  assert(listedAgents.agents?.length === 1, "Project RPC did not list its bound agent");
-  const httpInvocation = await jsonRpc(
-    "/",
-    project.publishableKey,
-    "agent.invoke",
-    { message: "project HTTP invocation" },
-    "http-invoke",
-    projectHost,
-  );
-  assert(httpInvocation.reply?.includes("project HTTP invocation"), "Project HTTP invocation failed");
-  const websocketInvocations = await projectWebSocketCalls(
-    projectRpcPath,
-    project.publishableKey,
-    Array.from({ length: 10 }, (_, index) => `project WSS invocation ${index + 1}`),
-  );
 
   const endpoints = await Promise.all(Array.from({ length: 10 }, async (_, index) => {
     return (await request("/v1/endpoints", {
@@ -225,7 +200,6 @@ async function setup() {
     bindingId: binding.id,
     projectId: project.id,
     projectSlug: project.slug,
-    projectKey: project.publishableKey,
     endpointIds: endpoints.map((endpoint) => endpoint.id),
     gatewayId: agentGateway.gatewayId,
     sessionId: agentGateway.sessionId,
@@ -240,7 +214,6 @@ async function setup() {
     endpoints: state.endpointIds.length,
     concurrentCalls: calls.length,
     completedTraces: completed.length,
-    projectRpcCalls: websocketInvocations.length + 1,
     canceledRequest,
     localAuth: true,
   }));
@@ -249,7 +222,7 @@ async function setup() {
 async function verify() {
   const state = JSON.parse(await readFile(statePath, "utf8"));
   runtimeCredential = adminKey;
-  const dashboardSession = await fetch(`${dashboardBaseUrl}/dashboard`, {
+  const dashboardSession = await fetch(`${dashboardBaseUrl}/project`, {
     headers: { cookie: `vifu_session=${state.authCookieValue}` },
   });
   assert(dashboardSession.ok, "Dashboard web session did not survive restart");
@@ -266,7 +239,7 @@ async function verify() {
   assert(bindings.bindings.some((item) => item.id === state.bindingId), "Binding was not persisted");
   assert(state.endpointIds.every((id) => endpoints.endpoints.some((item) => item.id === id)), "Endpoints were not persisted");
   assert(state.requestIds.every((id) => traces.traces.some((item) => item.requestId === id)), "Traces were not persisted");
-  assert(traces.traces.some((item) => item.projectId === state.projectId), "Project RPC traces were not persisted");
+  assert(traces.traces.some((item) => item.projectId === state.projectId), "Project endpoint traces were not persisted");
   const resumed = agentGateways.agentGateways.find((item) => item.gatewayId === state.gatewayId && item.status === "connected");
   assert(resumed, "Agent Gateway did not reconnect");
   assert(resumed.sessionId === state.sessionId, "Agent Gateway did not resume its session");
@@ -296,103 +269,6 @@ async function cleanup() {
     redirect: "manual",
   });
   console.log(JSON.stringify({ status: "ok", cleanedEndpoints: state.endpointIds.length }));
-}
-
-async function jsonRpc(path, credential, method, params, id, host) {
-  const target = path.startsWith("http://") || path.startsWith("https://")
-    ? path
-    : `${apiBaseUrl}${path}`;
-  if (host) {
-    const response = await hostJsonRpc(target, host, credential, { jsonrpc: "2.0", id, method, params });
-    assert(response.status >= 200 && response.status < 300, `Project JSON-RPC returned HTTP ${response.status}`);
-    assert(!response.payload.error, `Project JSON-RPC failed: ${response.payload.error?.message}`);
-    return response.payload.result;
-  }
-  const response = await fetch(target, {
-    method: "POST",
-    headers: {
-      accept: "application/json",
-      authorization: `Bearer ${credential}`,
-      "content-type": "application/json",
-    },
-    body: JSON.stringify({ jsonrpc: "2.0", id, method, params }),
-  });
-  const payload = await response.json();
-  assert(response.ok, `Project JSON-RPC returned HTTP ${response.status}`);
-  assert(!payload.error, `Project JSON-RPC failed: ${payload.error?.message}`);
-  return payload.result;
-}
-
-function hostJsonRpc(target, host, credential, body) {
-  return new Promise((resolve, reject) => {
-    const url = new URL(target);
-    const request = (url.protocol === "https:" ? httpsRequest : httpRequest)(url, {
-      method: "POST",
-      headers: {
-        accept: "application/json",
-        authorization: `Bearer ${credential}`,
-        "content-type": "application/json",
-        host,
-      },
-    }, (response) => {
-      const chunks = [];
-      response.on("data", (chunk) => chunks.push(chunk));
-      response.on("end", () => {
-        try {
-          resolve({
-            status: response.statusCode || 0,
-            payload: JSON.parse(Buffer.concat(chunks).toString("utf8")),
-          });
-        } catch (error) {
-          reject(error);
-        }
-      });
-    });
-    request.on("error", reject);
-    request.end(JSON.stringify(body));
-  });
-}
-
-async function projectWebSocketCalls(path, credential, messages) {
-  const url = new URL(path.startsWith("http://") || path.startsWith("https://") ? path : `${apiBaseUrl}${path}`);
-  url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
-  const socket = new WebSocket(url, ["jsonrpc", `vifu.token.${credential}`]);
-  await waitForSocket(socket, "open", 10_000);
-  const requests = messages.map((message, index) => ({
-    jsonrpc: "2.0",
-    id: index + 1,
-    method: "agent.invoke",
-    params: { message },
-  }));
-  const responses = await new Promise((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error("Project WebSocket batch timed out")), 30_000);
-    socket.addEventListener("message", (event) => {
-      clearTimeout(timer);
-      resolve(JSON.parse(String(event.data)));
-    }, { once: true });
-    socket.send(JSON.stringify(requests));
-  });
-  socket.close(1000, "test complete");
-  assert(Array.isArray(responses) && responses.length === requests.length, "Project WebSocket batch was incomplete");
-  for (const [index, response] of responses.entries()) {
-    assert(!response.error, `Project WebSocket call failed: ${response.error?.message}`);
-    assert(response.result?.reply?.includes(messages[index]), `Project WebSocket reply ${index + 1} was incorrect`);
-  }
-  return responses;
-}
-
-function waitForSocket(socket, event, timeoutMs) {
-  return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error(`WebSocket ${event} timed out`)), timeoutMs);
-    socket.addEventListener(event, (value) => {
-      clearTimeout(timer);
-      resolve(value);
-    }, { once: true });
-    socket.addEventListener("error", () => {
-      clearTimeout(timer);
-      reject(new Error("Project WebSocket connection failed"));
-    }, { once: true });
-  });
 }
 
 async function request(path, init = {}, credential = runtimeCredential) {

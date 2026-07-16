@@ -1,0 +1,9 @@
+name: vifu-local
+
+services:
+  postgres:
+    volumes:
+      - postgres_local_data:/var/lib/postgresql/data
+
+volumes:
+  postgres_local_data:

@@ -1,0 +1,12 @@
+{
+  "providers": [
+    {
+      "key": "openclaw-local",
+      "type": "openclaw",
+      "url": "http://host.docker.internal:18789",
+      "auth": {
+        "token": "replace-with-openclaw-gateway-token"
+      }
+    }
+  ]
+}

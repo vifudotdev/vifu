@@ -10,14 +10,28 @@ account and communicates through ordinary HTTP and WebSocket contracts.
 | `postgres` | Durable runtime state | `127.0.0.1:5432` |
 | `backend` | `vifu-server` HTTP and WebSocket runtime | `127.0.0.1:6790` |
 | `dashboard` | Next.js standalone management console | `127.0.0.1:6791` |
+| `agent-gateway` | Vifu adapter for external agent providers | internal WebSocket to `backend` |
 
 ## Start
 
 From the repository root:
 
 ```bash
-sh scripts/init-self-hosted.sh
-docker compose -f self-hosted/docker/docker-compose.yml up --build --wait
+cd self-hosted/docker
+cp .env.example .env
+docker compose up -d
+```
+
+After that, normal restarts from `self-hosted/docker` are:
+
+```bash
+docker compose up -d
+```
+
+If you use the Bun workspace from the repository root, the equivalent starter is:
+
+```bash
+bun run self-host
 ```
 
 Open `http://localhost:6791`, create the first local administrator, and verify
@@ -34,9 +48,11 @@ sessions, profiles, bindings, endpoints, keys, Agent Gateway sessions, or traces
 
 ## Configuration
 
-The initialization script creates an untracked, mode `0600` `.env` file with
-independent random authority values. It refuses to overwrite an existing file.
-Compose accepts these values:
+The Docker directory follows the usual Compose convention: copy
+`.env.example` to `.env` and change values there when needed. Blank authority
+values are generated on first startup and stored in the `vifu_secrets` Docker
+volume. Existing explicit values in `.env` are imported into that volume so
+restores and rotations remain predictable. Compose accepts these values:
 
 | Variable | Purpose |
 | --- | --- |
@@ -45,14 +61,15 @@ Compose accepts these values:
 | `AUTH_DISABLE_SIGNUP` | Disables Dashboard account creation when set to `true` |
 | `VIFU_AUTH_PASSWORD_ENABLED` | Enables the built-in Dashboard email/password provider unless set to `false` |
 | `VIFU_SIGNUP_ENABLED` | Enables Dashboard signup unless set to `false` |
-| `VIFU_ADMIN_KEY` | Server-side Dashboard runtime credential, recovery, and automation |
-| `VIFU_AGENT_GATEWAY_TOKEN` | Agent Gateway WebSocket authentication |
-| `VIFU_API_KEY_PEPPER` | One-way endpoint key hashing |
-| `DATABASE_URL` | PostgreSQL connection string for Dashboard auth state and `vifu-server` runtime state |
+| `VIFU_ADMIN_KEY` | Optional explicit server-side Dashboard runtime credential, recovery, and automation |
+| `VIFU_AGENT_GATEWAY_TOKEN` | Optional explicit Agent Gateway WebSocket authentication value |
+| `VIFU_API_KEY_PEPPER` | Optional explicit one-way endpoint key hashing pepper |
+| `VIFU_PROVIDER_SECRET_KEY` | Optional explicit server-side provider credential encryption key |
+| `DATABASE_URL` | Optional explicit PostgreSQL connection string for Dashboard auth state and `vifu-server` runtime state |
 | `VIFU_BIND_HOST` | Host interface for published ports |
 | `VIFU_SERVER_PORT` | Published runtime port |
 | `VIFU_DASHBOARD_PORT` | Published Dashboard port |
-| `VIFU_PROJECT_DOMAIN` | DNS suffix for stable Project endpoints |
+| `VIFU_CONFIG_DIR` | Host-side Vifu config directory; defaults to `~/.vifu` |
 | `POSTGRES_DB`, `POSTGRES_USER`, `POSTGRES_PASSWORD` | Included PostgreSQL container |
 
 ### OIDC
@@ -79,7 +96,8 @@ flow. Vifu does not automatically merge an OIDC identity into an existing
 password account with the same email.
 
 The three authority secrets must be independent and contain at least 16
-characters. Compose refuses to start when they are missing. `VIFU_ADMIN_KEY`
+characters when set explicitly. When left blank, Compose generates independent
+values and persists them in the `vifu_secrets` Docker volume. `VIFU_ADMIN_KEY`
 is available only to the Dashboard server and runtime; it is not a browser
 session and is not used for daily Dashboard requests. Never give it a
 `NEXT_PUBLIC_` name.
@@ -101,22 +119,25 @@ is the default self-host option.
 
 ## Agent Gateway
 
-Run the Agent Gateway on the machine that can reach the local OpenClaw gateway:
+Vifu Agent Gateway is part of the Compose stack. It opens one authenticated
+WebSocket to `vifu-server`, discovers agents through configured external
+providers, and carries concurrent logical endpoint channels over that
+connection.
 
-```bash
-VIFU_OPENCLAW_TOKEN=replace-with-your-gateway-token \
-sh scripts/dev-agent-gateway.sh
-```
+No external provider is required for the Vifu stack to start. Provider
+integrations are optional and documented separately:
 
-The Agent Gateway accepts only loopback OpenClaw URLs. It opens one authenticated
-WebSocket to `vifu-server`, discovers agents through OpenClaw's enabled
-OpenAI-compatible HTTP surface, and carries concurrent logical endpoint
-channels over that connection. Gateways configured without authentication can
-omit `VIFU_OPENCLAW_TOKEN`.
+See [providers](providers/README.md) for available integrations. OpenClaw, for
+example, is started with OpenClaw's own Docker Compose flow and then registered
+in Vifu's generic provider registry at `~/.vifu/providers.json`. Provider
+directories may be removed without changing Vifu's core self-host stack. When a
+provider is configured but not running, the Vifu Agent Gateway stays up and
+retries. The Dashboard shows no connected agents until the provider becomes
+available.
 
 Remote `VIFU_SERVER_URL` values must use HTTPS. Plain HTTP is accepted only for
-loopback development so Agent Gateway credentials are never sent over a remote
-plaintext WebSocket.
+loopback development and Docker-internal service names such as `backend`, so
+Agent Gateway credentials are not sent over a remote plaintext WebSocket.
 
 ## Exposure
 
@@ -132,10 +153,16 @@ browser-visible configuration. Revoke affected web sessions separately.
 
 ## Upgrade And Backup
 
-Build new images and recreate services without deleting the volume:
+Restart services without deleting the volume:
 
 ```bash
-docker compose -f self-hosted/docker/docker-compose.yml up -d --build --wait
+docker compose up -d
+```
+
+After changing local source or upgrading a checkout, rebuild images first:
+
+```bash
+docker compose up -d --build
 ```
 
 `vifu-server` applies embedded database migrations before accepting traffic.

@@ -7,6 +7,13 @@ const requiredDirectories = [
   "crates/vifu-server",
 ];
 const sourceRoots = ["npm-packages/dashboard", "crates/vifu", "crates/vifu-server"];
+const cargoWorkspaceMembers = await readCargoWorkspaceMembers("Cargo.toml");
+const workspaceCrateDirectories = new Set(
+  cargoWorkspaceMembers
+    .filter((member) => member.startsWith("crates/"))
+    .map((member) => member.slice("crates/".length).split("/")[0])
+    .filter(Boolean),
+);
 const ignoredDirectories = new Set(["node_modules", ".next", ".next-e2e", "target"]);
 const violations = [];
 const dashboardForbiddenPatterns = [
@@ -25,8 +32,16 @@ const serverForbiddenAuthPatterns = [
 for (const directory of requiredDirectories) {
   if (!(await exists(directory))) violations.push(`${directory}: required directory is missing`);
 }
+for (const directory of sourceRoots.filter((root) => root.startsWith("crates/"))) {
+  if (!cargoWorkspaceMembers.includes(directory)) {
+    violations.push(`${directory}: required crate must be listed in Cargo workspace members`);
+  }
+}
+if (workspaceCrateDirectories.size === 0) {
+  violations.push("Cargo.toml: workspace members must include at least one crates/* entry");
+}
 await enforceDirectoryAllowlist("npm-packages", new Set(["dashboard"]));
-await enforceDirectoryAllowlist("crates", new Set(["vifu", "vifu-server"]));
+await enforceDirectoryAllowlist("crates", workspaceCrateDirectories);
 
 for (const root of sourceRoots) {
   for (const file of await sourceFiles(root)) {
@@ -73,6 +88,37 @@ async function exists(target) {
   } catch {
     return false;
   }
+}
+
+async function readCargoWorkspaceMembers(target) {
+  const contents = await readFile(target, "utf8");
+  const lines = contents.split(/\r?\n/);
+  let inWorkspace = false;
+  let inMembers = false;
+  let membersBlock = "";
+
+  for (const line of lines) {
+    if (/^\s*\[/.test(line)) {
+      if (inWorkspace) break;
+      inWorkspace = /^\s*\[workspace\]\s*$/.test(line);
+      continue;
+    }
+    if (!inWorkspace) continue;
+
+    if (!inMembers) {
+      const start = line.match(/^\s*members\s*=\s*\[(.*)$/);
+      if (!start) continue;
+      inMembers = true;
+      membersBlock += `${start[1]}\n`;
+      if (start[1].includes("]")) break;
+      continue;
+    }
+
+    membersBlock += `${line}\n`;
+    if (line.includes("]")) break;
+  }
+
+  return Array.from(membersBlock.matchAll(/"([^"]+)"/g), ([, member]) => member);
 }
 
 async function sourceFiles(root) {

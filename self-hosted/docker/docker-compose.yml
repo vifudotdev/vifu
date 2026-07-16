@@ -1,16 +1,62 @@
 name: vifu
 
 services:
+  secrets:
+    image: postgres:17-bookworm
+    environment:
+      VIFU_ADMIN_KEY: ${VIFU_ADMIN_KEY:-}
+      VIFU_AGENT_GATEWAY_TOKEN: ${VIFU_AGENT_GATEWAY_TOKEN:-}
+      VIFU_API_KEY_PEPPER: ${VIFU_API_KEY_PEPPER:-}
+      VIFU_PROVIDER_SECRET_KEY: ${VIFU_PROVIDER_SECRET_KEY:-}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-}
+      DATABASE_URL: ${DATABASE_URL:-}
+    volumes:
+      - vifu_secrets:/run/vifu/secrets
+    command:
+      - sh
+      - -eu
+      - -c
+      - |
+        mkdir -p /run/vifu/secrets
+        write_or_generate() {
+          name="$$1"
+          env_value="$$2"
+          bytes="$$3"
+          path="/run/vifu/secrets/$$name"
+          if [ -n "$$env_value" ]; then
+            printf '%s\n' "$$env_value" > "$$path"
+          elif [ ! -s "$$path" ]; then
+            openssl rand -hex "$$bytes" > "$$path"
+          fi
+          chmod 0444 "$$path"
+        }
+        write_or_generate admin_key "$$VIFU_ADMIN_KEY" 32
+        write_or_generate agent_gateway_token "$$VIFU_AGENT_GATEWAY_TOKEN" 32
+        write_or_generate api_key_pepper "$$VIFU_API_KEY_PEPPER" 32
+        write_or_generate provider_secret_key "$$VIFU_PROVIDER_SECRET_KEY" 32
+        write_or_generate postgres_password "$$POSTGRES_PASSWORD" 24
+        if [ -n "$$DATABASE_URL" ]; then
+          printf '%s\n' "$$DATABASE_URL" > /run/vifu/secrets/database_url
+        elif [ ! -s /run/vifu/secrets/database_url ]; then
+          postgres_password="$$(cat /run/vifu/secrets/postgres_password)"
+          printf 'postgres://vifu:%s@postgres:5432/vifu\n' "$$postgres_password" > /run/vifu/secrets/database_url
+        fi
+        chmod 0444 /run/vifu/secrets/database_url
+
   postgres:
     image: postgres:17-bookworm
+    depends_on:
+      secrets:
+        condition: service_completed_successfully
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-vifu}
       POSTGRES_USER: ${POSTGRES_USER:-vifu}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Run sh scripts/init-self-hosted.sh first}
+      POSTGRES_PASSWORD_FILE: /run/vifu/secrets/postgres_password
     ports:
       - "${VIFU_BIND_HOST:-127.0.0.1}:${POSTGRES_PORT:-5432}:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
+      - vifu_secrets:/run/vifu/secrets:ro
     restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
@@ -29,14 +75,18 @@ services:
     environment:
       VIFU_DEPLOYMENT_MODE: self-hosted
       VIFU_SERVER_ADDR: 0.0.0.0:6790
-      DATABASE_URL: ${DATABASE_URL:?Run sh scripts/init-self-hosted.sh first}
-      VIFU_ADMIN_KEY: ${VIFU_ADMIN_KEY:?Run sh scripts/init-self-hosted.sh first}
-      VIFU_AGENT_GATEWAY_TOKEN: ${VIFU_AGENT_GATEWAY_TOKEN:?Run sh scripts/init-self-hosted.sh first}
-      VIFU_API_KEY_PEPPER: ${VIFU_API_KEY_PEPPER:?Run sh scripts/init-self-hosted.sh first}
-      VIFU_PROJECT_DOMAIN: ${VIFU_PROJECT_DOMAIN:-localhost}
+      DATABASE_URL_FILE: /run/vifu/secrets/database_url
+      VIFU_ADMIN_KEY_FILE: /run/vifu/secrets/admin_key
+      VIFU_AGENT_GATEWAY_TOKEN_FILE: /run/vifu/secrets/agent_gateway_token
+      VIFU_API_KEY_PEPPER_FILE: /run/vifu/secrets/api_key_pepper
+      VIFU_PROVIDER_SECRET_KEY_FILE: /run/vifu/secrets/provider_secret_key
+      VIFU_HOME: /home/vifu/.vifu
       RUST_LOG: ${RUST_LOG:-vifu_server=info,tower_http=info}
     ports:
       - "${VIFU_BIND_HOST:-127.0.0.1}:${VIFU_SERVER_PORT:-6790}:6790"
+    volumes:
+      - vifu_secrets:/run/vifu/secrets:ro
+      - ${VIFU_CONFIG_DIR:-${HOME}/.vifu}:/home/vifu/.vifu
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "--fail", "--silent", "http://127.0.0.1:6790/health"]
@@ -66,21 +116,47 @@ services:
       VIFU_AUTH_OIDC_NAME: ${VIFU_AUTH_OIDC_NAME:-}
       VIFU_AUTH_OIDC_SCOPES: ${VIFU_AUTH_OIDC_SCOPES:-}
       VIFU_AUTH_OIDC_BOOTSTRAP_EMAIL: ${VIFU_AUTH_OIDC_BOOTSTRAP_EMAIL:-}
-      DATABASE_URL: ${DATABASE_URL:?Run sh scripts/init-self-hosted.sh first}
+      DATABASE_URL_FILE: /run/vifu/secrets/database_url
       VIFU_API_BASE_URL: http://backend:6790
       NEXT_PUBLIC_VIFU_API_BASE_URL: http://localhost:${VIFU_SERVER_PORT:-6790}
-      NEXT_PUBLIC_VIFU_PROJECT_DOMAIN: ${VIFU_PROJECT_DOMAIN:-localhost}
-      VIFU_ADMIN_KEY: ${VIFU_ADMIN_KEY:?Run sh scripts/init-self-hosted.sh first}
+      VIFU_ADMIN_KEY_FILE: /run/vifu/secrets/admin_key
       HOSTNAME: 0.0.0.0
       PORT: 6791
     ports:
       - "${VIFU_BIND_HOST:-127.0.0.1}:${VIFU_DASHBOARD_PORT:-6791}:6791"
+    volumes:
+      - vifu_secrets:/run/vifu/secrets:ro
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:6791/dashboard').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:6791/project').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
       interval: 5s
       timeout: 3s
       retries: 20
 
+  agent-gateway:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+      target: vifu
+    depends_on:
+      backend:
+        condition: service_healthy
+    environment:
+      VIFU_HOME: /home/vifu/.vifu
+      VIFU_SERVER_URL: http://backend:6790
+      VIFU_AGENT_GATEWAY_TOKEN_FILE: /run/vifu/secrets/agent_gateway_token
+    volumes:
+      - vifu_secrets:/run/vifu/secrets:ro
+      - ${VIFU_CONFIG_DIR:-${HOME}/.vifu}:/home/vifu/.vifu
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "vifu", "--status"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
 volumes:
+  vifu_secrets:
   postgres_data:

@@ -24,6 +24,8 @@ RUN useradd \
     --shell /usr/sbin/nologin \
     --uid "${UID}" \
     vifu
+RUN mkdir -p /home/vifu/.vifu \
+    && chown -R vifu:vifu /home/vifu/.vifu
 
 USER vifu
 WORKDIR /home/vifu

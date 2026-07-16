@@ -6,11 +6,15 @@ const ignoredDirectories = new Set([
   ".git",
   ".next",
   ".next-e2e",
+  ".serena",
+  ".vifu",
+  "dist",
   "node_modules",
   "playwright-report",
   "target",
   "test-results",
 ]);
+const ignoredFiles = new Set(["release.bun.lock"]);
 const checks = [
   ["provider access key", /(?:AKIA|ASIA)[0-9A-Z]{16}/],
   ["source-control token", /(?:github_pat_|gh[pousr]_)[A-Za-z0-9_]+/],
@@ -28,7 +32,7 @@ const historyPattern = [
   "github_pat_[A-Za-z0-9_]+",
   "gh[pousr]_[A-Za-z0-9_]+",
   "sk-(proj-)?[A-Za-z0-9_-]{20,}",
-  "[0-9]{12}",
+  "\\b[0-9]{12}\\b",
   "BEGIN (RSA |OPENSSH |EC |DSA )?PRIVATE KEY",
 ].join("|");
 const violations = [];
@@ -39,6 +43,7 @@ const generatedOutputPattern = new RegExp(
     "\\.next-e2e",
     `\\.${["open", "next"].join("-")}`,
     `\\.${["wrang", "ler"].join("")}`,
+    "dist",
     "test-results",
     "playwright-report",
   ].join("|")})(/|$)`,
@@ -63,7 +68,7 @@ for (const file of tracked) {
   if (generatedOutputPattern.test(file)) {
     violations.push(`${file}: generated output is tracked`);
   }
-  if (/(^|\/)\.env(?:\.|$)/.test(file) && file !== ".env.example") {
+  if (/(^|\/)\.env(?:\.|$)/.test(file) && path.basename(file) !== ".env.example") {
     violations.push(`${file}: local environment file is tracked`);
   }
   if (/(^|\/)(?:screenshot|screen-shot|artifacts?)(?:\/|[-_.])/i.test(file)) {
@@ -136,6 +141,8 @@ async function sourceFiles(root) {
   const files = [];
   for (const entry of await readdir(root, { withFileTypes: true })) {
     if (entry.isDirectory() && ignoredDirectories.has(entry.name)) continue;
+    if (entry.isDirectory() && path.join(root, entry.name) === path.join("self-hosted", "docker", "providers")) continue;
+    if (!entry.isDirectory() && ignoredFiles.has(entry.name)) continue;
     if (!entry.isDirectory() && (entry.name === ".env" || (entry.name.startsWith(".env.") && entry.name !== ".env.example"))) continue;
     if (!entry.isDirectory() && entry.name.endsWith(".tsbuildinfo")) continue;
     const entryPath = path.join(root, entry.name);

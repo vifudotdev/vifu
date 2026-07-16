@@ -62,6 +62,7 @@ DATABASE_URL="$database_url" \
 VIFU_ADMIN_KEY=vifu-oidc-e2e-admin-key \
 VIFU_AGENT_GATEWAY_TOKEN=vifu-oidc-e2e-agent-gateway-token \
 VIFU_API_KEY_PEPPER=vifu-oidc-e2e-api-key-pepper \
+VIFU_PROVIDER_SECRET_KEY=vifu-oidc-e2e-provider-secret-key \
 RUST_LOG=tower_http=error \
 cargo run -p vifu-server >"$state_dir/server.log" 2>&1 &
 server_pid=$!
