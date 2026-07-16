@@ -408,7 +408,15 @@ fn sanitize_error(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{agent_gateway_websocket_url, sanitize_error};
+    use serde_json::json;
+    use uuid::Uuid;
+
+    use super::{agent_gateway_websocket_url, decode_command, encode_command, sanitize_error};
+    use crate::gateway_frame;
+    use crate::protocol::{
+        AgentGatewayCommand, AGENT_GATEWAY_HEARTBEAT_EVENT, AGENT_GATEWAY_HELLO_METHOD,
+        AGENT_GATEWAY_HELLO_REQUEST_ID, VERSION,
+    };
 
     #[test]
     fn builds_agent_gateway_websocket_url_from_http_base() {
@@ -449,5 +457,77 @@ mod tests {
     #[test]
     fn sanitizes_agent_gateway_errors() {
         assert_eq!(sanitize_error("bad\0token"), "bad token");
+    }
+
+    #[test]
+    fn client_transport_codec_round_trips_gateway_frames() {
+        let session_id = Uuid::new_v4();
+        let command = AgentGatewayCommand::Heartbeat { session_id };
+        let encoded = encode_command(&command).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&encoded).unwrap();
+
+        assert_eq!(value["type"], "event");
+        assert_eq!(value["event"], AGENT_GATEWAY_HEARTBEAT_EVENT);
+        assert_eq!(decode_command(&encoded).unwrap(), command);
+    }
+
+    #[test]
+    fn client_transport_codec_rejects_invalid_frames() {
+        assert!(decode_command("").unwrap_err().contains("empty"));
+        assert!(decode_command("{")
+            .unwrap_err()
+            .contains("invalid gateway frame"));
+        assert!(
+            decode_command(&" ".repeat(gateway_frame::MAX_GATEWAY_FRAME_BYTES + 1))
+                .unwrap_err()
+                .contains("too large")
+        );
+
+        let extra_frame_field = json!({
+            "type": "req",
+            "id": AGENT_GATEWAY_HELLO_REQUEST_ID,
+            "method": AGENT_GATEWAY_HELLO_METHOD,
+            "params": {
+                "protocol": VERSION,
+                "gatewayId": "local-gateway",
+                "agents": [],
+                "metadata": {}
+            },
+            "extra": true
+        })
+        .to_string();
+        assert!(decode_command(&extra_frame_field)
+            .unwrap_err()
+            .contains("invalid gateway frame"));
+
+        let null_typed_frame_field = json!({
+            "type": "event",
+            "event": AGENT_GATEWAY_HEARTBEAT_EVENT,
+            "seq": null,
+            "payload": {
+                "sessionId": Uuid::new_v4()
+            }
+        })
+        .to_string();
+        assert!(decode_command(&null_typed_frame_field)
+            .unwrap_err()
+            .contains("invalid gateway frame"));
+
+        let extra_protocol_payload_field = json!({
+            "type": "req",
+            "id": AGENT_GATEWAY_HELLO_REQUEST_ID,
+            "method": AGENT_GATEWAY_HELLO_METHOD,
+            "params": {
+                "protocol": VERSION,
+                "gatewayId": "local-gateway",
+                "agents": [],
+                "metadata": {},
+                "extra": true
+            }
+        })
+        .to_string();
+        assert!(decode_command(&extra_protocol_payload_field)
+            .unwrap_err()
+            .contains("invalid gateway.hello params"));
     }
 }
