@@ -14,8 +14,8 @@ Keep these ownership boundaries explicit:
 - `npm-packages/dashboard` is the only Dashboard application. Core views use a
   `DeploymentClient`; local and self-host authority enter through the same
   `AuthorityAdapter` path selected from server capabilities.
-- `self-hosted/docker` owns the supported PostgreSQL, server, and standalone
-  Dashboard deployment.
+- `docker-compose.yml` owns the supported PostgreSQL, server, Agent Gateway,
+  and standalone Dashboard deployment.
 
 The browser is never an authority boundary. Profile, endpoint, key, Agent Gateway,
 session, and trace decisions must be enforced by the server that owns them. Do

@@ -141,7 +141,6 @@ async function sourceFiles(root) {
   const files = [];
   for (const entry of await readdir(root, { withFileTypes: true })) {
     if (entry.isDirectory() && ignoredDirectories.has(entry.name)) continue;
-    if (entry.isDirectory() && path.join(root, entry.name) === path.join("self-hosted", "docker", "providers")) continue;
     if (!entry.isDirectory() && ignoredFiles.has(entry.name)) continue;
     if (!entry.isDirectory() && (entry.name === ".env" || (entry.name.startsWith(".env.") && entry.name !== ".env.example"))) continue;
     if (!entry.isDirectory() && entry.name.endsWith(".tsbuildinfo")) continue;

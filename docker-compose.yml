@@ -66,7 +66,7 @@ services:
 
   backend:
     build:
-      context: ../..
+      context: .
       dockerfile: Dockerfile
       target: vifu-server
     depends_on:
@@ -96,8 +96,8 @@ services:
 
   dashboard:
     build:
-      context: ../..
-      dockerfile: self-hosted/docker/Dockerfile.dashboard
+      context: .
+      dockerfile: npm-packages/dashboard/Dockerfile
     depends_on:
       backend:
         condition: service_healthy
@@ -135,7 +135,7 @@ services:
 
   agent-gateway:
     build:
-      context: ../..
+      context: .
       dockerfile: Dockerfile
       target: vifu
     depends_on:

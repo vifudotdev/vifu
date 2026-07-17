@@ -17,18 +17,17 @@ account and communicates through ordinary HTTP and WebSocket contracts.
 From the repository root:
 
 ```bash
-cd self-hosted/docker
 cp .env.example .env
 docker compose up -d
 ```
 
-After that, normal restarts from `self-hosted/docker` are:
+After that, normal restarts from the repository root are:
 
 ```bash
 docker compose up -d
 ```
 
-If you use the Bun workspace from the repository root, the equivalent starter is:
+The equivalent Bun workspace starter is:
 
 ```bash
 bun run self-host
@@ -48,8 +47,8 @@ sessions, profiles, bindings, endpoints, keys, Agent Gateway sessions, or traces
 
 ## Configuration
 
-The Docker directory follows the usual Compose convention: copy
-`.env.example` to `.env` and change values there when needed. Blank authority
+The repository root follows the usual Compose convention: copy `.env.example`
+to `.env` and change values there when needed. Blank authority
 values are generated on first startup and stored in the `vifu_secrets` Docker
 volume. Existing explicit values in `.env` are imported into that volume so
 restores and rotations remain predictable. Compose accepts these values:
@@ -127,7 +126,7 @@ connection.
 No external provider is required for the Vifu stack to start. Provider
 integrations are optional and documented separately:
 
-See [providers](providers/README.md) for available integrations. OpenClaw, for
+See [providers](../providers/README.md) for available integrations. OpenClaw, for
 example, is started with OpenClaw's own Docker Compose flow and then registered
 in Vifu's generic provider registry at `~/.vifu/providers.json`. Provider
 directories may be removed without changing Vifu's core self-host stack. When a

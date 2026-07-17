@@ -12,12 +12,11 @@ deployment are all included in this repository under Apache-2.0.
 Start Vifu:
 
 ```bash
-cd self-hosted/docker
 cp .env.example .env
 docker compose up -d
 ```
 
-After that, restarting the stack from `self-hosted/docker` is just:
+After that, restarting the stack from the repository root is just:
 
 ```bash
 docker compose up -d
@@ -35,8 +34,8 @@ with `AUTH_DISABLE_SIGNUP=true` or `VIFU_SIGNUP_ENABLED=false`.
 
 The Compose stack includes Vifu Agent Gateway, but no external provider is
 required for Vifu to start. Provider integrations are optional and live under
-`self-hosted/providers/`. If no provider is enabled, Vifu still runs normally
-and the Dashboard shows no connected agents.
+`providers/`. If no provider is enabled, Vifu still runs normally and the
+Dashboard shows no connected agents.
 
 ## Independent Self-hosting
 
@@ -51,14 +50,19 @@ Dashboard -> PostgreSQL users and web sessions
 Dashboard -> vifu-server through a server-side runtime credential
 ```
 
-Applications call endpoint-scoped HTTP invoke APIs. No SDK is required:
+Applications call the OpenAI-compatible API. Existing AI SDKs only need a Vifu
+base URL, an endpoint API key, and the endpoint slug as `model`:
 
 ```http
-POST http://localhost:6790/v1/endpoints/town-guide/invoke
+POST http://localhost:6790/v1/chat/completions
 Authorization: Bearer vifu_ep_...
 Content-Type: application/json
 
-{"message":"Open the north gate"}
+{
+  "model": "town-guide",
+  "messages": [{ "role": "user", "content": "Open the north gate" }],
+  "stream": false
+}
 ```
 
 API keys are scoped to one endpoint. The server stores only peppered key
@@ -74,7 +78,7 @@ The included Compose stack runs:
 - Vifu Agent Gateway for connecting configured external agent providers.
 
 Services bind to `127.0.0.1` by default. Configuration, upgrades, persistence,
-and exposure guidance are in [self-hosted/README.md](self-hosted/README.md).
+and exposure guidance are in [docs/self-hosting.md](docs/self-hosting.md).
 
 ## Architecture And Security
 
@@ -101,10 +105,12 @@ browser logs, or the client bundle. Optional managed infrastructure may be
 introduced later, but it is not required for the day-1 runtime.
 
 External agent providers are optional. Provider-specific setup lives under
-`self-hosted/providers/` and can be removed without changing the Vifu core
-stack. Remote self-host access must still use TLS even though the Dashboard has
-built-in login. See
+`providers/` and can be removed without changing the Vifu core stack. Remote
+self-host access must still use TLS even though the Dashboard has built-in login. See
 [SECURITY.md](SECURITY.md) for the full boundary.
+
+For the endpoint-first runtime model and protocol boundaries, see the
+[Vifu core runtime design documentation](https://vifu.dev/docs/core-runtime-design).
 
 ## Repository Layout
 
@@ -114,7 +120,8 @@ crates/
   vifu-server/      HTTP API, Agent Gateway relay, PostgreSQL runtime
 npm-packages/
   dashboard/        One capability-driven Next.js Dashboard
-self-hosted/docker/ PostgreSQL, vifu-server, Dashboard, and Agent Gateway images
+providers/          Optional external agent provider guides and examples
+docker-compose.yml PostgreSQL, vifu-server, Dashboard, and Agent Gateway stack
 scripts/            Development, E2E, and public-repository checks
 ```
 

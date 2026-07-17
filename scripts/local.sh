@@ -38,8 +38,8 @@ if [ -n "$shared_database_url" ]; then
 else
   printf '%s\n' "Starting local PostgreSQL container."
   docker compose $compose_env_args \
-    -f self-hosted/docker/docker-compose.yml \
-    -f self-hosted/docker/docker-compose.local.yml \
+    -f docker-compose.yml \
+    -f docker-compose.local.yml \
     up -d --wait postgres
 fi
 

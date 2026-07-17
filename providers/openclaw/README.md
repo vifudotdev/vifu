@@ -23,7 +23,7 @@ Then register that OpenClaw Gateway in Vifu:
 
 ```bash
 mkdir -p ~/.vifu
-cp <vifu>/self-hosted/providers/openclaw/providers.example.json ~/.vifu/providers.json
+cp <vifu>/providers/openclaw/providers.example.json ~/.vifu/providers.json
 ```
 
 OpenClaw protects its Gateway with its own Gateway token. In OpenClaw's Docker
@@ -39,7 +39,7 @@ Edit `auth.token` and keep the file local to your self-host deployment.
 Start or restart Vifu:
 
 ```bash
-cd <vifu>/self-hosted/docker
+cd <vifu>
 docker compose up -d
 docker compose logs --tail=60 agent-gateway
 ```
@@ -100,7 +100,7 @@ For an existing OpenClaw deployment, register its Gateway in Vifu:
 
 ```bash
 mkdir -p ~/.vifu
-cp <vifu>/self-hosted/providers/openclaw/providers.example.json ~/.vifu/providers.json
+cp <vifu>/providers/openclaw/providers.example.json ~/.vifu/providers.json
 ```
 
 Then put the OpenClaw Gateway token into:
@@ -132,14 +132,14 @@ them.
 cd <openclaw>
 docker compose up -d
 
-cd <vifu>/self-hosted/docker
+cd <vifu>
 docker compose up -d
 ```
 
 Check the Vifu side:
 
 ```bash
-cd <vifu>/self-hosted/docker
+cd <vifu>
 docker compose logs --tail=60 agent-gateway
 ```
 
@@ -170,7 +170,7 @@ registration, remove:
 Then restart Vifu:
 
 ```bash
-cd <vifu>/self-hosted/docker
+cd <vifu>
 docker compose up -d
 ```
 
@@ -179,7 +179,7 @@ docker compose up -d
 No agents in Vifu:
 
 ```bash
-cd <vifu>/self-hosted/docker
+cd <vifu>
 docker compose logs --tail=80 agent-gateway
 ```
 

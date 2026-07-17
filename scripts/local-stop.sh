@@ -10,6 +10,6 @@ if [ -f .env.local ]; then
 fi
 
 docker compose $compose_env_args \
-  -f self-hosted/docker/docker-compose.yml \
-  -f self-hosted/docker/docker-compose.local.yml \
+  -f docker-compose.yml \
+  -f docker-compose.local.yml \
   down

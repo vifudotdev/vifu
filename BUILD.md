@@ -9,15 +9,14 @@ Run commands from the repository root.
 - Node.js 22
 - Docker with Compose v2
 
-Install Dashboard dependencies and create local configuration:
+Install Dashboard dependencies:
 
 ```bash
 bun install --frozen-lockfile
-cp .env.example .env.local
 ```
 
-The sample values are for loopback development only. Replace all authority
-values before exposing a deployment.
+Source development uses loopback defaults. Docker self-hosting uses the root
+`.env.example` template described below.
 
 ## Source Development
 
@@ -135,7 +134,6 @@ sidebar session persistence, and signout.
 ## Clean Docker Verification
 
 ```bash
-cd self-hosted/docker
 cp .env.example .env
 docker compose build --pull --no-cache
 docker compose up -d --wait
@@ -168,7 +166,6 @@ bun run test:self-hosted
 Stop the stack after testing:
 
 ```bash
-cd self-hosted/docker
 docker compose down --volumes
 ```
 

@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-compose_file="self-hosted/docker/docker-compose.yml"
+compose_file="docker-compose.yml"
 state_dir="$(mktemp -d "${TMPDIR:-/tmp}/vifu-e2e.XXXXXX")"
 managed_stack=0
 compose_project=""

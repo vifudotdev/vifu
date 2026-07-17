@@ -15,4 +15,3 @@ test-results/
 !.env.example
 .vifu/
 .serena/
-self-hosted/docker/providers/

@@ -1,4 +1,0 @@
-name: vifu
-
-include:
-  - path: self-hosted/docker/docker-compose.yml
