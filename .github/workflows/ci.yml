@@ -60,22 +60,29 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - name: Initialize self-hosted secrets
-        run: sh scripts/init-self-hosted.sh
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.9
+      - name: Install dashboard test dependencies
+        run: bun install --frozen-lockfile
+      - name: Install browser
+        run: bunx playwright install --with-deps chromium
+      - name: Initialize self-hosted environment
+        run: cp .env.example .env
       - name: Build without local caches
-        run: docker compose -f self-hosted/docker/docker-compose.yml build --pull --no-cache
+        run: docker compose build --pull --no-cache
       - name: Start and wait for health checks
-        run: docker compose -f self-hosted/docker/docker-compose.yml up -d --wait
+        run: docker compose up -d --wait
       - name: Verify public endpoints
         run: |
           curl --fail --silent http://127.0.0.1:6790/health
           curl --fail --silent http://127.0.0.1:6790/v1/status
-          curl --fail --silent http://127.0.0.1:6791/dashboard > /dev/null
+          curl --fail --silent http://127.0.0.1:6791/project > /dev/null
       - name: Connector, concurrency, restart, and persistence E2E
         run: sh scripts/run-self-hosted-e2e.sh
       - name: Collect service status
         if: always()
-        run: docker compose -f self-hosted/docker/docker-compose.yml ps
+        run: docker compose ps
       - name: Stop services
         if: always()
-        run: docker compose -f self-hosted/docker/docker-compose.yml down --volumes
+        run: docker compose down --volumes
