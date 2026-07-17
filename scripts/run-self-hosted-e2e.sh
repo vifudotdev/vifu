@@ -94,6 +94,7 @@ state_path="$state_dir/state.json"
 mock_pid=""
 agent_gateway_pid=""
 use_existing_openclaw="${VIFU_E2E_USE_EXISTING_OPENCLAW:-0}"
+openclaw_provider_token="${OPENCLAW_GATEWAY_TOKEN:-}"
 
 compose() {
   if [ -n "$compose_project" ]; then
@@ -131,7 +132,10 @@ if [ "$managed_stack" = "1" ]; then
 fi
 
 if [ "$use_existing_openclaw" != "1" ]; then
-  OPENCLAW_MOCK_PORT="$openclaw_port" node scripts/mock-openclaw.mjs >"$mock_log" 2>&1 &
+  openclaw_provider_token="${openclaw_provider_token:-$(rand_hex 32)}"
+  OPENCLAW_MOCK_PORT="$openclaw_port" \
+  OPENCLAW_MOCK_TOKEN="$openclaw_provider_token" \
+  node scripts/mock-openclaw.mjs >"$mock_log" 2>&1 &
   mock_pid=$!
 fi
 
@@ -154,9 +158,9 @@ mkdir -p "$state_dir/vifu-home"
   printf '%s\n' '      "key": "openclaw-e2e",'
   printf '%s\n' '      "type": "openclaw",'
   printf '%s' "      \"url\": \"http://127.0.0.1:$openclaw_port\""
-  if [ -n "${OPENCLAW_GATEWAY_TOKEN:-}" ]; then
+  if [ -n "$openclaw_provider_token" ]; then
     printf '%s\n' ','
-    printf '%s\n' "      \"auth\": { \"token\": \"$(json_escape "$OPENCLAW_GATEWAY_TOKEN")\" }"
+    printf '%s\n' "      \"auth\": { \"token\": \"$(json_escape "$openclaw_provider_token")\" }"
   else
     printf '%s\n' ''
   fi

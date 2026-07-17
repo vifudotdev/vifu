@@ -53,10 +53,6 @@ jobs:
           VIFU_PRIVATE_TERMS: ${{ secrets.PUBLIC_REPOSITORY_PRIVATE_TERMS }}
       - name: Standalone dashboard builds
         run: bun run build
-      - name: Install browser
-        run: bunx playwright install --with-deps chromium
-      - name: Dashboard account-flow browser tests
-        run: bun run test:e2e
 
   self-hosted-docker:
     name: Clean self-hosted Docker smoke

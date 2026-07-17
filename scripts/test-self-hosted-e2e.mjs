@@ -105,9 +105,19 @@ async function setup() {
   assert(secondSignup.status === 303 && !secondSignup.headers.get("location")?.includes("auth_error"), "Open self-hosted signup rejected another account");
 
   const agentGateways = (await request("/v1/agent-gateways")).agentGateways ?? [];
-  const agentGateway = agentGateways.find((item) => item.status === "connected");
-  assert(agentGateway, "A connected Vifu Agent Gateway is required");
-  const agent = agentGateway.agents?.find((item) => item.id === "guide-agent") ?? agentGateway.agents?.[0];
+  const expectedMockAgent = openClawMockUrl ? "guide-agent" : null;
+  const agentGateway = expectedMockAgent
+    ? agentGateways.find((item) =>
+      item.status === "connected"
+        && item.agents?.some((agent) => agent.id === expectedMockAgent)
+    )
+    : agentGateways.find((item) => item.status === "connected");
+  assert(agentGateway, expectedMockAgent
+    ? `A connected Vifu Agent Gateway exposing ${expectedMockAgent} is required`
+    : "A connected Vifu Agent Gateway is required");
+  const agent = expectedMockAgent
+    ? agentGateway.agents?.find((item) => item.id === expectedMockAgent)
+    : agentGateway.agents?.[0];
   assert(agent?.id, "The Agent Gateway did not report an agent");
 
   const project = (await request("/v1/projects", {

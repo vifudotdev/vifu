@@ -2,6 +2,7 @@ import { createServer } from "node:http";
 
 const host = process.env.OPENCLAW_MOCK_HOST?.trim() || "127.0.0.1";
 const port = Number(process.env.OPENCLAW_MOCK_PORT || 18789);
+const token = process.env.OPENCLAW_MOCK_TOKEN?.trim() || "";
 const maxBodyBytes = 512 * 1024;
 let canceledRequests = 0;
 
@@ -13,6 +14,7 @@ const server = createServer(async (request, response) => {
     return json(response, 200, { canceledRequests });
   }
   if (request.method === "GET" && request.url === "/v1/models") {
+    if (!authorized(request)) return json(response, 401, { error: { message: "Unauthorized" } });
     return json(response, 200, {
       object: "list",
       data: [
@@ -24,6 +26,7 @@ const server = createServer(async (request, response) => {
     });
   }
   if (request.method === "POST" && request.url === "/v1/chat/completions") {
+    if (!authorized(request)) return json(response, 401, { error: { message: "Unauthorized" } });
     try {
       const input = JSON.parse(await readBody(request));
       const message = Array.isArray(input.messages)
@@ -80,6 +83,11 @@ function readBody(request) {
     request.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
     request.on("error", reject);
   });
+}
+
+function authorized(request) {
+  if (!token) return true;
+  return request.headers.authorization === `Bearer ${token}`;
 }
 
 function json(response, status, body) {
