@@ -3,7 +3,7 @@
 import type { FormEvent, ReactNode } from "react";
 import { useState } from "react";
 import { useRouter } from "next/navigation";
-import { Copy, KeyRound, Play, PlugZap, Plus, RefreshCw, Save, Trash2, XCircle } from "lucide-react";
+import { Play, PlugZap, Plus, RefreshCw, Save, Trash2, XCircle } from "lucide-react";
 import type {
   AgentBinding,
   AgentEndpoint,
@@ -271,55 +271,6 @@ export function EndpointEditForm({ endpoint }: { endpoint: AgentEndpoint }) {
   );
 }
 
-export function ApiKeyCreateForm({ endpoints }: { endpoints: AgentEndpoint[] }) {
-  const router = useRouter();
-  const [state, setState] = useState<ActionState>(null);
-  const [rawKey, setRawKey] = useState<string | null>(null);
-  const [pending, setPending] = useState(false);
-
-  async function submit(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    setPending(true);
-    setState(null);
-    setRawKey(null);
-    const form = new FormData(event.currentTarget);
-    try {
-      const payload = await runtimeRequest<{ apiKey?: { key?: string } }>("api-keys", "POST", {
-        endpointId: value(form, "endpointId"),
-        name: optionalValue(form, "name"),
-      });
-      const key = payload.apiKey?.key;
-      if (!key) throw new Error("The runtime did not return the new key.");
-      setRawKey(key);
-      setState({ tone: "success", message: "API key created." });
-      router.refresh();
-    } catch (error) {
-      setState({ tone: "error", message: errorMessage(error) });
-    } finally {
-      setPending(false);
-    }
-  }
-
-  return (
-    <form className="runtime-form" onSubmit={submit}>
-      <div className="form-grid">
-        <Field label="Endpoint">
-          <select name="endpointId" required defaultValue="">
-            <option value="" disabled>Select endpoint</option>
-            {endpoints.map((endpoint) => <option key={endpoint.id} value={endpoint.id}>{endpoint.name}</option>)}
-          </select>
-        </Field>
-        <Field label="Key name"><input name="name" placeholder="Game client" maxLength={128} /></Field>
-      </div>
-      <div className="form-actions">
-        <button className="primary-button" type="submit" disabled={pending}><KeyRound aria-hidden="true" />{pending ? "Creating" : "Create API key"}</button>
-        <ActionMessage state={state} />
-      </div>
-      {rawKey ? <KeyReveal value={rawKey} /> : null}
-    </form>
-  );
-}
-
 export function ProviderConnectionForm({ project, adapters }: { project: RuntimeProject; adapters: ProviderAdapter[] }) {
   const router = useRouter();
   const adapter = adapters[0];
@@ -443,22 +394,62 @@ export function DeleteResourceButton({ path, label }: { path: string; label: str
 export function RevokeApiKeyButton({ id, name }: { id: string; name: string }) {
   const router = useRouter();
   const [pending, setPending] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   async function revoke() {
     if (!window.confirm(`Revoke ${name}?`)) return;
     setPending(true);
+    setError(null);
     try {
-      await runtimeRequest(`api-keys/${id}`, "DELETE");
+      await runtimeRequest(`api-keys/${id}/revoke`, "POST");
       router.refresh();
+    } catch (nextError) {
+      setError(errorMessage(nextError));
     } finally {
       setPending(false);
     }
   }
 
-  return <button className="icon-button danger" type="button" onClick={revoke} disabled={pending} title={`Revoke ${name}`} aria-label={`Revoke ${name}`}><XCircle aria-hidden="true" /></button>;
+  return (
+    <span className="row-action-wrap">
+      <button className="icon-button danger" type="button" onClick={revoke} disabled={pending} title={`Revoke ${name}`} aria-label={`Revoke ${name}`}>
+        <XCircle aria-hidden="true" />
+      </button>
+      {error ? <span className="inline-error" role="alert">{error}</span> : null}
+    </span>
+  );
 }
 
-export function InvokeEndpointForm({ endpoint }: { endpoint: AgentEndpoint }) {
+export function DeleteApiKeyButton({ id, name }: { id: string; name: string }) {
+  const router = useRouter();
+  const [pending, setPending] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function remove() {
+    if (!window.confirm(`Permanently delete the revoked API key record ${name}? This cannot be undone.`)) return;
+    setPending(true);
+    setError(null);
+    try {
+      await runtimeRequest(`api-keys/${id}`, "DELETE");
+      router.refresh();
+    } catch (nextError) {
+      setError(errorMessage(nextError));
+    } finally {
+      setPending(false);
+    }
+  }
+
+  return (
+    <span className="row-action-wrap">
+      <button className="icon-button danger" type="button" onClick={remove} disabled={pending} title={`Delete ${name} record`} aria-label={`Delete ${name} record`}>
+        <Trash2 aria-hidden="true" />
+      </button>
+      {error ? <span className="inline-error" role="alert">{error}</span> : null}
+    </span>
+  );
+}
+
+export function ChatCompletionForm({ endpoint }: { endpoint: AgentEndpoint }) {
   const [pending, setPending] = useState(false);
   const [result, setResult] = useState<string | null>(null);
   const [state, setState] = useState<ActionState>(null);
@@ -470,8 +461,10 @@ export function InvokeEndpointForm({ endpoint }: { endpoint: AgentEndpoint }) {
     setResult(null);
     const form = new FormData(event.currentTarget);
     try {
-      const payload = await runtimeRequest(`endpoints/${endpoint.id}/invoke`, "POST", {
-        message: value(form, "message"),
+      const payload = await runtimeRequest("chat/completions", "POST", {
+        model: endpoint.slug,
+        messages: [{ role: "user", content: value(form, "message") }],
+        stream: false,
       });
       setResult(JSON.stringify(payload, null, 2));
       setState({ tone: "success", message: "Call completed." });
@@ -549,21 +542,6 @@ function Field({ label, wide = false, children }: { label: string; wide?: boolea
 
 function ActionMessage({ state }: { state: ActionState }) {
   return state ? <span className={`action-message ${state.tone}`} role={state.tone === "error" ? "alert" : "status"}>{state.message}</span> : null;
-}
-
-function KeyReveal({ value: key }: { value: string }) {
-  const [copied, setCopied] = useState(false);
-  async function copy() {
-    await navigator.clipboard.writeText(key);
-    setCopied(true);
-  }
-  return (
-    <div className="key-reveal">
-      <code>{key}</code>
-      <button className="icon-button" type="button" onClick={copy} title="Copy key" aria-label="Copy key"><Copy aria-hidden="true" /></button>
-      <span>{copied ? "Copied" : "Shown once"}</span>
-    </div>
-  );
 }
 
 async function runtimeRequest<T = unknown>(path: string, method: string, body?: unknown): Promise<T> {

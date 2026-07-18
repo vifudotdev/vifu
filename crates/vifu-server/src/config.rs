@@ -18,7 +18,7 @@ pub struct Config {
     pub database_url: String,
     pub database_max_connections: u32,
     pub admin_key: String,
-    pub agent_gateway_token: String,
+    pub agent_gateway_bootstrap_token: String,
     pub api_key_pepper: String,
     pub provider_secret_key: String,
     pub request_timeout: Duration,
@@ -56,11 +56,11 @@ impl Config {
             deployment_mode,
             "vifu-local-admin-key",
         )?;
-        let agent_gateway_token = deployment_secret(
+        let agent_gateway_bootstrap_token = deployment_secret(
             &mut lookup,
-            "VIFU_AGENT_GATEWAY_TOKEN",
+            "VIFU_AGENT_GATEWAY_BOOTSTRAP_TOKEN",
             deployment_mode,
-            "vifu-local-agent-gateway-token",
+            "vifu-local-agent-gateway-bootstrap-token",
         )?;
         let api_key_pepper = deployment_secret(
             &mut lookup,
@@ -90,7 +90,7 @@ impl Config {
                 100,
             )? as u32,
             admin_key,
-            agent_gateway_token,
+            agent_gateway_bootstrap_token,
             api_key_pepper,
             provider_secret_key,
             request_timeout: Duration::from_millis(parse_u64(
@@ -255,11 +255,14 @@ mod tests {
         assert_eq!(config.addr.to_string(), "127.0.0.1:6790");
         assert!(config.database_url.contains("127.0.0.1:5432"));
         assert_eq!(config.deployment_mode, DeploymentMode::Local);
-        assert_ne!(config.admin_key, config.agent_gateway_token);
+        assert_ne!(config.admin_key, config.agent_gateway_bootstrap_token);
         assert_ne!(config.admin_key, config.api_key_pepper);
         assert_ne!(config.admin_key, config.provider_secret_key);
-        assert_ne!(config.agent_gateway_token, config.api_key_pepper);
-        assert_ne!(config.agent_gateway_token, config.provider_secret_key);
+        assert_ne!(config.agent_gateway_bootstrap_token, config.api_key_pepper);
+        assert_ne!(
+            config.agent_gateway_bootstrap_token,
+            config.provider_secret_key
+        );
         assert_ne!(config.api_key_pepper, config.provider_secret_key);
     }
 
@@ -276,7 +279,7 @@ mod tests {
     #[test]
     fn rejects_unknown_deployment_mode() {
         let error = Config::from_lookup(|key| match key {
-            "VIFU_DEPLOYMENT_MODE" => Some("managed".to_string()),
+            "VIFU_DEPLOYMENT_MODE" => Some("unsupported".to_string()),
             _ => None,
         })
         .unwrap_err();
@@ -297,7 +300,9 @@ mod tests {
         let config = Config::from_lookup(|key| match key {
             "VIFU_DEPLOYMENT_MODE" => Some("self-hosted".to_string()),
             "VIFU_ADMIN_KEY" => Some("self-host-admin-key".to_string()),
-            "VIFU_AGENT_GATEWAY_TOKEN" => Some("self-host-agent-gateway-token".to_string()),
+            "VIFU_AGENT_GATEWAY_BOOTSTRAP_TOKEN" => {
+                Some("self-host-agent-gateway-bootstrap-token".to_string())
+            }
             "VIFU_API_KEY_PEPPER" => Some("self-host-api-key-pepper".to_string()),
             "VIFU_PROVIDER_SECRET_KEY" => Some("self-host-provider-secret-key".to_string()),
             _ => None,
@@ -316,13 +321,13 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
         let database_url = dir.join("database_url");
         let admin_key = dir.join("admin_key");
-        let agent_gateway_token = dir.join("agent_gateway_token");
+        let agent_gateway_bootstrap_token = dir.join("agent_gateway_bootstrap_token");
         let api_key_pepper = dir.join("api_key_pepper");
         let provider_secret_key = dir.join("provider_secret_key");
         fs::write(&database_url, "postgres://vifu@postgres:5432/vifu\n").unwrap();
         fs::write(&admin_key, "self-host-admin-key-from-file\n").unwrap();
         fs::write(
-            &agent_gateway_token,
+            &agent_gateway_bootstrap_token,
             "self-host-agent-gateway-token-from-file\n",
         )
         .unwrap();
@@ -337,7 +342,9 @@ mod tests {
             "VIFU_DEPLOYMENT_MODE" => Some("self-hosted".to_string()),
             "DATABASE_URL_FILE" => Some(database_url.display().to_string()),
             "VIFU_ADMIN_KEY_FILE" => Some(admin_key.display().to_string()),
-            "VIFU_AGENT_GATEWAY_TOKEN_FILE" => Some(agent_gateway_token.display().to_string()),
+            "VIFU_AGENT_GATEWAY_BOOTSTRAP_TOKEN_FILE" => {
+                Some(agent_gateway_bootstrap_token.display().to_string())
+            }
             "VIFU_API_KEY_PEPPER_FILE" => Some(api_key_pepper.display().to_string()),
             "VIFU_PROVIDER_SECRET_KEY_FILE" => Some(provider_secret_key.display().to_string()),
             _ => None,

@@ -106,6 +106,22 @@ bun run dev:agent-gateway
 
 ## Rust Workspace
 
+The Rust workspace produces two runtime executables:
+
+| Executable | Role |
+| --- | --- |
+| `vifu-server` | Deployment HTTP/WebSocket server and PostgreSQL runtime |
+| `vifu` | Agent Gateway that runs beside local or remote agent providers |
+
+Build only the release executables used by a Vifu deployment:
+
+```bash
+cargo build --release --locked -p vifu-server -p vifu
+```
+
+They are written to `target/release/vifu-server` and `target/release/vifu`.
+PostgreSQL and the Dashboard are still required for the complete local console.
+
 ```bash
 cargo fmt --all -- --check
 cargo test --workspace --all-targets
@@ -115,8 +131,9 @@ cargo build --workspace
 
 Database migrations are embedded in `vifu-server` and run at startup. Dashboard
 authentication is implemented in the Dashboard server, which also initializes
-and upgrades the auth tables it uses. SQLx uses runtime-checked queries, so a
-live database is not required for normal compilation or unit tests.
+and upgrades the auth tables it uses. SQLx uses runtime-checked queries. The
+database integration test runs when PostgreSQL is available and is mandatory in
+CI; compilation and pure unit tests do not require a live database.
 
 ## Dashboard
 
@@ -142,16 +159,17 @@ curl --fail --silent http://127.0.0.1:6790/v1/status
 curl --fail --silent http://127.0.0.1:6791/project > /dev/null
 ```
 
-With the stack running, the full Agent Gateway and persistence test is:
+The full Agent Gateway and persistence test creates an isolated stack on random
+loopback ports, exercises it, and removes it afterward:
 
 ```bash
 bun run test:self-hosted
 ```
 
 It creates ten endpoints, invokes them concurrently over one Agent Gateway
-WebSocket, verifies endpoint key isolation and traces, restarts all three
-services, verifies PostgreSQL persistence and session resume, then removes its
-test resources.
+WebSocket, verifies Project Key scopes, Canvas exposure, and traces, restarts
+the services, verifies PostgreSQL persistence and session resume, then removes
+its test resources.
 
 By default the test starts a protocol-compatible fixture. Release verification
 can target an already-running OpenClaw Gateway instead. If that Gateway requires
@@ -160,6 +178,7 @@ the test; the harness writes it into a temporary `providers.json`.
 
 ```bash
 VIFU_E2E_USE_EXISTING_OPENCLAW=1 \
+VIFU_E2E_OPENCLAW_PORT=18789 \
 bun run test:self-hosted
 ```
 

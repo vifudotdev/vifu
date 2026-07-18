@@ -338,7 +338,7 @@ function buildGraph({
 } {
   const profileById = new Map(profiles.map((profile) => [profile.id, profile]));
   const bindingById = new Map(bindings.map((binding) => [binding.id, binding]));
-  const gatewayById = new Map(agentGateways.map((gateway) => [gateway.gatewayId, gateway]));
+  const gatewayById = gatewayStatusMap(agentGateways);
   const canvasNodes = canvas?.nodes ?? [];
   const primaryEndpoint = endpoints[0];
   const resourceKeys = new Set(canvasNodes.map((node) => `${node.gatewayId ?? ""}/${node.resourceId ?? ""}`));
@@ -353,7 +353,7 @@ function buildGraph({
         subtitle: "Project endpoint",
         kind: "endpoint",
         status: project.enabled ? "ready" : "off",
-        meta: primaryEndpoint ? endpointInvokeUrl(primaryEndpoint, browserApiBaseUrl) : "No endpoint yet",
+        meta: primaryEndpoint ? projectChatCompletionsUrl(project, browserApiBaseUrl) : "No endpoint yet",
       },
       draggable: false,
     },
@@ -441,9 +441,10 @@ function nextPalettePosition(nodes: Node[]): { x: number; y: number } {
   return { x: 360 + (nodes.length % 3) * 280, y: 160 + Math.floor(nodes.length / 3) * 190 };
 }
 
-function endpointInvokeUrl(endpoint: AgentEndpoint, browserApiBaseUrl: string): string {
+function projectChatCompletionsUrl(project: RuntimeProject, browserApiBaseUrl: string): string {
   const url = new URL(browserApiBaseUrl);
-  url.pathname = `/v1/endpoints/${encodeURIComponent(endpoint.slug || endpoint.id)}/invoke`;
+  const basePath = url.pathname.replace(/\/+$/, "");
+  url.pathname = `${basePath}/${encodeURIComponent(project.slug)}/v1/chat/completions`;
   url.search = "";
   return url.toString().replace(/\/$/, "");
 }
@@ -476,6 +477,17 @@ function slugify(value: string): string {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : "Request failed.";
+}
+
+function gatewayStatusMap(gateways: AgentGateway[]): Map<string, AgentGateway> {
+  const byId = new Map<string, AgentGateway>();
+  for (const gateway of gateways) {
+    const current = byId.get(gateway.gatewayId);
+    if (!current || (current.status !== "connected" && gateway.status === "connected")) {
+      byId.set(gateway.gatewayId, gateway);
+    }
+  }
+  return byId;
 }
 
 function shortId(value: string): string {

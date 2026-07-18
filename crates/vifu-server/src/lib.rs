@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 use axum::http::header::{AUTHORIZATION, CONTENT_TYPE};
 use axum::http::{HeaderName, Method};
-use axum::routing::{delete, get, post, put};
+use axum::routing::{delete, get, patch, post, put};
 use axum::Router;
 use config::Config;
 use error::ApiError;
@@ -174,14 +174,35 @@ pub fn app(state: AppState) -> Router {
                 .patch(api::update_endpoint)
                 .delete(api::delete_endpoint),
         )
-        .route("/v1/endpoints/{id}/invoke", post(api::invoke_endpoint))
+        .route(
+            "/{project_slug}/v1/models",
+            get(api::list_project_openai_models),
+        )
+        .route(
+            "/{project_slug}/v1/chat/completions",
+            post(api::create_project_chat_completion),
+        )
+        .route("/v1/models", get(api::list_openai_models))
+        .route("/v1/chat/completions", post(api::create_chat_completion))
         .route(
             "/v1/api-keys",
             get(api::list_api_keys).post(api::create_api_key),
         )
-        .route("/v1/api-keys/{id}", delete(api::revoke_api_key))
+        .route("/v1/api-keys/{id}/revoke", post(api::revoke_api_key))
+        .route(
+            "/v1/api-keys/{id}",
+            patch(api::update_api_key).delete(api::delete_api_key),
+        )
         .route("/v1/agents", get(api::list_available_agents))
         .route("/v1/agent-gateways", get(api::list_agent_gateways))
+        .route(
+            "/v1/agent-gateways/register",
+            post(api::register_agent_gateway),
+        )
+        .route(
+            "/v1/agent-gateways/{gateway_id}/revoke",
+            post(api::revoke_agent_gateway),
+        )
         .route("/v1/traces", get(api::list_traces))
         .route("/v1/agent-gateway/connect", get(websocket::upgrade))
         .fallback(api::fallback)
@@ -232,5 +253,45 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn api_key_mutation_routes_require_admin_authority() {
+        let config = Config::from_env().unwrap();
+        let pool = PgPoolOptions::new()
+            .connect_lazy("postgres://vifu@127.0.0.1:1/vifu")
+            .unwrap();
+        let key_id = uuid::Uuid::new_v4();
+
+        let revoke = app(state(config.clone(), pool.clone()))
+            .oneshot(
+                Request::post(format!("/v1/api-keys/{key_id}/revoke"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(revoke.status(), StatusCode::FORBIDDEN);
+
+        let update = app(state(config.clone(), pool.clone()))
+            .oneshot(
+                Request::patch(format!("/v1/api-keys/{key_id}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"agentScope":{"mode":"all"}}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(update.status(), StatusCode::FORBIDDEN);
+
+        let delete = app(state(config, pool))
+            .oneshot(
+                Request::delete(format!("/v1/api-keys/{key_id}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(delete.status(), StatusCode::FORBIDDEN);
     }
 }

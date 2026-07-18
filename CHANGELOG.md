@@ -16,8 +16,8 @@ All notable changes to Vifu are documented here.
   PostgreSQL-backed opaque sessions, deployment roles, and first-admin setup.
 - Kept day-1 authentication local/self-hosted: first-admin bootstrap, local
   email/password sessions, and optional self-host OIDC.
-- Added a three-service self-host stack for PostgreSQL, `vifu-server`, and the
-  standalone Dashboard.
-- Added endpoint key-isolation tests and a ten-endpoint concurrency,
+- Added a self-host stack for PostgreSQL, `vifu-server`, the standalone
+  Dashboard, and the Agent Gateway.
+- Added project API key scope tests and a ten-endpoint concurrency,
   persistence, restart, and Agent Gateway resume E2E gate.
 - Adopted Apache-2.0 and documented Vifu trademark use.

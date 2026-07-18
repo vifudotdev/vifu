@@ -51,11 +51,11 @@ Dashboard -> vifu-server through a server-side runtime credential
 ```
 
 Applications call the OpenAI-compatible API. Existing AI SDKs only need a Vifu
-base URL, an endpoint API key, and the endpoint slug as `model`:
+project base URL, a project API key, and the target agent slug or ID as `model`:
 
 ```http
-POST http://localhost:6790/v1/chat/completions
-Authorization: Bearer vifu_ep_...
+POST http://localhost:6790/my-project/v1/chat/completions
+Authorization: Bearer vifu_pk_...
 Content-Type: application/json
 
 {
@@ -65,8 +65,10 @@ Content-Type: application/json
 }
 ```
 
-API keys are scoped to one endpoint. The server stores only peppered key
-hashes, and returns the raw key once when it is created.
+Project keys can follow every exposed agent in one project or an explicit set
+of agent bindings. The server stores only peppered key hashes and returns a raw
+key once when it is created. Removing an agent from the Gameplay canvas or
+turning off its exposure makes it unavailable through the project API.
 
 ## Docker Self-hosting
 
@@ -85,8 +87,8 @@ and exposure guidance are in [docs/self-hosting.md](docs/self-hosting.md).
 `vifu-server` owns the core runtime contract:
 
 - routing Profile, Binding, and Endpoint CRUD;
-- Project CRUD and endpoint-scoped HTTP invocation;
-- endpoint-scoped API keys;
+- Project CRUD and project-scoped HTTP invocation;
+- project API keys with all-agent or selected-agent access;
 - authenticated Agent Gateway sessions and heartbeat;
 - one WebSocket with multiple logical channels;
 - provider agent discovery and invocation through adapter contracts;

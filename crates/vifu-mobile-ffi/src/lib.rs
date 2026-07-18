@@ -6,7 +6,7 @@ use vifu_core::{config, openclaw, relay};
 pub struct VifuRuntimeConfig {
     pub server_url: String,
     pub openclaw_url: String,
-    pub agent_gateway_token: String,
+    pub agent_gateway_bootstrap_token: String,
     pub openclaw_token: Option<String>,
 }
 
@@ -59,7 +59,7 @@ pub fn default_vifu_runtime_config() -> VifuRuntimeConfig {
     VifuRuntimeConfig {
         server_url: config::DEFAULT_SERVER_URL.to_string(),
         openclaw_url: config::DEFAULT_OPENCLAW_URL.to_string(),
-        agent_gateway_token: config::DEFAULT_AGENT_GATEWAY_TOKEN.to_string(),
+        agent_gateway_bootstrap_token: config::DEFAULT_AGENT_GATEWAY_BOOTSTRAP_TOKEN.to_string(),
         openclaw_token: None,
     }
 }

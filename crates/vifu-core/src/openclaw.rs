@@ -206,17 +206,7 @@ pub async fn invoke(
     timeout: Duration,
 ) -> Result<Value, String> {
     protocol::validate_identifier("agent id", agent_id)?;
-    let mut request = json!({
-        "model": openclaw_model(agent_id),
-        "stream": false,
-        "messages": [{ "role": "user", "content": input_text(input)? }],
-    });
-    if let Some(user) = conversation_user(input) {
-        request
-            .as_object_mut()
-            .expect("chat completion request is an object")
-            .insert("user".to_string(), Value::String(user));
-    }
+    let request = openclaw_chat_request(agent_id, input)?;
     let body = serde_json::to_vec(&request).map_err(|error| error.to_string())?;
     let response = request_with_auth(
         endpoint,
@@ -230,6 +220,9 @@ pub async fn invoke(
     ensure_openclaw_status(&response, "agent invocation")?;
     let payload = serde_json::from_slice::<Value>(&response.body)
         .map_err(|_| "OpenClaw returned an invalid chat completion".to_string())?;
+    if input.get("messages").is_some() {
+        return Ok(payload);
+    }
     let reply = payload
         .pointer("/choices/0/message/content")
         .and_then(Value::as_str)
@@ -242,6 +235,31 @@ pub async fn invoke(
         "finishReason": payload.pointer("/choices/0/finish_reason").cloned(),
         "usage": payload.get("usage").cloned(),
     }))
+}
+
+fn openclaw_chat_request(agent_id: &str, input: &Value) -> Result<Value, String> {
+    if input.get("messages").is_some() {
+        let mut request = input
+            .as_object()
+            .ok_or_else(|| "chat completion request must be an object".to_string())?
+            .clone();
+        request.insert("model".to_string(), Value::String(openclaw_model(agent_id)));
+        request.insert("stream".to_string(), Value::Bool(false));
+        return Ok(Value::Object(request));
+    }
+
+    let mut request = json!({
+        "model": openclaw_model(agent_id),
+        "stream": false,
+        "messages": [{ "role": "user", "content": input_text(input)? }],
+    });
+    if let Some(user) = conversation_user(input) {
+        request
+            .as_object_mut()
+            .expect("chat completion request is an object")
+            .insert("user".to_string(), Value::String(user));
+    }
+    Ok(request)
 }
 
 fn read_models(value: Value) -> Vec<AgentDescriptor> {

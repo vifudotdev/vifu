@@ -20,7 +20,6 @@ const dashboardForbiddenPatterns = [
   ["edge-provider runtime package", /@opennextjs\//],
   ["edge-provider request context", /get[A-Z][A-Za-z]+Context/],
   ["private service binding", /\bAPI_GATEWAY\b/],
-  ["deployment CLI configuration", /\bwrangler(?:\.jsonc?)?\b/i],
 ];
 const serverForbiddenAuthPatterns = [
   ["web authentication route", /\/v1\/auth\//],

@@ -61,8 +61,8 @@ restores and rotations remain predictable. Compose accepts these values:
 | `VIFU_AUTH_PASSWORD_ENABLED` | Enables the built-in Dashboard email/password provider unless set to `false` |
 | `VIFU_SIGNUP_ENABLED` | Enables Dashboard signup unless set to `false` |
 | `VIFU_ADMIN_KEY` | Optional explicit server-side Dashboard runtime credential, recovery, and automation |
-| `VIFU_AGENT_GATEWAY_TOKEN` | Optional explicit Agent Gateway WebSocket authentication value |
-| `VIFU_API_KEY_PEPPER` | Optional explicit one-way endpoint key hashing pepper |
+| `VIFU_AGENT_GATEWAY_BOOTSTRAP_TOKEN` | Optional explicit enrollment secret used to register independent Agent Gateway credentials |
+| `VIFU_API_KEY_PEPPER` | Optional explicit one-way project API key hashing pepper |
 | `VIFU_PROVIDER_SECRET_KEY` | Optional explicit server-side provider credential encryption key |
 | `DATABASE_URL` | Optional explicit PostgreSQL connection string for Dashboard auth state and `vifu-server` runtime state |
 | `VIFU_BIND_HOST` | Host interface for published ports |
@@ -94,7 +94,7 @@ is required only when OIDC will create the first administrator. Set
 flow. Vifu does not automatically merge an OIDC identity into an existing
 password account with the same email.
 
-The three authority secrets must be independent and contain at least 16
+The authority secrets must be independent and contain at least 16
 characters when set explicitly. When left blank, Compose generates independent
 values and persists them in the `vifu_secrets` Docker volume. `VIFU_ADMIN_KEY`
 is available only to the Dashboard server and runtime; it is not a browser
@@ -123,6 +123,13 @@ WebSocket to `vifu-server`, discovers agents through configured external
 providers, and carries concurrent logical endpoint channels over that
 connection.
 
+The deployment bootstrap token is used only to enroll a Gateway identity. Each
+Gateway generates its own `vifu_gw_...` credential, stores it in its
+permission-restricted local session file, and uses that credential for normal
+WebSocket connections. The server stores only a peppered credential hash. A
+revoked identity stays revoked; run `vifu --reset` on that Gateway to create and
+enroll a new identity.
+
 No external provider is required for the Vifu stack to start. Provider
 integrations are optional and documented separately:
 
@@ -146,9 +153,10 @@ request-size limits. Built-in local accounts protect Dashboard operations; the
 built-in OIDC adapter or an access proxy can add centralized identity. Set
 `VIFU_BIND_HOST` only after those controls are in place.
 
-The bootstrap admin key remains powerful deployment authority. Rotate it and
-the Agent Gateway token if either appears in logs, shell history, screenshots, or
-browser-visible configuration. Revoke affected web sessions separately.
+The bootstrap admin key and Agent Gateway enrollment token remain powerful
+deployment authority. Rotate either value if it appears in logs, shell history,
+screenshots, or browser-visible configuration. Revoke affected Gateway
+credentials and web sessions separately.
 
 ## Upgrade And Backup
 

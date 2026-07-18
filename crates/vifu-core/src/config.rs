@@ -5,7 +5,7 @@ use serde_json::Value;
 
 pub const DEFAULT_OPENCLAW_URL: &str = "http://127.0.0.1:18789";
 pub const DEFAULT_SERVER_URL: &str = "http://127.0.0.1:6790";
-pub const DEFAULT_AGENT_GATEWAY_TOKEN: &str = "vifu-local-agent-gateway-token";
+pub const DEFAULT_AGENT_GATEWAY_BOOTSTRAP_TOKEN: &str = "vifu-local-agent-gateway-bootstrap-token";
 
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -13,7 +13,7 @@ pub struct Config {
     pub agent_providers_file: PathBuf,
     pub agent_providers: Vec<AgentProviderConfig>,
     pub server_url: String,
-    pub agent_gateway_token: String,
+    pub agent_gateway_bootstrap_token: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -30,10 +30,12 @@ impl Config {
             Some(value) if !value.is_empty() => PathBuf::from(value),
             _ => default_home_dir()?,
         };
-        let agent_gateway_token = env_or_file("VIFU_AGENT_GATEWAY_TOKEN")?
-            .unwrap_or_else(|| DEFAULT_AGENT_GATEWAY_TOKEN.to_string());
-        if agent_gateway_token.len() < 16 || agent_gateway_token.len() > 512 {
-            return Err("VIFU_AGENT_GATEWAY_TOKEN must contain 16-512 characters".to_string());
+        let agent_gateway_bootstrap_token = env_or_file("VIFU_AGENT_GATEWAY_BOOTSTRAP_TOKEN")?
+            .unwrap_or_else(|| DEFAULT_AGENT_GATEWAY_BOOTSTRAP_TOKEN.to_string());
+        if agent_gateway_bootstrap_token.len() < 16 || agent_gateway_bootstrap_token.len() > 512 {
+            return Err(
+                "VIFU_AGENT_GATEWAY_BOOTSTRAP_TOKEN must contain 16-512 characters".to_string(),
+            );
         }
         let (agent_providers_file, agent_providers) = load_agent_providers(&home_dir)?;
         Ok(Self {
@@ -41,7 +43,7 @@ impl Config {
             agent_providers_file,
             agent_providers,
             server_url,
-            agent_gateway_token,
+            agent_gateway_bootstrap_token,
         })
     }
 
@@ -252,7 +254,7 @@ mod tests {
     }
 
     #[test]
-    fn reads_agent_gateway_token_from_file() {
+    fn reads_agent_gateway_bootstrap_token_from_file() {
         let _guard = env_lock().lock().unwrap();
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -260,22 +262,28 @@ mod tests {
             .as_nanos();
         let dir = std::env::temp_dir().join(format!("vifu-core-config-test-{stamp}"));
         fs::create_dir_all(&dir).unwrap();
-        let token_path = dir.join("agent_gateway_token");
+        let token_path = dir.join("agent_gateway_bootstrap_token");
         fs::write(&token_path, "agent-gateway-token-from-file\n").unwrap();
 
         let previous_home = std::env::var_os("VIFU_HOME");
-        let previous_token = std::env::var_os("VIFU_AGENT_GATEWAY_TOKEN");
-        let previous_token_file = std::env::var_os("VIFU_AGENT_GATEWAY_TOKEN_FILE");
+        let previous_token = std::env::var_os("VIFU_AGENT_GATEWAY_BOOTSTRAP_TOKEN");
+        let previous_token_file = std::env::var_os("VIFU_AGENT_GATEWAY_BOOTSTRAP_TOKEN_FILE");
         std::env::set_var("VIFU_HOME", dir.join(".vifu"));
-        std::env::remove_var("VIFU_AGENT_GATEWAY_TOKEN");
-        std::env::set_var("VIFU_AGENT_GATEWAY_TOKEN_FILE", &token_path);
+        std::env::remove_var("VIFU_AGENT_GATEWAY_BOOTSTRAP_TOKEN");
+        std::env::set_var("VIFU_AGENT_GATEWAY_BOOTSTRAP_TOKEN_FILE", &token_path);
 
         let config = Config::load(DEFAULT_SERVER_URL.to_string()).unwrap();
-        assert_eq!(config.agent_gateway_token, "agent-gateway-token-from-file");
+        assert_eq!(
+            config.agent_gateway_bootstrap_token,
+            "agent-gateway-token-from-file"
+        );
 
         restore_env("VIFU_HOME", previous_home);
-        restore_env("VIFU_AGENT_GATEWAY_TOKEN", previous_token);
-        restore_env("VIFU_AGENT_GATEWAY_TOKEN_FILE", previous_token_file);
+        restore_env("VIFU_AGENT_GATEWAY_BOOTSTRAP_TOKEN", previous_token);
+        restore_env(
+            "VIFU_AGENT_GATEWAY_BOOTSTRAP_TOKEN_FILE",
+            previous_token_file,
+        );
         fs::remove_dir_all(dir).unwrap();
     }
 
@@ -283,25 +291,28 @@ mod tests {
     fn loads_no_agent_providers_by_default() {
         let _guard = env_lock().lock().unwrap();
         let previous_home = std::env::var_os("VIFU_HOME");
-        let previous_token_file = std::env::var_os("VIFU_AGENT_GATEWAY_TOKEN_FILE");
+        let previous_token_file = std::env::var_os("VIFU_AGENT_GATEWAY_BOOTSTRAP_TOKEN_FILE");
         std::env::set_var(
             "VIFU_HOME",
             std::env::temp_dir().join("vifu-core-no-providers-test"),
         );
-        std::env::remove_var("VIFU_AGENT_GATEWAY_TOKEN_FILE");
+        std::env::remove_var("VIFU_AGENT_GATEWAY_BOOTSTRAP_TOKEN_FILE");
 
         let config = Config::load(DEFAULT_SERVER_URL.to_string()).unwrap();
         assert!(config.agent_providers.is_empty());
 
         restore_env("VIFU_HOME", previous_home);
-        restore_env("VIFU_AGENT_GATEWAY_TOKEN_FILE", previous_token_file);
+        restore_env(
+            "VIFU_AGENT_GATEWAY_BOOTSTRAP_TOKEN_FILE",
+            previous_token_file,
+        );
     }
 
     #[test]
     fn loads_openclaw_provider_from_generic_file() {
         let _guard = env_lock().lock().unwrap();
         let previous_home = std::env::var_os("VIFU_HOME");
-        let previous_token_file = std::env::var_os("VIFU_AGENT_GATEWAY_TOKEN_FILE");
+        let previous_token_file = std::env::var_os("VIFU_AGENT_GATEWAY_BOOTSTRAP_TOKEN_FILE");
         let dir = std::env::temp_dir().join("vifu-core-provider-file-test");
         fs::create_dir_all(&dir).unwrap();
         let providers_file = dir.join("providers.json");
@@ -311,7 +322,7 @@ mod tests {
         )
         .unwrap();
         std::env::set_var("VIFU_HOME", &dir);
-        std::env::remove_var("VIFU_AGENT_GATEWAY_TOKEN_FILE");
+        std::env::remove_var("VIFU_AGENT_GATEWAY_BOOTSTRAP_TOKEN_FILE");
 
         let config = Config::load(DEFAULT_SERVER_URL.to_string()).unwrap();
         assert_eq!(config.agent_providers_file, providers_file);
@@ -322,7 +333,10 @@ mod tests {
         assert_eq!(provider.token.as_deref(), Some("openclaw-provider-token"));
 
         restore_env("VIFU_HOME", previous_home);
-        restore_env("VIFU_AGENT_GATEWAY_TOKEN_FILE", previous_token_file);
+        restore_env(
+            "VIFU_AGENT_GATEWAY_BOOTSTRAP_TOKEN_FILE",
+            previous_token_file,
+        );
         fs::remove_dir_all(dir).unwrap();
     }
 
@@ -330,7 +344,7 @@ mod tests {
     fn rejects_unknown_provider_auth_fields() {
         let _guard = env_lock().lock().unwrap();
         let previous_home = std::env::var_os("VIFU_HOME");
-        let previous_token_file = std::env::var_os("VIFU_AGENT_GATEWAY_TOKEN_FILE");
+        let previous_token_file = std::env::var_os("VIFU_AGENT_GATEWAY_BOOTSTRAP_TOKEN_FILE");
         let dir = std::env::temp_dir().join("vifu-core-provider-auth-test");
         fs::create_dir_all(&dir).unwrap();
         let providers_file = dir.join("providers.json");
@@ -340,13 +354,16 @@ mod tests {
         )
         .unwrap();
         std::env::set_var("VIFU_HOME", &dir);
-        std::env::remove_var("VIFU_AGENT_GATEWAY_TOKEN_FILE");
+        std::env::remove_var("VIFU_AGENT_GATEWAY_BOOTSTRAP_TOKEN_FILE");
 
         let error = Config::load(DEFAULT_SERVER_URL.to_string()).unwrap_err();
         assert!(error.contains("unknown field `tokenSource`"));
 
         restore_env("VIFU_HOME", previous_home);
-        restore_env("VIFU_AGENT_GATEWAY_TOKEN_FILE", previous_token_file);
+        restore_env(
+            "VIFU_AGENT_GATEWAY_BOOTSTRAP_TOKEN_FILE",
+            previous_token_file,
+        );
         fs::remove_dir_all(dir).unwrap();
     }
 

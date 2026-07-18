@@ -24,7 +24,7 @@ const MAX_RECONNECT_DELAY: Duration = Duration::from_secs(30);
 
 pub struct AgentGatewayRuntime<'a> {
     pub server_url: &'a str,
-    pub agent_gateway_token: &'a str,
+    pub agent_gateway_bootstrap_token: &'a str,
     pub provider_id: &'a str,
     pub endpoint: &'a Endpoint,
     pub openclaw_token: Option<&'a str>,
@@ -40,6 +40,25 @@ pub async fn run_agent_gateway(
     let mut reconnect_delay = Duration::from_secs(1);
 
     loop {
+        if let Err(error) = ensure_agent_gateway_registered(&runtime, session).await {
+            if error == RegisterAgentGatewayError::Revoked {
+                return Err(
+                    "agent gateway access was revoked; run `vifu --reset` to enroll a new gateway identity"
+                        .to_string(),
+                );
+            }
+            eprintln!(
+                "Agent Gateway registration failed: {}. Retrying in {}s.",
+                sanitize_error(&error.into_message()),
+                reconnect_delay.as_secs()
+            );
+            tokio::select! {
+                _ = tokio::time::sleep(reconnect_delay) => {}
+                _ = tokio::signal::ctrl_c() => return Ok(()),
+            }
+            reconnect_delay = reconnect_delay.saturating_mul(2).min(MAX_RECONNECT_DELAY);
+            continue;
+        }
         match run_connection(&websocket_url, &runtime, session).await {
             Ok(ConnectionOutcome::Shutdown) => return Ok(()),
             Ok(ConnectionOutcome::Disconnected) => {
@@ -81,8 +100,9 @@ async fn run_connection(
         .map_err(|error| error.to_string())?;
     request.headers_mut().insert(
         AUTHORIZATION,
-        HeaderValue::from_str(&format!("Bearer {}", runtime.agent_gateway_token))
-            .map_err(|_| "agent gateway token contains invalid header characters".to_string())?,
+        HeaderValue::from_str(&format!("Bearer {}", session.gateway_credential)).map_err(|_| {
+            "agent gateway credential contains invalid header characters".to_string()
+        })?,
     );
     let (mut socket, _) = connect_async(request)
         .await
@@ -92,7 +112,6 @@ async fn run_connection(
         &mut socket,
         &AgentGatewayCommand::Hello {
             protocol: protocol::VERSION.to_string(),
-            gateway_id: session.gateway_id.clone(),
             resume_session_id: session.resume_session_id,
             agents: runtime.agents.to_vec(),
             metadata: serde_json::json!({
@@ -108,6 +127,7 @@ async fn run_connection(
         .await
         .map_err(|_| "server did not accept the agent gateway in time".to_string())??;
     let AgentGatewayCommand::Welcome {
+        gateway_id,
         connection_id,
         session_id,
         heartbeat_interval_ms: _,
@@ -116,6 +136,9 @@ async fn run_connection(
     else {
         return Err("server must send welcome after agent gateway hello".to_string());
     };
+    if gateway_id != session.gateway_id {
+        return Err("server authenticated a different agent gateway identity".to_string());
+    }
     session.resume_session_id = Some(session_id);
     session::write_session(runtime.session_path, session)?;
     println!(
@@ -235,6 +258,16 @@ async fn run_connection(
                     }
                     AgentGatewayCommand::Error {
                         request_id: None,
+                        code,
+                        ..
+                    } if code == "CREDENTIAL_REVOKED" => {
+                        return Err(
+                            "agent gateway access was revoked; run `vifu --reset` to enroll a new gateway identity"
+                                .to_string(),
+                        );
+                    }
+                    AgentGatewayCommand::Error {
+                        request_id: None,
                         message,
                         ..
                     } => return Err(format!("server rejected agent gateway: {}", sanitize_error(&message))),
@@ -249,6 +282,79 @@ async fn run_connection(
     }
     let _ = socket.close(None).await;
     Ok(outcome)
+}
+
+async fn ensure_agent_gateway_registered(
+    runtime: &AgentGatewayRuntime<'_>,
+    session: &SessionSummary,
+) -> Result<(), RegisterAgentGatewayError> {
+    register_agent_gateway(
+        runtime.server_url,
+        runtime.agent_gateway_bootstrap_token,
+        &session.gateway_id,
+        &session.gateway_credential,
+    )
+    .await
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum RegisterAgentGatewayError {
+    Revoked,
+    Failed(String),
+}
+
+impl RegisterAgentGatewayError {
+    fn into_message(self) -> String {
+        match self {
+            Self::Revoked => "agent gateway credential was revoked".to_string(),
+            Self::Failed(message) => message,
+        }
+    }
+}
+
+async fn register_agent_gateway(
+    server_url: &str,
+    bootstrap_token: &str,
+    gateway_id: &str,
+    credential: &str,
+) -> Result<(), RegisterAgentGatewayError> {
+    let registration_url =
+        agent_gateway_registration_url(server_url).map_err(RegisterAgentGatewayError::Failed)?;
+    let response = reqwest::Client::new()
+        .post(registration_url)
+        .bearer_auth(bootstrap_token)
+        .json(&serde_json::json!({
+            "gatewayId": gateway_id,
+            "credential": credential,
+        }))
+        .send()
+        .await
+        .map_err(|error| RegisterAgentGatewayError::Failed(error.to_string()))?;
+    if response.status().is_success() {
+        return Ok(());
+    }
+    let status = response.status();
+    let payload = response.json::<serde_json::Value>().await.ok();
+    let code = payload
+        .as_ref()
+        .and_then(|value| value.pointer("/error/code"))
+        .and_then(serde_json::Value::as_str);
+    if code == Some("gateway_credential_revoked") {
+        return Err(RegisterAgentGatewayError::Revoked);
+    }
+    Err(RegisterAgentGatewayError::Failed(format!(
+        "server rejected agent gateway registration (HTTP {})",
+        status.as_u16()
+    )))
+}
+
+fn agent_gateway_registration_url(server_url: &str) -> Result<Url, String> {
+    let _ = agent_gateway_websocket_url(server_url)?;
+    let mut url = Url::parse(server_url.trim())
+        .map_err(|_| "VIFU_SERVER_URL must be a valid HTTP or HTTPS URL".to_string())?;
+    let base_path = url.path().trim_end_matches('/');
+    url.set_path(&format!("{base_path}/v1/agent-gateways/register"));
+    Ok(url)
 }
 
 pub fn agent_gateway_websocket_url(server_url: &str) -> Result<String, String> {
@@ -489,7 +595,6 @@ mod tests {
             "method": AGENT_GATEWAY_HELLO_METHOD,
             "params": {
                 "protocol": VERSION,
-                "gatewayId": "local-gateway",
                 "agents": [],
                 "metadata": {}
             },
@@ -519,7 +624,6 @@ mod tests {
             "method": AGENT_GATEWAY_HELLO_METHOD,
             "params": {
                 "protocol": VERSION,
-                "gatewayId": "local-gateway",
                 "agents": [],
                 "metadata": {},
                 "extra": true

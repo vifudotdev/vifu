@@ -1,17 +1,55 @@
 use std::collections::HashSet;
 
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use serde_json::{json, Value};
-use sqlx::{PgPool, Postgres, QueryBuilder};
+use sqlx::types::Json;
+use sqlx::{FromRow, PgPool, Postgres, QueryBuilder};
 use uuid::Uuid;
 
 use crate::error::{map_database_error, ApiError};
 use crate::models::{
-    slugify, validate_slug, AgentBinding, AgentEndpoint, AgentGatewaySession, AgentProfile,
-    ApiKeyRecord, AvailableAgent, EndpointRoute, EndpointTrace, Project, ProjectCanvas,
-    ProjectCanvasEdge, ProjectCanvasNode, ProjectWithBindings, ProviderConnection,
-    ProviderConnectionSecret,
+    slugify, validate_slug, AgentBinding, AgentEndpoint, AgentGatewayCredential,
+    AgentGatewaySession, AgentProfile, ApiKeyAgentScope, ApiKeyPermissions, ApiKeyRecord,
+    AvailableAgent, EndpointRoute, EndpointTrace, Project, ProjectCanvas, ProjectCanvasEdge,
+    ProjectCanvasNode, ProjectWithBindings, ProviderConnection, ProviderConnectionSecret,
 };
+
+#[derive(Debug, FromRow)]
+struct ApiKeyRow {
+    id: Uuid,
+    project_id: Uuid,
+    name: String,
+    scope_mode: String,
+    binding_ids: Vec<Uuid>,
+    permissions: Json<ApiKeyPermissions>,
+    key_prefix: String,
+    created_at: DateTime<Utc>,
+    revoked_at: Option<DateTime<Utc>>,
+}
+
+impl TryFrom<ApiKeyRow> for ApiKeyRecord {
+    type Error = ApiError;
+
+    fn try_from(row: ApiKeyRow) -> Result<Self, Self::Error> {
+        let agent_scope = match row.scope_mode.as_str() {
+            "all" if row.binding_ids.is_empty() => ApiKeyAgentScope::All,
+            "selected" => ApiKeyAgentScope::Selected {
+                binding_ids: row.binding_ids,
+            },
+            _ => return Err(ApiError::Internal),
+        };
+        Ok(Self {
+            id: row.id,
+            project_id: row.project_id,
+            name: row.name,
+            agent_scope,
+            permissions: row.permissions.0,
+            key_prefix: row.key_prefix,
+            created_at: row.created_at,
+            revoked_at: row.revoked_at,
+        })
+    }
+}
 
 pub async fn migrate(pool: &PgPool) -> Result<(), ApiError> {
     sqlx::migrate!("./migrations").run(pool).await?;
@@ -109,6 +147,7 @@ pub async fn create_project(
             .await?;
     }
     transaction.commit().await?;
+    sync_project_canvas_nodes(pool, project.id).await?;
     Ok(ProjectWithBindings {
         project: created,
         binding_ids: project.binding_ids.to_vec(),
@@ -177,6 +216,7 @@ pub async fn update_project(
         current.binding_ids
     };
     transaction.commit().await?;
+    sync_project_canvas_nodes(pool, id).await?;
     Ok(ProjectWithBindings {
         project,
         binding_ids,
@@ -347,7 +387,7 @@ pub async fn delete_provider_connection_by_key(
 
 pub async fn get_project_canvas(pool: &PgPool, slug: &str) -> Result<ProjectCanvas, ApiError> {
     let project = get_project_by_slug(pool, slug).await?;
-    ensure_project_canvas_seeded(pool, project.project.id).await?;
+    sync_project_canvas_nodes(pool, project.project.id).await?;
     let project = get_project(pool, project.project.id).await?;
     Ok(ProjectCanvas {
         nodes: list_canvas_nodes(pool, project.project.id).await?,
@@ -609,20 +649,16 @@ async fn list_canvas_edges(
     .map_err(ApiError::from)
 }
 
-async fn ensure_project_canvas_seeded(pool: &PgPool, project_id: Uuid) -> Result<(), ApiError> {
+pub async fn sync_project_canvas_nodes(pool: &PgPool, project_id: Uuid) -> Result<(), ApiError> {
+    let project = get_project(pool, project_id).await?;
+    let mut binding_ids = project.binding_ids.clone();
     let existing_nodes = sqlx::query_scalar::<_, i64>(
         "SELECT COUNT(*) FROM project_canvas_nodes WHERE project_id = $1",
     )
     .bind(project_id)
     .fetch_one(pool)
     .await?;
-    if existing_nodes > 0 {
-        return Ok(());
-    }
-
-    let project = get_project(pool, project_id).await?;
-    let mut binding_ids = project.binding_ids.clone();
-    if binding_ids.is_empty() {
+    if binding_ids.is_empty() && existing_nodes == 0 {
         let available_agents = list_available_agents(pool).await?;
         for agent in available_agents {
             if agent.status != "connected" {
@@ -644,6 +680,20 @@ async fn ensure_project_canvas_seeded(pool: &PgPool, project_id: Uuid) -> Result
         binding_ids.sort_unstable();
         binding_ids.dedup();
     }
+
+    sqlx::query(
+        "DELETE FROM project_canvas_nodes node
+         WHERE node.project_id = $1
+           AND node.binding_id IS NOT NULL
+           AND NOT EXISTS (
+                SELECT 1 FROM project_bindings binding
+                WHERE binding.project_id = node.project_id
+                  AND binding.binding_id = node.binding_id
+           )",
+    )
+    .bind(project_id)
+    .execute(pool)
+    .await?;
 
     seed_canvas_nodes_for_bindings(pool, project_id, &binding_ids).await
 }
@@ -993,6 +1043,54 @@ pub async fn list_endpoints(pool: &PgPool) -> Result<Vec<AgentEndpoint>, ApiErro
     .map_err(ApiError::from)
 }
 
+pub async fn list_enabled_endpoints(pool: &PgPool) -> Result<Vec<AgentEndpoint>, ApiError> {
+    sqlx::query_as::<_, AgentEndpoint>(
+        "SELECT id, slug, name, profile_id, binding_id, enabled, request_timeout_ms,
+                created_at, updated_at
+         FROM agent_endpoints
+         WHERE enabled = TRUE
+         ORDER BY created_at ASC",
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(ApiError::from)
+}
+
+pub async fn list_enabled_endpoints_for_project(
+    pool: &PgPool,
+    project_slug: &str,
+) -> Result<Vec<AgentEndpoint>, ApiError> {
+    let project = get_project_by_slug(pool, project_slug).await?;
+    list_enabled_endpoints_for_project_id(pool, project.project.id).await
+}
+
+pub async fn list_enabled_endpoints_for_project_id(
+    pool: &PgPool,
+    project_id: Uuid,
+) -> Result<Vec<AgentEndpoint>, ApiError> {
+    sync_project_canvas_nodes(pool, project_id).await?;
+    sqlx::query_as::<_, AgentEndpoint>(
+        "SELECT endpoint.id, endpoint.slug, endpoint.name, endpoint.profile_id,
+                endpoint.binding_id, endpoint.enabled, endpoint.request_timeout_ms,
+                endpoint.created_at, endpoint.updated_at
+         FROM agent_endpoints endpoint
+         JOIN project_bindings pb ON pb.binding_id = endpoint.binding_id
+         JOIN projects project ON project.id = pb.project_id
+         JOIN project_canvas_nodes node
+           ON node.project_id = project.id
+          AND node.binding_id = endpoint.binding_id
+          AND node.exposed = TRUE
+         WHERE endpoint.enabled = TRUE
+           AND project.enabled = TRUE
+           AND project.id = $1
+         ORDER BY endpoint.created_at ASC",
+    )
+    .bind(project_id)
+    .fetch_all(pool)
+    .await
+    .map_err(ApiError::from)
+}
+
 pub async fn get_endpoint(pool: &PgPool, id: Uuid) -> Result<AgentEndpoint, ApiError> {
     sqlx::query_as::<_, AgentEndpoint>(
         "SELECT id, slug, name, profile_id, binding_id, enabled, request_timeout_ms,
@@ -1112,65 +1210,245 @@ async fn ensure_binding_profile(
 }
 
 pub async fn list_api_keys(pool: &PgPool) -> Result<Vec<ApiKeyRecord>, ApiError> {
-    sqlx::query_as::<_, ApiKeyRecord>(
-        "SELECT id, endpoint_id, name, key_prefix, created_at, revoked_at
-         FROM endpoint_api_keys ORDER BY created_at DESC",
+    let rows = sqlx::query_as::<_, ApiKeyRow>(
+        "SELECT key.id, key.project_id, key.name, key.scope_mode,
+                COALESCE(
+                    ARRAY_AGG(scope.binding_id ORDER BY scope.binding_id)
+                        FILTER (WHERE scope.binding_id IS NOT NULL),
+                    ARRAY[]::UUID[]
+                ) AS binding_ids,
+                key.permissions, key.key_prefix, key.created_at, key.revoked_at
+         FROM api_keys key
+         LEFT JOIN api_key_agent_scopes scope ON scope.api_key_id = key.id
+         GROUP BY key.id
+         ORDER BY key.created_at DESC",
     )
     .fetch_all(pool)
-    .await
-    .map_err(ApiError::from)
+    .await?;
+    rows.into_iter().map(ApiKeyRecord::try_from).collect()
 }
 
-pub async fn create_api_key(
-    pool: &PgPool,
-    id: Uuid,
-    endpoint_id: Uuid,
-    name: &str,
-    key_prefix: &str,
-    key_hash: &[u8],
-) -> Result<ApiKeyRecord, ApiError> {
-    sqlx::query_as::<_, ApiKeyRecord>(
-        "INSERT INTO endpoint_api_keys (id, endpoint_id, name, key_prefix, key_hash)
-         VALUES ($1, $2, $3, $4, $5)
-         RETURNING id, endpoint_id, name, key_prefix, created_at, revoked_at",
+pub struct NewApiKey<'a> {
+    pub id: Uuid,
+    pub project_id: Uuid,
+    pub name: &'a str,
+    pub agent_scope: &'a ApiKeyAgentScope,
+    pub permissions: &'a ApiKeyPermissions,
+    pub key_prefix: &'a str,
+    pub key_hash: &'a [u8],
+}
+
+pub async fn create_api_key(pool: &PgPool, input: NewApiKey<'_>) -> Result<ApiKeyRecord, ApiError> {
+    validate_api_key_agent_scope(pool, input.project_id, input.agent_scope).await?;
+    let mut transaction = pool.begin().await?;
+    sqlx::query(
+        "INSERT INTO api_keys
+            (id, project_id, name, scope_mode, permissions, key_prefix, key_hash)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)",
     )
-    .bind(id)
-    .bind(endpoint_id)
-    .bind(name)
-    .bind(key_prefix)
-    .bind(key_hash)
-    .fetch_one(pool)
+    .bind(input.id)
+    .bind(input.project_id)
+    .bind(input.name)
+    .bind(input.agent_scope.mode())
+    .bind(Json(input.permissions))
+    .bind(input.key_prefix)
+    .bind(input.key_hash)
+    .execute(&mut *transaction)
     .await
-    .map_err(map_database_error)
+    .map_err(map_database_error)?;
+    insert_api_key_agent_scopes(
+        &mut transaction,
+        input.id,
+        input.project_id,
+        input.agent_scope.binding_ids(),
+    )
+    .await?;
+    transaction.commit().await?;
+    get_api_key(pool, input.id).await
 }
 
-pub async fn revoke_api_key(pool: &PgPool, id: Uuid) -> Result<ApiKeyRecord, ApiError> {
-    sqlx::query_as::<_, ApiKeyRecord>(
-        "UPDATE endpoint_api_keys SET revoked_at = COALESCE(revoked_at, NOW()) WHERE id = $1
-         RETURNING id, endpoint_id, name, key_prefix, created_at, revoked_at",
+pub async fn get_api_key(pool: &PgPool, id: Uuid) -> Result<ApiKeyRecord, ApiError> {
+    let row = sqlx::query_as::<_, ApiKeyRow>(
+        "SELECT key.id, key.project_id, key.name, key.scope_mode,
+                COALESCE(
+                    ARRAY_AGG(scope.binding_id ORDER BY scope.binding_id)
+                        FILTER (WHERE scope.binding_id IS NOT NULL),
+                    ARRAY[]::UUID[]
+                ) AS binding_ids,
+                key.permissions, key.key_prefix, key.created_at, key.revoked_at
+         FROM api_keys key
+         LEFT JOIN api_key_agent_scopes scope ON scope.api_key_id = key.id
+         WHERE key.id = $1
+         GROUP BY key.id",
     )
     .bind(id)
     .fetch_optional(pool)
     .await?
-    .ok_or(ApiError::NotFound)
+    .ok_or(ApiError::NotFound)?;
+    ApiKeyRecord::try_from(row)
 }
 
-pub async fn api_key_matches_endpoint(
+pub struct ApiKeyPatch<'a> {
+    pub project_id: Option<Uuid>,
+    pub name: Option<&'a str>,
+    pub agent_scope: Option<&'a ApiKeyAgentScope>,
+    pub permissions: Option<&'a ApiKeyPermissions>,
+}
+
+pub async fn update_api_key(
     pool: &PgPool,
-    endpoint_id: Uuid,
-    key_hash: &[u8],
-) -> Result<bool, ApiError> {
-    sqlx::query_scalar::<_, bool>(
-        "SELECT EXISTS(
-            SELECT 1 FROM endpoint_api_keys
-            WHERE endpoint_id = $1 AND key_hash = $2 AND revoked_at IS NULL
-         )",
+    id: Uuid,
+    patch: ApiKeyPatch<'_>,
+) -> Result<ApiKeyRecord, ApiError> {
+    let current = get_api_key(pool, id).await?;
+    if current.revoked_at.is_some() {
+        return Err(ApiError::Conflict(
+            "revoked API keys cannot be edited".to_string(),
+        ));
+    }
+    let project_id = patch.project_id.unwrap_or(current.project_id);
+    let agent_scope = patch.agent_scope.unwrap_or(&current.agent_scope);
+    validate_api_key_agent_scope(pool, project_id, agent_scope).await?;
+
+    let mut transaction = pool.begin().await?;
+    sqlx::query("DELETE FROM api_key_agent_scopes WHERE api_key_id = $1")
+        .bind(id)
+        .execute(&mut *transaction)
+        .await?;
+    let updated = sqlx::query_scalar::<_, Uuid>(
+        "UPDATE api_keys SET
+            project_id = $2,
+            name = COALESCE($3, name),
+            scope_mode = $4,
+            permissions = COALESCE($5, permissions)
+         WHERE id = $1 AND revoked_at IS NULL
+         RETURNING id",
     )
-    .bind(endpoint_id)
+    .bind(id)
+    .bind(project_id)
+    .bind(patch.name)
+    .bind(agent_scope.mode())
+    .bind(patch.permissions.map(Json))
+    .fetch_optional(&mut *transaction)
+    .await?
+    .ok_or_else(|| ApiError::Conflict("only active API keys can be edited".to_string()))?;
+    insert_api_key_agent_scopes(
+        &mut transaction,
+        updated,
+        project_id,
+        agent_scope.binding_ids(),
+    )
+    .await?;
+    transaction.commit().await?;
+    get_api_key(pool, id).await
+}
+
+pub async fn revoke_api_key(pool: &PgPool, id: Uuid) -> Result<ApiKeyRecord, ApiError> {
+    let updated = sqlx::query_scalar::<_, Uuid>(
+        "UPDATE api_keys SET revoked_at = COALESCE(revoked_at, NOW()) WHERE id = $1 RETURNING id",
+    )
+    .bind(id)
+    .fetch_optional(pool)
+    .await?
+    .ok_or(ApiError::NotFound)?;
+    get_api_key(pool, updated).await
+}
+
+pub async fn delete_api_key(pool: &PgPool, id: Uuid) -> Result<(), ApiError> {
+    let result = sqlx::query("DELETE FROM api_keys WHERE id = $1 AND revoked_at IS NOT NULL")
+        .bind(id)
+        .execute(pool)
+        .await?;
+    if result.rows_affected() == 1 {
+        return Ok(());
+    }
+
+    let exists =
+        sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM api_keys WHERE id = $1)")
+            .bind(id)
+            .fetch_one(pool)
+            .await?;
+    if exists {
+        Err(ApiError::Conflict(
+            "revoke the API key before deleting it".to_string(),
+        ))
+    } else {
+        Err(ApiError::NotFound)
+    }
+}
+
+pub async fn active_api_key_by_hash(
+    pool: &PgPool,
+    key_hash: &[u8],
+) -> Result<ApiKeyRecord, ApiError> {
+    let row = sqlx::query_as::<_, ApiKeyRow>(
+        "SELECT key.id, key.project_id, key.name, key.scope_mode,
+                COALESCE(
+                    ARRAY_AGG(scope.binding_id ORDER BY scope.binding_id)
+                        FILTER (WHERE scope.binding_id IS NOT NULL),
+                    ARRAY[]::UUID[]
+                ) AS binding_ids,
+                key.permissions, key.key_prefix, key.created_at, key.revoked_at
+         FROM api_keys key
+         LEFT JOIN api_key_agent_scopes scope ON scope.api_key_id = key.id
+         WHERE key.key_hash = $1 AND key.revoked_at IS NULL
+         GROUP BY key.id",
+    )
     .bind(key_hash)
+    .fetch_optional(pool)
+    .await?
+    .ok_or(ApiError::Forbidden)?;
+    ApiKeyRecord::try_from(row)
+}
+
+async fn validate_api_key_agent_scope(
+    pool: &PgPool,
+    project_id: Uuid,
+    agent_scope: &ApiKeyAgentScope,
+) -> Result<(), ApiError> {
+    let ApiKeyAgentScope::Selected { binding_ids } = agent_scope else {
+        return Ok(());
+    };
+    if binding_ids.is_empty() || binding_ids.len() > 256 {
+        return Err(ApiError::Invalid(
+            "selected agent access requires between 1 and 256 agents".to_string(),
+        ));
+    }
+    let count = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM project_bindings
+         WHERE project_id = $1 AND binding_id = ANY($2)",
+    )
+    .bind(project_id)
+    .bind(binding_ids)
     .fetch_one(pool)
-    .await
-    .map_err(ApiError::from)
+    .await?;
+    if usize::try_from(count).ok() != Some(binding_ids.len()) {
+        return Err(ApiError::Invalid(
+            "selected agents must belong to the API key project".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+async fn insert_api_key_agent_scopes(
+    transaction: &mut sqlx::Transaction<'_, Postgres>,
+    api_key_id: Uuid,
+    project_id: Uuid,
+    binding_ids: &[Uuid],
+) -> Result<(), ApiError> {
+    for binding_id in binding_ids {
+        sqlx::query(
+            "INSERT INTO api_key_agent_scopes (api_key_id, project_id, binding_id)
+             VALUES ($1, $2, $3)",
+        )
+        .bind(api_key_id)
+        .bind(project_id)
+        .bind(binding_id)
+        .execute(&mut **transaction)
+        .await
+        .map_err(map_database_error)?;
+    }
+    Ok(())
 }
 
 pub async fn resolve_endpoint_route(
@@ -1199,6 +1477,186 @@ pub async fn resolve_endpoint_route(
             .await?
             .ok_or(ApiError::NotFound)
     }
+}
+
+pub async fn resolve_project_endpoint_route(
+    pool: &PgPool,
+    project_slug: &str,
+    id_or_slug: &str,
+) -> Result<EndpointRoute, ApiError> {
+    let project = get_project_by_slug(pool, project_slug).await?;
+    sync_project_canvas_nodes(pool, project.project.id).await?;
+    const SELECT: &str =
+        "SELECT e.id AS endpoint_id, e.slug AS endpoint_slug, e.name AS endpoint_name,
+                e.request_timeout_ms, profile.id AS profile_id, binding.id AS binding_id,
+                binding.gateway_id, binding.agent_id, binding.config AS binding_config
+         FROM agent_endpoints e
+         JOIN agent_profiles profile ON profile.id = e.profile_id
+         JOIN agent_bindings binding ON binding.id = e.binding_id
+         JOIN project_bindings pb ON pb.binding_id = binding.id
+         JOIN projects project ON project.id = pb.project_id
+         JOIN project_canvas_nodes node
+           ON node.project_id = project.id
+          AND node.binding_id = binding.id
+          AND node.exposed = TRUE
+         WHERE e.enabled = TRUE
+           AND project.enabled = TRUE
+           AND project.slug = $1
+           AND ";
+
+    if let Ok(id) = Uuid::parse_str(id_or_slug) {
+        sqlx::query_as::<_, EndpointRoute>(&format!("{SELECT} e.id = $2"))
+            .bind(project_slug)
+            .bind(id)
+            .fetch_optional(pool)
+            .await?
+            .ok_or(ApiError::NotFound)
+    } else {
+        sqlx::query_as::<_, EndpointRoute>(&format!("{SELECT} e.slug = $2"))
+            .bind(project_slug)
+            .bind(id_or_slug)
+            .fetch_optional(pool)
+            .await?
+            .ok_or(ApiError::NotFound)
+    }
+}
+
+pub async fn resolve_project_model_route(
+    pool: &PgPool,
+    project_id: Uuid,
+    model: &str,
+) -> Result<EndpointRoute, ApiError> {
+    sync_project_canvas_nodes(pool, project_id).await?;
+    sqlx::query_as::<_, EndpointRoute>(
+        "SELECT endpoint.id AS endpoint_id, endpoint.slug AS endpoint_slug,
+                endpoint.name AS endpoint_name, endpoint.request_timeout_ms,
+                profile.id AS profile_id, binding.id AS binding_id,
+                binding.gateway_id, binding.agent_id, binding.config AS binding_config
+         FROM agent_endpoints endpoint
+         JOIN agent_profiles profile ON profile.id = endpoint.profile_id
+         JOIN agent_bindings binding ON binding.id = endpoint.binding_id
+         JOIN project_bindings pb ON pb.binding_id = binding.id
+         JOIN projects project ON project.id = pb.project_id
+         JOIN project_canvas_nodes node
+           ON node.project_id = project.id
+          AND node.binding_id = binding.id
+          AND node.exposed = TRUE
+         WHERE endpoint.enabled = TRUE
+           AND project.enabled = TRUE
+           AND project.id = $1
+           AND (
+                endpoint.slug = $2
+                OR endpoint.id::TEXT = $2
+                OR profile.slug = $2
+                OR binding.agent_id = $2
+           )
+         ORDER BY
+           CASE
+             WHEN endpoint.slug = $2 THEN 0
+             WHEN profile.slug = $2 THEN 1
+             WHEN binding.agent_id = $2 THEN 2
+             ELSE 3
+           END,
+           endpoint.created_at ASC
+         LIMIT 1",
+    )
+    .bind(project_id)
+    .bind(model)
+    .fetch_optional(pool)
+    .await?
+    .ok_or(ApiError::NotFound)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentGatewayRegistration {
+    Registered,
+    Existing,
+}
+
+#[derive(Debug, FromRow)]
+struct AgentGatewayCredentialSecret {
+    credential_hash: Vec<u8>,
+    revoked_at: Option<DateTime<Utc>>,
+}
+
+pub async fn register_agent_gateway_credential(
+    pool: &PgPool,
+    gateway_id: &str,
+    credential_prefix: &str,
+    credential_hash: &[u8],
+) -> Result<AgentGatewayRegistration, ApiError> {
+    let mut transaction = pool.begin().await?;
+    let existing = sqlx::query_as::<_, AgentGatewayCredentialSecret>(
+        "SELECT credential_hash, revoked_at
+         FROM agent_gateway_credentials
+         WHERE gateway_id = $1
+         FOR UPDATE",
+    )
+    .bind(gateway_id)
+    .fetch_optional(&mut *transaction)
+    .await?;
+
+    let registration = match existing {
+        None => {
+            sqlx::query(
+                "INSERT INTO agent_gateway_credentials
+                    (gateway_id, credential_prefix, credential_hash)
+                 VALUES ($1, $2, $3)",
+            )
+            .bind(gateway_id)
+            .bind(credential_prefix)
+            .bind(credential_hash)
+            .execute(&mut *transaction)
+            .await
+            .map_err(map_database_error)?;
+            AgentGatewayRegistration::Registered
+        }
+        Some(existing)
+            if existing.revoked_at.is_none() && existing.credential_hash == credential_hash =>
+        {
+            AgentGatewayRegistration::Existing
+        }
+        Some(existing) if existing.revoked_at.is_none() => {
+            return Err(ApiError::Conflict(
+                "agent gateway id is already registered".to_string(),
+            ));
+        }
+        Some(_) => return Err(ApiError::AgentGatewayCredentialRevoked),
+    };
+    transaction.commit().await?;
+    Ok(registration)
+}
+
+pub async fn authenticate_agent_gateway_credential(
+    pool: &PgPool,
+    credential_hash: &[u8],
+) -> Result<String, ApiError> {
+    sqlx::query_scalar::<_, String>(
+        "UPDATE agent_gateway_credentials
+         SET last_used_at = NOW()
+         WHERE credential_hash = $1 AND revoked_at IS NULL
+         RETURNING gateway_id",
+    )
+    .bind(credential_hash)
+    .fetch_optional(pool)
+    .await?
+    .ok_or(ApiError::Forbidden)
+}
+
+pub async fn revoke_agent_gateway_credential(
+    pool: &PgPool,
+    gateway_id: &str,
+) -> Result<AgentGatewayCredential, ApiError> {
+    sqlx::query_as::<_, AgentGatewayCredential>(
+        "UPDATE agent_gateway_credentials
+         SET revoked_at = COALESCE(revoked_at, NOW())
+         WHERE gateway_id = $1
+         RETURNING gateway_id, credential_prefix, created_at, last_used_at, revoked_at",
+    )
+    .bind(gateway_id)
+    .fetch_optional(pool)
+    .await?
+    .ok_or(ApiError::NotFound)
 }
 
 pub async fn open_agent_gateway_session(
@@ -1342,17 +1800,19 @@ pub async fn create_trace(
     pool: &PgPool,
     request_id: Uuid,
     endpoint_id: Uuid,
+    project_id: Option<Uuid>,
     gateway_session_id: Option<Uuid>,
     request: &Value,
 ) -> Result<(), ApiError> {
     sqlx::query(
         "INSERT INTO endpoint_traces
-            (id, request_id, endpoint_id, gateway_session_id, status, request)
-         VALUES ($1, $2, $3, $4, 'pending', $5)",
+            (id, request_id, endpoint_id, project_id, gateway_session_id, status, request)
+         VALUES ($1, $2, $3, $4, $5, 'pending', $6)",
     )
     .bind(Uuid::new_v4())
     .bind(request_id)
     .bind(endpoint_id)
+    .bind(project_id)
     .bind(gateway_session_id)
     .bind(request)
     .execute(pool)
@@ -1392,15 +1852,7 @@ pub async fn list_traces(
 ) -> Result<Vec<EndpointTrace>, ApiError> {
     let mut query = QueryBuilder::<Postgres>::new(
         "SELECT trace.id, trace.request_id, trace.endpoint_id,
-                COALESCE(trace.project_id, (
-                    SELECT binding_project.project_id
-                    FROM agent_endpoints endpoint
-                    JOIN project_bindings binding_project
-                        ON binding_project.binding_id = endpoint.binding_id
-                    WHERE endpoint.id = trace.endpoint_id
-                    ORDER BY binding_project.created_at ASC
-                    LIMIT 1
-                )) AS project_id,
+                trace.project_id,
                 trace.gateway_session_id, trace.status, trace.latency_ms,
                 trace.request, trace.response, trace.error, trace.created_at, trace.completed_at
          FROM endpoint_traces trace",
@@ -1412,17 +1864,7 @@ pub async fn list_traces(
     } else if let Some(project_id) = project_id {
         query
             .push(" WHERE trace.project_id = ")
-            .push_bind(project_id)
-            .push(
-                " OR trace.endpoint_id IN (
-                    SELECT endpoint.id
-                    FROM agent_endpoints endpoint
-                    JOIN project_bindings binding_project
-                        ON binding_project.binding_id = endpoint.binding_id
-                    WHERE binding_project.project_id = ",
-            )
-            .push_bind(project_id)
-            .push(")");
+            .push_bind(project_id);
     }
     query
         .push(" ORDER BY created_at DESC LIMIT ")

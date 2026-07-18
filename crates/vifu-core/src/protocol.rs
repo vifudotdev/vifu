@@ -38,12 +38,12 @@ pub struct AgentDescriptor {
 pub enum AgentGatewayCommand {
     Hello {
         protocol: String,
-        gateway_id: String,
         resume_session_id: Option<Uuid>,
         agents: Vec<AgentDescriptor>,
         metadata: Value,
     },
     Welcome {
+        gateway_id: String,
         connection_id: Uuid,
         session_id: Uuid,
         heartbeat_interval_ms: u64,
@@ -87,7 +87,6 @@ pub enum AgentGatewayCommand {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct HelloParams {
     protocol: String,
-    gateway_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     resume_session_id: Option<Uuid>,
     agents: Vec<AgentDescriptor>,
@@ -98,6 +97,7 @@ struct HelloParams {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct WelcomePayload {
+    gateway_id: String,
     connection_id: Uuid,
     session_id: Uuid,
     heartbeat_interval_ms: u64,
@@ -155,7 +155,6 @@ pub fn to_gateway_frame(command: &AgentGatewayCommand) -> Result<GatewayFrame, S
     match command {
         AgentGatewayCommand::Hello {
             protocol,
-            gateway_id,
             resume_session_id,
             agents,
             metadata,
@@ -164,13 +163,13 @@ pub fn to_gateway_frame(command: &AgentGatewayCommand) -> Result<GatewayFrame, S
             AGENT_GATEWAY_HELLO_METHOD,
             &HelloParams {
                 protocol: protocol.clone(),
-                gateway_id: gateway_id.clone(),
                 resume_session_id: *resume_session_id,
                 agents: agents.clone(),
                 metadata: metadata.clone(),
             },
         ),
         AgentGatewayCommand::Welcome {
+            gateway_id,
             connection_id,
             session_id,
             heartbeat_interval_ms,
@@ -178,6 +177,7 @@ pub fn to_gateway_frame(command: &AgentGatewayCommand) -> Result<GatewayFrame, S
         } => response_frame(
             AGENT_GATEWAY_HELLO_REQUEST_ID,
             &WelcomePayload {
+                gateway_id: gateway_id.clone(),
                 connection_id: *connection_id,
                 session_id: *session_id,
                 heartbeat_interval_ms: *heartbeat_interval_ms,
@@ -293,7 +293,6 @@ fn from_request_frame(request: RequestFrame) -> Result<AgentGatewayCommand, Stri
             let params = decode_required::<HelloParams>(request.params, "gateway.hello params")?;
             Ok(AgentGatewayCommand::Hello {
                 protocol: params.protocol,
-                gateway_id: params.gateway_id,
                 resume_session_id: params.resume_session_id,
                 agents: params.agents,
                 metadata: params.metadata,
@@ -336,6 +335,7 @@ fn from_response_frame(response: ResponseFrame) -> Result<AgentGatewayCommand, S
         }
         let payload = decode_required::<WelcomePayload>(response.payload, "gateway.hello payload")?;
         return Ok(AgentGatewayCommand::Welcome {
+            gateway_id: payload.gateway_id,
             connection_id: payload.connection_id,
             session_id: payload.session_id,
             heartbeat_interval_ms: payload.heartbeat_interval_ms,
@@ -356,7 +356,7 @@ fn from_response_frame(response: ResponseFrame) -> Result<AgentGatewayCommand, S
 
     let error = response
         .error
-        .ok_or_else(|| "agent.invoke error is required".to_string())?;
+        .ok_or_else(|| "response error is required".to_string())?;
     let details =
         decode_required::<ResponseErrorDetails>(error.details, "agent.invoke error details")?;
     Ok(AgentGatewayCommand::Error {
@@ -458,7 +458,6 @@ pub fn validate_command(command: &AgentGatewayCommand) -> Result<(), String> {
     match command {
         AgentGatewayCommand::Hello {
             protocol,
-            gateway_id,
             resume_session_id: _,
             agents,
             metadata,
@@ -466,7 +465,6 @@ pub fn validate_command(command: &AgentGatewayCommand) -> Result<(), String> {
             if protocol != VERSION {
                 return Err(format!("unsupported agent gateway protocol: {protocol}"));
             }
-            validate_identifier("agent gateway id", gateway_id)?;
             if agents.len() > MAX_AGENTS {
                 return Err("too many agent gateway agents".to_string());
             }
@@ -478,9 +476,11 @@ pub fn validate_command(command: &AgentGatewayCommand) -> Result<(), String> {
             validate_json("agent gateway metadata", metadata, 64 * 1024)
         }
         AgentGatewayCommand::Welcome {
+            gateway_id,
             heartbeat_interval_ms,
             ..
         } => {
+            validate_identifier("agent gateway id", gateway_id)?;
             if !(1_000..=60_000).contains(heartbeat_interval_ms) {
                 return Err("invalid heartbeat interval".to_string());
             }
@@ -648,7 +648,6 @@ mod tests {
     fn round_trips_resume_hello_command_over_gateway_frame() {
         let command = AgentGatewayCommand::Hello {
             protocol: VERSION.to_string(),
-            gateway_id: "local-gateway".to_string(),
             resume_session_id: Some(Uuid::new_v4()),
             agents: vec![AgentDescriptor {
                 id: "default-agent".to_string(),
@@ -662,6 +661,7 @@ mod tests {
         assert_eq!(value["id"], "gateway.hello");
         assert_eq!(value["method"], "gateway.hello");
         assert_eq!(value["params"]["protocol"], VERSION);
+        assert!(value["params"].get("gatewayId").is_none());
     }
 
     #[test]
@@ -727,7 +727,6 @@ mod tests {
     fn rejects_unknown_protocol() {
         let command = AgentGatewayCommand::Hello {
             protocol: "vifu.agent-gateway/999".to_string(),
-            gateway_id: "local-gateway".to_string(),
             resume_session_id: None,
             agents: Vec::new(),
             metadata: json!({}),

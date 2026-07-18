@@ -16,10 +16,6 @@ pub fn require_admin(headers: &HeaderMap, expected: &str) -> Result<(), ApiError
     }
 }
 
-pub fn require_agent_gateway(headers: &HeaderMap, expected: &str) -> Result<(), ApiError> {
-    require_admin(headers, expected)
-}
-
 pub fn bearer_token(headers: &HeaderMap) -> Option<&str> {
     headers
         .get(axum::http::header::AUTHORIZATION)?
@@ -31,7 +27,17 @@ pub fn bearer_token(headers: &HeaderMap) -> Option<&str> {
 }
 
 pub fn hash_api_key(value: &str, pepper: &str) -> Vec<u8> {
+    hash_credential(b"vifu-project-api-key-v1", value, pepper)
+}
+
+pub fn hash_agent_gateway_credential(value: &str, pepper: &str) -> Vec<u8> {
+    hash_credential(b"vifu-agent-gateway-credential-v1", value, pepper)
+}
+
+fn hash_credential(domain: &[u8], value: &str, pepper: &str) -> Vec<u8> {
     let mut digest = Sha256::new();
+    digest.update(domain);
+    digest.update([0]);
     digest.update(pepper.as_bytes());
     digest.update([0]);
     digest.update(value.as_bytes());

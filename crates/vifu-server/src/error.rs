@@ -16,6 +16,14 @@ pub enum ApiError {
     NotFound,
     #[error("{0}")]
     Conflict(String),
+    #[error("model is required for project API keys")]
+    ModelRequired,
+    #[error("the requested agent is not available to this project key")]
+    AgentAccessDenied,
+    #[error("the API key does not permit this endpoint")]
+    EndpointAccessDenied,
+    #[error("the agent gateway credential was revoked")]
+    AgentGatewayCredentialRevoked,
     #[error("agent gateway is not available")]
     AgentGatewayUnavailable,
     #[error("agent gateway is busy")]
@@ -40,6 +48,12 @@ impl IntoResponse for ApiError {
             Self::Invalid(_) => (StatusCode::BAD_REQUEST, "INVALID_REQUEST"),
             Self::NotFound => (StatusCode::NOT_FOUND, "NOT_FOUND"),
             Self::Conflict(_) => (StatusCode::CONFLICT, "CONFLICT"),
+            Self::ModelRequired => (StatusCode::BAD_REQUEST, "model_required"),
+            Self::AgentAccessDenied => (StatusCode::FORBIDDEN, "agent_access_denied"),
+            Self::EndpointAccessDenied => (StatusCode::FORBIDDEN, "endpoint_access_denied"),
+            Self::AgentGatewayCredentialRevoked => {
+                (StatusCode::CONFLICT, "gateway_credential_revoked")
+            }
             Self::AgentGatewayUnavailable => {
                 (StatusCode::SERVICE_UNAVAILABLE, "AGENT_GATEWAY_UNAVAILABLE")
             }

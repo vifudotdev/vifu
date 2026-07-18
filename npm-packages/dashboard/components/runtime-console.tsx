@@ -2,16 +2,12 @@ import Image from "next/image";
 import Link from "next/link";
 import type { LucideIcon } from "lucide-react";
 import {
-  Activity,
   ChevronDown,
-  FolderKanban,
   Gamepad2,
   HeartPulse,
   KeyRound,
   LogOut,
-  Plus,
   ScrollText,
-  Search,
   Settings,
 } from "lucide-react";
 import type { DashboardData } from "../lib/dashboard-data";
@@ -21,7 +17,7 @@ import type {
   AgentEndpoint,
   AgentGateway,
   AgentProfile,
-  ApiKeyRecord,
+  AvailableAgent,
   EndpointTrace,
   ProjectCanvas,
   ProjectCanvasNode,
@@ -30,19 +26,18 @@ import type {
   ServerCapabilities,
 } from "../lib/runtime-types";
 import { RuntimeTraceWorkbench } from "./runtime-trace-workbench";
+import { ApiIntegrationsView } from "./runtime-api-integrations";
 import { AppLayout } from "./console-shell";
-import { DismissibleDetails } from "./dismissible-details";
+import { ProjectSwitcher } from "./project-switcher";
 import {
-  ApiKeyCreateForm,
   DeleteResourceButton,
   ProjectCreateForm,
   ProviderConnectionActions,
   ProviderConnectionForm,
-  RevokeApiKeyButton,
 } from "./runtime-actions";
 import { RuntimeGameplayCanvas } from "./runtime-gameplay-canvas";
 
-export type DashboardSection = "health" | "gameplay" | "api-keys" | "logs" | "settings";
+export type DashboardSection = "health" | "gameplay" | "api" | "logs" | "settings";
 
 type NavigationItem = {
   id: DashboardSection;
@@ -54,7 +49,7 @@ type NavigationItem = {
 const PROJECT_NAVIGATION: NavigationItem[] = [
   { id: "health", label: "Health", icon: HeartPulse },
   { id: "gameplay", label: "Gameplay", icon: Gamepad2, capability: "canvas" },
-  { id: "api-keys", label: "API Keys", icon: KeyRound, capability: "apiKeys" },
+  { id: "api", label: "API", icon: KeyRound, capability: "apiKeys" },
   { id: "logs", label: "Logs", icon: ScrollText, capability: "traces" },
   { id: "settings", label: "Settings", icon: Settings },
 ];
@@ -62,7 +57,7 @@ const PROJECT_NAVIGATION: NavigationItem[] = [
 const SECTION_TITLES: Record<DashboardSection, string> = {
   health: "Health",
   gameplay: "Gameplay",
-  "api-keys": "API Keys",
+  api: "API Integrations",
   logs: "Logs",
   settings: "Settings",
 };
@@ -104,7 +99,7 @@ export function RuntimeConsole({
       )}
       header={(
         <>
-          <ProjectBreadcrumb
+          <ProjectSwitcher
             projects={data.runtime.projects}
             selectedProject={selectedProject}
             activeSection={activeSection}
@@ -136,50 +131,6 @@ export function RuntimeConsole({
         <NoProjectView data={data} />
       )}
     </AppLayout>
-  );
-}
-
-function ProjectBreadcrumb({
-  projects,
-  selectedProject,
-  activeSection,
-  availableAgents,
-  agentGateways,
-}: {
-  projects: RuntimeProject[];
-  selectedProject: RuntimeProject | null;
-  activeSection: DashboardSection;
-  availableAgents: DashboardData["runtime"]["availableAgents"];
-  agentGateways: AgentGateway[];
-}) {
-  return (
-    <nav className="project-breadcrumb" aria-label="Project">
-      <DismissibleDetails className="project-switcher">
-        <summary>
-          <span className="project-avatar"><FolderKanban aria-hidden="true" /></span>
-          <strong>{selectedProject?.name ?? "Create project"}</strong>
-          <ChevronDown aria-hidden="true" />
-        </summary>
-        <div className="project-menu">
-          <label className="project-search">
-            <Search aria-hidden="true" />
-            <input type="search" placeholder="Search projects..." />
-          </label>
-          <span>Projects</span>
-          <div className="project-menu-list">
-            {projects.map((project) => (
-              <Link key={project.id} href={`/project/${project.slug}/${activeSection}`} prefetch={false} title={project.name}>
-                <strong>{project.name}</strong>
-              </Link>
-            ))}
-          </div>
-          <section className="project-create-panel">
-            <div className="project-create-header"><Plus aria-hidden="true" /><span>Create project</span></div>
-            <ProjectCreateForm availableAgents={availableAgents} agentGateways={agentGateways} variant="menu" />
-          </section>
-        </div>
-      </DismissibleDetails>
-    </nav>
   );
 }
 
@@ -233,7 +184,19 @@ function ProjectSectionView({
       />
     );
   }
-  if (section === "api-keys") return <ApiKeysView project={project} keys={data.runtime.apiKeys} endpoints={endpoints} />;
+  if (section === "api") {
+    return (
+      <ApiIntegrationsView
+        project={project}
+        projects={data.runtime.projects}
+        keys={data.runtime.apiKeys}
+        endpoints={data.runtime.endpoints}
+        bindings={data.runtime.bindings}
+        canvas={data.canvas}
+        browserApiBaseUrl={browserApiBaseUrl}
+      />
+    );
+  }
   if (section === "logs") return <LogsView project={project} traces={projectTraces(data.runtime.traces, project)} />;
   if (section === "settings") {
     return (
@@ -263,98 +226,194 @@ function HealthView({
   browserApiBaseUrl: string;
 }) {
   const nodes = projectCanvasNodes(project, canvas);
-  const primaryEndpoint = endpoints[0];
-  const gateways = new Map(data.runtime.agentGateways.map((gateway) => [gateway.gatewayId, gateway]));
   const exposed = nodes.filter((node) => node.exposed).length;
-  const connected = nodes.filter((node) => node.gatewayId && gateways.get(node.gatewayId)?.status === "connected").length;
-  const failures = projectTraces(data.runtime.traces, project).filter((trace) => trace.status !== "completed" && trace.status !== "pending");
-  const connectedGateways = data.runtime.agentGateways.filter((gateway) => gateway.status === "connected").length;
+  const gatewayCards = gatewayHealthCards(data.runtime.agentGateways, data.runtime.availableAgents);
+  const connectedGatewayCards = gatewayCards.filter((item) => item.gateway.status === "connected");
+  const connectedGateways = connectedGatewayCards.length;
+  const connectedAgentKeys = new Set(
+    data.runtime.availableAgents
+      .filter((agent) => agent.status === "connected")
+      .map((agent) => `${agent.gatewayId}/${agent.id}`),
+  );
+  const connected = nodes.filter((node) => (
+    node.exposed
+    && node.gatewayId
+    && node.resourceId
+    && connectedAgentKeys.has(`${node.gatewayId}/${node.resourceId}`)
+  )).length;
+  const traces = projectTraces(data.runtime.traces, project);
+  const traceSummary = summarizeTraces(traces);
   return (
-    <>
-      <section className="health-summary">
-        <div className="summary-card endpoint-summary">
-          <div>
-            <span className="status-label ready">Endpoint</span>
-            <strong>Endpoint invoke API</strong>
-            {primaryEndpoint ? (
-              <code>{endpointInvokeUrl(primaryEndpoint, browserApiBaseUrl)}</code>
-            ) : (
-              <code>No endpoint yet</code>
-            )}
+    <div className="health-dashboard">
+      <HealthSection title="Summary" defaultOpen>
+        <dl className="health-summary-card">
+          <div className="wide">
+            <dt>HTTP URL</dt>
+            <dd><code>{projectChatCompletionsUrl(project, browserApiBaseUrl)}</code></dd>
           </div>
-          <dl>
-            <div><dt>Agents</dt><dd>{exposed}</dd></div>
-            <div><dt>Connected</dt><dd>{connected}</dd></div>
-            <div><dt>Failures</dt><dd>{failures.length}</dd></div>
-          </dl>
-        </div>
-        <Metric label="Canvas nodes" value={nodes.length} icon={Gamepad2} />
-        <Metric label="Gateways" value={connectedGateways} icon={Activity} />
-        <Metric label="Recent logs" value={projectTraces(data.runtime.traces, project).length} icon={ScrollText} />
-      </section>
+          <div className="wide">
+            <dt>WS URL</dt>
+            <dd><span className="health-unavailable">Not available</span></dd>
+          </div>
+          <div>
+            <dt>Gateways</dt>
+            <dd>{connectedGateways}</dd>
+          </div>
+          <div>
+            <dt>Agents</dt>
+            <dd>{connected}/{exposed}</dd>
+          </div>
+          <div>
+            <dt>Requests</dt>
+            <dd>{traces.length}</dd>
+          </div>
+        </dl>
+      </HealthSection>
       {nodes.length === 0 || connectedGateways === 0 ? (
         <SetupRail
           project={project}
           providerCount={data.providerConnections.length}
-          agentCount={data.runtime.availableAgents.length}
+          agentCount={connectedAgentKeys.size}
           exposedCount={exposed}
           connectedGatewayCount={connectedGateways}
         />
       ) : null}
-      <section className="content-section">
-        <SectionHeading title="Agents exposed by this project" count={nodes.length} action={<Link href={`/project/${project.slug}/gameplay`}>Open Gameplay</Link>} />
-        <ResourceList empty="No agents on this project canvas yet.">
-          {nodes.map((node) => {
-            const title = nodeTitle(node, data.runtime.profiles);
-            const resourceId = node.resourceId ?? node.id;
-            return (
-              <article className="resource-row health-agent-row" key={node.id}>
-                <ResourceIdentity title={title} code={resourceId === title ? undefined : resourceId} description={node.gatewayId ? gatewayDisplayLabel(node.gatewayId) : "unbound"} />
-                <div className="resource-meta">
-                  <span className={node.exposed ? "status-label ready" : "status-label pending"}>{node.exposed ? "Exposed" : "Hidden"}</span>
-                  <span className={node.gatewayId && gateways.get(node.gatewayId)?.status === "connected" ? "status-label ready" : "status-label off"}>
-                    {node.gatewayId && gateways.get(node.gatewayId)?.status === "connected" ? "Connected" : "Offline"}
-                  </span>
-                </div>
-              </article>
-            );
-          })}
-        </ResourceList>
-      </section>
-      <section className="content-section">
-        <SectionHeading title="Latest logs" action={<Link href={`/project/${project.slug}/logs`}>View logs</Link>} />
-        <TraceTable traces={projectTraces(data.runtime.traces, project).slice(0, 8)} project={project} />
-      </section>
-    </>
+      <HealthSection title="Traces" count={`${traces.length} recent`} defaultOpen>
+        <div className="trace-widget-grid">
+          <TraceMetricCard title="Requests" value={String(traces.length)} meta="Recent project traces">
+            <MiniBarChart bars={traceSummary.requestBuckets} />
+          </TraceMetricCard>
+          <TraceMetricCard title="Failure rate" value={`${formatPercent(traceSummary.failureRate)}%`} meta={`${traceSummary.failures} failed / ${traces.length} total`}>
+            <StatusStack completed={traceSummary.completed} failed={traceSummary.failures} pending={traceSummary.pending} />
+          </TraceMetricCard>
+          <TraceMetricCard title="Latency" value={traceSummary.p95LatencyMs === null ? "-" : `${traceSummary.p95LatencyMs} ms`} meta={traceSummary.avgLatencyMs === null ? "No completed latency data" : `avg ${traceSummary.avgLatencyMs} ms`}>
+            <MiniBarChart bars={traceSummary.latencyBuckets} />
+          </TraceMetricCard>
+          <TraceMetricCard title="Recent errors" value={String(traceSummary.failures)} meta="Latest failed traces">
+            <ErrorTraceList traces={traceSummary.errorTraces} />
+          </TraceMetricCard>
+        </div>
+      </HealthSection>
+      <HealthSection title="Gateways" count={`${connectedGateways} connected`} defaultOpen>
+        {connectedGatewayCards.length > 0 ? (
+          <div className="gateway-health-grid">
+            {connectedGatewayCards.map(({ gateway, agents }) => (
+              <GatewayHealthCard gateway={gateway} agents={agents} key={gateway.gatewayId} />
+            ))}
+          </div>
+        ) : (
+          <EmptyState>No gateways connected.</EmptyState>
+        )}
+      </HealthSection>
+    </div>
   );
 }
 
-function ApiKeysView({ project, keys, endpoints }: { project: RuntimeProject; keys: ApiKeyRecord[]; endpoints: AgentEndpoint[] }) {
-  const endpointIds = new Set(endpoints.map((endpoint) => endpoint.id));
-  const scopedKeys = keys.filter((key) => endpointIds.has(key.endpointId));
+function HealthSection({
+  children,
+  count,
+  defaultOpen,
+  title,
+}: {
+  children: React.ReactNode;
+  count?: string;
+  defaultOpen?: boolean;
+  title: string;
+}) {
   return (
-    <>
-      <section className="content-section">
-        <SectionHeading title="Endpoint access" />
-        <div className="definition-grid compact-definition-grid">
-          <div><dt>Project</dt><dd>{project.name}</dd></div>
-          <div><dt>Endpoints</dt><dd>{endpoints.length}</dd></div>
-          <div><dt>Status</dt><dd>{project.enabled ? "Enabled" : "Disabled"}</dd></div>
+    <details className="health-section" open={defaultOpen}>
+      <summary>
+        <ChevronDown aria-hidden="true" />
+        <strong>{title}</strong>
+        {count ? <span>{count}</span> : null}
+      </summary>
+      <div className="health-section-body">{children}</div>
+    </details>
+  );
+}
+
+function GatewayHealthCard({ gateway, agents }: { gateway: AgentGateway; agents: AvailableAgent[] }) {
+  const fallbackAgents = agents.length > 0
+    ? agents
+    : gateway.agents.map((agent, index) => ({
+      gatewayId: gateway.gatewayId,
+      id: agent.id ?? `agent-${index + 1}`,
+      name: agent.name ?? agent.id ?? `Agent ${index + 1}`,
+      status: gateway.status,
+      metadata: {},
+    }));
+  return (
+    <article className="gateway-health-card">
+      <header>
+        <div>
+          <strong>{gatewayDisplayLabel(gateway.gatewayId)}</strong>
+          <code>{shortId(gateway.sessionId, 12)}</code>
         </div>
-      </section>
-      {endpoints.length > 0 ? (
-        <section className="content-section create-section"><SectionHeading title="New endpoint API key" /><ApiKeyCreateForm endpoints={endpoints} /></section>
-      ) : null}
-      <section className="content-section"><SectionHeading title="Endpoint API keys" count={scopedKeys.length} />
-        <ResourceList empty="No endpoint API keys for this project.">{scopedKeys.map((key) => (
-          <article className="resource-row" key={key.id}>
-            <ResourceIdentity title={key.name} code={`${key.keyPrefix}...`} description={endpoints.find((endpoint) => endpoint.id === key.endpointId)?.name ?? "Unknown endpoint"} />
-            <div className="resource-meta"><span className={key.revokedAt ? "status-label off" : "status-label ready"}>{key.revokedAt ? "Revoked" : "Active"}</span><time>{formatDate(key.createdAt)}</time></div>
-            {!key.revokedAt ? <RevokeApiKeyButton id={key.id} name={key.name} /> : null}
-          </article>
-        ))}</ResourceList>
-      </section>
-    </>
+        <span className={statusClassName(gateway.status)}>{gateway.status}</span>
+      </header>
+      <dl>
+        <div><dt>Agents</dt><dd>{fallbackAgents.length}</dd></div>
+        <div><dt>Last seen</dt><dd>{formatDate(gateway.lastSeenAt)}</dd></div>
+      </dl>
+      <div className="gateway-agent-list">
+        {fallbackAgents.length > 0 ? fallbackAgents.map((agent) => (
+          <div key={`${agent.gatewayId}:${agent.id}`}>
+            <span>{agent.name || agent.id}</span>
+            <small className={statusClassName(agent.status)}>{agent.status}</small>
+          </div>
+        )) : <EmptyState>No agents reported.</EmptyState>}
+      </div>
+    </article>
+  );
+}
+
+function TraceMetricCard({ children, meta, title, value }: { children: React.ReactNode; meta: string; title: string; value: string }) {
+  return (
+    <article className="trace-widget-card">
+      <header>
+        <span>{title}</span>
+        <strong>{value}</strong>
+        <small>{meta}</small>
+      </header>
+      {children}
+    </article>
+  );
+}
+
+function MiniBarChart({ bars }: { bars: number[] }) {
+  const max = Math.max(...bars, 1);
+  const hasData = bars.some((value) => value > 0);
+  return (
+    <div className={`mini-bar-chart${hasData ? "" : " empty"}`} aria-hidden="true">
+      {hasData ? bars.map((value, index) => (
+        <i key={index} style={{ height: `${Math.max(4, (value / max) * 100)}%` }} />
+      )) : null}
+    </div>
+  );
+}
+
+function StatusStack({ completed, failed, pending }: { completed: number; failed: number; pending: number }) {
+  const total = Math.max(completed + failed + pending, 1);
+  return (
+    <div className="status-stack" aria-hidden="true">
+      <i className="ready" style={{ width: `${(completed / total) * 100}%` }} />
+      <i className="pending" style={{ width: `${(pending / total) * 100}%` }} />
+      <i className="failed" style={{ width: `${(failed / total) * 100}%` }} />
+    </div>
+  );
+}
+
+function ErrorTraceList({ traces }: { traces: EndpointTrace[] }) {
+  if (traces.length === 0) return <div className="trace-widget-empty">No recent errors.</div>;
+  return (
+    <div className="error-trace-list">
+      {traces.map((trace) => (
+        <div key={trace.id}>
+          <code>{shortId(trace.requestId, 8)}</code>
+          <span>{trace.error ?? trace.status}</span>
+        </div>
+      ))}
+    </div>
   );
 }
 
@@ -387,7 +446,8 @@ function SettingsView({
         <dl className="definition-grid">
           <div><dt>Name</dt><dd>{project.name}</dd></div>
           <div><dt>Slug</dt><dd>{project.slug}</dd></div>
-          <div><dt>Invoke endpoint</dt><dd>{primaryEndpoint ? <code>{endpointInvokeUrl(primaryEndpoint, browserApiBaseUrl)}</code> : "No endpoint yet"}</dd></div>
+          <div><dt>Chat completions</dt><dd>{primaryEndpoint ? <code>{projectChatCompletionsUrl(project, browserApiBaseUrl)}</code> : "No endpoint yet"}</dd></div>
+          <div><dt>Model</dt><dd>{primaryEndpoint ? <code>{primaryEndpoint.slug}</code> : "No endpoint yet"}</dd></div>
           <div><dt>Status</dt><dd>{project.enabled ? "Enabled" : "Disabled"}</dd></div>
         </dl>
       </section>
@@ -513,10 +573,6 @@ function TraceTable({ traces, project: _project, detailed = false }: { traces: E
   );
 }
 
-function Metric({ label, value, icon: Icon }: { label: string; value: number; icon: LucideIcon }) {
-  return <article className="metric"><div><Icon aria-hidden="true" /><span>{label}</span></div><strong>{value}</strong></article>;
-}
-
 function SectionHeading({ title, count, action }: { title: string; count?: number; action?: React.ReactNode }) {
   return <header className="section-heading"><div><h2>{title}</h2>{count !== undefined ? <span>{count}</span> : null}</div>{action}</header>;
 }
@@ -549,6 +605,32 @@ function projectCanvasNodes(project: RuntimeProject, canvas?: ProjectCanvas): Pr
   return [];
 }
 
+function gatewayStatusMap(gateways: AgentGateway[]): Map<string, AgentGateway> {
+  const byId = new Map<string, AgentGateway>();
+  for (const gateway of gateways) {
+    const current = byId.get(gateway.gatewayId);
+    if (!current || (current.status !== "connected" && gateway.status === "connected")) {
+      byId.set(gateway.gatewayId, gateway);
+    }
+  }
+  return byId;
+}
+
+function gatewayHealthCards(gateways: AgentGateway[], agents: AvailableAgent[]): Array<{ gateway: AgentGateway; agents: AvailableAgent[] }> {
+  return Array.from(gatewayStatusMap(gateways).values())
+    .sort((a, b) => gatewayStatusRank(a.status) - gatewayStatusRank(b.status) || a.gatewayId.localeCompare(b.gatewayId))
+    .map((gateway) => ({
+      gateway,
+      agents: agents
+        .filter((agent) => agent.gatewayId === gateway.gatewayId)
+        .sort((a, b) => a.name.localeCompare(b.name)),
+    }));
+}
+
+function gatewayStatusRank(status: string): number {
+  return status === "connected" ? 0 : status === "pending" ? 1 : 2;
+}
+
 function projectEndpoints(project: RuntimeProject, endpoints: AgentEndpoint[]): AgentEndpoint[] {
   const bindingIds = new Set(project.bindingIds);
   return endpoints.filter((endpoint) => bindingIds.has(endpoint.bindingId));
@@ -556,6 +638,63 @@ function projectEndpoints(project: RuntimeProject, endpoints: AgentEndpoint[]): 
 
 function projectTraces(traces: EndpointTrace[], project: RuntimeProject): EndpointTrace[] {
   return traces.filter((trace) => trace.projectId === project.id);
+}
+
+function summarizeTraces(traces: EndpointTrace[]) {
+  const completed = traces.filter((trace) => trace.status === "completed").length;
+  const pending = traces.filter((trace) => trace.status === "pending").length;
+  const failures = traces.length - completed - pending;
+  const latencies = traces
+    .map((trace) => trace.latencyMs)
+    .filter((value): value is number => typeof value === "number")
+    .sort((a, b) => a - b);
+  return {
+    avgLatencyMs: latencies.length === 0 ? null : Math.round(latencies.reduce((sum, value) => sum + value, 0) / latencies.length),
+    completed,
+    errorTraces: traces
+      .filter((trace) => trace.status !== "completed" && trace.status !== "pending")
+      .sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt))
+      .slice(0, 4),
+    failureRate: traces.length === 0 ? 0 : (failures / traces.length) * 100,
+    failures,
+    latencyBuckets: valueBuckets(latencies, 12),
+    p95LatencyMs: percentile(latencies, 0.95),
+    pending,
+    requestBuckets: timeBuckets(traces, 12),
+  };
+}
+
+function timeBuckets(traces: EndpointTrace[], count: number): number[] {
+  const buckets = Array.from({ length: count }, () => 0);
+  const times = traces
+    .map((trace) => Date.parse(trace.createdAt))
+    .filter((value) => Number.isFinite(value));
+  if (times.length === 0) return buckets;
+  const min = Math.min(...times);
+  const max = Math.max(...times);
+  const span = Math.max(max - min, 60_000);
+  for (const time of times) {
+    const index = Math.min(count - 1, Math.floor(((time - min) / span) * count));
+    buckets[index] += 1;
+  }
+  return buckets;
+}
+
+function valueBuckets(values: number[], count: number): number[] {
+  const buckets = Array.from({ length: count }, () => 0);
+  if (values.length === 0) return buckets;
+  const max = Math.max(...values, 1);
+  for (const value of values) {
+    const index = Math.min(count - 1, Math.floor((value / max) * count));
+    buckets[index] += 1;
+  }
+  return buckets;
+}
+
+function percentile(values: number[], ratio: number): number | null {
+  if (values.length === 0) return null;
+  const index = Math.min(values.length - 1, Math.max(0, Math.ceil(values.length * ratio) - 1));
+  return Math.round(values[index] ?? 0);
 }
 
 function nodeTitle(node: ProjectCanvasNode, profiles: AgentProfile[]): string {
@@ -573,11 +712,27 @@ function gatewayCountLabel(count: number): string {
   return `${count} ${count === 1 ? "gateway" : "gateways"} online`;
 }
 
-function endpointInvokeUrl(endpoint: AgentEndpoint, browserApiBaseUrl: string): string {
+function projectChatCompletionsUrl(project: RuntimeProject, browserApiBaseUrl: string): string {
+  return `${projectApiBaseUrl(project, browserApiBaseUrl)}/chat/completions`;
+}
+
+function projectApiBaseUrl(project: RuntimeProject, browserApiBaseUrl: string): string {
   const url = new URL(browserApiBaseUrl);
-  url.pathname = `/v1/endpoints/${encodeURIComponent(endpoint.slug || endpoint.id)}/invoke`;
+  const basePath = url.pathname.replace(/\/+$/, "");
+  url.pathname = `${basePath}/${encodeURIComponent(project.slug)}/v1`;
   url.search = "";
   return url.toString().replace(/\/$/, "");
+}
+
+function statusClassName(status: string): string {
+  const normalized = status.toLowerCase();
+  if (normalized === "connected" || normalized === "online" || normalized === "completed" || normalized === "ready") return "status-label ready";
+  if (normalized === "pending" || normalized === "connecting") return "status-label pending";
+  return "status-label off";
+}
+
+function formatPercent(value: number): string {
+  return value % 1 === 0 ? String(value) : value.toFixed(1);
 }
 
 function formatDate(value: string): string {
@@ -595,8 +750,8 @@ function formatDate(value: string): string {
     }).format(date);
 }
 
-function shortId(value: string): string {
-  return value.length > 12 ? `${value.slice(0, 8)}...` : value;
+function shortId(value: string, length = 12): string {
+  return value.length > length ? `${value.slice(0, Math.max(4, length - 4))}...` : value;
 }
 
 function gatewayDisplayLabel(value: string): string {

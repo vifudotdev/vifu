@@ -119,6 +119,8 @@ async function setup() {
     ? agentGateway.agents?.find((item) => item.id === expectedMockAgent)
     : agentGateway.agents?.[0];
   assert(agent?.id, "The Agent Gateway did not report an agent");
+  const secondaryAgent = agentGateway.agents?.find((item) => item.id && item.id !== agent.id) ?? null;
+  const projectAgentIds = secondaryAgent ? [agent.id, secondaryAgent.id] : [agent.id];
 
   const project = (await request("/v1/projects", {
     method: "POST",
@@ -126,15 +128,32 @@ async function setup() {
       name: `E2E Project ${suffix}`,
       slug: `e2e-project-${suffix}`,
       gatewayId: agentGateway.gatewayId,
+      agentIds: projectAgentIds,
+    },
+  })).project;
+  const scopeTargetProject = (await request("/v1/projects", {
+    method: "POST",
+    body: {
+      name: `E2E Scope Target ${suffix}`,
+      slug: `e2e-scope-target-${suffix}`,
+      gatewayId: agentGateway.gatewayId,
       agentIds: [agent.id],
     },
   })).project;
   const bindings = (await request("/v1/bindings")).bindings ?? [];
-  const binding = bindings.find((item) => project.bindingIds.includes(item.id));
+  const binding = bindings.find((item) => project.bindingIds.includes(item.id) && item.agentId === agent.id);
   assert(binding, "Project creation did not create a binding for the selected agent");
+  const secondaryBinding = secondaryAgent
+    ? bindings.find((item) => project.bindingIds.includes(item.id) && item.agentId === secondaryAgent.id)
+    : null;
+  if (secondaryAgent) assert(secondaryBinding, "Project creation did not bind the second agent");
   const profiles = (await request("/v1/profiles")).profiles ?? [];
   const profile = profiles.find((item) => item.id === binding.profileId);
   assert(profile, "Project creation did not create a profile for the selected agent");
+  const secondaryProfile = secondaryBinding
+    ? profiles.find((item) => item.id === secondaryBinding.profileId)
+    : null;
+  if (secondaryBinding) assert(secondaryProfile, "Project creation did not create the second agent profile");
 
   const endpoints = await Promise.all(Array.from({ length: 10 }, async (_, index) => {
     return (await request("/v1/endpoints", {
@@ -148,31 +167,220 @@ async function setup() {
       },
     })).endpoint;
   }));
-
-  const createdKeys = await Promise.all(endpoints.map(async (endpoint, index) => {
-    return (await request("/v1/api-keys", {
+  const secondaryEndpoint = secondaryBinding && secondaryProfile
+    ? (await request("/v1/endpoints", {
       method: "POST",
-      body: { endpointId: endpoint.id, name: `E2E key ${index + 1}` },
-    })).apiKey;
-  }));
+      body: {
+        name: "E2E secondary endpoint",
+        slug: `e2e-${suffix}-secondary`,
+        profileId: secondaryProfile.id,
+        bindingId: secondaryBinding.id,
+        requestTimeoutMs: 10000,
+      },
+    })).endpoint
+    : null;
+  const allEndpoints = secondaryEndpoint ? [...endpoints, secondaryEndpoint] : endpoints;
 
-  const crossEndpoint = await rawRequest(
-    `/v1/endpoints/${endpoints[1].id}/invoke`,
-    { method: "POST", body: { message: "must be denied" } },
-    createdKeys[0].key,
+  const projectKey = (await request("/v1/api-keys", {
+    method: "POST",
+    body: projectKeyBody(project.id, "E2E project key"),
+  })).apiKey;
+
+  const editableKey = (await request("/v1/api-keys", {
+    method: "POST",
+    body: projectKeyBody(project.id, "E2E editable key"),
+  })).apiKey;
+  const selectedScopeUpdate = (await request(`/v1/api-keys/${editableKey.id}`, {
+    method: "PATCH",
+    body: {
+      name: "E2E edited key",
+      agentScope: { mode: "selected", bindingIds: [binding.id] },
+      permissions: {
+        chatCompletions: "access",
+        agents: "read",
+        project: "write",
+      },
+    },
+  })).apiKey;
+  assert(selectedScopeUpdate.name === "E2E edited key", "API key name update was not persisted");
+  assert(
+    selectedScopeUpdate.agentScope?.mode === "selected"
+      && selectedScopeUpdate.agentScope.bindingIds?.[0] === binding.id,
+    "Selected agent scope was not persisted",
   );
-  assert(crossEndpoint.status === 403, "An endpoint key authorized a different endpoint");
+  assert(
+    selectedScopeUpdate.permissions?.chatCompletions === "access"
+      && selectedScopeUpdate.permissions.agents === "read"
+      && selectedScopeUpdate.permissions.project === "write",
+    "API key permissions were not persisted",
+  );
+  const selectedModels = await request(`/${project.slug}/v1/models`, {}, editableKey.key);
+  assert(
+    selectedModels.data?.length === endpoints.length,
+    "Selected agent scope returned models from another binding",
+  );
+  if (secondaryEndpoint) {
+    const selectedDenied = await rawRequest(
+      `/${project.slug}/v1/chat/completions`,
+      { method: "POST", body: chatCompletionBody(secondaryEndpoint, "selected scope probe") },
+      editableKey.key,
+    );
+    const selectedDeniedPayload = await selectedDenied.json();
+    assert(
+      selectedDenied.status === 403 && selectedDeniedPayload?.error?.code === "agent_access_denied",
+      "Selected agent scope allowed another project binding",
+    );
+  }
+
+  const scopeUpdate = (await request(`/v1/api-keys/${editableKey.id}`, {
+    method: "PATCH",
+    body: {
+      projectId: scopeTargetProject.id,
+      agentScope: { mode: "all" },
+    },
+  })).apiKey;
+  assert(scopeUpdate.projectId === scopeTargetProject.id, "API key project scope update was not persisted");
+  const formerScopeAccess = await rawRequest(`/${project.slug}/v1/models`, {}, editableKey.key);
+  assert(formerScopeAccess.status === 403, "API key retained access to its former project scope");
+  await formerScopeAccess.arrayBuffer();
+  const targetScopeModels = await request(`/${scopeTargetProject.slug}/v1/models`, {}, editableKey.key);
+  assert(Array.isArray(targetScopeModels.data), "API key could not access its updated project scope");
+
+  const endpointDeniedKey = (await request("/v1/api-keys", {
+    method: "POST",
+    body: {
+      ...projectKeyBody(project.id, "E2E endpoint permission probe"),
+      permissions: {
+        chatCompletions: "none",
+        agents: "read",
+        project: "read",
+      },
+    },
+  })).apiKey;
+  assert(
+    endpointDeniedKey.permissions?.chatCompletions === "none"
+      && endpointDeniedKey.permissions.agents === "read"
+      && endpointDeniedKey.permissions.project === "read",
+    "API key creation did not persist endpoint permissions",
+  );
+  const deniedModels = await rawRequest(`/${project.slug}/v1/models`, {}, endpointDeniedKey.key);
+  const deniedModelsPayload = await deniedModels.json();
+  assert(
+    deniedModels.status === 403 && deniedModelsPayload?.error?.code === "endpoint_access_denied",
+    "A key without Chat Completions access listed endpoint models",
+  );
+  const deniedCompletion = await rawRequest(
+    `/${project.slug}/v1/chat/completions`,
+    { method: "POST", body: chatCompletionBody(endpoints[0], "endpoint permission probe") },
+    endpointDeniedKey.key,
+  );
+  const deniedCompletionPayload = await deniedCompletion.json();
+  assert(
+    deniedCompletion.status === 403 && deniedCompletionPayload?.error?.code === "endpoint_access_denied",
+    "A key without Chat Completions access invoked the endpoint",
+  );
+  const endpointPermissionUpdate = (await request(`/v1/api-keys/${endpointDeniedKey.id}`, {
+    method: "PATCH",
+    body: {
+      permissions: {
+        chatCompletions: "access",
+        agents: "none",
+        project: "none",
+      },
+    },
+  })).apiKey;
+  assert(
+    endpointPermissionUpdate.permissions?.chatCompletions === "access",
+    "API key endpoint permission update was not persisted",
+  );
+  const allowedModels = await request(`/${project.slug}/v1/models`, {}, endpointDeniedKey.key);
+  assert(Array.isArray(allowedModels.data), "Updated endpoint permission did not authorize model discovery");
+
+  const disposableKey = (await request("/v1/api-keys", {
+    method: "POST",
+    body: projectKeyBody(project.id, "E2E revocation probe"),
+  })).apiKey;
+  const activeDelete = await rawRequest(`/v1/api-keys/${disposableKey.id}`, { method: "DELETE" });
+  assert(activeDelete.status === 409, "An active API key was permanently deleted without revocation");
+  await activeDelete.arrayBuffer();
+  await request(`/v1/api-keys/${disposableKey.id}/revoke`, { method: "POST" });
+  const revokedUpdate = await rawRequest(`/v1/api-keys/${disposableKey.id}`, {
+    method: "PATCH",
+    body: { agentScope: { mode: "all" } },
+  });
+  assert(revokedUpdate.status === 409, "A revoked API key could still be edited");
+  await revokedUpdate.arrayBuffer();
+  const revokedAccess = await rawRequest(`/${project.slug}/v1/models`, {}, disposableKey.key);
+  assert(revokedAccess.status === 403, "A revoked API key still authorized requests");
+  await revokedAccess.arrayBuffer();
+  await request(`/v1/api-keys/${disposableKey.id}`, { method: "DELETE" });
+  const keysAfterDelete = (await request("/v1/api-keys")).apiKeys ?? [];
+  assert(!keysAfterDelete.some((key) => key.id === disposableKey.id), "A deleted API key record remained visible");
+
+  const visibleModels = await request(`/${project.slug}/v1/models`, {}, projectKey.key);
+  assert(
+    visibleModels.data?.length === allEndpoints.length,
+    "Project key did not list all project models",
+  );
+
+  if (secondaryBinding && secondaryEndpoint) {
+    const { canvas } = await request(`/v1/project/${project.slug}/canvas`);
+    const secondaryNode = canvas.nodes?.find((node) => node.bindingId === secondaryBinding.id);
+    assert(secondaryNode, "The second agent was not represented on the project canvas");
+    await request(`/v1/project/${project.slug}/canvas/nodes/${secondaryNode.id}`, {
+      method: "PATCH",
+      body: { exposed: false },
+    });
+    const hiddenModels = await request(`/${project.slug}/v1/models`, {}, projectKey.key);
+    assert(hiddenModels.data?.length === endpoints.length, "A hidden canvas agent remained exposed as a model");
+    const hiddenAgent = await rawRequest(
+      `/${project.slug}/v1/chat/completions`,
+      { method: "POST", body: chatCompletionBody(secondaryEndpoint, "hidden agent probe") },
+      projectKey.key,
+    );
+    const hiddenAgentPayload = await hiddenAgent.json();
+    assert(
+      hiddenAgent.status === 403 && hiddenAgentPayload?.error?.code === "agent_access_denied",
+      "A hidden canvas agent remained callable",
+    );
+    await request(`/v1/project/${project.slug}/canvas/nodes/${secondaryNode.id}`, {
+      method: "PATCH",
+      body: { exposed: true },
+    });
+  }
+
+  const missingModel = await rawRequest(
+    `/${project.slug}/v1/chat/completions`,
+    { method: "POST", body: { messages: [{ role: "user", content: "Hello" }] } },
+    projectKey.key,
+  );
+  const missingModelPayload = await missingModel.json();
+  assert(
+    missingModel.status === 400 && missingModelPayload?.error?.code === "model_required",
+    "Project key without model did not return model_required",
+  );
+
+  const outsideProject = await rawRequest(
+    `/${project.slug}/v1/chat/completions`,
+    { method: "POST", body: { model: "outside-project-agent", messages: [{ role: "user", content: "Hello" }] } },
+    projectKey.key,
+  );
+  const outsideProjectPayload = await outsideProject.json();
+  assert(
+    outsideProject.status === 403 && outsideProjectPayload?.error?.code === "agent_access_denied",
+    "Project key targeting an outside model did not return agent_access_denied",
+  );
 
   const calls = await Promise.all(endpoints.map(async (endpoint, index) => {
     const message = `parallel call ${index + 1}`;
     const result = await request(
-      `/v1/endpoints/${endpoint.id}/invoke`,
-      { method: "POST", body: { message } },
-      createdKeys[index].key,
+      `/${project.slug}/v1/chat/completions`,
+      { method: "POST", body: chatCompletionBody(endpoint, message) },
+      projectKey.key,
     );
-    assert(result.output?.agentId === agent.id, `Endpoint ${index + 1} used the wrong agent`);
+    assert(result.model === endpoint.slug, `Endpoint ${index + 1} returned the wrong model`);
     assert(
-      typeof result.output?.reply === "string" && result.output.reply.includes(message),
+      completionContent(result).includes(message),
       `Endpoint ${index + 1} returned the wrong reply`,
     );
     return result;
@@ -185,9 +393,9 @@ async function setup() {
       body: { requestTimeoutMs: 500 },
     });
     const timeoutResponse = await rawRequest(
-      `/v1/endpoints/${endpoints[0].id}/invoke`,
-      { method: "POST", body: { message: "delay:2000" } },
-      createdKeys[0].key,
+      `/${project.slug}/v1/chat/completions`,
+      { method: "POST", body: chatCompletionBody(endpoints[0], "delay:2000") },
+      projectKey.key,
     );
     assert(timeoutResponse.status === 504, `Expected timeout status 504, got ${timeoutResponse.status}`);
     await timeoutResponse.arrayBuffer();
@@ -198,22 +406,27 @@ async function setup() {
   }
 
   const traces = (await request("/v1/traces?limit=500")).traces ?? [];
-  const requestIds = new Set(calls.map((call) => call.requestId));
+  const requestIds = new Set(calls.map(completionRequestId));
   const completed = traces.filter((trace) => requestIds.has(trace.requestId) && trace.status === "completed");
   assert(completed.length === 10, `Expected 10 completed traces, found ${completed.length}`);
+  assert(
+    completed.every((trace) => trace.projectId === project.id && trace.endpointId),
+    "Project invocation traces lost their project or endpoint attribution",
+  );
   if (openClawMockUrl) {
     assert(traces.some((trace) => trace.status === "timed_out"), "Timed-out trace was not persisted");
   }
 
   const state = {
-    profileId: profile.id,
-    bindingId: binding.id,
     projectId: project.id,
     projectSlug: project.slug,
-    endpointIds: endpoints.map((endpoint) => endpoint.id),
+    scopeTargetProjectId: scopeTargetProject.id,
+    endpointIds: allEndpoints.map((endpoint) => endpoint.id),
+    bindingIds: [binding.id, secondaryBinding?.id].filter(Boolean),
+    profileIds: [profile.id, secondaryProfile?.id].filter(Boolean),
     gatewayId: agentGateway.gatewayId,
     sessionId: agentGateway.sessionId,
-    requestIds: calls.map((call) => call.requestId),
+    requestIds: calls.map(completionRequestId),
     authCookieValue: loginCookie.cookieValue,
   };
   await writeFile(statePath, `${JSON.stringify(state, null, 2)}\n`, { mode: 0o600 });
@@ -221,7 +434,7 @@ async function setup() {
     status: "ok",
     gatewayId: state.gatewayId,
     sessionId: state.sessionId,
-    endpoints: state.endpointIds.length,
+    endpoints: allEndpoints.length,
     concurrentCalls: calls.length,
     completedTraces: completed.length,
     canceledRequest,
@@ -245,8 +458,9 @@ async function verify() {
     request("/v1/traces?limit=500"),
   ]);
   assert(projects.projects.some((item) => item.id === state.projectId), "Project was not persisted");
-  assert(profiles.profiles.some((item) => item.id === state.profileId), "Profile was not persisted");
-  assert(bindings.bindings.some((item) => item.id === state.bindingId), "Binding was not persisted");
+  assert(projects.projects.some((item) => item.id === state.scopeTargetProjectId), "API key target project was not persisted");
+  assert(state.profileIds.every((id) => profiles.profiles.some((item) => item.id === id)), "Profiles were not persisted");
+  assert(state.bindingIds.every((id) => bindings.bindings.some((item) => item.id === id)), "Bindings were not persisted");
   assert(state.endpointIds.every((id) => endpoints.endpoints.some((item) => item.id === id)), "Endpoints were not persisted");
   assert(state.requestIds.every((id) => traces.traces.some((item) => item.requestId === id)), "Traces were not persisted");
   assert(traces.traces.some((item) => item.projectId === state.projectId), "Project endpoint traces were not persisted");
@@ -267,9 +481,10 @@ async function cleanup() {
   const state = JSON.parse(await readFile(statePath, "utf8"));
   runtimeCredential = adminKey;
   await request(`/v1/projects/${state.projectId}`, { method: "DELETE" });
+  await request(`/v1/projects/${state.scopeTargetProjectId}`, { method: "DELETE" });
   await Promise.all(state.endpointIds.map((id) => request(`/v1/endpoints/${id}`, { method: "DELETE" })));
-  await request(`/v1/bindings/${state.bindingId}`, { method: "DELETE" });
-  await request(`/v1/profiles/${state.profileId}`, { method: "DELETE" });
+  await Promise.all(state.bindingIds.map((id) => request(`/v1/bindings/${id}`, { method: "DELETE" })));
+  await Promise.all(state.profileIds.map((id) => request(`/v1/profiles/${id}`, { method: "DELETE" })));
   await fetch(`${dashboardBaseUrl}/auth/logout`, {
     method: "POST",
     headers: {
@@ -298,6 +513,38 @@ function rawRequest(path, init = {}, credential = runtimeCredential) {
   const body = init.body === undefined ? undefined : JSON.stringify(init.body);
   if (body !== undefined) headers.set("content-type", "application/json");
   return fetch(`${apiBaseUrl}${path}`, { ...init, headers, body });
+}
+
+function chatCompletionBody(endpoint, message) {
+  return {
+    model: endpoint.slug,
+    messages: [{ role: "user", content: message }],
+    stream: false,
+  };
+}
+
+function projectKeyBody(projectId, name) {
+  return {
+    projectId,
+    name,
+    agentScope: { mode: "all" },
+    permissions: {
+      chatCompletions: "access",
+      agents: "none",
+      project: "none",
+    },
+  };
+}
+
+function completionContent(result) {
+  const content = result?.choices?.[0]?.message?.content;
+  return typeof content === "string" ? content : "";
+}
+
+function completionRequestId(result) {
+  const id = typeof result?.id === "string" ? result.id : "";
+  assert(id.startsWith("chatcmpl-"), "Chat completion id did not include the Vifu request id");
+  return id.slice("chatcmpl-".length);
 }
 
 function dashboardForm(path, values) {

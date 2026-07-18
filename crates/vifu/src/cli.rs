@@ -71,7 +71,7 @@ Usage:
   vifu --status          Show Agent Gateway configuration
   vifu --doctor          Diagnose local setup
   vifu --logout          Remove the resumable Agent Gateway session
-  vifu --reset           Remove all local Vifu state
+  vifu --reset           Replace the local Agent Gateway identity
 
 Options:
   --server-url URL       Vifu server HTTP base URL

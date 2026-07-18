@@ -10,6 +10,22 @@ jobs:
   rust:
     name: Rust
     runs-on: ubuntu-latest
+    env:
+      VIFU_TEST_DATABASE_REQUIRED: "1"
+    services:
+      postgres:
+        image: postgres:17-bookworm
+        env:
+          POSTGRES_DB: vifu
+          POSTGRES_USER: vifu
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U vifu -d vifu"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -69,20 +85,7 @@ jobs:
         run: bunx playwright install --with-deps chromium
       - name: Initialize self-hosted environment
         run: cp .env.example .env
-      - name: Build without local caches
-        run: docker compose build --pull --no-cache
-      - name: Start and wait for health checks
-        run: docker compose up -d --wait
-      - name: Verify public endpoints
-        run: |
-          curl --fail --silent http://127.0.0.1:6790/health
-          curl --fail --silent http://127.0.0.1:6790/v1/status
-          curl --fail --silent http://127.0.0.1:6791/project > /dev/null
-      - name: Connector, concurrency, restart, and persistence E2E
-        run: sh scripts/run-self-hosted-e2e.sh
-      - name: Collect service status
-        if: always()
-        run: docker compose ps
-      - name: Stop services
-        if: always()
-        run: docker compose down --volumes
+      - name: Validate Compose configuration
+        run: docker compose config --quiet
+      - name: Agent Gateway, concurrency, restart, persistence, and browser E2E
+        run: bun run test:self-hosted

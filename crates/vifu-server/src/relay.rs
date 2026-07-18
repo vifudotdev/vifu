@@ -139,6 +139,22 @@ impl RelayHub {
         self.inner.lock().await.connections.len()
     }
 
+    pub async fn disconnect(&self, gateway_id: &str, code: &str) -> bool {
+        let connection = self.inner.lock().await.connections.get(gateway_id).cloned();
+        let Some(connection) = connection else {
+            return false;
+        };
+        connection
+            .sender
+            .try_send(AgentGatewayCommand::Error {
+                request_id: None,
+                channel_id: None,
+                code: code.to_string(),
+                message: "The agent gateway credential is no longer active.".to_string(),
+            })
+            .is_ok()
+    }
+
     pub async fn invoke(
         &self,
         route: &EndpointRoute,

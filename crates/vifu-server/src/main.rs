@@ -2,30 +2,44 @@ use tokio::net::TcpListener;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 use vifu_server::config::Config;
+use vifu_server::error::ApiError;
 
 #[tokio::main]
 async fn main() {
     init_tracing();
     if let Err(error) = run().await {
-        tracing::error!(error = %error, "vifu-server failed");
+        tracing::error!(error = %error, error_debug = ?error, "vifu-server failed");
         std::process::exit(1);
     }
 }
 
-async fn run() -> Result<(), String> {
-    let config = Config::from_env()?;
+async fn run() -> Result<(), StartupError> {
+    let config = Config::from_env().map_err(StartupError::Config)?;
     let addr = config.addr;
-    let state = vifu_server::connect(config)
-        .await
-        .map_err(|error| error.to_string())?;
+    let state = vifu_server::connect(config).await?;
     let listener = TcpListener::bind(addr)
         .await
-        .map_err(|error| error.to_string())?;
+        .map_err(|source| StartupError::Bind { addr, source })?;
     info!(%addr, "vifu-server listening");
     axum::serve(listener, vifu_server::app(state))
         .with_graceful_shutdown(shutdown_signal())
         .await
-        .map_err(|error| error.to_string())
+        .map_err(StartupError::Serve)
+}
+
+#[derive(Debug, thiserror::Error)]
+enum StartupError {
+    #[error("{0}")]
+    Config(String),
+    #[error(transparent)]
+    Api(#[from] ApiError),
+    #[error("could not bind {addr}: {source}")]
+    Bind {
+        addr: std::net::SocketAddr,
+        source: std::io::Error,
+    },
+    #[error("http server failed: {0}")]
+    Serve(std::io::Error),
 }
 
 async fn shutdown_signal() {

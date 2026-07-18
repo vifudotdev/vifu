@@ -17,6 +17,10 @@ oidc_port="$(free_port)"
 server_port="$(free_port)"
 dashboard_port="$(free_port)"
 postgres_password="$(openssl rand -hex 24)"
+admin_key="$(openssl rand -hex 32)"
+agent_gateway_bootstrap_token="$(openssl rand -hex 32)"
+api_key_pepper="$(openssl rand -hex 32)"
+provider_secret_key="$(openssl rand -hex 32)"
 database_url="$(printf '%s%s%s%s%s%s%s\n' 'postgres://' 'vifu' ':' "$postgres_password" '@127.0.0.1:' "$postgres_port" '/vifu')"
 
 cleanup() {
@@ -59,10 +63,10 @@ oidc_pid=$!
 VIFU_DEPLOYMENT_MODE=self-hosted \
 VIFU_SERVER_ADDR="127.0.0.1:$server_port" \
 DATABASE_URL="$database_url" \
-VIFU_ADMIN_KEY=vifu-oidc-e2e-admin-key \
-VIFU_AGENT_GATEWAY_TOKEN=vifu-oidc-e2e-agent-gateway-token \
-VIFU_API_KEY_PEPPER=vifu-oidc-e2e-api-key-pepper \
-VIFU_PROVIDER_SECRET_KEY=vifu-oidc-e2e-provider-secret-key \
+VIFU_ADMIN_KEY="$admin_key" \
+VIFU_AGENT_GATEWAY_BOOTSTRAP_TOKEN="$agent_gateway_bootstrap_token" \
+VIFU_API_KEY_PEPPER="$api_key_pepper" \
+VIFU_PROVIDER_SECRET_KEY="$provider_secret_key" \
 RUST_LOG=tower_http=error \
 cargo run -p vifu-server >"$state_dir/server.log" 2>&1 &
 server_pid=$!
@@ -85,7 +89,7 @@ done
   VIFU_API_BASE_URL="http://127.0.0.1:$server_port" \
   VIFU_DASHBOARD_URL="http://localhost:$dashboard_port" \
   DATABASE_URL="$database_url" \
-  VIFU_ADMIN_KEY=vifu-oidc-e2e-admin-key \
+  VIFU_ADMIN_KEY="$admin_key" \
   VIFU_AUTH_OIDC_ISSUER="http://127.0.0.1:$oidc_port" \
   VIFU_AUTH_OIDC_CLIENT_ID=vifu-oidc-e2e \
   VIFU_AUTH_OIDC_CLIENT_SECRET=vifu-oidc-e2e-secret \

@@ -43,15 +43,81 @@ test("session remains valid across sidebar navigation on the bind address", asyn
   expect(session?.domain).toBe(new URL(page.url()).hostname);
   await expect(page).toHaveURL(/\/project\/[^/]+\/health$/);
 
-  for (const [label, path] of [
-    ["Gameplay", "gameplay"],
-    ["API Keys", "api-keys"],
-    ["Logs", "logs"],
-    ["Settings", "settings"],
-    ["Health", "health"],
+  await page.getByRole("link", { name: "Gameplay", exact: true }).click();
+  const projectSwitcher = page.locator(".project-switcher");
+  await projectSwitcher.locator("summary").click();
+  const projectSearch = projectSwitcher.getByLabel("Search projects");
+  await projectSearch.fill("no-project-has-this-name");
+  await expect(projectSwitcher.getByText("No matching projects", { exact: true })).toBeVisible();
+  await projectSearch.fill("");
+  const projectLinks = projectSwitcher.locator(".project-menu-list a");
+  await expect(projectLinks.first()).toBeVisible();
+  expect(await projectLinks.count()).toBeGreaterThanOrEqual(2);
+  await projectLinks.nth(1).click();
+  await expect(page).toHaveURL(/\/project\/[^/]+\/gameplay$/);
+
+  for (const [label, path, heading] of [
+    ["Gameplay", "gameplay", "Gameplay"],
+    ["API", "api", "API Integrations"],
+    ["Logs", "logs", "Logs"],
+    ["Settings", "settings", "Settings"],
+    ["Health", "health", "Health"],
   ] as const) {
     await page.getByRole("link", { name: label, exact: true }).click();
     await expect(page).toHaveURL(new RegExp(`/project/[^/]+/${path}$`));
-    await expect(page.getByRole("heading", { level: 1, name: label })).toBeVisible();
+    await expect(page.getByRole("heading", { level: 1, name: heading })).toBeVisible();
   }
+
+  await page.getByRole("link", { name: "API", exact: true }).click();
+  await page.getByRole("button", { name: "Create key" }).click();
+  const keyDialog = page.getByRole("dialog");
+  await expect(keyDialog.getByRole("heading", { name: "Create API key" })).toBeVisible();
+  await expect(keyDialog.getByLabel("Name")).toHaveValue(/^Project key - /);
+  await expect(keyDialog.getByRole("combobox")).toHaveCount(0);
+  await expect(keyDialog.getByRole("button", { name: "All agents", exact: true })).toHaveAttribute("aria-pressed", "true");
+  await expect(
+    keyDialog.getByRole("group", { name: "Chat Completions permission" }).getByRole("button", { name: "Access", exact: true }),
+  ).toHaveAttribute("aria-pressed", "true");
+  await expect(
+    keyDialog.getByRole("group", { name: "Agents permission" }).getByRole("button", { name: "No access", exact: true }),
+  ).toHaveAttribute("aria-pressed", "true");
+  await keyDialog.getByRole("group", { name: "Agents permission" }).getByRole("button", { name: "Read", exact: true }).click();
+  await keyDialog.getByRole("button", { name: "Selected agents", exact: true }).click();
+  await expect(keyDialog.getByPlaceholder("Search agents")).toBeVisible();
+  const agentOptions = keyDialog.locator(".api-key-agent-options input[type=checkbox]");
+  await expect(agentOptions.first()).toBeVisible();
+  await agentOptions.first().check();
+  await expect(keyDialog.getByText("1 selected", { exact: true })).toBeVisible();
+
+  await keyDialog.getByLabel("Name").fill("Playwright project key");
+  await keyDialog.getByRole("button", { name: "Create key" }).click();
+  await expect(keyDialog.getByRole("heading", { name: "Save your API key" })).toBeVisible();
+  await expect(keyDialog.getByText("Shown once")).toBeVisible();
+  await keyDialog.getByRole("button", { name: "Done" }).click();
+
+  await expect(page.getByRole("cell", { name: "Playwright project key", exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Edit Playwright project key" }).click();
+  const editKeyDialog = page.getByRole("dialog");
+  await expect(editKeyDialog.getByRole("heading", { name: "Edit API key" })).toBeVisible();
+  await expect(editKeyDialog.getByLabel("Project scope")).toHaveValue(/.+/);
+  await expect(editKeyDialog.getByRole("button", { name: "Selected agents", exact: true })).toHaveAttribute("aria-pressed", "true");
+  await expect(
+    editKeyDialog.getByRole("group", { name: "Agents permission" }).getByRole("button", { name: "Read", exact: true }),
+  ).toHaveAttribute("aria-pressed", "true");
+  await editKeyDialog.getByRole("button", { name: "All agents", exact: true }).click();
+  await editKeyDialog.getByRole("group", { name: "Project permission" }).getByRole("button", { name: "Write", exact: true }).click();
+  await editKeyDialog.getByRole("button", { name: "Save changes" }).click();
+  const keyRow = page.getByRole("row").filter({ has: page.getByRole("cell", { name: "Playwright project key", exact: true }) });
+  await expect(keyRow).toContainText("All agents");
+  await expect(keyRow).toContainText("Chat completions, Agents read, Project write");
+
+  page.once("dialog", (dialog) => dialog.accept());
+  await page.getByRole("button", { name: "Revoke Playwright project key" }).click();
+  const revokedTab = page.getByRole("tab", { name: /^Revoked / });
+  await expect(revokedTab).toBeVisible();
+  await revokedTab.click();
+  await expect(page.getByRole("cell", { name: "Playwright project key", exact: true })).toBeVisible();
+  page.once("dialog", (dialog) => dialog.accept());
+  await page.getByRole("button", { name: "Delete Playwright project key record" }).click();
+  await expect(page.getByRole("cell", { name: "Playwright project key", exact: true })).toHaveCount(0);
 });

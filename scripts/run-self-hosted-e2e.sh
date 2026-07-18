@@ -28,7 +28,7 @@ write_e2e_env() {
 
   umask 077
   admin_key="$(rand_hex 32)"
-  agent_gateway_token="$(rand_hex 32)"
+  agent_gateway_bootstrap_token="$(rand_hex 32)"
   api_key_pepper="$(rand_hex 32)"
   provider_secret_key="$(rand_hex 32)"
   postgres_password="$(rand_hex 24)"
@@ -40,7 +40,7 @@ write_e2e_env() {
     printf '%s\n' "AUTH_DISABLE_USERNAME_PASSWORD=false"
     printf '%s\n' "AUTH_DISABLE_SIGNUP=false"
     printf '%s\n' "VIFU_ADMIN_KEY=$admin_key"
-    printf '%s\n' "VIFU_AGENT_GATEWAY_TOKEN=$agent_gateway_token"
+    printf '%s\n' "VIFU_AGENT_GATEWAY_BOOTSTRAP_TOKEN=$agent_gateway_bootstrap_token"
     printf '%s\n' "VIFU_API_KEY_PEPPER=$api_key_pepper"
     printf '%s\n' "VIFU_PROVIDER_SECRET_KEY=$provider_secret_key"
     printf '%s\n' "POSTGRES_DB=vifu"
@@ -64,6 +64,7 @@ else
     printf '%s\n' "VIFU_SERVER_PORT=$server_port"
     printf '%s\n' "VIFU_DASHBOARD_PORT=$dashboard_port"
     printf '%s\n' "POSTGRES_PORT=$postgres_port"
+    printf '%s\n' "VIFU_CONFIG_DIR=$state_dir/vifu-home"
   } >> "$env_file"
   compose_project="vifu-e2e-$$"
   managed_stack=1
@@ -83,8 +84,11 @@ if [ -z "${VIFU_ADMIN_KEY:-}" ]; then
   printf '%s\n' "VIFU_ADMIN_KEY is missing. Set VIFU_E2E_ADMIN_KEY or use an E2E env file with an explicit admin key." >&2
   exit 1
 fi
+use_existing_openclaw="${VIFU_E2E_USE_EXISTING_OPENCLAW:-0}"
 if [ -n "${VIFU_E2E_OPENCLAW_PORT:-}" ]; then
   openclaw_port="$VIFU_E2E_OPENCLAW_PORT"
+elif [ "$use_existing_openclaw" = "1" ]; then
+  openclaw_port="18789"
 else
   openclaw_port="$(free_port)"
 fi
@@ -93,8 +97,10 @@ mock_log="$state_dir/openclaw.log"
 state_path="$state_dir/state.json"
 mock_pid=""
 agent_gateway_pid=""
-use_existing_openclaw="${VIFU_E2E_USE_EXISTING_OPENCLAW:-0}"
 openclaw_provider_token="${OPENCLAW_GATEWAY_TOKEN:-}"
+if [ "$use_existing_openclaw" != "1" ]; then
+  openclaw_provider_token="${openclaw_provider_token:-$(rand_hex 32)}"
+fi
 
 compose() {
   if [ -n "$compose_project" ]; then
@@ -102,6 +108,20 @@ compose() {
   else
     docker compose --env-file "$env_file" -f "$compose_file" "$@"
   fi
+}
+
+agent_gateway_ready() {
+  curl --fail --silent \
+    -H "Authorization: Bearer ${VIFU_E2E_ADMIN_KEY:-$VIFU_ADMIN_KEY}" \
+    "${VIFU_E2E_API_URL:-http://127.0.0.1:6790}/v1/agent-gateways" \
+  | node -e '
+      const payload = JSON.parse(require("node:fs").readFileSync(0, "utf8"));
+      const ready = payload.agentGateways?.some((gateway) =>
+        gateway.status === "connected"
+          && gateway.agents?.some((agent) => agent.id === "guide-agent")
+      );
+      process.exit(ready ? 0 : 1);
+    '
 }
 
 cleanup_processes() {
@@ -116,23 +136,16 @@ on_failure() {
     tail -n 100 "$agent_gateway_log" 2>/dev/null || true
     printf '%s\n' "--- OpenClaw mock log ---"
     tail -n 100 "$mock_log" 2>/dev/null || true
-    compose logs --no-color --tail=100 backend dashboard postgres || true
+    compose logs --no-color --tail=100 agent-gateway backend dashboard postgres || true
   fi
   cleanup_processes
-  if [ "$managed_stack" = "1" ]; then compose down --volumes --remove-orphans >/dev/null 2>&1 || true; fi
+  if [ "$managed_stack" = "1" ]; then compose down --volumes --remove-orphans --rmi local >/dev/null 2>&1 || true; fi
   rm -rf -- "$state_dir"
   exit "$status"
 }
 trap on_failure EXIT INT TERM
 
-if [ "$managed_stack" = "1" ]; then
-  compose up -d --build --wait
-  export VIFU_E2E_API_URL="http://127.0.0.1:$VIFU_SERVER_PORT"
-  export VIFU_E2E_DASHBOARD_URL="http://127.0.0.1:$VIFU_DASHBOARD_PORT"
-fi
-
 if [ "$use_existing_openclaw" != "1" ]; then
-  openclaw_provider_token="${openclaw_provider_token:-$(rand_hex 32)}"
   OPENCLAW_MOCK_PORT="$openclaw_port" \
   OPENCLAW_MOCK_TOKEN="$openclaw_provider_token" \
   node scripts/mock-openclaw.mjs >"$mock_log" 2>&1 &
@@ -150,14 +163,20 @@ until curl --fail --silent "http://127.0.0.1:$openclaw_port/health" >/dev/null; 
   sleep 1
 done
 
-mkdir -p "$state_dir/vifu-home"
+gateway_home="$state_dir/vifu-home"
+mkdir -p "$gateway_home"
+chmod 0777 "$gateway_home"
+provider_url="http://127.0.0.1:$openclaw_port"
+if [ "$managed_stack" = "1" ]; then
+  provider_url="http://host.docker.internal:$openclaw_port"
+fi
 {
   printf '%s\n' '{'
   printf '%s\n' '  "providers": ['
   printf '%s\n' '    {'
   printf '%s\n' '      "key": "openclaw-e2e",'
   printf '%s\n' '      "type": "openclaw",'
-  printf '%s' "      \"url\": \"http://127.0.0.1:$openclaw_port\""
+  printf '%s' "      \"url\": \"$provider_url\""
   if [ -n "$openclaw_provider_token" ]; then
     printf '%s\n' ','
     printf '%s\n' "      \"auth\": { \"token\": \"$(json_escape "$openclaw_provider_token")\" }"
@@ -167,20 +186,23 @@ mkdir -p "$state_dir/vifu-home"
   printf '%s\n' '    }'
   printf '%s\n' '  ]'
   printf '%s\n' '}'
-} > "$state_dir/vifu-home/providers.json"
+} > "$gateway_home/providers.json"
 
-VIFU_HOME="$state_dir/vifu-home" \
-VIFU_AGENT_GATEWAY_TOKEN="${VIFU_E2E_AGENT_GATEWAY_TOKEN:-$VIFU_AGENT_GATEWAY_TOKEN}" \
-cargo run -p vifu -- \
-  --server-url "${VIFU_E2E_API_URL:-http://127.0.0.1:6790}" \
-  >"$agent_gateway_log" 2>&1 &
-agent_gateway_pid=$!
+if [ "$managed_stack" = "1" ]; then
+  compose up -d --build --wait
+  export VIFU_E2E_API_URL="http://127.0.0.1:$VIFU_SERVER_PORT"
+  export VIFU_E2E_DASHBOARD_URL="http://127.0.0.1:$VIFU_DASHBOARD_PORT"
+else
+  VIFU_HOME="$gateway_home" \
+  VIFU_AGENT_GATEWAY_BOOTSTRAP_TOKEN="${VIFU_E2E_AGENT_GATEWAY_BOOTSTRAP_TOKEN:-$VIFU_AGENT_GATEWAY_BOOTSTRAP_TOKEN}" \
+  cargo run -p vifu -- \
+    --server-url "${VIFU_E2E_API_URL:-http://127.0.0.1:6790}" \
+    >"$agent_gateway_log" 2>&1 &
+  agent_gateway_pid=$!
+fi
 
 attempt=0
-until curl --fail --silent \
-  -H "Authorization: Bearer ${VIFU_E2E_ADMIN_KEY:-$VIFU_ADMIN_KEY}" \
-  "${VIFU_E2E_API_URL:-http://127.0.0.1:6790}/v1/agent-gateways" \
-  | grep -q '"status":"connected"'; do
+until agent_gateway_ready; do
   attempt=$((attempt + 1))
   if [ "$attempt" -ge 60 ]; then exit 1; fi
   sleep 1
@@ -210,10 +232,7 @@ until curl --fail --silent "${VIFU_E2E_DASHBOARD_URL:-http://127.0.0.1:6791}/pro
 done
 
 attempt=0
-until curl --fail --silent \
-  -H "Authorization: Bearer ${VIFU_E2E_ADMIN_KEY:-$VIFU_ADMIN_KEY}" \
-  "${VIFU_E2E_API_URL:-http://127.0.0.1:6790}/v1/agent-gateways" \
-  | grep -q '"status":"connected"'; do
+until agent_gateway_ready; do
   attempt=$((attempt + 1))
   if [ "$attempt" -ge 60 ]; then exit 1; fi
   sleep 1
@@ -229,7 +248,7 @@ VIFU_E2E_STATE_PATH="$state_path" node scripts/test-self-hosted-e2e.mjs cleanup
 cleanup_processes
 agent_gateway_pid=""
 mock_pid=""
-if [ "$managed_stack" = "1" ]; then compose down --volumes --remove-orphans >/dev/null; fi
+if [ "$managed_stack" = "1" ]; then compose down --volumes --remove-orphans --rmi local >/dev/null; fi
 rm -rf -- "$state_dir"
 trap - EXIT INT TERM
 printf '%s\n' "Self-hosted Agent Gateway, persistence, and concurrency E2E passed."

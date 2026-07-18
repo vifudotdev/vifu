@@ -8,7 +8,7 @@ Security fixes target the latest released Vifu version.
 
 Report suspected vulnerabilities privately through GitHub Security Advisories
 for `vifudotdev/vifu`. Do not open public issues containing access tokens,
-session IDs, admin keys, endpoint keys, Agent Gateway tokens, provider credentials,
+session IDs, admin keys, project API keys, Agent Gateway credentials, provider credentials,
 private endpoint URLs, database contents, or sensitive logs.
 
 ## Trust Boundaries
@@ -20,19 +20,22 @@ private endpoint URLs, database contents, or sensitive logs.
 - A self-hosted Dashboard uses `VIFU_ADMIN_KEY` only on the server side for
   runtime administration, recovery, and automation. The key must never enter
   `NEXT_PUBLIC_*`, HTML, browser logs, screenshots, or client bundles.
-- Endpoint API keys authorize exactly one endpoint. `vifu-server` stores a
+- Project API keys authorize one project and use the OpenAI-compatible `model`
+  field to select an exposed agent. A key can follow all current and future
+  exposed agents or an explicit binding allowlist. `vifu-server` stores a
   peppered hash and returns the raw value only at creation.
-- Agent Gateway WebSockets require a bearer token. Request IDs and channel IDs are
-  checked against the connection that owns the in-flight call.
+- The Agent Gateway bootstrap token enrolls independent Gateway identities; it
+  is not the normal WebSocket credential. Each Gateway stores its own credential
+  in a permission-restricted local session file, while the server stores only a
+  peppered hash and supports revocation. Request IDs and channel IDs are checked
+  against the connection that owns the in-flight call.
 - The Agent Gateway accepts only loopback OpenClaw URLs, disables HTTP redirects,
   limits request and response sizes, and does not open a local public listener.
-  The OpenClaw Gateway token and Vifu Agent Gateway token are read from the
-  environment and are never persisted in the Agent Gateway session file.
+  Provider credentials remain in the operator-controlled provider
+  configuration and are not copied into the Agent Gateway session file.
 - PostgreSQL is the durable source of runtime metadata. Restrict database
   network access, encrypt backups, and manage retention outside the Dashboard.
-- Vifu runs locally or self-hosted for day-1. No Vifu account is required.
-  Optional managed infrastructure may be introduced later, but it is not part
-  of the local/self-host trust boundary.
+- Vifu runs locally or self-hosted without a Vifu account.
 
 ## Self-hosting
 

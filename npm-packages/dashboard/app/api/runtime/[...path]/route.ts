@@ -3,10 +3,12 @@ import { AuthorityError, resolveAuthority } from "../../../../lib/authority";
 import { VifuHttpError } from "../../../../lib/deployment-client";
 
 const ALLOWED_ROOTS = new Set([
+  "chat",
   "projects",
   "profiles",
   "bindings",
   "endpoints",
+  "models",
   "api-keys",
   "agent-gateways",
   "project",
@@ -53,14 +55,15 @@ async function proxyRuntimeRequest(
     const body = method === "GET" || method === "DELETE" ? undefined : await readBody(request);
     const authority = await resolveAuthority({ redirectToLogin: false });
     const query = new URL(request.url).search;
+    const runtimePath = runtimeApiPath(path);
     const response = await authority.deployment.request<unknown>(
-      `/v1/${path.map(encodeURIComponent).join("/")}${query}`,
+      `${runtimePath}${query}`,
       { method, body },
     );
     return response === undefined
       ? new Response(null, { status: 204 })
       : NextResponse.json(response, {
-        status: method === "POST" && !["invoke", "test", "discover-agents"].includes(path.at(-1) ?? "") ? 201 : 200,
+        status: method === "POST" && !["completions", "test", "discover-agents", "revoke"].includes(path.at(-1) ?? "") ? 201 : 200,
       });
   } catch (error) {
     if (error instanceof AuthorityError || error instanceof VifuHttpError) {
@@ -85,8 +88,12 @@ async function readBody(request: Request): Promise<ArrayBuffer> {
 }
 
 function isAllowedPath(path: string[]): boolean {
-  if (path.length < 1 || path.length > 5 || !ALLOWED_ROOTS.has(path[0] ?? "")) return false;
+  if (path.length < 1 || path.length > 5) return false;
   if (!path.every((segment) => /^[A-Za-z0-9._:-]{1,128}$/.test(segment))) return false;
+  if (isProjectScopedOpenAiPath(path)) return true;
+  if (!ALLOWED_ROOTS.has(path[0] ?? "")) return false;
+  if (path[0] === "chat") return path.length === 2 && path[1] === "completions";
+  if (path[0] === "models") return path.length === 1;
   if (path[0] === "provider-adapters") return path.length === 1;
   if (path[0] === "provider-connections") {
     return path.length === 2 || (path.length === 3 && (path[2] === "test" || path[2] === "discover-agents"));
@@ -111,9 +118,21 @@ function isAllowedPath(path: string[]): boolean {
     if (path.length === 4) return path[3] === "nodes" || path[3] === "edges";
     return (path[3] === "nodes" || path[3] === "edges") && Boolean(path[4]);
   }
-  if (path.length === 3) return path[0] === "endpoints" && path[2] === "invoke";
   if (path.length === 2 && path[0] === "traces") return false;
   return true;
+}
+
+function runtimeApiPath(path: string[]): string {
+  if (isProjectScopedOpenAiPath(path)) {
+    return `/${path.map(encodeURIComponent).join("/")}`;
+  }
+  return `/v1/${path.map(encodeURIComponent).join("/")}`;
+}
+
+function isProjectScopedOpenAiPath(path: string[]): boolean {
+  if (path[1] !== "v1") return false;
+  if (path.length === 3) return path[2] === "models";
+  return path.length === 4 && path[2] === "chat" && path[3] === "completions";
 }
 
 function errorResponse(status: number, code: string, message: string): Response {

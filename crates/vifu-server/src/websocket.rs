@@ -12,7 +12,7 @@ use uuid::Uuid;
 use vifu_core::gateway_frame;
 use vifu_core::protocol::{self, AgentGatewayCommand};
 
-use crate::auth::require_agent_gateway;
+use crate::auth::{bearer_token, hash_agent_gateway_credential};
 use crate::db;
 use crate::error::ApiError;
 use crate::AppState;
@@ -22,16 +22,19 @@ pub async fn upgrade(
     headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> Result<Response, ApiError> {
-    require_agent_gateway(&headers, &state.config.agent_gateway_token)?;
+    let credential = bearer_token(&headers).ok_or(ApiError::Unauthorized)?;
+    let credential_hash = hash_agent_gateway_credential(credential, &state.config.api_key_pepper);
+    let gateway_id =
+        db::authenticate_agent_gateway_credential(&state.pool, &credential_hash).await?;
     Ok(ws
         .max_message_size(gateway_frame::MAX_GATEWAY_FRAME_BYTES)
         .max_frame_size(gateway_frame::MAX_GATEWAY_FRAME_BYTES)
-        .on_upgrade(move |socket| handle_socket(state, socket))
+        .on_upgrade(move |socket| handle_socket(state, socket, gateway_id))
         .into_response())
 }
 
-async fn handle_socket(state: AppState, mut socket: WebSocket) {
-    if let Err(error) = run_socket(&state, &mut socket).await {
+async fn handle_socket(state: AppState, mut socket: WebSocket, gateway_id: String) {
+    if let Err(error) = run_socket(&state, &mut socket, &gateway_id).await {
         warn!(error = %error, "agent gateway websocket closed with an error");
         let protocol_error = AgentGatewayCommand::Error {
             request_id: None,
@@ -46,13 +49,16 @@ async fn handle_socket(state: AppState, mut socket: WebSocket) {
     let _ = socket.close().await;
 }
 
-async fn run_socket(state: &AppState, socket: &mut WebSocket) -> Result<(), String> {
+async fn run_socket(
+    state: &AppState,
+    socket: &mut WebSocket,
+    gateway_id: &str,
+) -> Result<(), String> {
     let hello = tokio::time::timeout(Duration::from_secs(5), receive_command(socket))
         .await
         .map_err(|_| "agent gateway did not send hello in time".to_string())??;
     let AgentGatewayCommand::Hello {
         protocol: _,
-        gateway_id,
         resume_session_id,
         agents,
         metadata,
@@ -64,7 +70,7 @@ async fn run_socket(state: &AppState, socket: &mut WebSocket) -> Result<(), Stri
     let agents_json = serde_json::to_value(&agents).map_err(|error| error.to_string())?;
     let (session_id, resumed) = db::open_agent_gateway_session(
         &state.pool,
-        &gateway_id,
+        gateway_id,
         resume_session_id,
         &agents_json,
         &metadata,
@@ -75,10 +81,11 @@ async fn run_socket(state: &AppState, socket: &mut WebSocket) -> Result<(), Stri
     let (sender, mut receiver) = state.relay.channel();
     state
         .relay
-        .register(gateway_id.clone(), connection_id, session_id, sender)
+        .register(gateway_id.to_string(), connection_id, session_id, sender)
         .await;
 
     let welcome = AgentGatewayCommand::Welcome {
+        gateway_id: gateway_id.to_string(),
         connection_id,
         session_id,
         heartbeat_interval_ms: state
@@ -105,14 +112,15 @@ async fn run_socket(state: &AppState, socket: &mut WebSocket) -> Result<(), Stri
                 let Some(outbound) = outbound else {
                     break Ok(());
                 };
-                let replaced = matches!(
+                let disconnect = matches!(
                     &outbound,
-                    AgentGatewayCommand::Error { code, .. } if code == "SESSION_REPLACED"
+                    AgentGatewayCommand::Error { code, .. }
+                        if code == "SESSION_REPLACED" || code == "CREDENTIAL_REVOKED"
                 );
                 if let Err(error) = send_command(socket, &outbound).await {
                     break Err(error);
                 }
-                if replaced {
+                if disconnect {
                     break Ok(());
                 }
             }
@@ -162,7 +170,7 @@ async fn run_socket(state: &AppState, socket: &mut WebSocket) -> Result<(), Stri
         }
     };
 
-    let removed_current = state.relay.unregister(&gateway_id, connection_id).await;
+    let removed_current = state.relay.unregister(gateway_id, connection_id).await;
     if removed_current {
         if let Err(error) = db::close_agent_gateway_session(&state.pool, session_id).await {
             warn!(error = %error, %session_id, "could not persist agent gateway disconnect");
@@ -257,12 +265,16 @@ mod tests {
     use super::{decode_command, encode_command};
     use crate::auth::hash_api_key;
     use crate::config::Config;
-    use crate::db::{self, NewEndpoint};
+    use crate::db::{self, NewEndpoint, NewProject};
+    use crate::models::{
+        ApiKeyAgentScope, ApiKeyPermissions, EndpointPermission, ResourcePermission,
+    };
     use crate::{app, state};
 
     #[test]
     fn server_transport_codec_round_trips_gateway_frames() {
         let command = AgentGatewayCommand::Welcome {
+            gateway_id: "local-gateway".to_string(),
             connection_id: Uuid::new_v4(),
             session_id: Uuid::new_v4(),
             heartbeat_interval_ms: 30_000,
@@ -297,7 +309,6 @@ mod tests {
             "method": AGENT_GATEWAY_HELLO_METHOD,
             "params": {
                 "protocol": VERSION,
-                "gatewayId": "local-gateway",
                 "agents": [],
                 "metadata": {}
             },
@@ -325,7 +336,6 @@ mod tests {
             "method": AGENT_GATEWAY_HELLO_METHOD,
             "params": {
                 "protocol": VERSION,
-                "gatewayId": "local-gateway",
                 "agents": [],
                 "metadata": {},
                 "extra": true
@@ -342,12 +352,33 @@ mod tests {
         let Some(pool) = maybe_test_pool().await else {
             return;
         };
-        let raw_api_key = "test-endpoint-api-key";
-        let endpoint_id = seed_endpoint(&pool, raw_api_key).await;
+        let raw_api_key = "synthetic-project-api-key";
+        let gateway_id = format!("wire-gateway-{}", Uuid::new_v4().simple());
+        let seeded = seed_endpoint(&pool, raw_api_key, &gateway_id).await;
         let mut config = Config::from_env().unwrap();
         config.heartbeat_interval = std::time::Duration::from_secs(30);
-        let agent_gateway_token = config.agent_gateway_token.clone();
+        let bootstrap_token = config.agent_gateway_bootstrap_token.clone();
+        let admin_key = config.admin_key.clone();
+        let gateway_credential =
+            "vifu_gw_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
         let state = state(config, pool);
+        let registration = app(state.clone())
+            .oneshot(
+                Request::post("/v1/agent-gateways/register")
+                    .header(AUTHORIZATION, format!("Bearer {bootstrap_token}"))
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        json!({
+                            "gatewayId": gateway_id,
+                            "credential": gateway_credential,
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(registration.status(), StatusCode::CREATED);
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let server_state = state.clone();
@@ -355,7 +386,7 @@ mod tests {
             axum::serve(listener, app(server_state)).await.unwrap();
         });
 
-        let mut socket = connect_agent_gateway(addr, &agent_gateway_token).await;
+        let mut socket = connect_agent_gateway(addr, gateway_credential).await;
         send_gateway_frame(
             &mut socket,
             GatewayFrame::Request(RequestFrame {
@@ -364,11 +395,15 @@ mod tests {
                 method: AGENT_GATEWAY_HELLO_METHOD.to_string(),
                 params: Some(json!({
                     "protocol": VERSION,
-                    "gatewayId": "openclaw-local",
                     "agents": [
                         {
                             "id": "guide-agent",
                             "name": "Guide",
+                            "metadata": {}
+                        },
+                        {
+                            "id": "other-agent",
+                            "name": "Other",
                             "metadata": {}
                         }
                     ],
@@ -384,15 +419,23 @@ mod tests {
         assert_eq!(welcome["type"], "res");
         assert_eq!(welcome["id"], AGENT_GATEWAY_HELLO_REQUEST_ID);
         assert_eq!(welcome["ok"], true);
+        assert_eq!(welcome["payload"]["gatewayId"], seeded.gateway_id);
         assert!(welcome["payload"]["sessionId"].is_string());
         assert!(welcome.get("type").is_some());
         assert!(welcome.get("method").is_none());
 
-        let request = invoke_endpoint_request(endpoint_id, raw_api_key);
-        let invoke_task =
-            tokio::spawn(
-                async move { app(state).oneshot(request).await.expect("invoke response") },
-            );
+        let request = chat_completion_request(
+            &seeded.project_slug,
+            Some(&seeded.endpoint_slug),
+            raw_api_key,
+        );
+        let invoke_state = state.clone();
+        let invoke_task = tokio::spawn(async move {
+            app(invoke_state)
+                .oneshot(request)
+                .await
+                .expect("chat response")
+        });
 
         let invoke = receive_json_frame(&mut socket).await;
         assert_eq!(invoke["type"], "req");
@@ -402,35 +445,232 @@ mod tests {
             .is_some_and(|value| Uuid::parse_str(value).is_ok()));
         assert!(invoke.get("requestId").is_none());
         assert_eq!(invoke["params"]["channelId"], 1);
-        assert_eq!(invoke["params"]["endpointId"], endpoint_id.to_string());
+        assert_eq!(
+            invoke["params"]["endpointId"],
+            seeded.endpoint_id.to_string()
+        );
         assert_eq!(invoke["params"]["agentId"], "guide-agent");
-        assert_eq!(invoke["params"]["input"]["message"], "Hello");
+        assert_eq!(invoke["params"]["input"]["model"], seeded.endpoint_slug);
+        assert_eq!(invoke["params"]["input"]["messages"][0]["role"], "user");
+        assert_eq!(invoke["params"]["input"]["messages"][0]["content"], "Hello");
 
-        let request_id = invoke["id"].as_str().unwrap();
-        let channel_id = invoke["params"]["channelId"].as_u64().unwrap();
-        send_gateway_frame(
-            &mut socket,
-            GatewayFrame::Response(ResponseFrame {
-                frame_type: ResponseFrameType::Res,
-                id: request_id.to_string(),
-                ok: true,
-                payload: Some(json!({
-                    "channelId": channel_id,
-                    "output": {
-                        "text": "Hi from frame transport"
-                    }
-                })),
-                error: None,
-            }),
-        )
-        .await;
+        complete_invocation(&mut socket, &invoke, "Hi from frame transport").await;
 
         let response = invoke_task.await.unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
         let payload: Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(payload["endpointId"], endpoint_id.to_string());
-        assert_eq!(payload["output"]["text"], "Hi from frame transport");
+        assert_eq!(payload["object"], "chat.completion");
+        assert_eq!(payload["model"], seeded.endpoint_slug);
+        assert_eq!(
+            payload["choices"][0]["message"]["content"],
+            "Hi from frame transport"
+        );
+        let traces = db::list_traces(&state.pool, None, Some(seeded.project_id), 10)
+            .await
+            .unwrap();
+        let trace = traces
+            .iter()
+            .find(|trace| trace.endpoint_id == Some(seeded.endpoint_id))
+            .expect("project invocation trace");
+        assert_eq!(trace.project_id, Some(seeded.project_id));
+
+        let missing_model = app(state.clone())
+            .oneshot(chat_completion_request(
+                &seeded.project_slug,
+                None,
+                raw_api_key,
+            ))
+            .await
+            .unwrap();
+        assert_api_error(missing_model, StatusCode::BAD_REQUEST, "model_required").await;
+
+        let outside_project = app(state.clone())
+            .oneshot(chat_completion_request(
+                &seeded.project_slug,
+                Some("not-in-this-project"),
+                raw_api_key,
+            ))
+            .await
+            .unwrap();
+        assert_api_error(
+            outside_project,
+            StatusCode::FORBIDDEN,
+            "agent_access_denied",
+        )
+        .await;
+
+        let denied_api_key = "synthetic-endpoint-denied-api-key";
+        let denied_key_hash = hash_api_key(denied_api_key, &state.config.api_key_pepper);
+        db::create_api_key(
+            &state.pool,
+            db::NewApiKey {
+                id: Uuid::new_v4(),
+                project_id: seeded.project_id,
+                name: "Endpoint Denied Wire Test Key",
+                agent_scope: &ApiKeyAgentScope::All,
+                permissions: &ApiKeyPermissions {
+                    chat_completions: EndpointPermission::None,
+                    agents: ResourcePermission::Read,
+                    project: ResourcePermission::Read,
+                },
+                key_prefix: "denied-test",
+                key_hash: &denied_key_hash,
+            },
+        )
+        .await
+        .unwrap();
+        let denied_models = app(state.clone())
+            .oneshot(project_models_request(&seeded.project_slug, denied_api_key))
+            .await
+            .unwrap();
+        assert_api_error(
+            denied_models,
+            StatusCode::FORBIDDEN,
+            "endpoint_access_denied",
+        )
+        .await;
+        let denied_chat = app(state.clone())
+            .oneshot(chat_completion_request(
+                &seeded.project_slug,
+                Some(&seeded.endpoint_slug),
+                denied_api_key,
+            ))
+            .await
+            .unwrap();
+        assert_api_error(denied_chat, StatusCode::FORBIDDEN, "endpoint_access_denied").await;
+
+        let selected_api_key = "synthetic-selected-project-api-key";
+        let selected_key_hash = hash_api_key(selected_api_key, &state.config.api_key_pepper);
+        db::create_api_key(
+            &state.pool,
+            db::NewApiKey {
+                id: Uuid::new_v4(),
+                project_id: seeded.project_id,
+                name: "Selected Wire Test Key",
+                agent_scope: &ApiKeyAgentScope::Selected {
+                    binding_ids: vec![seeded.binding_id],
+                },
+                permissions: &ApiKeyPermissions::default(),
+                key_prefix: "selected-test",
+                key_hash: &selected_key_hash,
+            },
+        )
+        .await
+        .unwrap();
+        let models = app(state.clone())
+            .oneshot(project_models_request(
+                &seeded.project_slug,
+                selected_api_key,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(models.status(), StatusCode::OK);
+        let models_body = to_bytes(models.into_body(), 64 * 1024).await.unwrap();
+        let models_payload: Value = serde_json::from_slice(&models_body).unwrap();
+        assert_eq!(models_payload["data"].as_array().unwrap().len(), 1);
+        assert_eq!(models_payload["data"][0]["id"], seeded.endpoint_slug);
+
+        let selected_outside_scope = app(state.clone())
+            .oneshot(chat_completion_request(
+                &seeded.project_slug,
+                Some(&seeded.other_endpoint_slug),
+                selected_api_key,
+            ))
+            .await
+            .unwrap();
+        assert_api_error(
+            selected_outside_scope,
+            StatusCode::FORBIDDEN,
+            "agent_access_denied",
+        )
+        .await;
+
+        let selected_request = chat_completion_request(
+            &seeded.project_slug,
+            Some(&seeded.endpoint_slug),
+            selected_api_key,
+        );
+        let selected_state = state.clone();
+        let selected_task = tokio::spawn(async move {
+            app(selected_state)
+                .oneshot(selected_request)
+                .await
+                .expect("selected key chat response")
+        });
+        let selected_invoke = receive_json_frame(&mut socket).await;
+        assert_eq!(selected_invoke["params"]["agentId"], "guide-agent");
+        complete_invocation(&mut socket, &selected_invoke, "Hi from selected key").await;
+        assert_eq!(selected_task.await.unwrap().status(), StatusCode::OK);
+
+        let canvas = db::get_project_canvas(&state.pool, &seeded.project_slug)
+            .await
+            .unwrap();
+        let selected_node = canvas
+            .nodes
+            .iter()
+            .find(|node| node.binding_id == Some(seeded.binding_id))
+            .expect("selected binding canvas node");
+        db::update_canvas_node(
+            &state.pool,
+            &seeded.project_slug,
+            selected_node.id,
+            db::CanvasNodePatch {
+                position: None,
+                config: None,
+                inputs: None,
+                outputs: None,
+                exposed: Some(false),
+            },
+        )
+        .await
+        .unwrap();
+        let hidden_agent = app(state.clone())
+            .oneshot(chat_completion_request(
+                &seeded.project_slug,
+                Some(&seeded.endpoint_slug),
+                raw_api_key,
+            ))
+            .await
+            .unwrap();
+        assert_api_error(hidden_agent, StatusCode::FORBIDDEN, "agent_access_denied").await;
+
+        let revocation = app(state.clone())
+            .oneshot(
+                Request::post(format!("/v1/agent-gateways/{}/revoke", seeded.gateway_id))
+                    .header(AUTHORIZATION, format!("Bearer {admin_key}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(revocation.status(), StatusCode::OK);
+        let revoked = receive_json_frame(&mut socket).await;
+        assert_eq!(revoked["type"], "event");
+        assert_eq!(revoked["event"], "gateway.error");
+        assert_eq!(revoked["payload"]["code"], "CREDENTIAL_REVOKED");
+        let reenrollment = app(state.clone())
+            .oneshot(
+                Request::post("/v1/agent-gateways/register")
+                    .header(AUTHORIZATION, format!("Bearer {bootstrap_token}"))
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        json!({
+                            "gatewayId": seeded.gateway_id,
+                            "credential": "vifu_gw_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_api_error(
+            reenrollment,
+            StatusCode::CONFLICT,
+            "gateway_credential_revoked",
+        )
+        .await;
 
         let _ = socket.close(None).await;
         server.abort();
@@ -445,6 +685,9 @@ mod tests {
         {
             Ok(pool) => pool,
             Err(error) => {
+                if std::env::var("VIFU_TEST_DATABASE_REQUIRED").as_deref() == Ok("1") {
+                    panic!("agent gateway wire integration database unavailable: {error}");
+                }
                 eprintln!(
                     "skipping agent gateway wire integration test: database unavailable ({error})"
                 );
@@ -452,20 +695,40 @@ mod tests {
             }
         };
         if let Err(error) = db::migrate(&pool).await {
+            if std::env::var("VIFU_TEST_DATABASE_REQUIRED").as_deref() == Ok("1") {
+                panic!("agent gateway wire integration migration failed: {error}");
+            }
             eprintln!("skipping agent gateway wire integration test: migration failed ({error})");
             return None;
         }
         Some(pool)
     }
 
-    async fn seed_endpoint(pool: &PgPool, raw_api_key: &str) -> Uuid {
+    struct SeededProject {
+        endpoint_id: Uuid,
+        endpoint_slug: String,
+        other_endpoint_slug: String,
+        project_id: Uuid,
+        project_slug: String,
+        binding_id: Uuid,
+        gateway_id: String,
+    }
+
+    async fn seed_endpoint(pool: &PgPool, raw_api_key: &str, gateway_id: &str) -> SeededProject {
         let config = Config::from_env().unwrap();
         let profile_id = Uuid::new_v4();
         let binding_id = Uuid::new_v4();
         let endpoint_id = Uuid::new_v4();
+        let other_profile_id = Uuid::new_v4();
+        let other_binding_id = Uuid::new_v4();
+        let other_endpoint_id = Uuid::new_v4();
+        let project_id = Uuid::new_v4();
         let suffix = Uuid::new_v4().simple().to_string();
         let profile_slug = format!("wire-test-profile-{suffix}");
         let endpoint_slug = format!("wire-test-endpoint-{suffix}");
+        let other_profile_slug = format!("wire-test-other-profile-{suffix}");
+        let other_endpoint_slug = format!("wire-test-other-endpoint-{suffix}");
+        let project_slug = format!("wire-test-project-{suffix}");
         db::create_profile(pool, profile_id, &profile_slug, "Wire Test", None)
             .await
             .unwrap();
@@ -474,7 +737,7 @@ mod tests {
             binding_id,
             profile_id,
             "openclaw",
-            "openclaw-local",
+            gateway_id,
             "guide-agent",
             &json!({}),
         )
@@ -494,18 +757,78 @@ mod tests {
         )
         .await
         .unwrap();
-        let key_hash = hash_api_key(raw_api_key, &config.api_key_pepper);
-        db::create_api_key(
+        db::create_profile(
             pool,
-            Uuid::new_v4(),
-            endpoint_id,
-            "Wire Test Key",
-            "test",
-            &key_hash,
+            other_profile_id,
+            &other_profile_slug,
+            "Other Wire Test",
+            None,
         )
         .await
         .unwrap();
-        endpoint_id
+        db::create_binding(
+            pool,
+            other_binding_id,
+            other_profile_id,
+            "openclaw",
+            gateway_id,
+            "other-agent",
+            &json!({}),
+        )
+        .await
+        .unwrap();
+        db::create_endpoint(
+            pool,
+            NewEndpoint {
+                id: other_endpoint_id,
+                slug: &other_endpoint_slug,
+                name: "Other Wire Test",
+                profile_id: other_profile_id,
+                binding_id: other_binding_id,
+                enabled: true,
+                request_timeout_ms: 30_000,
+            },
+        )
+        .await
+        .unwrap();
+        let binding_ids = [binding_id, other_binding_id];
+        db::create_project(
+            pool,
+            NewProject {
+                id: project_id,
+                slug: &project_slug,
+                name: "Wire Test Project",
+                description: None,
+                gateway_id,
+                binding_ids: &binding_ids,
+            },
+        )
+        .await
+        .unwrap();
+        let key_hash = hash_api_key(raw_api_key, &config.api_key_pepper);
+        db::create_api_key(
+            pool,
+            db::NewApiKey {
+                id: Uuid::new_v4(),
+                project_id,
+                name: "Wire Test Key",
+                agent_scope: &ApiKeyAgentScope::All,
+                permissions: &ApiKeyPermissions::default(),
+                key_prefix: "test",
+                key_hash: &key_hash,
+            },
+        )
+        .await
+        .unwrap();
+        SeededProject {
+            endpoint_id,
+            endpoint_slug,
+            other_endpoint_slug,
+            project_id,
+            project_slug,
+            binding_id,
+            gateway_id: gateway_id.to_string(),
+        }
     }
 
     async fn connect_agent_gateway(
@@ -522,12 +845,76 @@ mod tests {
         connect_async(request).await.unwrap().0
     }
 
-    fn invoke_endpoint_request(endpoint_id: Uuid, raw_api_key: &str) -> Request<Body> {
-        Request::post(format!("/v1/endpoints/{endpoint_id}/invoke"))
+    fn chat_completion_request(
+        project_slug: &str,
+        model: Option<&str>,
+        raw_api_key: &str,
+    ) -> Request<Body> {
+        let mut body = json!({
+            "messages": [{ "role": "user", "content": "Hello" }],
+            "stream": false
+        });
+        if let Some(model) = model {
+            body.as_object_mut()
+                .unwrap()
+                .insert("model".to_string(), Value::String(model.to_string()));
+        }
+        Request::post(format!("/{project_slug}/v1/chat/completions"))
             .header(AUTHORIZATION, format!("Bearer {raw_api_key}"))
             .header(CONTENT_TYPE, "application/json")
-            .body(Body::from(json!({ "message": "Hello" }).to_string()))
+            .body(Body::from(body.to_string()))
             .unwrap()
+    }
+
+    fn project_models_request(project_slug: &str, raw_api_key: &str) -> Request<Body> {
+        Request::get(format!("/{project_slug}/v1/models"))
+            .header(AUTHORIZATION, format!("Bearer {raw_api_key}"))
+            .body(Body::empty())
+            .unwrap()
+    }
+
+    async fn assert_api_error(response: axum::response::Response, status: StatusCode, code: &str) {
+        assert_eq!(response.status(), status);
+        let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+        let payload: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(payload["error"]["code"], code);
+    }
+
+    async fn complete_invocation<S>(
+        socket: &mut tokio_tungstenite::WebSocketStream<S>,
+        invoke: &Value,
+        content: &str,
+    ) where
+        S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+    {
+        let request_id = invoke["id"].as_str().unwrap();
+        let channel_id = invoke["params"]["channelId"].as_u64().unwrap();
+        send_gateway_frame(
+            socket,
+            GatewayFrame::Response(ResponseFrame {
+                frame_type: ResponseFrameType::Res,
+                id: request_id.to_string(),
+                ok: true,
+                payload: Some(json!({
+                    "channelId": channel_id,
+                    "output": {
+                        "id": "upstream-chatcmpl",
+                        "object": "chat.completion",
+                        "model": "openclaw/guide-agent",
+                        "choices": [{
+                            "index": 0,
+                            "message": {
+                                "role": "assistant",
+                                "content": content
+                            },
+                            "finish_reason": "stop"
+                        }]
+                    }
+                })),
+                error: None,
+            }),
+        )
+        .await;
     }
 
     async fn send_gateway_frame<S>(

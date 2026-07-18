@@ -167,10 +167,22 @@ export type AgentEndpoint = {
   updatedAt: string;
 };
 
+export type ApiKeyAgentScope =
+  | { mode: "all" }
+  | { mode: "selected"; bindingIds: string[] };
+
+export type ApiKeyPermissions = {
+  chatCompletions: "none" | "access";
+  agents: "none" | "read" | "write";
+  project: "none" | "read" | "write";
+};
+
 export type ApiKeyRecord = {
   id: string;
-  endpointId: string;
+  projectId: string;
   name: string;
+  agentScope: ApiKeyAgentScope;
+  permissions: ApiKeyPermissions;
   keyPrefix: string;
   key?: string;
   createdAt: string;

@@ -6,9 +6,8 @@ test("OIDC signs in through PKCE and creates one Vifu session", async ({ context
   await expect(page.getByLabel("Email")).toBeVisible();
 
   await page.getByRole("link", { name: "Continue with Test Identity" }).click();
-  await expect(page).toHaveURL(/\/dashboard$/);
-  await expect(page.getByRole("heading", { name: "Overview" })).toBeVisible();
-  await expect(page.getByText("oidc-admin@example.com").first()).toBeVisible();
+  await expect(page).toHaveURL(/\/project$/);
+  await expect(page.getByRole("heading", { name: "Create your first project" })).toBeVisible();
 
   const cookies = await context.cookies();
   const session = cookies.find((cookie) => cookie.name === "vifu_session");

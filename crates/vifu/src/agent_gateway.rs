@@ -74,7 +74,7 @@ async fn connect(options: Options) -> Result<(), String> {
         let session_file = config.session_file();
         let runtime = relay::AgentGatewayRuntime {
             server_url: &config.server_url,
-            agent_gateway_token: &config.agent_gateway_token,
+            agent_gateway_bootstrap_token: &config.agent_gateway_bootstrap_token,
             provider_id: &provider.id,
             endpoint: &report.endpoint,
             openclaw_token: provider.token.as_deref(),
@@ -157,27 +157,40 @@ async fn print_agent_provider_status(
 
 fn logout(options: Options) -> Result<(), String> {
     let config = Config::load(options.server_url)?;
-    match fs::remove_file(config.session_file()) {
-        Ok(()) => println!("Removed the local agent gateway session."),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+    match session::read_session(&config.session_file()) {
+        SessionStatus::Ready(mut summary) | SessionStatus::UpgradeRequired(mut summary) => {
+            summary.resume_session_id = None;
+            session::write_session(&config.session_file(), &summary)?;
+            println!("Cleared the resumable Agent Gateway session.");
+        }
+        SessionStatus::Missing => {
             println!("No local agent gateway session found.");
         }
-        Err(error) => return Err(error.to_string()),
+        SessionStatus::Invalid(reason) => {
+            return Err(format!(
+                "local agent gateway state is invalid: {reason}. Run `vifu --reset` to replace it."
+            ));
+        }
     }
     Ok(())
 }
 
 fn reset(options: Options) -> Result<(), String> {
     let config = Config::load(options.server_url)?;
-    ensure_safe_reset_dir(&config.home_dir)?;
-    match fs::remove_dir_all(&config.home_dir) {
-        Ok(()) => println!("Removed all local Vifu state."),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            println!("No local Vifu state found.");
-        }
-        Err(error) => return Err(error.to_string()),
+    if remove_gateway_identity(&config.session_file())? {
+        println!("Removed the local Agent Gateway identity.");
+    } else {
+        println!("No local Agent Gateway identity found.");
     }
     Ok(())
+}
+
+fn remove_gateway_identity(path: &Path) -> Result<bool, String> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error.to_string()),
+    }
 }
 
 fn ensure_home_dir(config: &Config) -> Result<(), String> {
@@ -229,6 +242,9 @@ fn print_server_config(config: &Config) -> Result<(), String> {
 fn print_stored_session(config: &Config) {
     match session::read_session(&config.session_file()) {
         SessionStatus::Ready(summary) => print_session(&summary),
+        SessionStatus::UpgradeRequired(summary) => {
+            println!("Session: upgrade pending ({})", summary.gateway_id);
+        }
         SessionStatus::Missing => println!("Session: not established"),
         SessionStatus::Invalid(reason) => println!("Session: invalid ({reason})"),
     }
@@ -247,9 +263,15 @@ fn print_session(session: &SessionSummary) {
 fn load_or_create_session(config: &Config) -> Result<SessionSummary, String> {
     match session::read_session(&config.session_file()) {
         SessionStatus::Ready(summary) => Ok(summary),
+        SessionStatus::UpgradeRequired(summary) => {
+            session::write_session(&config.session_file(), &summary)?;
+            println!("Upgraded the local Agent Gateway session.");
+            Ok(summary)
+        }
         SessionStatus::Missing => {
             let summary = SessionSummary {
                 gateway_id: format!("gateway-{}", Uuid::new_v4().simple()),
+                gateway_credential: session::generate_gateway_credential(),
                 resume_session_id: None,
                 created_at_unix: now_unix_seconds()?,
             };
@@ -257,7 +279,7 @@ fn load_or_create_session(config: &Config) -> Result<SessionSummary, String> {
             Ok(summary)
         }
         SessionStatus::Invalid(reason) => Err(format!(
-            "local agent gateway session is invalid: {reason}. Run `vifu --logout` to replace it."
+            "local agent gateway session is invalid: {reason}. Run `vifu --reset` to replace it."
         )),
     }
 }
@@ -269,47 +291,27 @@ fn now_unix_seconds() -> Result<u64, String> {
         .map_err(|error| error.to_string())
 }
 
-fn ensure_safe_reset_dir(path: &Path) -> Result<(), String> {
-    if !path.is_absolute() {
-        return Err(format!(
-            "Refusing to reset '{}'. Vifu reset requires an absolute state directory path.",
-            path.display()
-        ));
-    }
-    let file_name = path
-        .file_name()
-        .and_then(|value| value.to_str())
-        .ok_or_else(|| "Refusing to reset an unnamed Vifu state directory.".to_string())?;
-    if file_name != ".vifu" {
-        return Err(format!(
-            "Refusing to reset '{}'. Vifu reset only removes a directory named '.vifu'.",
-            path.display()
-        ));
-    }
-    let parent = path
-        .parent()
-        .ok_or_else(|| "Refusing to reset a root-level Vifu state directory.".to_string())?;
-    if parent.parent().is_none() {
-        return Err("Refusing to reset a root-level Vifu state directory.".to_string());
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
+    use std::fs;
 
-    use super::ensure_safe_reset_dir;
+    use uuid::Uuid;
 
-    #[test]
-    fn reset_allows_default_state_dir_name() {
-        assert!(ensure_safe_reset_dir(&PathBuf::from("/Users/example/.vifu")).is_ok());
-    }
+    use super::remove_gateway_identity;
 
     #[test]
-    fn reset_rejects_unscoped_or_relative_directories() {
-        assert!(ensure_safe_reset_dir(&PathBuf::from("/Users/example")).is_err());
-        assert!(ensure_safe_reset_dir(&PathBuf::from(".vifu")).is_err());
-        assert!(ensure_safe_reset_dir(&PathBuf::from("/.vifu")).is_err());
+    fn gateway_identity_reset_does_not_remove_provider_config() {
+        let directory = std::env::temp_dir().join(format!("vifu-reset-{}", Uuid::new_v4()));
+        fs::create_dir_all(&directory).unwrap();
+        let session = directory.join("agent-gateway-session");
+        let providers = directory.join("providers.json");
+        fs::write(&session, "session").unwrap();
+        fs::write(&providers, "{}").unwrap();
+
+        assert!(remove_gateway_identity(&session).unwrap());
+
+        assert!(!session.exists());
+        assert!(providers.exists());
+        fs::remove_dir_all(directory).unwrap();
     }
 }

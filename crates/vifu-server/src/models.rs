@@ -364,12 +364,92 @@ pub struct UpdateEndpoint {
     pub request_timeout_ms: Option<i32>,
 }
 
-#[derive(Debug, Clone, Serialize, FromRow)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "mode", rename_all = "lowercase", deny_unknown_fields)]
+pub enum ApiKeyAgentScope {
+    All,
+    Selected {
+        #[serde(rename = "bindingIds")]
+        binding_ids: Vec<Uuid>,
+    },
+}
+
+impl Default for ApiKeyAgentScope {
+    fn default() -> Self {
+        Self::All
+    }
+}
+
+impl ApiKeyAgentScope {
+    pub fn mode(&self) -> &'static str {
+        match self {
+            Self::All => "all",
+            Self::Selected { .. } => "selected",
+        }
+    }
+
+    pub fn binding_ids(&self) -> &[Uuid] {
+        match self {
+            Self::All => &[],
+            Self::Selected { binding_ids } => binding_ids,
+        }
+    }
+
+    pub fn allows(&self, binding_id: Uuid) -> bool {
+        match self {
+            Self::All => true,
+            Self::Selected { binding_ids } => binding_ids.contains(&binding_id),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum EndpointPermission {
+    None,
+    Access,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ResourcePermission {
+    None,
+    Read,
+    Write,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ApiKeyPermissions {
+    pub chat_completions: EndpointPermission,
+    pub agents: ResourcePermission,
+    pub project: ResourcePermission,
+}
+
+impl Default for ApiKeyPermissions {
+    fn default() -> Self {
+        Self {
+            chat_completions: EndpointPermission::Access,
+            agents: ResourcePermission::None,
+            project: ResourcePermission::None,
+        }
+    }
+}
+
+impl ApiKeyPermissions {
+    pub fn chat_completions_allowed(&self) -> bool {
+        self.chat_completions == EndpointPermission::Access
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ApiKeyRecord {
     pub id: Uuid,
-    pub endpoint_id: Uuid,
+    pub project_id: Uuid,
     pub name: String,
+    pub agent_scope: ApiKeyAgentScope,
+    pub permissions: ApiKeyPermissions,
     pub key_prefix: String,
     pub created_at: DateTime<Utc>,
     pub revoked_at: Option<DateTime<Utc>>,
@@ -386,8 +466,38 @@ pub struct CreatedApiKey {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateApiKey {
-    pub endpoint_id: Uuid,
+    pub project_id: Uuid,
     pub name: Option<String>,
+    #[serde(default)]
+    pub agent_scope: ApiKeyAgentScope,
+    #[serde(default)]
+    pub permissions: ApiKeyPermissions,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct UpdateApiKey {
+    pub project_id: Option<Uuid>,
+    pub name: Option<String>,
+    pub agent_scope: Option<ApiKeyAgentScope>,
+    pub permissions: Option<ApiKeyPermissions>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RegisterAgentGateway {
+    pub gateway_id: String,
+    pub credential: String,
+}
+
+#[derive(Debug, Clone, Serialize, FromRow)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentGatewayCredential {
+    pub gateway_id: String,
+    pub credential_prefix: String,
+    pub created_at: DateTime<Utc>,
+    pub last_used_at: Option<DateTime<Utc>>,
+    pub revoked_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, Serialize, FromRow)]
@@ -442,15 +552,6 @@ pub struct EndpointRoute {
     pub gateway_id: String,
     pub agent_id: String,
     pub binding_config: Value,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct InvokeEndpoint {
-    pub message: Option<String>,
-    pub input: Option<Value>,
-    pub context: Option<Value>,
-    pub metadata: Option<Value>,
 }
 
 pub fn slugify(value: &str) -> String {

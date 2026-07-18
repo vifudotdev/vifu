@@ -15,7 +15,8 @@ use vifu_core::config::{AgentProviderAuthDefinition, AgentProviderDefinition, Ag
 use vifu_core::protocol::validate_identifier;
 
 use crate::auth::{
-    bearer_token, decrypt_secret_json, encrypt_secret_json, hash_api_key, is_secret_match,
+    bearer_token, decrypt_secret_json, encrypt_secret_json, hash_agent_gateway_credential,
+    hash_api_key, is_secret_match,
 };
 use crate::config::DeploymentMode;
 use crate::db::{
@@ -24,10 +25,11 @@ use crate::db::{
 };
 use crate::error::ApiError;
 use crate::models::{
-    slugify, validate_slug, Capabilities, CreateApiKey, CreateBinding, CreateCanvasEdge,
-    CreateCanvasNode, CreateEndpoint, CreateProfile, CreateProject, CreatedApiKey,
-    ImportProviderConnections, InvokeEndpoint, ProviderAdapter, ProviderAdapterField,
-    ProviderConnection, ProviderConnectionSecret, UpdateBinding, UpdateCanvasNode, UpdateEndpoint,
+    slugify, validate_slug, AgentEndpoint, ApiKeyAgentScope, ApiKeyPermissions, ApiKeyRecord,
+    Capabilities, CreateApiKey, CreateBinding, CreateCanvasEdge, CreateCanvasNode, CreateEndpoint,
+    CreateProfile, CreateProject, CreatedApiKey, EndpointRoute, ImportProviderConnections,
+    ProviderAdapter, ProviderAdapterField, ProviderConnection, ProviderConnectionSecret,
+    RegisterAgentGateway, UpdateApiKey, UpdateBinding, UpdateCanvasNode, UpdateEndpoint,
     UpdateProfile, UpdateProject, UpsertProviderConnection,
 };
 use crate::relay::RelayCallError;
@@ -62,8 +64,6 @@ pub async fn health() -> Json<impl Serialize> {
 
 pub async fn status(State(state): State<AppState>) -> Result<Json<impl Serialize>, ApiError> {
     db::ready(&state.pool).await?;
-    // This binary owns runtime capabilities only. A managed control plane may
-    // augment this response after it has authenticated the account session.
     let capabilities = Capabilities::self_hosted();
     Ok(Json(StatusResponse {
         service: "vifu-server",
@@ -621,30 +621,108 @@ pub async fn create_api_key(
     Json(input): Json<CreateApiKey>,
 ) -> Result<(StatusCode, Json<Value>), ApiError> {
     admin(&state, &headers).await?;
-    db::get_endpoint(&state.pool, input.endpoint_id).await?;
+    db::get_project(&state.pool, input.project_id).await?;
+    let agent_scope = normalize_api_key_agent_scope(input.agent_scope)?;
     let name = input
         .name
         .as_deref()
         .map(|value| required_text("name", value, 128))
         .transpose()?
-        .unwrap_or("Default");
+        .unwrap_or("Project key");
+    let created = issue_api_key(
+        &state,
+        input.project_id,
+        name,
+        &agent_scope,
+        &input.permissions,
+    )
+    .await?;
+    Ok((StatusCode::CREATED, Json(json!({ "apiKey": created }))))
+}
+
+async fn issue_api_key(
+    state: &AppState,
+    project_id: Uuid,
+    name: &str,
+    agent_scope: &ApiKeyAgentScope,
+    permissions: &ApiKeyPermissions,
+) -> Result<CreatedApiKey, ApiError> {
     let raw_key = generate_api_key();
     let key_prefix = raw_key.chars().take(18).collect::<String>();
     let key_hash = hash_api_key(&raw_key, &state.config.api_key_pepper);
     let record = db::create_api_key(
         &state.pool,
-        Uuid::new_v4(),
-        input.endpoint_id,
-        name,
-        &key_prefix,
-        &key_hash,
+        db::NewApiKey {
+            id: Uuid::new_v4(),
+            project_id,
+            name,
+            agent_scope,
+            permissions,
+            key_prefix: &key_prefix,
+            key_hash: &key_hash,
+        },
     )
     .await?;
-    let created = CreatedApiKey {
+    Ok(CreatedApiKey {
         record,
         key: raw_key,
-    };
-    Ok((StatusCode::CREATED, Json(json!({ "apiKey": created }))))
+    })
+}
+
+pub async fn update_api_key(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+    Json(input): Json<UpdateApiKey>,
+) -> Result<Json<Value>, ApiError> {
+    admin(&state, &headers).await?;
+    let current = db::get_api_key(&state.pool, id).await?;
+    if current.revoked_at.is_some() {
+        return Err(ApiError::Conflict(
+            "revoked API keys cannot be edited".to_string(),
+        ));
+    }
+    if input.project_id.is_none()
+        && input.name.is_none()
+        && input.agent_scope.is_none()
+        && input.permissions.is_none()
+    {
+        return Err(ApiError::Invalid(
+            "at least one API key field is required".to_string(),
+        ));
+    }
+    if let Some(project_id) = input.project_id {
+        db::get_project(&state.pool, project_id).await?;
+    }
+    let project_changed = input
+        .project_id
+        .is_some_and(|project_id| project_id != current.project_id);
+    if project_changed && input.agent_scope.is_none() {
+        return Err(ApiError::Invalid(
+            "agentScope is required when moving an API key to another project".to_string(),
+        ));
+    }
+    let agent_scope = input
+        .agent_scope
+        .map(normalize_api_key_agent_scope)
+        .transpose()?;
+    let name = input
+        .name
+        .as_deref()
+        .map(|value| required_text("name", value, 128))
+        .transpose()?;
+    let api_key = db::update_api_key(
+        &state.pool,
+        id,
+        db::ApiKeyPatch {
+            project_id: input.project_id,
+            name,
+            agent_scope: agent_scope.as_ref(),
+            permissions: input.permissions.as_ref(),
+        },
+    )
+    .await?;
+    Ok(Json(json!({ "apiKey": api_key })))
 }
 
 pub async fn revoke_api_key(
@@ -658,6 +736,16 @@ pub async fn revoke_api_key(
     ))
 }
 
+pub async fn delete_api_key(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<StatusCode, ApiError> {
+    admin(&state, &headers).await?;
+    db::delete_api_key(&state.pool, id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 pub async fn list_agent_gateways(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -666,6 +754,53 @@ pub async fn list_agent_gateways(
     Ok(Json(json!({
         "agentGateways": db::list_agent_gateway_sessions(&state.pool).await?
     })))
+}
+
+pub async fn register_agent_gateway(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<RegisterAgentGateway>,
+) -> Result<(StatusCode, Json<Value>), ApiError> {
+    require_agent_gateway_bootstrap(&state, &headers)?;
+    let gateway_id = required_identifier("agent gateway id", &input.gateway_id)?;
+    let credential = validate_agent_gateway_credential(&input.credential)?;
+    let credential_prefix = credential.chars().take(20).collect::<String>();
+    let credential_hash = hash_agent_gateway_credential(credential, &state.config.api_key_pepper);
+    let registration = db::register_agent_gateway_credential(
+        &state.pool,
+        gateway_id,
+        &credential_prefix,
+        &credential_hash,
+    )
+    .await?;
+    let status = match registration {
+        db::AgentGatewayRegistration::Registered => "registered",
+        db::AgentGatewayRegistration::Existing => "existing",
+    };
+    let status_code = if registration == db::AgentGatewayRegistration::Registered {
+        StatusCode::CREATED
+    } else {
+        StatusCode::OK
+    };
+    Ok((
+        status_code,
+        Json(json!({ "gatewayId": gateway_id, "status": status })),
+    ))
+}
+
+pub async fn revoke_agent_gateway(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(gateway_id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    admin(&state, &headers).await?;
+    let gateway_id = required_identifier("agent gateway id", &gateway_id)?;
+    let credential = db::revoke_agent_gateway_credential(&state.pool, gateway_id).await?;
+    state
+        .relay
+        .disconnect(gateway_id, "CREDENTIAL_REVOKED")
+        .await;
+    Ok(Json(json!({ "agentGatewayCredential": credential })))
 }
 
 pub async fn list_available_agents(
@@ -938,34 +1073,112 @@ pub async fn list_traces(
     })))
 }
 
-pub async fn invoke_endpoint(
+pub async fn list_openai_models(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Path(id_or_slug): Path<String>,
-    Json(input): Json<InvokeEndpoint>,
 ) -> Result<Json<Value>, ApiError> {
-    let route = db::resolve_endpoint_route(&state.pool, &id_or_slug).await?;
-    authorize_endpoint(&state, &headers, route.endpoint_id).await?;
-    if input.message.as_deref().is_none_or(str::is_empty) && input.input.is_none() {
+    let authority = api_request_authority(&state, &headers).await?;
+    let endpoints = match authority {
+        ApiRequestAuthority::Admin => db::list_enabled_endpoints(&state.pool).await?,
+        ApiRequestAuthority::Key(_) => return Err(ApiError::Forbidden),
+    };
+    Ok(openai_models_response(endpoints))
+}
+
+pub async fn list_project_openai_models(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(project_slug): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let authority = api_request_authority(&state, &headers).await?;
+    let project = db::get_project_by_slug(&state.pool, &project_slug).await?;
+    let mut endpoints = match &authority {
+        ApiRequestAuthority::Admin => {
+            db::list_enabled_endpoints_for_project(&state.pool, &project_slug).await?
+        }
+        ApiRequestAuthority::Key(key) => {
+            if key.project_id != project.project.id {
+                return Err(ApiError::AgentAccessDenied);
+            }
+            if !key.permissions.chat_completions_allowed() {
+                return Err(ApiError::EndpointAccessDenied);
+            }
+            db::list_enabled_endpoints_for_project_id(&state.pool, key.project_id).await?
+        }
+    };
+    if let ApiRequestAuthority::Key(key) = authority {
+        endpoints.retain(|endpoint| key.agent_scope.allows(endpoint.binding_id));
+    }
+    Ok(openai_models_response(endpoints))
+}
+
+fn openai_models_response(endpoints: Vec<AgentEndpoint>) -> Json<Value> {
+    Json(json!({
+        "object": "list",
+        "data": endpoints
+            .into_iter()
+            .map(|endpoint| json!({
+                "id": endpoint.slug,
+                "object": "model",
+                "created": endpoint.created_at.timestamp(),
+                "owned_by": "vifu",
+            }))
+            .collect::<Vec<_>>()
+    }))
+}
+
+pub async fn create_chat_completion(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<Value>,
+) -> Result<Json<Value>, ApiError> {
+    create_chat_completion_for_project(state, headers, None, request).await
+}
+
+pub async fn create_project_chat_completion(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(project_slug): Path<String>,
+    Json(request): Json<Value>,
+) -> Result<Json<Value>, ApiError> {
+    create_chat_completion_for_project(state, headers, Some(project_slug), request).await
+}
+
+async fn create_chat_completion_for_project(
+    state: AppState,
+    headers: HeaderMap,
+    project_slug: Option<String>,
+    mut request: Value,
+) -> Result<Json<Value>, ApiError> {
+    let authority = api_request_authority(&state, &headers).await?;
+    validate_chat_completion_request(&request)?;
+    let model = request
+        .get("model")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    if request.get("stream").and_then(Value::as_bool) == Some(true) {
         return Err(ApiError::Invalid(
-            "message or input must be provided".to_string(),
+            "streaming chat completions are not supported yet".to_string(),
         ));
     }
-    let request = serde_json::to_value(&input).map_err(|_| ApiError::Internal)?;
-    if serde_json::to_vec(&request)
-        .map_err(|_| ApiError::Internal)?
-        .len()
-        > 512 * 1024
-    {
-        return Err(ApiError::Invalid("request body is too large".to_string()));
+    if let Some(object) = request.as_object_mut() {
+        object.insert("stream".to_string(), Value::Bool(false));
     }
 
+    let project = match project_slug.as_deref() {
+        Some(slug) => Some(db::get_project_by_slug(&state.pool, slug).await?),
+        None => None,
+    };
+    let route = resolve_chat_route(&state, &authority, project.as_ref(), model.as_deref()).await?;
     let request_id = Uuid::new_v4();
     let gateway_session_id = state.relay.session_for(&route.gateway_id).await;
     db::create_trace(
         &state.pool,
         request_id,
         route.endpoint_id,
+        project.as_ref().map(|project| project.project.id),
         gateway_session_id,
         &request,
     )
@@ -983,20 +1196,17 @@ pub async fn invoke_endpoint(
         .await
     {
         Ok(output) => {
+            let response = chat_completion_response(request_id, &route.endpoint_slug, output);
             persist_trace(
                 &state,
                 request_id,
                 "completed",
                 started_at,
-                Some(&output),
+                Some(&response),
                 None,
             )
             .await;
-            Ok(Json(json!({
-                "requestId": request_id,
-                "endpointId": route.endpoint_id,
-                "output": output
-            })))
+            Ok(Json(response))
         }
         Err(error) => {
             let message = relay_error_message(&error);
@@ -1012,6 +1222,164 @@ pub async fn invoke_endpoint(
             Err(map_relay_error(error))
         }
     }
+}
+
+#[derive(Debug)]
+enum ApiRequestAuthority {
+    Admin,
+    Key(ApiKeyRecord),
+}
+
+async fn api_request_authority(
+    state: &AppState,
+    headers: &HeaderMap,
+) -> Result<ApiRequestAuthority, ApiError> {
+    let token = bearer_token(headers).ok_or(ApiError::Unauthorized)?;
+    if is_secret_match(token, &state.config.admin_key) {
+        return Ok(ApiRequestAuthority::Admin);
+    }
+    let key_hash = hash_api_key(token, &state.config.api_key_pepper);
+    Ok(ApiRequestAuthority::Key(
+        db::active_api_key_by_hash(&state.pool, &key_hash).await?,
+    ))
+}
+
+async fn resolve_chat_route(
+    state: &AppState,
+    authority: &ApiRequestAuthority,
+    project: Option<&crate::models::ProjectWithBindings>,
+    model: Option<&str>,
+) -> Result<EndpointRoute, ApiError> {
+    match authority {
+        ApiRequestAuthority::Admin => {
+            let model = model.ok_or_else(|| ApiError::Invalid("model is required".to_string()))?;
+            match project {
+                Some(project) => {
+                    db::resolve_project_model_route(&state.pool, project.project.id, model).await
+                }
+                None => db::resolve_endpoint_route(&state.pool, model).await,
+            }
+        }
+        ApiRequestAuthority::Key(key) => {
+            if !key.permissions.chat_completions_allowed() {
+                return Err(ApiError::EndpointAccessDenied);
+            }
+            let project = project.ok_or(ApiError::Forbidden)?;
+            if project.project.id != key.project_id {
+                return Err(ApiError::AgentAccessDenied);
+            }
+            let model = model.ok_or(ApiError::ModelRequired)?;
+            match db::resolve_project_model_route(&state.pool, key.project_id, model).await {
+                Ok(route) if key.agent_scope.allows(route.binding_id) => Ok(route),
+                Ok(_) => Err(ApiError::AgentAccessDenied),
+                Err(ApiError::NotFound) => Err(ApiError::AgentAccessDenied),
+                Err(error) => Err(error),
+            }
+        }
+    }
+}
+
+fn validate_chat_completion_request(request: &Value) -> Result<(), ApiError> {
+    let object = request
+        .as_object()
+        .ok_or_else(|| ApiError::Invalid("request body must be an object".to_string()))?;
+    let messages = object
+        .get("messages")
+        .and_then(Value::as_array)
+        .ok_or_else(|| ApiError::Invalid("messages must be an array".to_string()))?;
+    if messages.is_empty() {
+        return Err(ApiError::Invalid("messages must not be empty".to_string()));
+    }
+    for message in messages {
+        let role = message
+            .get("role")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        if role.is_none() {
+            return Err(ApiError::Invalid(
+                "each message must include a role".to_string(),
+            ));
+        }
+        if !message
+            .as_object()
+            .is_some_and(|item| item.contains_key("content"))
+        {
+            return Err(ApiError::Invalid(
+                "each message must include content".to_string(),
+            ));
+        }
+    }
+    if serde_json::to_vec(request)
+        .map_err(|_| ApiError::Internal)?
+        .len()
+        > 512 * 1024
+    {
+        return Err(ApiError::Invalid("request body is too large".to_string()));
+    }
+    Ok(())
+}
+
+fn chat_completion_response(request_id: Uuid, endpoint_slug: &str, output: Value) -> Value {
+    if let Value::Object(mut object) = output {
+        if object
+            .get("choices")
+            .and_then(Value::as_array)
+            .is_some_and(|choices| !choices.is_empty())
+        {
+            object.insert(
+                "id".to_string(),
+                Value::String(chat_completion_id(request_id)),
+            );
+            object.insert(
+                "object".to_string(),
+                Value::String("chat.completion".to_string()),
+            );
+            object.insert(
+                "created".to_string(),
+                Value::Number(serde_json::Number::from(Utc::now().timestamp())),
+            );
+            object.insert(
+                "model".to_string(),
+                Value::String(endpoint_slug.to_string()),
+            );
+            return Value::Object(object);
+        }
+        let output = Value::Object(object);
+        let content = output
+            .get("reply")
+            .or_else(|| output.get("text"))
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .unwrap_or_else(|| output.to_string());
+        return chat_completion_text_response(request_id, endpoint_slug, content);
+    }
+    let content = output
+        .as_str()
+        .map(str::to_string)
+        .unwrap_or_else(|| output.to_string());
+    chat_completion_text_response(request_id, endpoint_slug, content)
+}
+
+fn chat_completion_text_response(request_id: Uuid, endpoint_slug: &str, content: String) -> Value {
+    json!({
+        "id": chat_completion_id(request_id),
+        "object": "chat.completion",
+        "created": Utc::now().timestamp(),
+        "model": endpoint_slug,
+        "choices": [{
+            "index": 0,
+            "message": {
+                "role": "assistant",
+                "content": content
+            },
+            "finish_reason": "stop"
+        }]
+    })
+}
+
+fn chat_completion_id(request_id: Uuid) -> String {
+    format!("chatcmpl-{request_id}")
 }
 
 async fn persist_trace(
@@ -1409,21 +1777,48 @@ async fn admin(state: &AppState, headers: &HeaderMap) -> Result<(), ApiError> {
     Err(ApiError::Forbidden)
 }
 
-async fn authorize_endpoint(
-    state: &AppState,
-    headers: &HeaderMap,
-    endpoint_id: Uuid,
-) -> Result<(), ApiError> {
+fn require_agent_gateway_bootstrap(state: &AppState, headers: &HeaderMap) -> Result<(), ApiError> {
     let token = bearer_token(headers).ok_or(ApiError::Unauthorized)?;
-    if is_secret_match(token, &state.config.admin_key) {
-        return Ok(());
-    }
-    let key_hash = hash_api_key(token, &state.config.api_key_pepper);
-    if db::api_key_matches_endpoint(&state.pool, endpoint_id, &key_hash).await? {
+    if is_secret_match(token, &state.config.agent_gateway_bootstrap_token) {
         Ok(())
     } else {
         Err(ApiError::Forbidden)
     }
+}
+
+fn normalize_api_key_agent_scope(
+    agent_scope: ApiKeyAgentScope,
+) -> Result<ApiKeyAgentScope, ApiError> {
+    match agent_scope {
+        ApiKeyAgentScope::All => Ok(ApiKeyAgentScope::All),
+        ApiKeyAgentScope::Selected { mut binding_ids } => {
+            binding_ids.sort_unstable();
+            binding_ids.dedup();
+            if binding_ids.is_empty() || binding_ids.len() > 256 {
+                return Err(ApiError::Invalid(
+                    "selected agent access requires between 1 and 256 agents".to_string(),
+                ));
+            }
+            Ok(ApiKeyAgentScope::Selected { binding_ids })
+        }
+    }
+}
+
+fn validate_agent_gateway_credential(value: &str) -> Result<&str, ApiError> {
+    let value = value.trim();
+    let secret = value.strip_prefix("vifu_gw_").ok_or_else(|| {
+        ApiError::Invalid("agent gateway credential must start with vifu_gw_".to_string())
+    })?;
+    if !(48..=256).contains(&value.len())
+        || !secret
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+    {
+        return Err(ApiError::Invalid(
+            "agent gateway credential is invalid".to_string(),
+        ));
+    }
+    Ok(value)
 }
 
 fn profile_slug(explicit: Option<&str>, name: &str) -> Result<String, ApiError> {
@@ -1555,7 +1950,7 @@ fn validate_json_object(name: &str, value: &Value, max: usize) -> Result<(), Api
 
 fn generate_api_key() -> String {
     format!(
-        "vifu_ep_{}{}",
+        "vifu_pk_{}{}",
         Uuid::new_v4().simple(),
         Uuid::new_v4().simple()
     )

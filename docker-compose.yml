@@ -5,7 +5,7 @@ services:
     image: postgres:17-bookworm
     environment:
       VIFU_ADMIN_KEY: ${VIFU_ADMIN_KEY:-}
-      VIFU_AGENT_GATEWAY_TOKEN: ${VIFU_AGENT_GATEWAY_TOKEN:-}
+      VIFU_AGENT_GATEWAY_BOOTSTRAP_TOKEN: ${VIFU_AGENT_GATEWAY_BOOTSTRAP_TOKEN:-}
       VIFU_API_KEY_PEPPER: ${VIFU_API_KEY_PEPPER:-}
       VIFU_PROVIDER_SECRET_KEY: ${VIFU_PROVIDER_SECRET_KEY:-}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-}
@@ -31,7 +31,7 @@ services:
           chmod 0444 "$$path"
         }
         write_or_generate admin_key "$$VIFU_ADMIN_KEY" 32
-        write_or_generate agent_gateway_token "$$VIFU_AGENT_GATEWAY_TOKEN" 32
+        write_or_generate agent_gateway_bootstrap_token "$$VIFU_AGENT_GATEWAY_BOOTSTRAP_TOKEN" 32
         write_or_generate api_key_pepper "$$VIFU_API_KEY_PEPPER" 32
         write_or_generate provider_secret_key "$$VIFU_PROVIDER_SECRET_KEY" 32
         write_or_generate postgres_password "$$POSTGRES_PASSWORD" 24
@@ -77,7 +77,7 @@ services:
       VIFU_SERVER_ADDR: 0.0.0.0:6790
       DATABASE_URL_FILE: /run/vifu/secrets/database_url
       VIFU_ADMIN_KEY_FILE: /run/vifu/secrets/admin_key
-      VIFU_AGENT_GATEWAY_TOKEN_FILE: /run/vifu/secrets/agent_gateway_token
+      VIFU_AGENT_GATEWAY_BOOTSTRAP_TOKEN_FILE: /run/vifu/secrets/agent_gateway_bootstrap_token
       VIFU_API_KEY_PEPPER_FILE: /run/vifu/secrets/api_key_pepper
       VIFU_PROVIDER_SECRET_KEY_FILE: /run/vifu/secrets/provider_secret_key
       VIFU_HOME: /home/vifu/.vifu
@@ -144,7 +144,7 @@ services:
     environment:
       VIFU_HOME: /home/vifu/.vifu
       VIFU_SERVER_URL: http://backend:6790
-      VIFU_AGENT_GATEWAY_TOKEN_FILE: /run/vifu/secrets/agent_gateway_token
+      VIFU_AGENT_GATEWAY_BOOTSTRAP_TOKEN_FILE: /run/vifu/secrets/agent_gateway_bootstrap_token
     volumes:
       - vifu_secrets:/run/vifu/secrets:ro
       - ${VIFU_CONFIG_DIR:-${HOME}/.vifu}:/home/vifu/.vifu
@@ -153,9 +153,9 @@ services:
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "vifu", "--status"]
-      interval: 30s
+      interval: 5s
       timeout: 10s
-      retries: 5
+      retries: 20
 
 volumes:
   vifu_secrets:
