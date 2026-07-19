@@ -74,7 +74,6 @@ services:
         condition: service_healthy
     environment:
       VIFU_DEPLOYMENT_MODE: self-hosted
-      DATABASE_URL_FILE: /run/vifu/secrets/database_url
       VIFU_ADMIN_KEY_FILE: /run/vifu/secrets/admin_key
       VIFU_AGENT_GATEWAY_BOOTSTRAP_TOKEN_FILE: /run/vifu/secrets/agent_gateway_bootstrap_token
       VIFU_API_KEY_PEPPER_FILE: /run/vifu/secrets/api_key_pepper

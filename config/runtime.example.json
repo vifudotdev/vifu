@@ -1,7 +1,8 @@
 {
   "version": 1,
   "server": {
-    "listen": "127.0.0.1:6790"
+    "listen": "127.0.0.1:6790",
+    "databaseUrl": "postgres://vifu@127.0.0.1:5432/vifu"
   },
   "gateway": {
     "serverUrl": "http://127.0.0.1:6790"

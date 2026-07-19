@@ -63,7 +63,7 @@ restores and rotations remain predictable. Compose accepts these values:
 | `VIFU_AGENT_GATEWAY_BOOTSTRAP_TOKEN` | Optional explicit enrollment secret used to register independent Agent Gateway credentials |
 | `VIFU_API_KEY_PEPPER` | Optional explicit one-way project API key hashing pepper |
 | `VIFU_PROVIDER_SECRET_KEY` | Optional explicit server-side provider credential encryption key |
-| `DATABASE_URL` | Optional explicit PostgreSQL connection string for Dashboard auth state and Vifu Server runtime state |
+| `DATABASE_URL` | Optional explicit PostgreSQL connection string written to Docker's private database secret. The Server reads that secret through `config/docker/server.json`; the Dashboard uses it for auth state. |
 | `VIFU_BIND_HOST` | Host interface for published ports |
 | `VIFU_SERVER_PORT` | Published runtime port |
 | `VIFU_DASHBOARD_PORT` | Published Dashboard port |
@@ -132,8 +132,13 @@ in, and hold deployment roles. Invite flows, member administration, and password
 reset/change screens are not included yet.
 
 Vifu depends on PostgreSQL, not a provider-specific API. A PostgreSQL-compatible
-managed provider can be used by setting `DATABASE_URL`; the included container
+managed provider can be used by setting `DATABASE_URL`; Docker writes it to the
+private database secret referenced by the Server configuration. The included container
 is the default self-host option.
+
+The Server's database connection is configured in `config.json`: local runtime
+configurations use `server.databaseUrl`, while the Docker configuration uses
+`server.databaseUrlFile` to read Docker's private secret file.
 
 ## Agent Gateway
 

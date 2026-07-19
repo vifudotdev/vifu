@@ -62,11 +62,11 @@ oidc_pid=$!
 
 runtime_home="$state_dir/runtime-home"
 mkdir -p "$runtime_home/.vifu"
-printf '{\n  "version": 1,\n  "server": { "listen": "127.0.0.1:%s" }\n}\n' "$server_port" > "$runtime_home/.vifu/config.json"
+printf '{\n  "version": 1,\n  "server": { "listen": "127.0.0.1:%s", "databaseUrl": "%s" }\n}\n' \
+  "$server_port" "$database_url" > "$runtime_home/.vifu/config.json"
 cargo build -p vifu
 
 VIFU_DEPLOYMENT_MODE=self-hosted \
-DATABASE_URL="$database_url" \
 VIFU_ADMIN_KEY="$admin_key" \
 VIFU_AGENT_GATEWAY_BOOTSTRAP_TOKEN="$agent_gateway_bootstrap_token" \
 VIFU_API_KEY_PEPPER="$api_key_pepper" \

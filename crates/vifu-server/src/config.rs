@@ -41,16 +41,20 @@ impl Config {
         Ok(())
     }
 
+    pub fn apply_database_url(&mut self, database_url: String) -> Result<(), String> {
+        let database_url = database_url.trim();
+        if database_url.is_empty() {
+            return Err("server database URL must not be empty".to_string());
+        }
+        self.database_url = database_url.to_string();
+        Ok(())
+    }
+
     fn from_lookup<F>(mut lookup: F) -> Result<Self, String>
     where
         F: FnMut(&str) -> Option<String>,
     {
         let addr = SocketAddr::from(([127, 0, 0, 1], 6790));
-        let database_url = value(
-            &mut lookup,
-            "DATABASE_URL",
-            "postgres://vifu@127.0.0.1:5432/vifu",
-        )?;
         let deployment_mode =
             parse_deployment_mode(configured_value(&mut lookup, "VIFU_DEPLOYMENT_MODE")?)?;
         let admin_key = deployment_secret(
@@ -84,7 +88,7 @@ impl Config {
         Ok(Self {
             addr,
             deployment_mode,
-            database_url,
+            database_url: "postgres://vifu@127.0.0.1:5432/vifu".to_string(),
             database_max_connections: parse_u64(
                 &mut lookup,
                 "VIFU_DATABASE_MAX_CONNECTIONS",
@@ -163,13 +167,6 @@ where
         return Err(format!("{file_key} is empty"));
     }
     Ok(Some(value))
-}
-
-fn value<F>(lookup: &mut F, key: &str, fallback: &str) -> Result<String, String>
-where
-    F: FnMut(&str) -> Option<String>,
-{
-    Ok(configured_value(lookup, key)?.unwrap_or_else(|| fallback.to_string()))
 }
 
 fn deployment_secret<F>(
@@ -251,6 +248,17 @@ mod tests {
     }
 
     #[test]
+    fn database_url_is_not_read_from_the_environment() {
+        let config = Config::from_lookup(|key| match key {
+            "DATABASE_URL" => Some("postgres://remote.example/vifu".to_string()),
+            _ => None,
+        })
+        .unwrap();
+
+        assert_eq!(config.database_url, "postgres://vifu@127.0.0.1:5432/vifu");
+    }
+
+    #[test]
     fn rejects_short_admin_keys() {
         let error = Config::from_lookup(|key| match key {
             "VIFU_ADMIN_KEY" => Some("short".to_string()),
@@ -305,19 +313,17 @@ mod tests {
     }
 
     #[test]
-    fn self_hosted_accepts_runtime_config_from_files() {
+    fn self_hosted_accepts_secrets_from_files() {
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
         let dir = std::env::temp_dir().join(format!("vifu-config-test-{stamp}"));
         fs::create_dir_all(&dir).unwrap();
-        let database_url = dir.join("database_url");
         let admin_key = dir.join("admin_key");
         let agent_gateway_bootstrap_token = dir.join("agent_gateway_bootstrap_token");
         let api_key_pepper = dir.join("api_key_pepper");
         let provider_secret_key = dir.join("provider_secret_key");
-        fs::write(&database_url, "postgres://vifu@postgres:5432/vifu\n").unwrap();
         fs::write(&admin_key, "self-host-admin-key-from-file\n").unwrap();
         fs::write(
             &agent_gateway_bootstrap_token,
@@ -333,7 +339,6 @@ mod tests {
 
         let config = Config::from_lookup(|key| match key {
             "VIFU_DEPLOYMENT_MODE" => Some("self-hosted".to_string()),
-            "DATABASE_URL_FILE" => Some(database_url.display().to_string()),
             "VIFU_ADMIN_KEY_FILE" => Some(admin_key.display().to_string()),
             "VIFU_AGENT_GATEWAY_BOOTSTRAP_TOKEN_FILE" => {
                 Some(agent_gateway_bootstrap_token.display().to_string())
@@ -346,7 +351,6 @@ mod tests {
 
         assert_eq!(config.deployment_mode, DeploymentMode::SelfHosted);
         assert_eq!(config.admin_key, "self-host-admin-key-from-file");
-        assert!(config.database_url.contains("postgres://vifu@postgres"));
         fs::remove_dir_all(dir).unwrap();
     }
 }
