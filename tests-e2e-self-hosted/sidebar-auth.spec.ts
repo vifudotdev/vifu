@@ -45,8 +45,11 @@ test("session remains valid across sidebar navigation on the bind address", asyn
 
   await page.getByRole("link", { name: "Gameplay", exact: true }).click();
   const projectSwitcher = page.locator(".project-switcher");
-  await projectSwitcher.locator("summary").click();
   const projectSearch = projectSwitcher.getByLabel("Search projects");
+  if (!await projectSearch.isVisible()) {
+    await projectSwitcher.locator("summary").click();
+  }
+  await expect(projectSearch).toBeVisible();
   await projectSearch.fill("no-project-has-this-name");
   await expect(projectSwitcher.getByText("No matching projects", { exact: true })).toBeVisible();
   await projectSearch.fill("");

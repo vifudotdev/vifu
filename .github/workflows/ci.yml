@@ -31,9 +31,11 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy,rustfmt
-      - uses: gitleaks/gitleaks-action@v2
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Secret scan
+        run: >-
+          docker run --rm -v "$GITHUB_WORKSPACE:/repo" -w /repo
+          zricethezav/gitleaks:v8.18.4
+          detect --source=/repo --no-git --redact --no-banner
       - name: Format
         run: cargo fmt --check
       - name: Test

@@ -99,14 +99,26 @@ async fn run_combined(config: LoadedRuntimeConfig) -> Result<(), String> {
     ));
     let mut gateway = tokio::spawn(agent_gateway::run(gateway_options, shutdown_rx));
     let outcome = tokio::select! {
-        () = shutdown_signal() => Ok(()),
-        result = &mut server => join_result("Vifu Server", result),
-        result = &mut gateway => join_result("Vifu Agent Gateway", result),
+        () = shutdown_signal() => CombinedRuntimeOutcome::Shutdown,
+        result = &mut server => CombinedRuntimeOutcome::Server(result),
+        result = &mut gateway => CombinedRuntimeOutcome::Gateway(result),
     };
     let _ = shutdown_tx.send(true);
-    let _ = server.await;
-    let _ = gateway.await;
-    outcome
+    match outcome {
+        CombinedRuntimeOutcome::Shutdown => {
+            let _ = server.await;
+            let _ = gateway.await;
+            Ok(())
+        }
+        CombinedRuntimeOutcome::Server(result) => {
+            let _ = gateway.await;
+            join_result("Vifu Server", result)
+        }
+        CombinedRuntimeOutcome::Gateway(result) => {
+            let _ = server.await;
+            join_result("Vifu Agent Gateway", result)
+        }
+    }
 }
 
 #[cfg(not(feature = "server"))]
@@ -123,12 +135,17 @@ async fn run_server_only(config: LoadedRuntimeConfig) -> Result<(), String> {
         wait_for_shutdown(shutdown_rx),
     ));
     let outcome = tokio::select! {
-        () = shutdown_signal() => Ok(()),
-        result = &mut server => join_result("Vifu Server", result),
+        () = shutdown_signal() => SingleRuntimeOutcome::Shutdown,
+        result = &mut server => SingleRuntimeOutcome::Role(result),
     };
     let _ = shutdown_tx.send(true);
-    let _ = server.await;
-    outcome
+    match outcome {
+        SingleRuntimeOutcome::Shutdown => {
+            let _ = server.await;
+            Ok(())
+        }
+        SingleRuntimeOutcome::Role(result) => join_result("Vifu Server", result),
+    }
 }
 
 #[cfg(not(feature = "server"))]
@@ -141,12 +158,28 @@ async fn run_gateway_only(config: LoadedRuntimeConfig) -> Result<(), String> {
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let mut gateway = tokio::spawn(agent_gateway::run(gateway_options, shutdown_rx));
     let outcome = tokio::select! {
-        () = shutdown_signal() => Ok(()),
-        result = &mut gateway => join_result("Vifu Agent Gateway", result),
+        () = shutdown_signal() => SingleRuntimeOutcome::Shutdown,
+        result = &mut gateway => SingleRuntimeOutcome::Role(result),
     };
     let _ = shutdown_tx.send(true);
-    let _ = gateway.await;
-    outcome
+    match outcome {
+        SingleRuntimeOutcome::Shutdown => {
+            let _ = gateway.await;
+            Ok(())
+        }
+        SingleRuntimeOutcome::Role(result) => join_result("Vifu Agent Gateway", result),
+    }
+}
+
+enum CombinedRuntimeOutcome {
+    Shutdown,
+    Server(Result<Result<(), String>, tokio::task::JoinError>),
+    Gateway(Result<Result<(), String>, tokio::task::JoinError>),
+}
+
+enum SingleRuntimeOutcome {
+    Shutdown,
+    Role(Result<Result<(), String>, tokio::task::JoinError>),
 }
 
 fn join_result(
