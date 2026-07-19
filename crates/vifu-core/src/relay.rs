@@ -351,7 +351,7 @@ async fn register_agent_gateway(
 fn agent_gateway_registration_url(server_url: &str) -> Result<Url, String> {
     let _ = agent_gateway_websocket_url(server_url)?;
     let mut url = Url::parse(server_url.trim())
-        .map_err(|_| "VIFU_SERVER_URL must be a valid HTTP or HTTPS URL".to_string())?;
+        .map_err(|_| "gateway.serverUrl must be a valid HTTP or HTTPS URL".to_string())?;
     let base_path = url.path().trim_end_matches('/');
     url.set_path(&format!("{base_path}/v1/agent-gateways/register"));
     Ok(url)
@@ -359,26 +359,26 @@ fn agent_gateway_registration_url(server_url: &str) -> Result<Url, String> {
 
 pub fn agent_gateway_websocket_url(server_url: &str) -> Result<String, String> {
     let mut url = Url::parse(server_url.trim())
-        .map_err(|_| "VIFU_SERVER_URL must be a valid HTTP or HTTPS URL".to_string())?;
+        .map_err(|_| "gateway.serverUrl must be a valid HTTP or HTTPS URL".to_string())?;
     if !url.username().is_empty()
         || url.password().is_some()
         || url.query().is_some()
         || url.fragment().is_some()
     {
         return Err(
-            "VIFU_SERVER_URL must not include credentials, a query, or a fragment".to_string(),
+            "gateway.serverUrl must not include credentials, a query, or a fragment".to_string(),
         );
     }
     let websocket_scheme = match url.scheme() {
         "http" if is_local_plaintext_server(&url) => "ws",
         "http" => {
             return Err(
-                "Remote VIFU_SERVER_URL values must use https so agent gateway credentials are encrypted"
+                "Remote gateway.serverUrl values must use https so agent gateway credentials are encrypted"
                     .to_string(),
             );
         }
         "https" => "wss",
-        _ => return Err("VIFU_SERVER_URL must use http or https".to_string()),
+        _ => return Err("gateway.serverUrl must use http or https".to_string()),
     };
     url.set_scheme(websocket_scheme)
         .map_err(|_| "could not build agent gateway WebSocket URL".to_string())?;

@@ -2,9 +2,9 @@ use std::fs;
 use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use tokio::sync::watch;
 use uuid::Uuid;
 
-use crate::cli::{help_text, Command, Options};
 use crate::config::{AgentProviderConfig, Config};
 use crate::openclaw::{self, ProbeStatus};
 use crate::relay;
@@ -12,60 +12,52 @@ use crate::session::{self, SessionStatus, SessionSummary};
 
 const PROVIDER_RETRY_DELAY: Duration = Duration::from_secs(10);
 
-pub async fn execute(options: Options) -> Result<(), String> {
-    match options.command {
-        Command::Help => {
-            print!("{}", help_text());
-            Ok(())
-        }
-        Command::Version => {
-            println!("vifu {}", env!("CARGO_PKG_VERSION"));
-            Ok(())
-        }
-        Command::Connect => connect(options).await,
-        Command::Status => status(options).await,
-        Command::Doctor => doctor(options).await,
-        Command::Logout => logout(options),
-        Command::Reset => reset(options),
+#[derive(Debug, Clone)]
+pub struct GatewayRuntimeOptions {
+    pub server_url: String,
+}
+
+impl GatewayRuntimeOptions {
+    pub fn load_config(&self) -> Result<Config, String> {
+        Config::load(self.server_url.clone())
     }
 }
 
-async fn connect(options: Options) -> Result<(), String> {
+pub async fn run(
+    options: GatewayRuntimeOptions,
+    mut shutdown: watch::Receiver<bool>,
+) -> Result<(), String> {
     println!("Vifu Agent Gateway");
     loop {
-        let config = Config::load(options.server_url.clone())?;
+        if *shutdown.borrow() {
+            return Ok(());
+        }
+        let config = options.load_config()?;
         ensure_home_dir(&config)?;
         print_server_config(&config)?;
         let Some(provider) = config.openclaw_provider().cloned() else {
             print_agent_provider_config(&config);
-            if wait_for_provider_retry("No agent provider is configured.").await {
-                continue;
-            }
-            return Ok(());
+            wait_for_provider_retry("No agent provider is configured.", &mut shutdown).await;
+            continue;
         };
 
         let report = openclaw::probe(&provider.url).await;
         print_openclaw_report(&provider, &report);
-
         if !matches!(report.status, ProbeStatus::Online) {
-            if wait_for_provider_retry("OpenClaw Gateway is not reachable.").await {
-                continue;
-            }
-            return Ok(());
+            wait_for_provider_retry("OpenClaw Gateway is not reachable.", &mut shutdown).await;
+            continue;
         }
 
         let agents =
             match openclaw::discover_agents(&report.endpoint, provider.token.as_deref()).await {
                 Ok(agents) => agents,
                 Err(error) => {
-                    if wait_for_provider_retry(&format!(
-                        "OpenClaw agent discovery is unavailable ({error})."
-                    ))
-                    .await
-                    {
-                        continue;
-                    }
-                    return Ok(());
+                    wait_for_provider_retry(
+                        &format!("OpenClaw agent discovery is unavailable ({error})."),
+                        &mut shutdown,
+                    )
+                    .await;
+                    continue;
                 }
             };
         println!("Agents: {} discovered", agents.len());
@@ -81,50 +73,54 @@ async fn connect(options: Options) -> Result<(), String> {
             agents: &agents,
             session_path: &session_file,
         };
-        match relay::run_agent_gateway(runtime, &mut session).await {
-            Ok(()) => return Ok(()),
-            Err(error) => {
-                if wait_for_provider_retry(&format!("Agent Gateway stopped ({error}).")).await {
-                    continue;
-                }
-                return Ok(());
-            }
+        let result = tokio::select! {
+            result = relay::run_agent_gateway(runtime, &mut session) => result,
+            () = wait_for_shutdown(&mut shutdown) => return Ok(()),
+        };
+        if let Err(error) = result {
+            wait_for_provider_retry(&format!("Agent Gateway stopped ({error})."), &mut shutdown)
+                .await;
         }
     }
 }
 
-async fn wait_for_provider_retry(message: &str) -> bool {
+async fn wait_for_provider_retry(message: &str, shutdown: &mut watch::Receiver<bool>) {
     eprintln!(
         "{message} Waiting {}s before retrying.",
         PROVIDER_RETRY_DELAY.as_secs()
     );
     tokio::select! {
-        _ = tokio::time::sleep(PROVIDER_RETRY_DELAY) => true,
-        _ = tokio::signal::ctrl_c() => false,
+        _ = tokio::time::sleep(PROVIDER_RETRY_DELAY) => {},
+        () = wait_for_shutdown(shutdown) => {},
     }
 }
 
-async fn status(options: Options) -> Result<(), String> {
-    let config = Config::load(options.server_url)?;
-    println!("Vifu status");
+async fn wait_for_shutdown(shutdown: &mut watch::Receiver<bool>) {
+    if *shutdown.borrow() {
+        return;
+    }
+    let _ = shutdown.changed().await;
+}
+
+pub async fn status(config: &Config) -> Result<(), String> {
+    println!("Vifu Agent Gateway status");
     println!("State: {}", config.home_dir.display());
-    print_agent_provider_status(&config).await;
-    print_server_config(&config)?;
-    print_stored_session(&config);
+    print_agent_provider_status(config).await;
+    print_server_config(config)?;
+    print_stored_session(config);
     Ok(())
 }
 
-async fn doctor(options: Options) -> Result<(), String> {
-    let config = Config::load(options.server_url)?;
-    println!("Vifu doctor");
+pub async fn doctor(config: &Config) -> Result<(), String> {
+    println!("Vifu Agent Gateway doctor");
     println!("State directory: {}", config.home_dir.display());
-    let Some((provider, report)) = print_agent_provider_status(&config).await else {
-        print_server_config(&config)?;
-        print_stored_session(&config);
+    let Some((provider, report)) = print_agent_provider_status(config).await else {
+        print_server_config(config)?;
+        print_stored_session(config);
         return Ok(());
     };
-    print_server_config(&config)?;
-    print_stored_session(&config);
+    print_server_config(config)?;
+    print_stored_session(config);
     match report.status {
         ProbeStatus::Online => {
             match openclaw::discover_agents(&report.endpoint, provider.token.as_deref()).await {
@@ -155,17 +151,14 @@ async fn print_agent_provider_status(
     Some((provider, report))
 }
 
-fn logout(options: Options) -> Result<(), String> {
-    let config = Config::load(options.server_url)?;
+pub fn logout(config: &Config) -> Result<(), String> {
     match session::read_session(&config.session_file()) {
         SessionStatus::Ready(mut summary) | SessionStatus::UpgradeRequired(mut summary) => {
             summary.resume_session_id = None;
             session::write_session(&config.session_file(), &summary)?;
             println!("Cleared the resumable Agent Gateway session.");
         }
-        SessionStatus::Missing => {
-            println!("No local agent gateway session found.");
-        }
+        SessionStatus::Missing => println!("No local Agent Gateway session found."),
         SessionStatus::Invalid(reason) => {
             return Err(format!(
                 "local agent gateway state is invalid: {reason}. Run `vifu --reset` to replace it."
@@ -175,8 +168,7 @@ fn logout(options: Options) -> Result<(), String> {
     Ok(())
 }
 
-fn reset(options: Options) -> Result<(), String> {
-    let config = Config::load(options.server_url)?;
+pub fn reset(config: &Config) -> Result<(), String> {
     if remove_gateway_identity(&config.session_file())? {
         println!("Removed the local Agent Gateway identity.");
     } else {
@@ -221,12 +213,10 @@ fn print_openclaw_report(provider: &AgentProviderConfig, report: &openclaw::Prob
             "OpenClaw provider {}: offline at {}:{} ({reason})",
             provider.id, report.endpoint.host, report.endpoint.port
         ),
-        ProbeStatus::Unsupported(reason) => {
-            println!(
-                "OpenClaw provider {}: unsupported configuration ({reason})",
-                provider.id
-            );
-        }
+        ProbeStatus::Unsupported(reason) => println!(
+            "OpenClaw provider {}: unsupported configuration ({reason})",
+            provider.id
+        ),
     }
 }
 

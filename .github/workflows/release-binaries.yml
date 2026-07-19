@@ -1,0 +1,89 @@
+name: Release Vifu binaries
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: ${{ matrix.target }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+            binary: vifu
+            archive: tar
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            binary: vifu
+            archive: tar
+          - os: macos-13
+            target: x86_64-apple-darwin
+            binary: vifu
+            archive: tar
+          - os: macos-14
+            target: aarch64-apple-darwin
+            binary: vifu
+            archive: tar
+          - os: windows-2022
+            target: x86_64-pc-windows-msvc
+            binary: vifu.exe
+            archive: zip
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Build runtime
+        run: cargo build --release --locked -p vifu --target ${{ matrix.target }}
+      - name: Package Unix binary
+        if: matrix.archive == 'tar'
+        shell: bash
+        run: |
+          asset="vifu-${GITHUB_REF_NAME#v}-${{ matrix.target }}"
+          mkdir -p "dist/$asset/config"
+          cp "target/${{ matrix.target }}/release/${{ matrix.binary }}" "dist/$asset/vifu"
+          cp LICENSE "dist/$asset/LICENSE"
+          cp README.md "dist/$asset/README.md"
+          cp config/runtime.example.json "dist/$asset/config/runtime.example.json"
+          tar -C dist -czf "dist/$asset.tar.gz" "$asset"
+          shasum -a 256 "dist/$asset.tar.gz" > "dist/$asset.tar.gz.sha256"
+      - name: Package Windows binary
+        if: matrix.archive == 'zip'
+        shell: pwsh
+        run: |
+          $asset = "vifu-$($env:GITHUB_REF_NAME -replace '^v','')-${{ matrix.target }}"
+          New-Item -ItemType Directory -Force -Path "dist/$asset/config" | Out-Null
+          Copy-Item "target/${{ matrix.target }}/release/${{ matrix.binary }}" "dist/$asset/vifu.exe"
+          Copy-Item LICENSE "dist/$asset/LICENSE"
+          Copy-Item README.md "dist/$asset/README.md"
+          Copy-Item config/runtime.example.json "dist/$asset/config/runtime.example.json"
+          Compress-Archive -Path "dist/$asset" -DestinationPath "dist/$asset.zip"
+          (Get-FileHash "dist/$asset.zip" -Algorithm SHA256).Hash.ToLower() + "  $asset.zip" | Out-File -Encoding ascii "dist/$asset.zip.sha256"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+
+  publish:
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Publish release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" dist/* --verify-tag --generate-notes

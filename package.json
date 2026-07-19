@@ -12,20 +12,7 @@
     "check:public": "node scripts/check-public-repo.mjs",
     "typecheck": "bun run --cwd npm-packages/dashboard typecheck",
     "build": "bun run --cwd npm-packages/dashboard build",
-    "test:e2e": "playwright test",
-    "test:oidc": "sh scripts/run-oidc-e2e.sh",
-    "test:self-hosted": "sh scripts/run-self-hosted-e2e.sh",
-    "dev:database": "docker compose -f docker-compose.yml -f docker-compose.local.yml up -d postgres",
-    "dev:database:down": "docker compose -f docker-compose.yml -f docker-compose.local.yml down",
-    "dev:server": "sh scripts/dev-server.sh",
-    "dev:agent-gateway": "sh scripts/dev-agent-gateway.sh",
-    "dev:openclaw-mock": "node scripts/mock-openclaw.mjs",
-    "dev:dashboard": "sh scripts/dev-dashboard.sh",
-    "local": "sh scripts/local.sh",
-    "local:stop": "sh scripts/local-stop.sh",
-    "self-host": "sh scripts/self-host.sh",
-    "self-host:stop": "docker compose stop",
-    "self-host:logs": "docker compose logs -f"
+    "test:e2e": "playwright test"
   },
   "devDependencies": {
     "@playwright/test": "^1.61.1",

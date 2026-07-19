@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "server": {
+    "listen": "127.0.0.1:6790"
+  },
+  "gateway": {
+    "serverUrl": "http://127.0.0.1:6790"
+  }
+}

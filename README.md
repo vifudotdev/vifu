@@ -14,35 +14,60 @@ A complete Vifu installation has three layers:
 | Layer | Processes |
 | --- | --- |
 | Dashboard | The Next.js management console |
-| Runtime | `vifu-server` and the `vifu` Agent Gateway |
+| Runtime | One `vifu` binary configured as Server, Agent Gateway, or both |
 | Database | PostgreSQL |
 
-The Rust runtime is not a single binary. One workspace produces two executables:
-`vifu-server` owns the project API, persistence, routing, and WebSocket relay.
-`vifu` runs near the user's agent providers and connects them to the server.
-Keeping them separate lets the Gateway run on a developer machine while the
-server runs elsewhere. A binary release therefore needs to ship both programs
-together. Agent providers integrate with the runtime through the Gateway.
+Vifu ships one Rust executable: `vifu`. On first run it creates
+`~/.vifu/config.json` and `~/.vifu/providers.json`, then starts a loopback
+Server and Agent Gateway. The runtime configuration is only needed when a
+deployment changes addresses or runs the two roles separately. A Gateway always
+connects to its configured Server. Agent providers integrate through the Gateway
+role.
 
 `local` and `self-hosted` are deployment modes. Native processes and Docker are
 two ways to run a self-hosted deployment; Docker is not a separate product mode.
 
 ### Local Development
 
-Run the Dashboard and both Rust programs from source with loopback-only local
-defaults. PostgreSQL stays in Docker so local data survives restarts:
+Run PostgreSQL, the configured Vifu runtime, and the Dashboard as separate
+native processes. PostgreSQL stays in Docker so local data survives restarts.
+Install Dashboard dependencies once:
 
 ```bash
 bun install --frozen-lockfile
-bun run local
 ```
 
-Open `http://localhost:6791` to work through the local Dashboard. Press `Ctrl-C`
-to stop the local processes; PostgreSQL remains available for the next run.
+Then use separate terminals:
+
+```bash
+# Terminal 1: PostgreSQL
+docker compose -f docker-compose.yml -f docker-compose.local.yml up -d postgres
+```
+
+```bash
+# Terminal 2: Vifu Server and Agent Gateway
+cd crates/vifu
+cargo run
+```
+
+```bash
+# Terminal 3: Dashboard
+cd npm-packages/dashboard
+bun dev
+```
+
+Open `http://localhost:6791` to work through the local Dashboard. Stop the Rust
+runtime and Dashboard with `Ctrl-C`; PostgreSQL remains available for the next
+run. Stop the local database with:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.local.yml down
+```
 
 ### Docker Self-hosting
 
-Docker Compose starts the Dashboard, both runtime programs, and PostgreSQL:
+Docker Compose starts the Dashboard, PostgreSQL, and two containers that reuse
+the same Vifu runtime image with separate role configurations:
 
 ```bash
 cp .env.example .env
@@ -54,8 +79,6 @@ After that, restarting the stack from the repository root is just:
 ```bash
 docker compose up -d
 ```
-
-`bun run self-host` is an equivalent repository command.
 
 Open `http://localhost:6791` and create the first local administrator. Dashboard
 identities and sessions stay in this deployment's PostgreSQL database. Signup
@@ -74,15 +97,18 @@ Configuration, upgrades, persistence, and network exposure are documented in
 
 ### Native Self-hosting
 
-Build the two Rust executables without Docker:
+Build the Vifu executable without Docker:
 
 ```bash
-cargo build --release --locked -p vifu-server -p vifu
+cargo build --release --locked -p vifu
 ```
 
-The binaries are written to `target/release/`. A complete native installation
-also runs the Next.js Dashboard and PostgreSQL. See [BUILD.md](BUILD.md) for
-independent process commands and verification.
+Run `target/release/vifu` directly. It creates its loopback configuration on
+first use. To split the Server and Agent Gateway, or change their addresses,
+edit `~/.vifu/config.json` using
+[config/runtime.example.json](config/runtime.example.json) as a reference. A
+complete native installation also runs the Next.js Dashboard and PostgreSQL. See
+[BUILD.md](BUILD.md) for verification.
 
 ## Runtime Architecture
 
@@ -90,12 +116,12 @@ A self-hosted deployment keeps Dashboard identity and session state inside the
 deployment:
 
 ```text
-application -> vifu-server -> one multiplexed WebSocket -> Vifu Agent Gateway -> provider
-                     |
-                     +-> PostgreSQL profiles, endpoints, keys, traces
+application -> vifu (Server role) -> one multiplexed WebSocket -> vifu (Gateway role) -> provider
+                           |
+                           +-> PostgreSQL profiles, endpoints, keys, traces
 
 Dashboard -> PostgreSQL users and web sessions
-Dashboard -> vifu-server through a server-side runtime credential
+Dashboard -> Vifu Server through a server-side runtime credential
 ```
 
 Applications call the OpenAI-compatible API. Existing AI SDKs only need a Vifu
@@ -120,7 +146,7 @@ turning off its exposure makes it unavailable through the project API.
 
 ## Architecture And Security
 
-`vifu-server` owns the core runtime contract:
+The Vifu Server role owns the core runtime contract:
 
 - routing Profile, Binding, and Endpoint CRUD;
 - Project CRUD and project-scoped HTTP invocation;
@@ -151,13 +177,13 @@ access must still use TLS even though the Dashboard has built-in login. See
 
 ```text
 crates/
-  vifu/             CLI, provider adapters, Agent Gateway, session, protocol
-  vifu-server/      HTTP API, Agent Gateway relay, PostgreSQL runtime
+  vifu/             The single executable, configuration, and Agent Gateway
+  vifu-server/      Internal HTTP API, Agent Gateway relay, PostgreSQL runtime library
 npm-packages/
   dashboard/        One capability-driven Next.js Dashboard
 providers/          Agent provider guides and examples
-docker-compose.yml PostgreSQL, vifu-server, Dashboard, and Agent Gateway stack
-scripts/            Development, E2E, and public-repository checks
+docker-compose.yml PostgreSQL, one Vifu runtime image, Dashboard, and Agent Gateway stack
+scripts/            E2E fixtures and public-repository checks
 ```
 
 ## Build And Contribute

@@ -5,6 +5,7 @@ FROM rust:${RUST_VERSION}-bookworm AS build
 
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
+COPY crates/vifu-core/Cargo.toml crates/vifu-core/Cargo.toml
 COPY crates/vifu/Cargo.toml crates/vifu/Cargo.toml
 COPY crates/vifu-server/Cargo.toml crates/vifu-server/Cargo.toml
 COPY crates/vifu-server/build.rs crates/vifu-server/build.rs
@@ -13,10 +14,9 @@ COPY crates ./crates
 RUN --mount=type=cache,id=vifu-cargo-registry,target=/usr/local/cargo/registry \
     --mount=type=cache,id=vifu-cargo-git,target=/usr/local/cargo/git \
     --mount=type=cache,id=vifu-cargo-target,target=/src/target \
-    cargo build --release --locked -p vifu -p vifu-server \
+    cargo build --release --locked -p vifu \
     && mkdir -p /out \
-    && cp /src/target/release/vifu /out/vifu \
-    && cp /src/target/release/vifu-server /out/vifu-server
+    && cp /src/target/release/vifu /out/vifu
 
 FROM debian:bookworm-slim AS runtime-base
 
@@ -36,11 +36,7 @@ RUN mkdir -p /home/vifu/.vifu \
 USER vifu
 WORKDIR /home/vifu
 
-FROM runtime-base AS vifu-server
-COPY --from=build /out/vifu-server /usr/local/bin/vifu-server
-EXPOSE 6790
-ENTRYPOINT ["vifu-server"]
-
-FROM runtime-base AS vifu
+FROM runtime-base AS runtime
 COPY --from=build /out/vifu /usr/local/bin/vifu
+EXPOSE 6790
 ENTRYPOINT ["vifu"]

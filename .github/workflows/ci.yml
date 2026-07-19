@@ -88,4 +88,4 @@ jobs:
       - name: Validate Compose configuration
         run: docker compose config --quiet
       - name: Agent Gateway, concurrency, restart, persistence, and browser E2E
-        run: bun run test:self-hosted
+        run: sh scripts/run-self-hosted-e2e.sh

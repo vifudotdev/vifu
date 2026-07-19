@@ -1,6 +1,7 @@
 # Building From Source
 
-Run commands from the repository root.
+Run each service from its owning directory. Docker Compose commands run from the
+repository root because the Compose file lives there.
 
 ## Prerequisites
 
@@ -20,51 +21,58 @@ Source development uses loopback defaults. Docker self-hosting uses the root
 
 ## Source Development
 
-For the normal local loop, start the local server, Dashboard, Agent Gateway, and
-PostgreSQL together:
+For local development, run PostgreSQL, the Vifu runtime, and the Dashboard in
+separate terminals. Install Dashboard dependencies once:
 
 ```bash
-bun run local
+bun install --frozen-lockfile
 ```
 
-Open `http://localhost:6791`. Press `Ctrl-C` to stop the local server,
-Dashboard, and Agent Gateway. The PostgreSQL container is kept so data survives
-between runs.
-
-If the self-host stack is already running, `bun run local` stops only the
-self-host app containers and reuses the running self-host PostgreSQL container.
-Return to Docker self-host mode with:
+Then start each service directly:
 
 ```bash
-docker compose up -d
+# Terminal 1: PostgreSQL
+docker compose -f docker-compose.yml -f docker-compose.local.yml up -d postgres
 ```
-
-The lower-level commands remain available when you need to run pieces
-independently.
-
-Start only PostgreSQL:
 
 ```bash
-bun run dev:database
+# Terminal 2: Vifu Server and Agent Gateway
+cd crates/vifu
+cargo run
 ```
-
-This uses `.env.local` and a separate `vifu-local` Docker Compose database
-volume.
-
-Start the Rust server and Dashboard in separate terminals:
 
 ```bash
-bun run dev:server
-bun run dev:dashboard
+# Terminal 3: Dashboard
+cd npm-packages/dashboard
+bun dev
 ```
 
-Open `http://localhost:6791`. The server listens on
-`http://127.0.0.1:6790`.
+Open `http://localhost:6791`. The runtime and Dashboard stop with `Ctrl-C`;
+the local PostgreSQL container keeps its data. Stop it when needed:
 
-To run only the local Vifu Agent Gateway:
+```bash
+docker compose -f docker-compose.yml -f docker-compose.local.yml down
+```
+
+The local Compose override uses its own `vifu-local` PostgreSQL volume and
+trust authentication on the loopback-only development port. The server listens
+on `http://127.0.0.1:6790`.
+
+The first `cargo run` creates `~/.vifu/config.json` and
+`~/.vifu/providers.json`. Its generated configuration starts both roles on
+loopback. To run a Gateway-only process on a machine that already has a Server,
+replace the generated runtime configuration with a gateway-only configuration:
 
 ```bash
 mkdir -p ~/.vifu
+cat > ~/.vifu/config.json <<'JSON'
+{
+  "version": 1,
+  "gateway": {
+    "serverUrl": "https://runtime.example.com"
+  }
+}
+JSON
 cat > ~/.vifu/providers.json <<'JSON'
 {
   "providers": [
@@ -77,18 +85,25 @@ cat > ~/.vifu/providers.json <<'JSON'
   ]
 }
 JSON
-bun run dev:agent-gateway
+cd crates/vifu
+cargo run
 ```
 
-The Gateway must have `gateway.http.endpoints.chatCompletions.enabled` set to
-`true`. An intentionally unauthenticated local Gateway does not need the
-`auth` block.
+For a provider that does not require authentication, omit the `auth` block.
 
 For an isolated adapter test, run the included mock on another port and point
 the Agent Gateway at it:
 
 ```bash
 mkdir -p ~/.vifu
+cat > ~/.vifu/config.json <<'JSON'
+{
+  "version": 1,
+  "gateway": {
+    "serverUrl": "http://127.0.0.1:6790"
+  }
+}
+JSON
 cat > ~/.vifu/providers.json <<'JSON'
 {
   "providers": [
@@ -100,27 +115,22 @@ cat > ~/.vifu/providers.json <<'JSON'
   ]
 }
 JSON
-OPENCLAW_MOCK_PORT=18790 bun run dev:openclaw-mock
-bun run dev:agent-gateway
+OPENCLAW_MOCK_PORT=18790 node scripts/mock-openclaw.mjs
+cd crates/vifu
+cargo run
 ```
 
 ## Rust Workspace
 
-The Rust workspace produces two runtime executables:
-
-| Executable | Role |
-| --- | --- |
-| `vifu-server` | Deployment HTTP/WebSocket server and PostgreSQL runtime |
-| `vifu` | Agent Gateway that runs beside local or remote agent providers |
-
-Build only the release executables used by a Vifu deployment:
+The Rust workspace produces one runtime executable. Its configuration selects
+the Server role, Agent Gateway role, or both:
 
 ```bash
-cargo build --release --locked -p vifu-server -p vifu
+cargo build --release --locked -p vifu
 ```
 
-They are written to `target/release/vifu-server` and `target/release/vifu`.
-PostgreSQL and the Dashboard are still required for the complete local console.
+It is written to `target/release/vifu`. PostgreSQL and the Dashboard are still
+required for the complete local console.
 
 ```bash
 cargo fmt --all -- --check
@@ -129,7 +139,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo build --workspace
 ```
 
-Database migrations are embedded in `vifu-server` and run at startup. Dashboard
+Database migrations are embedded in the Vifu Server role and run at startup. Dashboard
 authentication is implemented in the Dashboard server, which also initializes
 and upgrades the auth tables it uses. SQLx uses runtime-checked queries. The
 database integration test runs when PostgreSQL is available and is mandatory in
@@ -163,7 +173,7 @@ The full Agent Gateway and persistence test creates an isolated stack on random
 loopback ports, exercises it, and removes it afterward:
 
 ```bash
-bun run test:self-hosted
+sh scripts/run-self-hosted-e2e.sh
 ```
 
 It creates ten endpoints, invokes them concurrently over one Agent Gateway
@@ -179,7 +189,7 @@ the test; the harness writes it into a temporary `providers.json`.
 ```bash
 VIFU_E2E_USE_EXISTING_OPENCLAW=1 \
 VIFU_E2E_OPENCLAW_PORT=18789 \
-bun run test:self-hosted
+sh scripts/run-self-hosted-e2e.sh
 ```
 
 Stop the stack after testing:

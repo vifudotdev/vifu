@@ -7,6 +7,7 @@ pub mod models;
 pub mod relay;
 pub mod websocket;
 
+use std::future::Future;
 use std::sync::Arc;
 
 use axum::http::header::{AUTHORIZATION, CONTENT_TYPE};
@@ -18,11 +19,13 @@ use error::ApiError;
 use relay::RelayHub;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
+use tokio::net::TcpListener;
 use tower_http::catch_panic::CatchPanicLayer;
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer};
 use tower_http::trace::TraceLayer;
+use tracing::info;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -39,6 +42,22 @@ pub async fn connect(config: Config) -> Result<AppState, ApiError> {
     db::migrate(&pool).await?;
     db::mark_agent_gateway_sessions_disconnected(&pool).await?;
     Ok(state(config, pool))
+}
+
+pub async fn serve<F>(config: Config, shutdown: F) -> Result<(), String>
+where
+    F: Future<Output = ()> + Send + 'static,
+{
+    let addr = config.addr;
+    let state = connect(config).await.map_err(|error| error.to_string())?;
+    let listener = TcpListener::bind(addr)
+        .await
+        .map_err(|error| format!("could not bind {addr}: {error}"))?;
+    info!(%addr, "vifu server listening");
+    axum::serve(listener, app(state))
+        .with_graceful_shutdown(shutdown)
+        .await
+        .map_err(|error| format!("http server failed: {error}"))
 }
 
 pub fn state(config: Config, pool: PgPool) -> AppState {

@@ -33,13 +33,19 @@ impl Config {
         Self::from_lookup(|key| std::env::var(key).ok())
     }
 
+    pub fn apply_listen_override(&mut self, addr: SocketAddr) -> Result<(), String> {
+        if self.deployment_mode == DeploymentMode::Local && !addr.ip().is_loopback() {
+            return Err("local deployments require a loopback server listen address".to_string());
+        }
+        self.addr = addr;
+        Ok(())
+    }
+
     fn from_lookup<F>(mut lookup: F) -> Result<Self, String>
     where
         F: FnMut(&str) -> Option<String>,
     {
-        let addr = value(&mut lookup, "VIFU_SERVER_ADDR", "127.0.0.1:6790")?
-            .parse::<SocketAddr>()
-            .map_err(|error| format!("VIFU_SERVER_ADDR is invalid: {error}"))?;
+        let addr = SocketAddr::from(([127, 0, 0, 1], 6790));
         let database_url = value(
             &mut lookup,
             "DATABASE_URL",
@@ -47,9 +53,6 @@ impl Config {
         )?;
         let deployment_mode =
             parse_deployment_mode(configured_value(&mut lookup, "VIFU_DEPLOYMENT_MODE")?)?;
-        if deployment_mode == DeploymentMode::Local && !addr.ip().is_loopback() {
-            return Err("local deployments require a loopback VIFU_SERVER_ADDR".to_string());
-        }
         let admin_key = deployment_secret(
             &mut lookup,
             "VIFU_ADMIN_KEY",
@@ -74,7 +77,7 @@ impl Config {
             deployment_mode,
             "vifu-local-provider-secret-key",
         )?;
-        let provider_home_dir = provider_home_dir(&mut lookup)?;
+        let provider_home_dir = vifu_core::config::default_home_dir()?;
         let provider_registry_file =
             vifu_core::config::discover_provider_registry_file(&provider_home_dir);
 
@@ -118,25 +121,6 @@ impl Config {
             provider_registry_file,
         })
     }
-}
-
-fn provider_home_dir<F>(lookup: &mut F) -> Result<PathBuf, String>
-where
-    F: FnMut(&str) -> Option<String>,
-{
-    if let Some(value) = lookup("VIFU_HOME")
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-    {
-        return Ok(PathBuf::from(value));
-    }
-    if let Some(value) = std::env::var_os("VIFU_HOME").filter(|value| !value.is_empty()) {
-        return Ok(PathBuf::from(value));
-    }
-    let home = std::env::var_os("HOME").ok_or_else(|| {
-        "HOME is not set. Set VIFU_HOME to choose where vifu stores local state.".to_string()
-    })?;
-    Ok(PathBuf::from(home).join(".vifu"))
 }
 
 fn parse_deployment_mode(value: Option<String>) -> Result<DeploymentMode, String> {
@@ -287,6 +271,15 @@ mod tests {
     }
 
     #[test]
+    fn local_listen_override_must_remain_loopback() {
+        let mut config = Config::from_lookup(|_| None).unwrap();
+        let error = config
+            .apply_listen_override("0.0.0.0:6790".parse().unwrap())
+            .unwrap_err();
+        assert!(error.contains("loopback"));
+    }
+
+    #[test]
     fn requires_explicit_secrets_for_self_hosted_mode() {
         let error = Config::from_lookup(|key| {
             (key == "VIFU_DEPLOYMENT_MODE").then(|| "self-hosted".to_string())
@@ -355,15 +348,5 @@ mod tests {
         assert_eq!(config.admin_key, "self-host-admin-key-from-file");
         assert!(config.database_url.contains("postgres://vifu@postgres"));
         fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[test]
-    fn local_mode_cannot_bind_to_a_public_address() {
-        let error = Config::from_lookup(|key| match key {
-            "VIFU_SERVER_ADDR" => Some("0.0.0.0:6790".to_string()),
-            _ => None,
-        })
-        .unwrap_err();
-        assert!(error.contains("loopback"));
     }
 }

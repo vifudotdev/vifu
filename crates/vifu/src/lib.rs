@@ -1,5 +1,7 @@
 pub mod agent_gateway;
 pub mod cli;
+pub mod runtime;
+pub mod runtime_config;
 
 pub use vifu_core::{config, openclaw, protocol, relay, session};
 
@@ -9,5 +11,5 @@ where
     S: Into<String>,
 {
     let options = cli::Options::parse(args)?;
-    agent_gateway::execute(options).await
+    runtime::execute(options).await
 }

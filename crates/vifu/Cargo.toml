@@ -11,7 +11,17 @@ keywords = ["ai", "cli", "openclaw", "local-first"]
 categories = ["command-line-utilities"]
 rust-version.workspace = true
 
+[features]
+default = ["server", "gateway"]
+server = ["dep:vifu-server"]
+gateway = []
+
 [dependencies]
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "sync", "time"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 uuid = { version = "1", features = ["serde", "v4"] }
 vifu-core = { path = "../vifu-core" }
+vifu-server = { path = "../vifu-server", optional = true }

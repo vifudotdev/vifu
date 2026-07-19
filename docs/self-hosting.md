@@ -8,9 +8,14 @@ control and communicates through ordinary HTTP and WebSocket contracts.
 | Service | Role | Default address |
 | --- | --- | --- |
 | `postgres` | Durable runtime state | `127.0.0.1:5432` |
-| `backend` | `vifu-server` HTTP and WebSocket runtime | `127.0.0.1:6790` |
+| `backend` | `vifu` configured with the Server role | `127.0.0.1:6790` |
 | `dashboard` | Next.js standalone management console | `127.0.0.1:6791` |
 | `agent-gateway` | Vifu adapter for external agent providers | internal WebSocket to `backend` |
+
+`backend` and `agent-gateway` use the same Vifu image and the same `vifu`
+binary. Each container mounts a different read-only runtime configuration, so
+the configuration selects its role rather than a Docker command or a separate
+executable.
 
 ## Start
 
@@ -25,12 +30,6 @@ After that, normal restarts from the repository root are:
 
 ```bash
 docker compose up -d
-```
-
-The equivalent Bun workspace starter is:
-
-```bash
-bun run self-host
 ```
 
 Open `http://localhost:6791`, create the first local administrator, and verify
@@ -64,12 +63,32 @@ restores and rotations remain predictable. Compose accepts these values:
 | `VIFU_AGENT_GATEWAY_BOOTSTRAP_TOKEN` | Optional explicit enrollment secret used to register independent Agent Gateway credentials |
 | `VIFU_API_KEY_PEPPER` | Optional explicit one-way project API key hashing pepper |
 | `VIFU_PROVIDER_SECRET_KEY` | Optional explicit server-side provider credential encryption key |
-| `DATABASE_URL` | Optional explicit PostgreSQL connection string for Dashboard auth state and `vifu-server` runtime state |
+| `DATABASE_URL` | Optional explicit PostgreSQL connection string for Dashboard auth state and Vifu Server runtime state |
 | `VIFU_BIND_HOST` | Host interface for published ports |
 | `VIFU_SERVER_PORT` | Published runtime port |
 | `VIFU_DASHBOARD_PORT` | Published Dashboard port |
-| `VIFU_CONFIG_DIR` | Host-side Vifu config directory; defaults to `~/.vifu` |
 | `POSTGRES_DB`, `POSTGRES_USER`, `POSTGRES_PASSWORD` | Included PostgreSQL container |
+
+### Runtime Roles
+
+`vifu` reads `~/.vifu/config.json`. The binary creates a loopback configuration
+with both roles on first run. Its runtime configuration selects a specific role
+by including a `server` block, a `gateway` block, or both. It contains no
+deployment secrets: Docker secret files remain the source for database
+credentials and server authority material.
+
+```json
+{
+  "version": 1,
+  "server": { "listen": "127.0.0.1:6790" },
+  "gateway": { "serverUrl": "http://127.0.0.1:6790" }
+}
+```
+
+The Compose deployment mounts one server-only configuration in `backend` and
+one gateway-only configuration in `agent-gateway`. Its shared Vifu state is
+stored in the `vifu_runtime_state` Docker volume. Native deployments can put
+both blocks in one file to run both roles from one process.
 
 ### OIDC
 
@@ -119,7 +138,7 @@ is the default self-host option.
 ## Agent Gateway
 
 Vifu Agent Gateway is part of the Compose stack. It opens one authenticated
-WebSocket to `vifu-server`, discovers agents through configured external
+WebSocket to the Vifu Server role, discovers agents through configured external
 providers, and carries concurrent logical endpoint channels over that
 connection.
 
@@ -133,13 +152,15 @@ enroll a new identity.
 Connect an Agent Provider to discover agents and expose them through project
 endpoints. See [providers](../providers/README.md) for available integrations.
 OpenClaw, for example, is started with OpenClaw's own Docker Compose flow and
-then registered in Vifu's generic provider registry at
-`~/.vifu/providers.json`. When a configured provider is unavailable, Vifu Agent
-Gateway stays connected to Vifu Server and retries; the Dashboard updates the
-agent connection status when the provider returns.
+then registered through the Dashboard. Native installations persist the generic
+provider registry at `~/.vifu/providers.json`; the Compose deployment keeps the
+same file in its runtime-state volume. When a configured provider is
+unavailable, Vifu Agent Gateway stays connected to Vifu Server and retries; the
+Dashboard updates the agent connection status when the provider returns.
 
-Remote `VIFU_SERVER_URL` values must use HTTPS. Plain HTTP is accepted only for
-loopback development and Docker-internal service names such as `backend`, so
+Gateway-only native installations set `gateway.serverUrl` in
+`~/.vifu/config.json`. Remote values must use HTTPS. Plain HTTP is accepted only
+for loopback development and Docker-internal service names such as `backend`, so
 Agent Gateway credentials are not sent over a remote plaintext WebSocket.
 
 ## Exposure
@@ -169,7 +190,7 @@ After changing local source or upgrading a checkout, rebuild images first:
 docker compose up -d --build
 ```
 
-`vifu-server` applies embedded database migrations before accepting traffic.
+The Vifu Server role applies embedded database migrations before accepting traffic.
 The Dashboard server owns and upgrades its authentication tables. Back up
 PostgreSQL before upgrading across releases. Do not use `down --volumes`
 unless you intend to delete all deployment data.

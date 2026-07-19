@@ -6,6 +6,7 @@ state_dir="$(mktemp -d "${TMPDIR:-/tmp}/vifu-e2e.XXXXXX")"
 managed_stack=0
 compose_project=""
 browser_dashboard_port=""
+compose_override=""
 
 free_port() {
   node -e 'const net=require("node:net");const server=net.createServer();server.listen(0,"127.0.0.1",()=>{console.log(server.address().port);server.close();});'
@@ -64,7 +65,6 @@ else
     printf '%s\n' "VIFU_SERVER_PORT=$server_port"
     printf '%s\n' "VIFU_DASHBOARD_PORT=$dashboard_port"
     printf '%s\n' "POSTGRES_PORT=$postgres_port"
-    printf '%s\n' "VIFU_CONFIG_DIR=$state_dir/vifu-home"
   } >> "$env_file"
   compose_project="vifu-e2e-$$"
   managed_stack=1
@@ -104,9 +104,17 @@ fi
 
 compose() {
   if [ -n "$compose_project" ]; then
-    docker compose -p "$compose_project" --env-file "$env_file" -f "$compose_file" "$@"
+    if [ -n "$compose_override" ]; then
+      docker compose -p "$compose_project" --env-file "$env_file" -f "$compose_file" -f "$compose_override" "$@"
+    else
+      docker compose -p "$compose_project" --env-file "$env_file" -f "$compose_file" "$@"
+    fi
   else
-    docker compose --env-file "$env_file" -f "$compose_file" "$@"
+    if [ -n "$compose_override" ]; then
+      docker compose --env-file "$env_file" -f "$compose_file" -f "$compose_override" "$@"
+    else
+      docker compose --env-file "$env_file" -f "$compose_file" "$@"
+    fi
   fi
 }
 
@@ -163,7 +171,8 @@ until curl --fail --silent "http://127.0.0.1:$openclaw_port/health" >/dev/null; 
   sleep 1
 done
 
-gateway_home="$state_dir/vifu-home"
+gateway_root="$state_dir/gateway-home"
+gateway_home="$gateway_root/.vifu"
 mkdir -p "$gateway_home"
 chmod 0777 "$gateway_home"
 provider_url="http://127.0.0.1:$openclaw_port"
@@ -188,15 +197,30 @@ fi
   printf '%s\n' '}'
 } > "$gateway_home/providers.json"
 
+if [ "$managed_stack" != "1" ]; then
+  printf '{\n  "version": 1,\n  "gateway": { "serverUrl": "%s" }\n}\n' \
+    "$(json_escape "${VIFU_E2E_API_URL:-http://127.0.0.1:6790}")" > "$gateway_home/config.json"
+fi
+
 if [ "$managed_stack" = "1" ]; then
+  compose_override="$state_dir/docker-compose.runtime-state.yml"
+  cat > "$compose_override" <<EOF
+services:
+  backend:
+    volumes:
+      - $gateway_home:/home/vifu/.vifu
+  agent-gateway:
+    volumes:
+      - $gateway_home:/home/vifu/.vifu
+EOF
   compose up -d --build --wait
   export VIFU_E2E_API_URL="http://127.0.0.1:$VIFU_SERVER_PORT"
   export VIFU_E2E_DASHBOARD_URL="http://127.0.0.1:$VIFU_DASHBOARD_PORT"
 else
-  VIFU_HOME="$gateway_home" \
+  cargo build -p vifu
+  HOME="$gateway_root" \
   VIFU_AGENT_GATEWAY_BOOTSTRAP_TOKEN="${VIFU_E2E_AGENT_GATEWAY_BOOTSTRAP_TOKEN:-$VIFU_AGENT_GATEWAY_BOOTSTRAP_TOKEN}" \
-  cargo run -p vifu -- \
-    --server-url "${VIFU_E2E_API_URL:-http://127.0.0.1:6790}" \
+  target/debug/vifu \
     >"$agent_gateway_log" 2>&1 &
   agent_gateway_pid=$!
 fi

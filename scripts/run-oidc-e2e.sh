@@ -60,15 +60,20 @@ done
 VIFU_OIDC_TEST_PORT="$oidc_port" node scripts/mock-oidc-provider.mjs >"$state_dir/oidc.log" 2>&1 &
 oidc_pid=$!
 
+runtime_home="$state_dir/runtime-home"
+mkdir -p "$runtime_home/.vifu"
+printf '{\n  "version": 1,\n  "server": { "listen": "127.0.0.1:%s" }\n}\n' "$server_port" > "$runtime_home/.vifu/config.json"
+cargo build -p vifu
+
 VIFU_DEPLOYMENT_MODE=self-hosted \
-VIFU_SERVER_ADDR="127.0.0.1:$server_port" \
 DATABASE_URL="$database_url" \
 VIFU_ADMIN_KEY="$admin_key" \
 VIFU_AGENT_GATEWAY_BOOTSTRAP_TOKEN="$agent_gateway_bootstrap_token" \
 VIFU_API_KEY_PEPPER="$api_key_pepper" \
 VIFU_PROVIDER_SECRET_KEY="$provider_secret_key" \
+HOME="$runtime_home" \
 RUST_LOG=tower_http=error \
-cargo run -p vifu-server >"$state_dir/server.log" 2>&1 &
+target/debug/vifu >"$state_dir/server.log" 2>&1 &
 server_pid=$!
 
 attempt=0
