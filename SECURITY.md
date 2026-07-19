@@ -35,7 +35,8 @@ private endpoint URLs, database contents, or sensitive logs.
   configuration and are not copied into the Agent Gateway session file.
 - PostgreSQL is the durable source of runtime metadata. Restrict database
   network access, encrypt backups, and manage retention outside the Dashboard.
-- Vifu runs locally or self-hosted without a Vifu account.
+- Vifu is designed for local and self-hosted deployments, with Dashboard
+  identities and runtime state managed by the operator's deployment.
 
 ## Self-hosting
 

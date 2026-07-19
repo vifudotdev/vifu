@@ -1,7 +1,7 @@
 # Self-hosting Vifu
 
-The included Docker Compose stack runs one Vifu deployment. It requires no Vifu
-account and communicates through ordinary HTTP and WebSocket contracts.
+The included Docker Compose stack runs one Vifu deployment on infrastructure you
+control and communicates through ordinary HTTP and WebSocket contracts.
 
 ## Services
 
@@ -130,16 +130,13 @@ WebSocket connections. The server stores only a peppered credential hash. A
 revoked identity stays revoked; run `vifu --reset` on that Gateway to create and
 enroll a new identity.
 
-No external provider is required for the Vifu stack to start. Provider
-integrations are optional and documented separately:
-
-See [providers](../providers/README.md) for available integrations. OpenClaw, for
-example, is started with OpenClaw's own Docker Compose flow and then registered
-in Vifu's generic provider registry at `~/.vifu/providers.json`. Provider
-directories may be removed without changing Vifu's core self-host stack. When a
-provider is configured but not running, the Vifu Agent Gateway stays up and
-retries. The Dashboard shows no connected agents until the provider becomes
-available.
+Connect an Agent Provider to discover agents and expose them through project
+endpoints. See [providers](../providers/README.md) for available integrations.
+OpenClaw, for example, is started with OpenClaw's own Docker Compose flow and
+then registered in Vifu's generic provider registry at
+`~/.vifu/providers.json`. When a configured provider is unavailable, Vifu Agent
+Gateway stays connected to Vifu Server and retries; the Dashboard updates the
+agent connection status when the provider returns.
 
 Remote `VIFU_SERVER_URL` values must use HTTPS. Plain HTTP is accepted only for
 loopback development and Docker-internal service names such as `backend`, so

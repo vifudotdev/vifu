@@ -2,14 +2,47 @@
 
 Vifu is an open-source endpoint runtime for local AI agents. It provides stable
 project endpoints with profiles, bindings, API keys, connection status, and
-traces, while external agent providers remain optional integrations.
+traces, and connects agent providers through Vifu Agent Gateway.
 
 The runtime, Agent Gateway protocol, PostgreSQL migrations, dashboard, and Docker
 deployment are all included in this repository under Apache-2.0.
 
-## Local Demo
+## Run Vifu
 
-Start Vifu:
+A complete Vifu installation has three layers:
+
+| Layer | Processes |
+| --- | --- |
+| Dashboard | The Next.js management console |
+| Runtime | `vifu-server` and the `vifu` Agent Gateway |
+| Database | PostgreSQL |
+
+The Rust runtime is not a single binary. One workspace produces two executables:
+`vifu-server` owns the project API, persistence, routing, and WebSocket relay.
+`vifu` runs near the user's agent providers and connects them to the server.
+Keeping them separate lets the Gateway run on a developer machine while the
+server runs elsewhere. A binary release therefore needs to ship both programs
+together. Agent providers integrate with the runtime through the Gateway.
+
+`local` and `self-hosted` are deployment modes. Native processes and Docker are
+two ways to run a self-hosted deployment; Docker is not a separate product mode.
+
+### Local Development
+
+Run the Dashboard and both Rust programs from source with loopback-only local
+defaults. PostgreSQL stays in Docker so local data survives restarts:
+
+```bash
+bun install --frozen-lockfile
+bun run local
+```
+
+Open `http://localhost:6791` to work through the local Dashboard. Press `Ctrl-C`
+to stop the local processes; PostgreSQL remains available for the next run.
+
+### Docker Self-hosting
+
+Docker Compose starts the Dashboard, both runtime programs, and PostgreSQL:
 
 ```bash
 cp .env.example .env
@@ -22,24 +55,39 @@ After that, restarting the stack from the repository root is just:
 docker compose up -d
 ```
 
-From the repository root, `bun run self-host` is the same starter for local
-development checkouts.
+`bun run self-host` is an equivalent repository command.
 
-Open `http://localhost:6791` and create the first local administrator. The
-account is stored only in this deployment's PostgreSQL database; no Vifu account
-or external identity provider is required. Signup stays open by default for
-additional local users. The first account receives the deployment `admin` role;
-later signups receive the deployment `operator` role. Signup can be disabled
-with `AUTH_DISABLE_SIGNUP=true` or `VIFU_SIGNUP_ENABLED=false`.
+Open `http://localhost:6791` and create the first local administrator. Dashboard
+identities and sessions stay in this deployment's PostgreSQL database. Signup
+stays open by default for additional local users. The first account receives the
+deployment `admin` role; later signups receive the deployment `operator` role.
+Signup can be disabled with `AUTH_DISABLE_SIGNUP=true` or
+`VIFU_SIGNUP_ENABLED=false`.
 
-The Compose stack includes Vifu Agent Gateway, but no external provider is
-required for Vifu to start. Provider integrations are optional and live under
-`providers/`. If no provider is enabled, Vifu still runs normally and the
-Dashboard shows no connected agents.
+The Compose stack includes Vifu Agent Gateway. Connect a supported provider
+under `providers/` to discover agents, expose them through a project endpoint,
+and invoke them from your game. The Dashboard shows connected agents as the
+Gateway discovers them.
 
-## Independent Self-hosting
+Configuration, upgrades, persistence, and network exposure are documented in
+[Self-hosting Vifu](docs/self-hosting.md).
 
-The self-hosted core works without an external identity provider:
+### Native Self-hosting
+
+Build the two Rust executables without Docker:
+
+```bash
+cargo build --release --locked -p vifu-server -p vifu
+```
+
+The binaries are written to `target/release/`. A complete native installation
+also runs the Next.js Dashboard and PostgreSQL. See [BUILD.md](BUILD.md) for
+independent process commands and verification.
+
+## Runtime Architecture
+
+A self-hosted deployment keeps Dashboard identity and session state inside the
+deployment:
 
 ```text
 application -> vifu-server -> one multiplexed WebSocket -> Vifu Agent Gateway -> provider
@@ -70,18 +118,6 @@ of agent bindings. The server stores only peppered key hashes and returns a raw
 key once when it is created. Removing an agent from the Gameplay canvas or
 turning off its exposure makes it unavailable through the project API.
 
-## Docker Self-hosting
-
-The included Compose stack runs:
-
-- PostgreSQL for durable runtime state;
-- `vifu-server` for HTTP, WebSocket routing, and database migration history;
-- the same Next.js Dashboard used by every deployment mode;
-- Vifu Agent Gateway for connecting configured external agent providers.
-
-Services bind to `127.0.0.1` by default. Configuration, upgrades, persistence,
-and exposure guidance are in [docs/self-hosting.md](docs/self-hosting.md).
-
 ## Architecture And Security
 
 `vifu-server` owns the core runtime contract:
@@ -103,16 +139,13 @@ stored in PostgreSQL. The Dashboard owns the auth implementation and initializes
 the auth tables it uses; append-only database history may still include older
 auth table migrations. The generated admin key is a server-side runtime
 credential for the Dashboard, recovery, and automation; it never enters HTML,
-browser logs, or the client bundle. Optional managed infrastructure may be
-introduced later, but it is not required for the day-1 runtime.
+browser logs, or the client bundle.
 
-External agent providers are optional. Provider-specific setup lives under
-`providers/` and can be removed without changing the Vifu core stack. Remote
-self-host access must still use TLS even though the Dashboard has built-in login. See
+Provider-specific setup lives under `providers/`. Register a supported provider
+to make its agents available to Vifu projects; each registration uses the same
+Vifu Server, Dashboard, database, and Agent Gateway stack. Remote self-host
+access must still use TLS even though the Dashboard has built-in login. See
 [SECURITY.md](SECURITY.md) for the full boundary.
-
-For the endpoint-first runtime model and protocol boundaries, see the
-[Vifu core runtime design documentation](https://vifu.dev/docs/core-runtime-design).
 
 ## Repository Layout
 
@@ -122,7 +155,7 @@ crates/
   vifu-server/      HTTP API, Agent Gateway relay, PostgreSQL runtime
 npm-packages/
   dashboard/        One capability-driven Next.js Dashboard
-providers/          Optional external agent provider guides and examples
+providers/          Agent provider guides and examples
 docker-compose.yml PostgreSQL, vifu-server, Dashboard, and Agent Gateway stack
 scripts/            Development, E2E, and public-repository checks
 ```

@@ -6,7 +6,8 @@ Use this SDK inside a browser game when the game needs a small, safe boundary to
 talk to its host page. It starts the runtime bridge, sends events to the host,
 and calls host capabilities through JSON-RPC.
 
-It does not require a Vifu account, Vifu Cloud, a database, or a server SDK.
+The SDK gives games a compact runtime bridge that works across browser and
+native hosts.
 
 ## Install
 
@@ -99,6 +100,5 @@ const vifu = createVifuSDK({
 
 ## Package Boundary
 
-`@vifu/sdk` is browser game runtime code. It has no cloud service dependency and
-does not include product-specific APIs. Those belong in the host application or a
-separate package.
+`@vifu/sdk` is browser game runtime code. Product-specific APIs belong in the
+host application or a separate package.
