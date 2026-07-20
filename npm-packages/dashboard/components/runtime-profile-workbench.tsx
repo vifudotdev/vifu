@@ -31,6 +31,7 @@ import type {
   ProjectProvider,
   RuntimeProject,
 } from "../lib/runtime-types";
+import { RuntimeConfirmDialog } from "./runtime-confirm-dialog";
 
 type ProfileWorkbenchProps = {
   project: RuntimeProject;
@@ -100,6 +101,7 @@ export function RuntimeProfileWorkbench({
   const [changeSummary, setChangeSummary] = useState("");
   const [loading, setLoading] = useState(true);
   const [pending, setPending] = useState<string | null>(null);
+  const [confirmingRemoval, setConfirmingRemoval] = useState(false);
   const [message, setMessage] = useState<{ tone: "error" | "success"; text: string } | null>(null);
   const router = useRouter();
   const importRef = useRef<HTMLInputElement>(null);
@@ -241,7 +243,6 @@ export function RuntimeProfileWorkbench({
   }
 
   async function deleteProfile() {
-    if (!window.confirm(`Remove ${profile.name} from this project? You can add it again later.`)) return;
     setPending("delete-profile");
     setMessage(null);
     try {
@@ -252,6 +253,7 @@ export function RuntimeProfileWorkbench({
       setMessage({ tone: "error", text: errorMessage(error) });
     } finally {
       setPending(null);
+      setConfirmingRemoval(false);
     }
   }
 
@@ -287,7 +289,8 @@ export function RuntimeProfileWorkbench({
   }
 
   return (
-    <aside className="profile-workbench" aria-label={`${profile.name} profile`}>
+    <>
+      <aside className="profile-workbench" aria-label={`${profile.name} profile`}>
       <header className="profile-workbench-header">
         <div className="profile-workbench-title">
           <span>Selected agent</span>
@@ -331,7 +334,7 @@ export function RuntimeProfileWorkbench({
                 activeVersion={activeVersion}
                 pending={pending}
                 onUpdateProfile={updateProfile}
-                onRemove={deleteProfile}
+                onRemove={() => setConfirmingRemoval(true)}
                 onSync={sourceManaged ? syncSource : undefined}
                 presentation={draft.presentation}
                 onPresentationChange={(presentation) => setDraft({ ...draft, presentation })}
@@ -397,7 +400,18 @@ export function RuntimeProfileWorkbench({
           </button>
         </footer>
       ) : null}
-    </aside>
+      </aside>
+      {confirmingRemoval ? (
+        <RuntimeConfirmDialog
+          title="Remove agent?"
+          description={`${profile.name} will be removed from ${project.name}. You can add it again from the agent picker.`}
+          confirmLabel="Remove agent"
+          pending={pending === "delete-profile"}
+          onCancel={() => setConfirmingRemoval(false)}
+          onConfirm={deleteProfile}
+        />
+      ) : null}
+    </>
   );
 }
 

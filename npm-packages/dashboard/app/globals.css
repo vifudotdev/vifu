@@ -5127,9 +5127,7 @@ button:disabled {
   height: 100%;
   grid-template-columns: minmax(0, 1fr);
   overflow: hidden;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  background: var(--surface);
+  background: transparent;
 }
 
 .agents-management.has-workbench {
@@ -5140,7 +5138,7 @@ button:disabled {
   min-width: 0;
   min-height: 0;
   overflow: auto;
-  background: #f7f8fa;
+  background: transparent;
 }
 
 .primary-button.compact {
@@ -5400,6 +5398,49 @@ button:disabled {
   gap: 7px;
 }
 
+.runtime-confirm-dialog {
+  width: min(430px, calc(100vw - 28px));
+}
+
+.runtime-confirm-body {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: start;
+  gap: 12px;
+  padding: 18px 16px;
+}
+
+.runtime-confirm-icon {
+  display: grid;
+  width: 38px;
+  height: 38px;
+  place-items: center;
+  border: 1px solid #e3b4b0;
+  border-radius: 8px;
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
+.runtime-confirm-icon svg {
+  width: 18px;
+  height: 18px;
+}
+
+.runtime-confirm-body p {
+  margin: 1px 0 0;
+  color: var(--text-muted);
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.primary-button.destructive-button {
+  background: var(--danger);
+}
+
+.primary-button.destructive-button:hover {
+  background: #a72c22;
+}
+
 .resource-dialog-fields {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -5468,9 +5509,7 @@ button:disabled {
   grid-template-rows: auto minmax(0, 1fr);
   gap: 0;
   overflow: auto;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  background: #f7f8fa;
+  background: transparent;
   padding: 0;
 }
 
@@ -5484,6 +5523,7 @@ button:disabled {
   align-items: center;
   justify-content: space-between;
   gap: 18px;
+  border-top: 1px solid var(--line);
   border-bottom: 1px solid var(--line);
   background: rgba(255, 255, 255, 0.96);
   padding: 11px 16px 11px 18px;
@@ -5516,7 +5556,7 @@ button:disabled {
 }
 
 .project-provider-grid {
-  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
 }
 
 .project-agent-grid {
@@ -5527,6 +5567,7 @@ button:disabled {
   display: grid;
   width: min(440px, calc(100% - 32px));
   min-height: 190px;
+  align-self: start;
   place-items: center;
   align-content: center;
   justify-self: center;
@@ -5577,6 +5618,10 @@ button:disabled {
 .agent-picker-shell {
   min-height: min(620px, calc(100vh - 40px));
   grid-template-rows: auto auto minmax(0, 1fr) auto;
+}
+
+.agent-picker-shell.single-mode {
+  grid-template-rows: auto minmax(0, 1fr) auto;
 }
 
 .resource-picker-search {
@@ -5705,6 +5750,20 @@ button:disabled {
   gap: 2px;
 }
 
+.dialog-title-with-back h2,
+.dialog-title-with-back p {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dialog-title-with-back p {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
 .resource-mode-switch {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -5767,6 +5826,10 @@ button:disabled {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(270px, 1fr));
   gap: 10px;
+}
+
+.provider-card-grid.project-provider-grid {
+  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
 }
 
 .provider-resource-card {
@@ -5889,24 +5952,8 @@ button:disabled {
   width: min(620px, calc(100vw - 28px));
 }
 
-.provider-dialog-identity {
-  display: flex;
-  align-items: center;
-  gap: 11px;
-  border-bottom: 1px solid var(--line);
-  background: #fafbfc;
-  padding: 13px 16px;
-}
-
-.provider-dialog-identity > div {
-  display: grid;
-  gap: 2px;
-}
-
-.provider-dialog-identity p {
-  margin: 0;
-  color: var(--text-muted);
-  font-size: 12px;
+.provider-config-dialog .resource-dialog-fields label:last-child:nth-child(odd) {
+  grid-column: 1 / -1;
 }
 
 .profile-json-panel {
@@ -6486,16 +6533,57 @@ button:disabled {
 }
 
 @media (max-width: 560px) {
+  .resource-page-heading {
+    gap: 10px;
+    padding: 10px 12px;
+  }
+
+  .resource-page-summary span {
+    display: none;
+  }
+
+  .project-agent-grid,
+  .project-provider-grid {
+    padding: 12px;
+  }
+
   .resource-dialog-fields {
     grid-template-columns: minmax(0, 1fr);
   }
 
-  .resource-dialog-fields label:has(textarea) {
+  .resource-dialog-fields label:has(textarea),
+  .provider-config-dialog .resource-dialog-fields label:last-child:nth-child(odd) {
     grid-column: auto;
   }
 
+  .provider-dialog-actions {
+    display: grid !important;
+    grid-template-columns: minmax(0, 1fr);
+    align-items: stretch !important;
+  }
+
+  .provider-dialog-actions > .provider-test-button {
+    width: 100%;
+  }
+
+  .provider-dialog-actions > span:first-child:empty {
+    display: none;
+  }
+
+  .provider-dialog-actions > span:last-child {
+    display: grid;
+    width: 100%;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .provider-dialog-actions > span:last-child button {
+    width: 100%;
+    min-width: 0;
+  }
+
   .agent-card-grid,
-  .provider-card-grid {
+  .provider-card-grid,
+  .provider-card-grid.project-provider-grid {
     grid-template-columns: minmax(0, 1fr);
   }
 }

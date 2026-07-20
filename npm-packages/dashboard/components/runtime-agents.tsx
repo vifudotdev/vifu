@@ -163,7 +163,9 @@ function AddAgentDialog({
   const router = useRouter();
   const dialogRef = useRef<HTMLDialogElement>(null);
   const creatableProviders = providers.filter((provider) => !adapters.find((adapter) => adapter.id === provider.providerType)?.supportsDiscovery);
-  const [mode, setMode] = useState<"available" | "create">(candidates.length > 0 ? "available" : "create");
+  const [mode, setMode] = useState<"available" | "create">(
+    candidates.length > 0 || creatableProviders.length === 0 ? "available" : "create",
+  );
   const [query, setQuery] = useState("");
   const [selected, setSelected] = useState<ProjectAgentCandidate | null>(null);
   const [providerKey, setProviderKey] = useState(creatableProviders[0]?.providerKey ?? "");
@@ -257,12 +259,14 @@ function AddAgentDialog({
 
   return (
     <dialog className="resource-dialog agent-picker-dialog" ref={dialogRef} onClose={onClose} onClick={(event) => { if (event.target === event.currentTarget) event.currentTarget.close(); }}>
-      <div className="resource-dialog-shell agent-picker-shell">
-        <header><div><span>Add agent</span><h2>Choose an agent</h2></div><button className="icon-button" type="button" onClick={() => dialogRef.current?.close()} aria-label="Close"><X aria-hidden="true" /></button></header>
-        <div className="resource-mode-switch" role="tablist" aria-label="Agent source">
-          <button type="button" role="tab" aria-selected={mode === "available"} className={mode === "available" ? "active" : ""} onClick={() => { setMode("available"); setError(null); }}>Available</button>
-          <button type="button" role="tab" aria-selected={mode === "create"} className={mode === "create" ? "active" : ""} onClick={() => { setMode("create"); setError(null); }}>Create new</button>
-        </div>
+      <div className={`resource-dialog-shell agent-picker-shell${creatableProviders.length === 0 ? " single-mode" : ""}`}>
+        <header><div><span>Add agent</span><h2>{mode === "available" ? "Choose an agent" : "Create an agent"}</h2></div><button className="icon-button" type="button" onClick={() => dialogRef.current?.close()} aria-label="Close"><X aria-hidden="true" /></button></header>
+        {creatableProviders.length > 0 ? (
+          <div className="resource-mode-switch" role="tablist" aria-label="Agent source">
+            <button type="button" role="tab" aria-selected={mode === "available"} className={mode === "available" ? "active" : ""} onClick={() => { setMode("available"); setError(null); }}>Available</button>
+            <button type="button" role="tab" aria-selected={mode === "create"} className={mode === "create" ? "active" : ""} onClick={() => { setMode("create"); setError(null); }}>Create new</button>
+          </div>
+        ) : null}
 
         {mode === "available" ? (
           <div className="agent-picker-content">
@@ -282,7 +286,13 @@ function AddAgentDialog({
                   <span className="agent-picker-provider">{candidate.providerKey}</span>
                 </button>
               ))}
-              {filtered.length === 0 ? <div className="resource-picker-empty">No agents available to add.</div> : null}
+              {filtered.length === 0 ? (
+                <div className="resource-picker-empty">
+                  {providers.length === 0
+                    ? "Add a provider before adding an agent."
+                    : "No agents are waiting to be added. Connected Gateways add newly detected agents automatically."}
+                </div>
+              ) : null}
             </div>
           </div>
         ) : creatableProviders.length > 0 ? (

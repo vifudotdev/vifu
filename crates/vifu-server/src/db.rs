@@ -641,7 +641,7 @@ pub async fn unassign_project_provider(
     .await?;
     if referenced {
         return Err(ApiError::Conflict(
-            "move or remove the agents using this provider before removing it from the project"
+            "Remove or move the agents using this provider before disconnecting it from the project."
                 .to_string(),
         ));
     }

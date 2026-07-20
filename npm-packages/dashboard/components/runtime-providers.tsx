@@ -25,6 +25,7 @@ import type {
   ProviderAdapterField,
   RuntimeProject,
 } from "../lib/runtime-types";
+import { RuntimeConfirmDialog } from "./runtime-confirm-dialog";
 
 type ProvidersViewProps = {
   project: RuntimeProject;
@@ -108,10 +109,10 @@ function ProjectProviderCard({
 }) {
   const router = useRouter();
   const [pending, setPending] = useState(false);
+  const [confirming, setConfirming] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   async function remove() {
-    if (!window.confirm(`Remove ${provider.name} from ${project.name}?`)) return;
     setPending(true);
     setError(null);
     try {
@@ -121,6 +122,7 @@ function ProjectProviderCard({
       setError(errorMessage(nextError));
     } finally {
       setPending(false);
+      setConfirming(false);
     }
   }
 
@@ -139,11 +141,21 @@ function ProjectProviderCard({
       </button>
       <footer>
         <span>{capabilitySummary(adapter?.capabilities ?? [])}</span>
-        <button className="icon-button danger" type="button" disabled={pending} onClick={remove} title="Remove provider" aria-label={`Remove ${provider.name}`}>
+        <button className="icon-button danger" type="button" disabled={pending} onClick={() => setConfirming(true)} title="Remove provider" aria-label={`Remove ${provider.name}`}>
           <Trash2 aria-hidden="true" />
         </button>
       </footer>
       {error ? <p className="provider-card-error" role="alert">{error}</p> : null}
+      {confirming ? (
+        <RuntimeConfirmDialog
+          title="Remove provider?"
+          description={`${provider.name} will be disconnected from ${project.name}. Remove or move any agents using it first.`}
+          confirmLabel="Remove provider"
+          pending={pending}
+          onCancel={() => setConfirming(false)}
+          onConfirm={remove}
+        />
+      ) : null}
     </article>
   );
 }
@@ -235,7 +247,7 @@ function ProviderDialog({
         "POST",
         {},
       );
-      setNotice(result.message ?? "Connection test complete.");
+      setNotice(result.message ?? `${provider.name} is reachable.`);
       router.refresh();
     } catch (nextError) {
       setError(errorMessage(nextError));
@@ -251,11 +263,15 @@ function ProviderDialog({
           <header>
             <div className="dialog-title-with-back">
               {!provider ? <button className="icon-button" type="button" onClick={() => { setChoice(null); setError(null); }} aria-label="Back to providers"><ArrowLeft aria-hidden="true" /></button> : null}
-              <div><span>{provider ? "Provider settings" : "Add provider"}</span><h2>{choice.name}</h2></div>
+              <ProviderMark type={choice.providerType} />
+              <div>
+                <span>{provider ? "Provider settings" : "Add provider"}</span>
+                <h2>{choice.name}</h2>
+                <p>{choice.description}</p>
+              </div>
             </div>
             <button className="icon-button" type="button" onClick={() => dialogRef.current?.close()} aria-label="Close"><X aria-hidden="true" /></button>
           </header>
-          <div className="provider-dialog-identity"><ProviderMark type={choice.providerType} /><div><strong>{choice.name}</strong><p>{choice.description}</p></div></div>
           <div className="resource-dialog-fields">
             <label><span>Name</span><input name="name" required maxLength={128} defaultValue={provider?.name ?? choice.name} autoFocus /></label>
             {choice.fields.map((field) => (
@@ -271,8 +287,8 @@ function ProviderDialog({
           </div>
           {error ? <p className="inline-error" role="alert">{error}</p> : null}
           {notice ? <p className="inline-success" role="status">{notice}</p> : null}
-          <footer>
-            <span>{provider ? <button className="secondary-button" type="button" disabled={testing || pending} onClick={test}><RefreshCw aria-hidden="true" />{testing ? "Testing" : "Test connection"}</button> : null}</span>
+          <footer className="provider-dialog-actions">
+            {provider ? <button className="secondary-button provider-test-button" type="button" disabled={testing || pending} onClick={test}><RefreshCw aria-hidden="true" />{testing ? "Testing" : "Test connection"}</button> : <span />}
             <span><button className="secondary-button" type="button" onClick={() => dialogRef.current?.close()}>Cancel</button><button className="primary-button" type="submit" disabled={pending}>{pending ? "Saving" : provider ? "Save changes" : "Add provider"}</button></span>
           </footer>
         </form>
