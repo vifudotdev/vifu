@@ -2,11 +2,13 @@ import Image from "next/image";
 import Link from "next/link";
 import type { LucideIcon } from "lucide-react";
 import {
+  Bot,
   ChevronDown,
   Gamepad2,
   HeartPulse,
   KeyRound,
   LogOut,
+  Plug,
   ScrollText,
   Settings,
 } from "lucide-react";
@@ -16,12 +18,9 @@ import type {
   AgentBinding,
   AgentEndpoint,
   AgentGateway,
-  AgentProfile,
   AvailableAgent,
   EndpointTrace,
   ProjectCanvas,
-  ProjectCanvasNode,
-  ProviderConnection,
   RuntimeProject,
   ServerCapabilities,
 } from "../lib/runtime-types";
@@ -32,12 +31,12 @@ import { ProjectSwitcher } from "./project-switcher";
 import {
   DeleteResourceButton,
   ProjectCreateForm,
-  ProviderConnectionActions,
-  ProviderConnectionForm,
 } from "./runtime-actions";
 import { RuntimeGameplayCanvas } from "./runtime-gameplay-canvas";
+import { RuntimeAgentsView } from "./runtime-agents";
+import { RuntimeProvidersView } from "./runtime-providers";
 
-export type DashboardSection = "health" | "gameplay" | "api" | "logs" | "settings";
+export type DashboardSection = "health" | "agents" | "providers" | "gameplay" | "api" | "logs" | "settings";
 
 type NavigationItem = {
   id: DashboardSection;
@@ -48,6 +47,8 @@ type NavigationItem = {
 
 const PROJECT_NAVIGATION: NavigationItem[] = [
   { id: "health", label: "Health", icon: HeartPulse },
+  { id: "agents", label: "Agents", icon: Bot, capability: "profiles" },
+  { id: "providers", label: "Providers", icon: Plug, capability: "providerConnections" },
   { id: "gameplay", label: "Gameplay", icon: Gamepad2, capability: "canvas" },
   { id: "api", label: "API", icon: KeyRound, capability: "apiKeys" },
   { id: "logs", label: "Logs", icon: ScrollText, capability: "traces" },
@@ -56,6 +57,8 @@ const PROJECT_NAVIGATION: NavigationItem[] = [
 
 const SECTION_TITLES: Record<DashboardSection, string> = {
   health: "Health",
+  agents: "Agents",
+  providers: "Providers",
   gameplay: "Gameplay",
   api: "API Integrations",
   logs: "Logs",
@@ -103,8 +106,6 @@ export function RuntimeConsole({
             projects={data.runtime.projects}
             selectedProject={selectedProject}
             activeSection={activeSection}
-            availableAgents={data.runtime.availableAgents}
-            agentGateways={data.runtime.agentGateways}
           />
           <div className="app-header-meta">
             <div className="runtime-state"><span className="status-dot" />{runtimeStatusLabel(data.authority.status.status)}</div>
@@ -169,6 +170,31 @@ function ProjectSectionView({
   browserApiBaseUrl: string;
 }) {
   const endpoints = projectEndpoints(project, data.runtime.endpoints);
+  if (section === "agents") {
+    return (
+      <RuntimeAgentsView
+        project={project}
+        profiles={data.runtime.profiles}
+        profileDetails={data.profileDetails}
+        bindings={data.runtime.bindings}
+        availableAgents={data.runtime.availableAgents}
+        candidates={data.agentCandidates}
+        providerAdapters={data.runtime.providerAdapters}
+        projectProviders={data.projectProviders}
+      />
+    );
+  }
+  if (section === "providers") {
+    return (
+      <RuntimeProvidersView
+        project={project}
+        adapters={data.runtime.providerAdapters}
+        stock={data.providerStock}
+        assigned={data.projectProviders}
+        availableAgents={data.runtime.availableAgents}
+      />
+    );
+  }
   if (section === "gameplay") {
     return (
       <RuntimeGameplayCanvas
@@ -177,9 +203,9 @@ function ProjectSectionView({
         profiles={data.runtime.profiles}
         bindings={data.runtime.bindings}
         agentGateways={data.runtime.agentGateways}
-        availableAgents={data.runtime.availableAgents}
-        endpoints={endpoints}
         traces={projectTraces(data.runtime.traces, project)}
+        providerAdapters={data.runtime.providerAdapters}
+        providerConnections={data.projectProviders}
         browserApiBaseUrl={browserApiBaseUrl}
       />
     );
@@ -188,11 +214,8 @@ function ProjectSectionView({
     return (
       <ApiIntegrationsView
         project={project}
-        projects={data.runtime.projects}
         keys={data.runtime.apiKeys}
-        endpoints={data.runtime.endpoints}
-        bindings={data.runtime.bindings}
-        canvas={data.canvas}
+        profiles={data.runtime.profiles}
         browserApiBaseUrl={browserApiBaseUrl}
       />
     );
@@ -204,29 +227,23 @@ function ProjectSectionView({
         project={project}
         endpoints={endpoints}
         browserApiBaseUrl={browserApiBaseUrl}
-        providerAdapters={data.runtime.providerAdapters}
-        providerConnections={data.providerConnections}
       />
     );
   }
-  return <HealthView project={project} canvas={data.canvas} data={data} endpoints={endpoints} browserApiBaseUrl={browserApiBaseUrl} />;
+  return <HealthView project={project} data={data} endpoints={endpoints} browserApiBaseUrl={browserApiBaseUrl} />;
 }
 
 function HealthView({
   project,
-  canvas,
   data,
   endpoints,
   browserApiBaseUrl,
 }: {
   project: RuntimeProject;
-  canvas?: ProjectCanvas;
   data: DashboardData;
   endpoints: AgentEndpoint[];
   browserApiBaseUrl: string;
 }) {
-  const nodes = projectCanvasNodes(project, canvas);
-  const exposed = nodes.filter((node) => node.exposed).length;
   const gatewayCards = gatewayHealthCards(data.runtime.agentGateways, data.runtime.availableAgents);
   const connectedGatewayCards = gatewayCards.filter((item) => item.gateway.status === "connected");
   const connectedGateways = connectedGatewayCards.length;
@@ -235,12 +252,17 @@ function HealthView({
       .filter((agent) => agent.status === "connected")
       .map((agent) => `${agent.gatewayId}/${agent.id}`),
   );
-  const connected = nodes.filter((node) => (
-    node.exposed
-    && node.gatewayId
-    && node.resourceId
-    && connectedAgentKeys.has(`${node.gatewayId}/${node.resourceId}`)
-  )).length;
+  const connected = data.runtime.profiles.filter((profile) => {
+    const binding = data.runtime.bindings.find((item) => item.profileId === profile.id);
+    if (binding && connectedAgentKeys.has(`${binding.gatewayId}/${binding.agentId}`)) return true;
+    const detail = data.profileDetails.find((item) => item.profile.id === profile.id);
+    const active = detail?.versions.find((item) => item.version.id === profile.activeVersionId);
+    const providerKey = typeof active?.version.source.providerKey === "string"
+      ? active.version.source.providerKey
+      : active?.capabilities[0]?.providerKey;
+    return data.projectProviders.some((provider) => provider.providerKey === providerKey && provider.status === "online");
+  }).length;
+  const agentTotal = data.runtime.profiles.length;
   const traces = projectTraces(data.runtime.traces, project);
   const traceSummary = summarizeTraces(traces);
   return (
@@ -261,7 +283,7 @@ function HealthView({
           </div>
           <div>
             <dt>Agents</dt>
-            <dd>{connected}/{exposed}</dd>
+            <dd>{connected}/{agentTotal}</dd>
           </div>
           <div>
             <dt>Requests</dt>
@@ -269,12 +291,12 @@ function HealthView({
           </div>
         </dl>
       </HealthSection>
-      {nodes.length === 0 || connectedGateways === 0 ? (
+      {data.projectProviders.length === 0 || agentTotal === 0 ? (
         <SetupRail
           project={project}
-          providerCount={data.providerConnections.length}
-          agentCount={connectedAgentKeys.size}
-          exposedCount={exposed}
+          providerCount={data.projectProviders.length}
+          agentCount={data.runtime.profiles.length}
+          callableCount={agentTotal}
           connectedGatewayCount={connectedGateways}
         />
       ) : null}
@@ -429,14 +451,10 @@ function SettingsView({
   project,
   endpoints,
   browserApiBaseUrl,
-  providerAdapters,
-  providerConnections,
 }: {
   project: RuntimeProject;
   endpoints: AgentEndpoint[];
   browserApiBaseUrl: string;
-  providerAdapters: DashboardData["runtime"]["providerAdapters"];
-  providerConnections: ProviderConnection[];
 }) {
   const primaryEndpoint = endpoints[0];
   return (
@@ -451,26 +469,6 @@ function SettingsView({
           <div><dt>Status</dt><dd>{project.enabled ? "Enabled" : "Disabled"}</dd></div>
         </dl>
       </section>
-      <section className="content-section create-section">
-        <SectionHeading title="Provider settings" />
-        <ProviderConnectionForm project={project} adapters={providerAdapters} />
-      </section>
-      <section className="content-section">
-        <SectionHeading title="Configured providers" count={providerConnections.length} />
-        <ResourceList empty="No providers configured for this project.">
-          {providerConnections.map((connection) => (
-            <article className="resource-row" key={connection.id}>
-              <ResourceIdentity title={connection.name} code={connection.providerKey} description={connection.baseUrl} />
-              <div className="resource-meta">
-                <span className={connection.status === "online" ? "status-label ready" : connection.status === "configured" ? "status-label pending" : "status-label off"}>{connection.status}</span>
-                {connection.secretKeys.length > 0 ? <span>{connection.secretKeys.join(", ")}</span> : null}
-                {connection.displaySecret ? <code>{connection.displaySecret}</code> : null}
-              </div>
-              <ProviderConnectionActions project={project} connection={connection} />
-            </article>
-          ))}
-        </ResourceList>
-      </section>
       <section className="content-section danger-section">
         <SectionHeading title="Danger zone" />
         <div className="settings-danger-row">
@@ -478,7 +476,7 @@ function SettingsView({
             <strong>Delete project</strong>
             <p>Remove this project from the dashboard. Detected gateway agents are not deleted.</p>
           </div>
-          <DeleteResourceButton path={`projects/${project.id}`} label={project.name} />
+          <DeleteResourceButton path={`projects/${project.id}`} label={project.name} redirectTo="/project" />
         </div>
       </section>
     </>
@@ -492,7 +490,7 @@ function NoProjectView({ data }: { data: DashboardData }) {
         <FirstRunRail />
         <section className="content-section create-section">
           <SectionHeading title="Create your first project" />
-          <ProjectCreateForm availableAgents={data.runtime.availableAgents} agentGateways={data.runtime.agentGateways} />
+          <ProjectCreateForm />
         </section>
       </div>
     </div>
@@ -506,30 +504,30 @@ function FirstRunRail() {
       <ol>
         <li className="active"><strong>Project</strong><small>Name the game or app you are building.</small></li>
         <li><strong>Provider</strong><small>Connect OpenClaw or another agent provider.</small></li>
-        <li><strong>Agents</strong><small>Discover agents and place them on Gameplay.</small></li>
+        <li><strong>Agents</strong><small>Add detected agents or create one from a provider.</small></li>
         <li><strong>Endpoint</strong><small>Call this project from your game over HTTP or WebSocket.</small></li>
       </ol>
     </aside>
   );
 }
 
-function SetupRail({ project, providerCount, agentCount, exposedCount, connectedGatewayCount }: {
+function SetupRail({ project, providerCount, agentCount, callableCount, connectedGatewayCount }: {
   project: RuntimeProject;
   providerCount: number;
   agentCount: number;
-  exposedCount: number;
+  callableCount: number;
   connectedGatewayCount: number;
 }) {
   const providerReady = providerCount > 0;
   const agentsReady = agentCount > 0;
-  const endpointReady = exposedCount > 0;
+  const endpointReady = callableCount > 0;
   const gatewayReady = connectedGatewayCount > 0;
   const nextStep = !providerReady
     ? "Connect an agent provider"
     : !agentsReady
       ? "Discover provider agents"
       : !endpointReady
-        ? "Expose an agent endpoint"
+        ? "Add an agent"
         : !gatewayReady
           ? "Reconnect agent gateway"
           : "Project is ready to call";
@@ -541,14 +539,14 @@ function SetupRail({ project, providerCount, agentCount, exposedCount, connected
       </div>
       <ol>
         <li className="ready"><strong>Project</strong><small>{project.slug}</small></li>
-        <li className={providerReady ? "ready" : "active"}><strong>Provider</strong><small>{providerReady ? `${providerCount} configured` : "Add one in Settings"}</small></li>
-        <li className={agentsReady ? "ready" : providerReady ? "active" : undefined}><strong>Agents</strong><small>{agentsReady ? `${agentCount} detected` : "Discover agents"}</small></li>
-        <li className={endpointReady ? "ready" : agentsReady ? "active" : undefined}><strong>Endpoint</strong><small>{endpointReady ? `${exposedCount} exposed` : "Add agents to Gameplay"}</small></li>
+        <li className={providerReady ? "ready" : "active"}><strong>Provider</strong><small>{providerReady ? `${providerCount} assigned` : "Assign one in Providers"}</small></li>
+        <li className={agentsReady ? "ready" : providerReady ? "active" : undefined}><strong>Agents</strong><small>{agentsReady ? `${agentCount} available` : "Add or detect agents"}</small></li>
+        <li className={endpointReady ? "ready" : agentsReady ? "active" : undefined}><strong>Endpoint</strong><small>{endpointReady ? `${callableCount} callable` : "Agents become callable when added"}</small></li>
         <li className={gatewayReady ? "ready" : endpointReady ? "active" : undefined}><strong>Gateway</strong><small>{gatewayReady ? `${connectedGatewayCount} online` : "Start gateway"}</small></li>
       </ol>
       <div className="setup-actions">
-        {!providerReady ? <Link className="primary-button" href={`/project/${project.slug}/settings`}>Connect provider</Link> : null}
-        {providerReady && !endpointReady ? <Link className="secondary-button" href={`/project/${project.slug}/gameplay`}>Open Gameplay</Link> : null}
+        {!providerReady ? <Link className="primary-button" href={`/project/${project.slug}/providers`}>Open Providers</Link> : null}
+        {providerReady && !endpointReady ? <Link className="secondary-button" href={`/project/${project.slug}/agents`}>Add agents</Link> : null}
       </div>
     </section>
   );
@@ -577,15 +575,6 @@ function SectionHeading({ title, count, action }: { title: string; count?: numbe
   return <header className="section-heading"><div><h2>{title}</h2>{count !== undefined ? <span>{count}</span> : null}</div>{action}</header>;
 }
 
-function ResourceList({ empty, children }: { empty: string; children: React.ReactNode }) {
-  const hasChildren = Array.isArray(children) ? children.length > 0 : Boolean(children);
-  return <div className="resource-list">{hasChildren ? children : <EmptyState>{empty}</EmptyState>}</div>;
-}
-
-function ResourceIdentity({ title, code, description }: { title: string; code?: string; description?: string | null }) {
-  return <div className="resource-identity"><strong>{title}</strong>{code ? <code>{code}</code> : null}{description ? <span>{description}</span> : null}</div>;
-}
-
 function EmptyState({ children }: { children: React.ReactNode }) {
   return <div className="empty-state">{children}</div>;
 }
@@ -598,11 +587,6 @@ function selectProject(projects: RuntimeProject[], projectSlug: string | undefin
 function isSectionAvailable(section: DashboardSection, capabilities: ServerCapabilities): boolean {
   const item = PROJECT_NAVIGATION.find((entry) => entry.id === section);
   return Boolean(item && (!item.capability || capabilities[item.capability]));
-}
-
-function projectCanvasNodes(project: RuntimeProject, canvas?: ProjectCanvas): ProjectCanvasNode[] {
-  if (canvas?.project.id === project.id) return canvas.nodes;
-  return [];
 }
 
 function gatewayStatusMap(gateways: AgentGateway[]): Map<string, AgentGateway> {
@@ -695,13 +679,6 @@ function percentile(values: number[], ratio: number): number | null {
   if (values.length === 0) return null;
   const index = Math.min(values.length - 1, Math.max(0, Math.ceil(values.length * ratio) - 1));
   return Math.round(values[index] ?? 0);
-}
-
-function nodeTitle(node: ProjectCanvasNode, profiles: AgentProfile[]): string {
-  const profileName = node.profileId ? profiles.find((profile) => profile.id === node.profileId)?.name : null;
-  const resourceName = String(node.config.agentName ?? node.resourceId ?? "Agent").trim();
-  if (profileName && profileName !== "Agent") return profileName;
-  return resourceName || "Agent";
 }
 
 function runtimeStatusLabel(status: string): string {

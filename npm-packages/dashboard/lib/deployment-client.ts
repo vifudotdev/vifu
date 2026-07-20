@@ -3,13 +3,15 @@ import type {
   AgentBinding,
   AgentEndpoint,
   AgentProfile,
+  AgentProfileDetail,
   AgentGateway,
   ApiKeyRecord,
   AvailableAgent,
   EndpointTrace,
   ProjectCanvas,
+  ProjectAgentCandidate,
   ProviderAdapter,
-  ProviderConnection,
+  ProviderStockItem,
   RuntimeStatus,
   RuntimeProject,
 } from "./runtime-types";
@@ -61,6 +63,16 @@ export class DeploymentClient {
     return (await this.request<{ profiles: AgentProfile[] }>("/v1/profiles")).profiles ?? [];
   }
 
+  async projectProfiles(slug: string): Promise<AgentProfile[]> {
+    return (await this.request<{ profiles: AgentProfile[] }>(`/v1/project/${encodeURIComponent(slug)}/profiles`)).profiles ?? [];
+  }
+
+  async projectProfile(slug: string, profileId: string): Promise<AgentProfileDetail> {
+    return this.request<AgentProfileDetail>(
+      `/v1/project/${encodeURIComponent(slug)}/profiles/${encodeURIComponent(profileId)}`,
+    );
+  }
+
   async bindings(): Promise<AgentBinding[]> {
     return (await this.request<{ bindings: AgentBinding[] }>("/v1/bindings")).bindings ?? [];
   }
@@ -85,8 +97,16 @@ export class DeploymentClient {
     return (await this.request<{ providerAdapters: ProviderAdapter[] }>("/v1/provider-adapters")).providerAdapters ?? [];
   }
 
-  async providerConnections(slug: string): Promise<ProviderConnection[]> {
-    return (await this.request<{ providerConnections: ProviderConnection[] }>(`/v1/project/${encodeURIComponent(slug)}/provider-connections`)).providerConnections ?? [];
+  async providerStock(): Promise<ProviderStockItem[]> {
+    return (await this.request<{ providers: ProviderStockItem[] }>("/v1/providers")).providers ?? [];
+  }
+
+  async projectProviders(slug: string): Promise<ProviderStockItem[]> {
+    return (await this.request<{ providers: ProviderStockItem[] }>(`/v1/project/${encodeURIComponent(slug)}/providers`)).providers ?? [];
+  }
+
+  async projectAgentCandidates(slug: string): Promise<ProjectAgentCandidate[]> {
+    return (await this.request<{ candidates: ProjectAgentCandidate[] }>(`/v1/project/${encodeURIComponent(slug)}/agent-candidates`)).candidates ?? [];
   }
 
   async traces(): Promise<EndpointTrace[]> {

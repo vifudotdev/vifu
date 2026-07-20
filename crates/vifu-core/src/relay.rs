@@ -25,11 +25,16 @@ const MAX_RECONNECT_DELAY: Duration = Duration::from_secs(30);
 pub struct AgentGatewayRuntime<'a> {
     pub server_url: &'a str,
     pub agent_gateway_bootstrap_token: &'a str,
-    pub provider_id: &'a str,
-    pub endpoint: &'a Endpoint,
-    pub openclaw_token: Option<&'a str>,
+    pub providers: &'a [OpenClawRuntimeProvider],
     pub agents: &'a [AgentDescriptor],
     pub session_path: &'a Path,
+}
+
+#[derive(Debug, Clone)]
+pub struct OpenClawRuntimeProvider {
+    pub id: String,
+    pub endpoint: Endpoint,
+    pub token: Option<String>,
 }
 
 pub async fn run_agent_gateway(
@@ -116,7 +121,7 @@ async fn run_connection(
             agents: runtime.agents.to_vec(),
             metadata: serde_json::json!({
                 "adapter": "openclaw",
-                "providerId": runtime.provider_id,
+                "providerIds": runtime.providers.iter().map(|provider| provider.id.as_str()).collect::<Vec<_>>(),
                 "version": env!("CARGO_PKG_VERSION")
             }),
         },
@@ -202,8 +207,20 @@ async fn run_connection(
                                 continue;
                             }
                         };
-                        let endpoint = runtime.endpoint.clone();
-                        let openclaw_token = runtime.openclaw_token.map(str::to_string);
+                        let Some(provider) = resolve_openclaw_provider(runtime.providers, &binding)
+                        else {
+                            queue_error(
+                                &outbound_sender,
+                                Some(request_id),
+                                Some(channel_id),
+                                "PROVIDER_NOT_AVAILABLE",
+                                "The requested provider is not connected to this Agent Gateway.",
+                            )
+                            .await?;
+                            continue;
+                        };
+                        let endpoint = provider.endpoint.clone();
+                        let openclaw_token = provider.token.clone();
                         let sender = outbound_sender.clone();
                         let handle = tokio::spawn(async move {
                             let result = openclaw::invoke(
@@ -282,6 +299,25 @@ async fn run_connection(
     }
     let _ = socket.close(None).await;
     Ok(outcome)
+}
+
+fn resolve_openclaw_provider<'a>(
+    providers: &'a [OpenClawRuntimeProvider],
+    binding: &serde_json::Value,
+) -> Option<&'a OpenClawRuntimeProvider> {
+    let provider_key = binding
+        .get("providerKey")
+        .or_else(|| binding.pointer("/source/providerKey"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    match provider_key {
+        Some(provider_key) => providers
+            .iter()
+            .find(|provider| provider.id == provider_key),
+        None if providers.len() == 1 => providers.first(),
+        None => None,
+    }
 }
 
 async fn ensure_agent_gateway_registered(
@@ -517,12 +553,43 @@ mod tests {
     use serde_json::json;
     use uuid::Uuid;
 
-    use super::{agent_gateway_websocket_url, decode_command, encode_command, sanitize_error};
+    use super::{
+        agent_gateway_websocket_url, decode_command, encode_command, resolve_openclaw_provider,
+        sanitize_error, OpenClawRuntimeProvider,
+    };
     use crate::gateway_frame;
+    use crate::openclaw::Endpoint;
     use crate::protocol::{
         AgentGatewayCommand, AGENT_GATEWAY_HEARTBEAT_EVENT, AGENT_GATEWAY_HELLO_METHOD,
         AGENT_GATEWAY_HELLO_REQUEST_ID, VERSION,
     };
+
+    #[test]
+    fn routes_calls_to_the_provider_named_by_the_binding() {
+        let providers = vec![
+            OpenClawRuntimeProvider {
+                id: "primary".to_string(),
+                endpoint: Endpoint {
+                    host: "127.0.0.1".to_string(),
+                    port: 18789,
+                },
+                token: None,
+            },
+            OpenClawRuntimeProvider {
+                id: "story".to_string(),
+                endpoint: Endpoint {
+                    host: "127.0.0.1".to_string(),
+                    port: 18790,
+                },
+                token: None,
+            },
+        ];
+
+        let selected = resolve_openclaw_provider(&providers, &json!({ "providerKey": "story" }))
+            .expect("story provider must resolve");
+        assert_eq!(selected.id, "story");
+        assert!(resolve_openclaw_provider(&providers, &json!({})).is_none());
+    }
 
     #[test]
     fn builds_agent_gateway_websocket_url_from_http_base() {

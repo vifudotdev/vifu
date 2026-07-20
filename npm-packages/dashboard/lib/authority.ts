@@ -96,11 +96,13 @@ export function createSelfHostedAuthorityAdapter(
   };
 }
 
-export async function loadRuntimeSnapshot(authority: AuthorityAdapter): Promise<RuntimeSnapshot> {
+export async function loadRuntimeSnapshot(authority: AuthorityAdapter, projectSlug?: string): Promise<RuntimeSnapshot> {
   const { capabilities } = authority.status;
   const [projects, profiles, bindings, endpoints, apiKeys, agentGateways, availableAgents, providerAdapters, traces] = await Promise.all([
     capabilities.projects ? authority.deployment.projects() : Promise.resolve([]),
-    capabilities.profiles ? authority.deployment.profiles() : Promise.resolve([]),
+    capabilities.profiles
+      ? (projectSlug ? authority.deployment.projectProfiles(projectSlug) : authority.deployment.profiles())
+      : Promise.resolve([]),
     capabilities.bindings ? authority.deployment.bindings() : Promise.resolve([]),
     capabilities.endpoints ? authority.deployment.endpoints() : Promise.resolve([]),
     capabilities.apiKeys ? authority.deployment.apiKeys() : Promise.resolve([]),

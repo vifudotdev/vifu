@@ -101,14 +101,17 @@ export type ProviderAdapterField = {
 
 export type ProviderAdapter = {
   id: string;
+  category: "local" | "cloud" | "custom" | string;
   name: string;
   description: string;
+  capabilities: ProfileCapabilityKind[];
+  executionModes: Array<"gateway" | "server" | string>;
+  supportsDiscovery: boolean;
   fields: ProviderAdapterField[];
 };
 
-export type ProviderConnection = {
+export type ProviderStockItem = {
   id: string;
-  projectId: string;
   providerKey: string;
   name: string;
   providerType: string;
@@ -137,11 +140,62 @@ export type DeploymentStatus = RuntimeStatus & {
 
 export type AgentProfile = {
   id: string;
+  projectId: string | null;
   slug: string;
   name: string;
   description: string | null;
+  activeVersionId: string | null;
+  archivedAt: string | null;
   createdAt: string;
   updatedAt: string;
+};
+
+export type AgentProfileVersion = {
+  id: string;
+  profileId: string;
+  versionNumber: number;
+  persona: Record<string, unknown>;
+  runtime: Record<string, unknown>;
+  presentation: Record<string, unknown>;
+  source: Record<string, unknown>;
+  contentHash: string;
+  changeSummary: string | null;
+  archivedAt: string | null;
+  createdAt: string;
+};
+
+export type ProfileCapabilityKind = "chat" | "speech" | "transcription" | "realtime" | "tool";
+
+export type AgentProfileCapability = {
+  id: string;
+  profileVersionId: string;
+  kind: ProfileCapabilityKind;
+  providerType: string;
+  providerKey: string;
+  resourceId: string | null;
+  config: Record<string, unknown>;
+  inputSchema: Record<string, unknown>;
+  outputSchema: Record<string, unknown>;
+  createdAt: string;
+};
+
+export type ProfileVersionWithCapabilities = {
+  version: AgentProfileVersion;
+  capabilities: AgentProfileCapability[];
+};
+
+export type AgentProfileRollout = {
+  profileId: string;
+  profileVersionId: string;
+  weightBps: number;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type AgentProfileDetail = {
+  profile: AgentProfile;
+  versions: ProfileVersionWithCapabilities[];
+  rollout: AgentProfileRollout[];
 };
 
 export type AgentBinding = {
@@ -169,10 +223,13 @@ export type AgentEndpoint = {
 
 export type ApiKeyAgentScope =
   | { mode: "all" }
-  | { mode: "selected"; bindingIds: string[] };
+  | { mode: "selected"; profileIds: string[] };
 
 export type ApiKeyPermissions = {
   chatCompletions: "none" | "access";
+  speech: "none" | "access";
+  transcriptions: "none" | "access";
+  realtime: "none" | "access";
   agents: "none" | "read" | "write";
   project: "none" | "read" | "write";
 };
@@ -209,16 +266,53 @@ export type AvailableAgent = {
   metadata: Record<string, unknown>;
 };
 
+export type ProjectAgentCandidate = {
+  gatewayId: string;
+  id: string;
+  name: string;
+  status: string;
+  providerKey: string;
+  providerType: string;
+  metadata: Record<string, unknown>;
+};
+
 export type EndpointTrace = {
   id: string;
   requestId: string;
   endpointId: string | null;
   projectId: string | null;
   gatewaySessionId: string | null;
+  profileId: string | null;
+  profileVersionId: string | null;
+  profileSlug: string | null;
+  profileName: string | null;
+  profileVersionNumber: number | null;
+  operation: string;
+  providerKey: string | null;
+  capabilityKind: string | null;
+  selectionKey: string | null;
   status: string;
   latencyMs: number | null;
   request: Record<string, unknown>;
   response: unknown;
+  error: string | null;
+  createdAt: string;
+  completedAt: string | null;
+};
+
+export type TraceSpan = {
+  id: string;
+  traceId: string;
+  parentSpanId: string | null;
+  name: string;
+  kind: string;
+  status: string;
+  providerKey: string | null;
+  capabilityKind: string | null;
+  durationMs: number | null;
+  inputSummary: unknown;
+  outputSummary: unknown;
+  attributes: Record<string, unknown>;
   error: string | null;
   createdAt: string;
   completedAt: string | null;

@@ -3,6 +3,13 @@
 ARG RUST_VERSION=1.90
 FROM rust:${RUST_VERSION}-bookworm AS build
 
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends clang cmake libclang-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Build whisper.cpp for the portable container CPU baseline, not the build host.
+ENV GGML_NATIVE=OFF
+
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
 COPY crates/vifu-core/Cargo.toml crates/vifu-core/Cargo.toml

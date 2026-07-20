@@ -16,12 +16,10 @@ import {
   X,
 } from "lucide-react";
 import type {
-  AgentBinding,
-  AgentEndpoint,
+  AgentProfile,
   ApiKeyAgentScope,
   ApiKeyPermissions,
   ApiKeyRecord,
-  ProjectCanvas,
   RuntimeProject,
 } from "../lib/runtime-types";
 import { DeleteApiKeyButton, RevokeApiKeyButton } from "./runtime-actions";
@@ -37,38 +35,27 @@ const CODE_TABS: Array<{ id: CodeTab; label: string }> = [
 
 export function ApiIntegrationsView({
   project,
-  projects,
   keys,
-  endpoints,
-  bindings,
-  canvas,
+  profiles,
   browserApiBaseUrl,
 }: {
   project: RuntimeProject;
-  projects: RuntimeProject[];
   keys: ApiKeyRecord[];
-  endpoints: AgentEndpoint[];
-  bindings: AgentBinding[];
-  canvas?: ProjectCanvas;
+  profiles: AgentProfile[];
   browserApiBaseUrl: string;
 }) {
-  const exposedBindingIds = canvas
-    ? new Set(canvas.nodes.filter((node) => node.exposed && node.bindingId).map((node) => node.bindingId as string))
-    : new Set(project.bindingIds);
-  const enabledEndpoints = endpoints.filter((endpoint) => (
-    endpoint.enabled
-    && project.bindingIds.includes(endpoint.bindingId)
-    && exposedBindingIds.has(endpoint.bindingId)
-  ));
-  const agentOptions = projectAgentOptions(project, endpoints, bindings);
+  const agentOptions = profiles
+    .filter((profile) => profile.projectId === project.id && !profile.archivedAt)
+    .map((profile) => ({ profileId: profile.id, name: profile.name, slug: profile.slug }))
+    .sort((left, right) => left.name.localeCompare(right.name));
   const scopedKeys = keys.filter((key) => key.projectId === project.id);
-  const [selectedEndpointId, setSelectedEndpointId] = useState(enabledEndpoints[0]?.id ?? "");
+  const [selectedProfileId, setSelectedProfileId] = useState(agentOptions[0]?.profileId ?? "");
   const [codeTab, setCodeTab] = useState<CodeTab>("curl");
   const [apiKeyFilter, setApiKeyFilter] = useState<ApiKeyFilter>("active");
-  const selectedEndpoint = enabledEndpoints.find((endpoint) => endpoint.id === selectedEndpointId)
-    ?? enabledEndpoints[0];
+  const selectedProfile = agentOptions.find((profile) => profile.profileId === selectedProfileId)
+    ?? agentOptions[0];
   const projectBaseUrl = projectApiBaseUrl(project, browserApiBaseUrl);
-  const code = buildCodeExample(codeTab, projectBaseUrl, selectedEndpoint?.slug ?? "agent-id");
+  const code = buildCodeExample(codeTab, projectBaseUrl, selectedProfile?.slug ?? "agent-id");
   const activeKeys = scopedKeys.filter((key) => !key.revokedAt);
   const revokedKeys = scopedKeys.filter((key) => key.revokedAt);
   const visibleKeys = apiKeyFilter === "active" ? activeKeys : revokedKeys;
@@ -88,20 +75,20 @@ export function ApiIntegrationsView({
         </div>
       </section>
 
-      {selectedEndpoint ? (
+      {selectedProfile ? (
         <div className="api-integration-grid">
           <section className="api-integration-section api-quickstart-section">
             <IntegrationSectionHeading
               title="Quickstart"
               description="Send an OpenAI-compatible chat completion."
-              action={<CopyButton key={`${codeTab}:${selectedEndpoint.id}`} value={code} label="Copy code example" />}
+              action={<CopyButton key={`${codeTab}:${selectedProfile.profileId}`} value={code} label="Copy code example" />}
             />
             <div className="api-quickstart-controls">
               <label>
                 <span>Agent</span>
-                <select value={selectedEndpoint.id} onChange={(event) => setSelectedEndpointId(event.target.value)}>
-                  {enabledEndpoints.map((endpoint) => (
-                    <option key={endpoint.id} value={endpoint.id}>{endpoint.name}</option>
+                <select value={selectedProfile.profileId} onChange={(event) => setSelectedProfileId(event.target.value)}>
+                  {agentOptions.map((profile) => (
+                    <option key={profile.profileId} value={profile.profileId}>{profile.name}</option>
                   ))}
                 </select>
               </label>
@@ -130,20 +117,20 @@ export function ApiIntegrationsView({
           <section className="api-integration-section api-agents-section">
             <IntegrationSectionHeading
               title="Agents"
-              description={`${enabledEndpoints.length} available through this endpoint`}
+              description={`${agentOptions.length} available through this endpoint`}
             />
             <div className="api-agent-list">
-              {enabledEndpoints.map((endpoint) => (
+              {agentOptions.map((profile) => (
                   <button
-                    className={selectedEndpoint?.id === endpoint.id ? "selected" : ""}
+                    className={selectedProfile?.profileId === profile.profileId ? "selected" : ""}
                     type="button"
-                    key={endpoint.id}
-                    onClick={() => setSelectedEndpointId(endpoint.id)}
+                    key={profile.profileId}
+                    onClick={() => setSelectedProfileId(profile.profileId)}
                   >
                     <span className="api-agent-status" aria-label="Enabled" />
                     <span className="api-agent-identity">
-                      <strong>{endpoint.name}</strong>
-                      <code>{endpoint.slug}</code>
+                      <strong>{profile.name}</strong>
+                      <code>{profile.slug}</code>
                     </span>
                     <ArrowRight aria-hidden="true" />
                   </button>
@@ -186,7 +173,7 @@ export function ApiIntegrationsView({
                 <CreateApiKeyDialog
                   project={project}
                   agentOptions={agentOptions}
-                  exampleModel={selectedEndpoint?.slug ?? enabledEndpoints[0]?.slug ?? "agent-slug-or-id"}
+                  exampleModel={selectedProfile?.slug ?? agentOptions[0]?.slug ?? "agent-slug-or-id"}
                   projectBaseUrl={projectBaseUrl}
                 />
               </div>
@@ -221,7 +208,7 @@ export function ApiIntegrationsView({
                         <td>
                           <div className="api-key-row-actions">
                             {!key.revokedAt ? (
-                              <EditApiKeyDialog apiKey={key} projects={projects} endpoints={endpoints} bindings={bindings} />
+                              <EditApiKeyDialog apiKey={key} agentOptions={agentOptions} />
                             ) : null}
                             {key.revokedAt
                               ? <DeleteApiKeyButton id={key.id} name={key.name} />
@@ -269,7 +256,7 @@ function ApiSetupEmpty({ projectSlug }: { projectSlug: string }) {
   return (
     <section className="api-integration-section api-setup-empty">
       <Terminal aria-hidden="true" />
-      <div><strong>Expose an agent to start</strong><span>Agents added in Gameplay become models on this project endpoint.</span></div>
+      <div><strong>Add an agent to start</strong><span>Agents added to the project become models on this endpoint.</span></div>
       <Link className="secondary-button" href={`/project/${projectSlug}/gameplay`}>Open Gameplay<ArrowRight aria-hidden="true" /></Link>
     </section>
   );
@@ -340,7 +327,7 @@ function ApiReferenceDialog({ baseUrl }: { baseUrl: string }) {
 }
 
 type ApiKeyAgentOption = {
-  bindingId: string;
+  profileId: string;
   name: string;
   slug: string;
 };
@@ -360,7 +347,7 @@ function CreateApiKeyDialog({
   const dialogRef = useRef<HTMLDialogElement>(null);
   const [name, setName] = useState("");
   const [scopeMode, setScopeMode] = useState<ApiKeyAgentScope["mode"]>("all");
-  const [selectedBindingIds, setSelectedBindingIds] = useState<string[]>([]);
+  const [selectedProfileIds, setSelectedProfileIds] = useState<string[]>([]);
   const [permissions, setPermissions] = useState<ApiKeyPermissions>(defaultApiKeyPermissions);
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -377,7 +364,7 @@ function CreateApiKeyDialog({
       const payload = await runtimeRequest<{ apiKey?: { key?: string } }>("api-keys", "POST", {
         projectId: project.id,
         name: name.trim() || readableDefaultKeyName(),
-        agentScope: agentScopePayload(scopeMode, selectedBindingIds),
+        agentScope: agentScopePayload(scopeMode, selectedProfileIds),
         permissions,
       });
       const key = payload.apiKey?.key;
@@ -400,7 +387,7 @@ function CreateApiKeyDialog({
   function reset() {
     setName("");
     setScopeMode("all");
-    setSelectedBindingIds([]);
+    setSelectedProfileIds([]);
     setPermissions(defaultApiKeyPermissions());
     setCreatedKey(null);
     setError(null);
@@ -447,21 +434,21 @@ function CreateApiKeyDialog({
 
                 <div className="api-key-scope-note">
                   <strong>Project key</strong>
-                  <span>Each request must provide a <code>model</code> that resolves to an exposed agent in <b>{project.name}</b>.</span>
+                  <span>Each request must provide a <code>model</code> that resolves to an agent in <b>{project.name}</b>.</span>
                 </div>
                 <ApiKeyAgentScopeFields
                   mode={scopeMode}
-                  selectedBindingIds={selectedBindingIds}
+                  selectedProfileIds={selectedProfileIds}
                   options={agentOptions}
                   onModeChange={setScopeMode}
-                  onSelectedBindingIdsChange={setSelectedBindingIds}
+                  onSelectedProfileIdsChange={setSelectedProfileIds}
                 />
                 <ApiKeyPermissionsFields permissions={permissions} onChange={setPermissions} />
                 {error ? <span className="action-message error" role="alert">{error}</span> : null}
               </div>
               <div className="api-dialog-actions">
                 <button className="secondary-button" type="button" onClick={() => dialogRef.current?.close()}>Cancel</button>
-                <button className="primary-button" type="submit" disabled={pending || !name.trim() || (scopeMode === "selected" && selectedBindingIds.length === 0)}>
+                <button className="primary-button" type="submit" disabled={pending || !name.trim() || (scopeMode === "selected" && selectedProfileIds.length === 0)}>
                   <KeyRound aria-hidden="true" />{pending ? "Creating" : "Create key"}
                 </button>
               </div>
@@ -475,33 +462,24 @@ function CreateApiKeyDialog({
 
 function EditApiKeyDialog({
   apiKey,
-  projects,
-  endpoints,
-  bindings,
+  agentOptions,
 }: {
   apiKey: ApiKeyRecord;
-  projects: RuntimeProject[];
-  endpoints: AgentEndpoint[];
-  bindings: AgentBinding[];
+  agentOptions: ApiKeyAgentOption[];
 }) {
   const router = useRouter();
   const dialogRef = useRef<HTMLDialogElement>(null);
   const [name, setName] = useState(apiKey.name);
-  const [projectId, setProjectId] = useState(apiKey.projectId);
   const [scopeMode, setScopeMode] = useState<ApiKeyAgentScope["mode"]>(apiKey.agentScope.mode);
-  const [selectedBindingIds, setSelectedBindingIds] = useState<string[]>(selectedScopeBindingIds(apiKey.agentScope));
+  const [selectedProfileIds, setSelectedProfileIds] = useState<string[]>(selectedScopeProfileIds(apiKey.agentScope));
   const [permissions, setPermissions] = useState<ApiKeyPermissions>(apiKey.permissions);
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const selectedProject = projects.find((project) => project.id === projectId);
-  const agentOptions = selectedProject ? projectAgentOptions(selectedProject, endpoints, bindings) : [];
-  const scopeChanged = projectId !== apiKey.projectId;
 
   function reset() {
     setName(apiKey.name);
-    setProjectId(apiKey.projectId);
     setScopeMode(apiKey.agentScope.mode);
-    setSelectedBindingIds(selectedScopeBindingIds(apiKey.agentScope));
+    setSelectedProfileIds(selectedScopeProfileIds(apiKey.agentScope));
     setPermissions(apiKey.permissions);
     setError(null);
   }
@@ -511,21 +489,14 @@ function EditApiKeyDialog({
     dialogRef.current?.showModal();
   }
 
-  function changeProject(nextProjectId: string) {
-    setProjectId(nextProjectId);
-    setScopeMode("all");
-    setSelectedBindingIds([]);
-  }
-
   async function save(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setPending(true);
     setError(null);
     try {
       await runtimeRequest(`api-keys/${apiKey.id}`, "PATCH", {
-        projectId,
         name: name.trim(),
-        agentScope: agentScopePayload(scopeMode, selectedBindingIds),
+        agentScope: agentScopePayload(scopeMode, selectedProfileIds),
         permissions,
       });
       dialogRef.current?.close();
@@ -560,31 +531,23 @@ function EditApiKeyDialog({
                   autoFocus
                 />
               </label>
-              <label>
-                <span>Project scope</span>
-                <select name="projectId" value={projectId} onChange={(event) => changeProject(event.target.value)}>
-                  {projects.map((project) => <option value={project.id} key={project.id}>{project.name}</option>)}
-                </select>
-              </label>
               <div className="api-key-scope-note">
-                <strong>{scopeChanged ? `Move access to ${selectedProject?.name ?? "this project"}` : `Scoped to ${selectedProject?.name ?? "this project"}`}</strong>
-                <span>{scopeChanged
-                  ? "Saving moves this key to the selected project. Its agent access has been reset so it cannot retain bindings from the previous project."
-                  : "Choose whether this key follows every exposed agent or only an explicit set."}</span>
+                <strong>Project key</strong>
+                <span>Choose whether this key follows every agent or only an explicit set in this project.</span>
               </div>
               <ApiKeyAgentScopeFields
                 mode={scopeMode}
-                selectedBindingIds={selectedBindingIds}
+                selectedProfileIds={selectedProfileIds}
                 options={agentOptions}
                 onModeChange={setScopeMode}
-                onSelectedBindingIdsChange={setSelectedBindingIds}
+                onSelectedProfileIdsChange={setSelectedProfileIds}
               />
               <ApiKeyPermissionsFields permissions={permissions} onChange={setPermissions} />
               {error ? <span className="action-message error" role="alert">{error}</span> : null}
             </div>
             <div className="api-dialog-actions">
               <button className="secondary-button" type="button" onClick={() => dialogRef.current?.close()}>Cancel</button>
-              <button className="primary-button" type="submit" disabled={pending || !name.trim() || !projectId || (scopeMode === "selected" && selectedBindingIds.length === 0)}>
+              <button className="primary-button" type="submit" disabled={pending || !name.trim() || (scopeMode === "selected" && selectedProfileIds.length === 0)}>
                 <Check aria-hidden="true" />{pending ? "Saving" : "Save changes"}
               </button>
             </div>
@@ -597,16 +560,16 @@ function EditApiKeyDialog({
 
 function ApiKeyAgentScopeFields({
   mode,
-  selectedBindingIds,
+  selectedProfileIds,
   options,
   onModeChange,
-  onSelectedBindingIdsChange,
+  onSelectedProfileIdsChange,
 }: {
   mode: ApiKeyAgentScope["mode"];
-  selectedBindingIds: string[];
+  selectedProfileIds: string[];
   options: ApiKeyAgentOption[];
   onModeChange: (mode: ApiKeyAgentScope["mode"]) => void;
-  onSelectedBindingIdsChange: (bindingIds: string[]) => void;
+  onSelectedProfileIdsChange: (profileIds: string[]) => void;
 }) {
   const [query, setQuery] = useState("");
   const normalizedQuery = query.trim().toLocaleLowerCase();
@@ -614,10 +577,10 @@ function ApiKeyAgentScopeFields({
     ? options.filter((option) => `${option.name} ${option.slug}`.toLocaleLowerCase().includes(normalizedQuery))
     : options;
 
-  function toggleBinding(bindingId: string) {
-    onSelectedBindingIdsChange(selectedBindingIds.includes(bindingId)
-      ? selectedBindingIds.filter((id) => id !== bindingId)
-      : [...selectedBindingIds, bindingId]);
+  function toggleProfile(profileId: string) {
+    onSelectedProfileIdsChange(selectedProfileIds.includes(profileId)
+      ? selectedProfileIds.filter((id) => id !== profileId)
+      : [...selectedProfileIds, profileId]);
   }
 
   return (
@@ -629,7 +592,7 @@ function ApiKeyAgentScopeFields({
       </div>
       <p className="api-key-agent-access-help">
         {mode === "all"
-          ? "Includes agents exposed now and agents exposed later in this project."
+          ? "Includes current agents and agents added later in this project."
           : "Only the selected project bindings can be invoked with this key."}
       </p>
       {mode === "selected" ? (
@@ -640,17 +603,17 @@ function ApiKeyAgentScopeFields({
           </label>
           <div className="api-key-agent-options">
             {visibleOptions.length > 0 ? visibleOptions.map((option) => (
-              <label key={option.bindingId}>
+              <label key={option.profileId}>
                 <input
                   type="checkbox"
-                  checked={selectedBindingIds.includes(option.bindingId)}
-                  onChange={() => toggleBinding(option.bindingId)}
+                  checked={selectedProfileIds.includes(option.profileId)}
+                  onChange={() => toggleProfile(option.profileId)}
                 />
                 <span><strong>{option.name}</strong><code>{option.slug}</code></span>
               </label>
             )) : <p>{options.length > 0 ? "No matching agents." : "This project has no agent bindings yet."}</p>}
           </div>
-          <span className="api-key-agent-count">{selectedBindingIds.length} selected</span>
+          <span className="api-key-agent-count">{selectedProfileIds.length} selected</span>
         </div>
       ) : null}
     </fieldset>
@@ -675,6 +638,33 @@ function ApiKeyPermissionsFields({
           { value: "access", label: "Access" },
         ]}
         onChange={(chatCompletions) => onChange({ ...permissions, chatCompletions })}
+      />
+      <ApiKeyPermissionRow
+        label="Speech"
+        value={permissions.speech}
+        options={[
+          { value: "none", label: "No access" },
+          { value: "access", label: "Access" },
+        ]}
+        onChange={(speech) => onChange({ ...permissions, speech })}
+      />
+      <ApiKeyPermissionRow
+        label="Transcriptions"
+        value={permissions.transcriptions}
+        options={[
+          { value: "none", label: "No access" },
+          { value: "access", label: "Access" },
+        ]}
+        onChange={(transcriptions) => onChange({ ...permissions, transcriptions })}
+      />
+      <ApiKeyPermissionRow
+        label="Realtime"
+        value={permissions.realtime}
+        options={[
+          { value: "none", label: "No access" },
+          { value: "access", label: "Access" },
+        ]}
+        onChange={(realtime) => onChange({ ...permissions, realtime })}
       />
       <ApiKeyPermissionRow
         label="Agents"
@@ -808,36 +798,20 @@ function readableDefaultKeyName(): string {
   return `Project key - ${date}`;
 }
 
-function projectAgentOptions(
-  project: RuntimeProject,
-  endpoints: AgentEndpoint[],
-  bindings: AgentBinding[],
-): ApiKeyAgentOption[] {
-  const projectBindings = new Set(project.bindingIds);
-  return bindings
-    .filter((binding) => projectBindings.has(binding.id))
-    .map((binding) => {
-      const endpoint = endpoints.find((item) => item.bindingId === binding.id);
-      return {
-        bindingId: binding.id,
-        name: endpoint?.name ?? binding.agentId,
-        slug: endpoint?.slug ?? binding.agentId,
-      };
-    })
-    .sort((left, right) => left.name.localeCompare(right.name));
+function agentScopePayload(mode: ApiKeyAgentScope["mode"], profileIds: string[]): ApiKeyAgentScope {
+  return mode === "all" ? { mode: "all" } : { mode: "selected", profileIds };
 }
 
-function agentScopePayload(mode: ApiKeyAgentScope["mode"], bindingIds: string[]): ApiKeyAgentScope {
-  return mode === "all" ? { mode: "all" } : { mode: "selected", bindingIds };
-}
-
-function selectedScopeBindingIds(scope: ApiKeyAgentScope): string[] {
-  return scope.mode === "selected" ? scope.bindingIds : [];
+function selectedScopeProfileIds(scope: ApiKeyAgentScope): string[] {
+  return scope.mode === "selected" ? scope.profileIds : [];
 }
 
 function defaultApiKeyPermissions(): ApiKeyPermissions {
   return {
     chatCompletions: "access",
+    speech: "none",
+    transcriptions: "none",
+    realtime: "none",
     agents: "none",
     project: "none",
   };
@@ -846,6 +820,9 @@ function defaultApiKeyPermissions(): ApiKeyPermissions {
 function formatPermissions(permissions: ApiKeyPermissions): string {
   const enabled: string[] = [];
   if (permissions.chatCompletions === "access") enabled.push("Chat completions");
+  if (permissions.speech === "access") enabled.push("Speech");
+  if (permissions.transcriptions === "access") enabled.push("Transcriptions");
+  if (permissions.realtime === "access") enabled.push("Realtime");
   if (permissions.agents !== "none") enabled.push(`Agents ${permissions.agents}`);
   if (permissions.project !== "none") enabled.push(`Project ${permissions.project}`);
   return enabled.length > 0 ? enabled.join(", ") : "No access";
@@ -853,10 +830,10 @@ function formatPermissions(permissions: ApiKeyPermissions): string {
 
 function formatAgentScope(scope: ApiKeyAgentScope, options: ApiKeyAgentOption[]): string {
   if (scope.mode === "all") return "All agents";
-  if (scope.bindingIds.length === 1) {
-    return options.find((option) => option.bindingId === scope.bindingIds[0])?.name ?? "1 selected agent";
+  if (scope.profileIds.length === 1) {
+    return options.find((option) => option.profileId === scope.profileIds[0])?.name ?? "1 selected agent";
   }
-  return `${scope.bindingIds.length} selected agents`;
+  return `${scope.profileIds.length} selected agents`;
 }
 
 function formatDate(value: string): string {

@@ -5,7 +5,7 @@ import { loadDashboardData } from "../../../../lib/dashboard-data";
 
 export const dynamic = "force-dynamic";
 
-const VIEWS = new Set<DashboardSection>(["health", "gameplay", "api", "logs", "settings"]);
+const VIEWS = new Set<DashboardSection>(["health", "agents", "providers", "gameplay", "api", "logs", "settings"]);
 
 export default async function ProjectViewPage({ params }: {
   params: Promise<{ projectSlug: string; view: string }>;

@@ -4,6 +4,7 @@ pub mod config;
 pub mod db;
 pub mod error;
 pub mod models;
+mod openclaw_device;
 pub mod relay;
 pub mod websocket;
 
@@ -131,6 +132,31 @@ pub fn app(state: AppState) -> Router {
             delete(api::delete_canvas_edge),
         )
         .route("/v1/provider-adapters", get(api::list_provider_adapters))
+        .route("/v1/providers", get(api::list_provider_stock))
+        .route(
+            "/v1/providers/{provider_key}",
+            put(api::upsert_provider_stock).delete(api::delete_provider_stock),
+        )
+        .route(
+            "/v1/providers/{provider_key}/test",
+            post(api::test_provider_stock),
+        )
+        .route(
+            "/v1/project/{slug}/providers",
+            get(api::list_project_providers),
+        )
+        .route(
+            "/v1/project/{slug}/providers/{provider_key}",
+            put(api::assign_project_provider).delete(api::unassign_project_provider),
+        )
+        .route(
+            "/v1/project/{slug}/agent-candidates",
+            get(api::list_project_agent_candidates),
+        )
+        .route(
+            "/v1/project/{slug}/agents/import",
+            post(api::import_project_agent),
+        )
         .route(
             "/v1/project/{slug}/provider-connections",
             get(api::list_provider_connections),
@@ -174,6 +200,40 @@ pub fn app(state: AppState) -> Router {
                 .delete(api::delete_profile),
         )
         .route(
+            "/v1/project/{slug}/profiles",
+            get(api::list_project_profiles).post(api::create_project_profile),
+        )
+        .route(
+            "/v1/project/{slug}/profiles/{id}",
+            get(api::get_project_profile)
+                .patch(api::update_project_profile)
+                .delete(api::archive_project_profile),
+        )
+        .route(
+            "/v1/project/{slug}/profiles/{id}/versions",
+            post(api::create_project_profile_version),
+        )
+        .route(
+            "/v1/project/{slug}/profiles/{id}/source/sync",
+            post(api::sync_project_profile_source),
+        )
+        .route(
+            "/v1/project/{slug}/profiles/{id}/versions/{version_id}/activate",
+            post(api::activate_project_profile_version),
+        )
+        .route(
+            "/v1/project/{slug}/profiles/{id}/versions/{version_id}/archive",
+            post(api::archive_project_profile_version),
+        )
+        .route(
+            "/v1/project/{slug}/profiles/{id}/rollout",
+            put(api::set_project_profile_rollout),
+        )
+        .route(
+            "/v1/project/{slug}/profiles/{id}/test",
+            post(api::test_project_profile),
+        )
+        .route(
             "/v1/bindings",
             get(api::list_bindings).post(api::create_binding),
         )
@@ -201,6 +261,20 @@ pub fn app(state: AppState) -> Router {
             "/{project_slug}/v1/chat/completions",
             post(api::create_project_chat_completion),
         )
+        .route("/{project_slug}/v1/agents", get(api::list_project_agents))
+        .route(
+            "/{project_slug}/v1/audio/speech",
+            post(api::create_project_speech),
+        )
+        .route(
+            "/{project_slug}/v1/audio/transcriptions",
+            post(api::create_project_transcription),
+        )
+        .route(
+            "/{project_slug}/v1/realtime/sessions",
+            post(api::create_realtime_session),
+        )
+        .route("/{project_slug}/v1/realtime", get(api::connect_realtime))
         .route("/v1/models", get(api::list_openai_models))
         .route("/v1/chat/completions", post(api::create_chat_completion))
         .route(
@@ -223,12 +297,13 @@ pub fn app(state: AppState) -> Router {
             post(api::revoke_agent_gateway),
         )
         .route("/v1/traces", get(api::list_traces))
+        .route("/v1/traces/{id}/spans", get(api::list_trace_spans))
         .route("/v1/agent-gateway/connect", get(websocket::upgrade))
         .fallback(api::fallback)
         .layer(PropagateRequestIdLayer::new(request_id_header.clone()))
         .layer(TraceLayer::new_for_http())
         .layer(SetRequestIdLayer::new(request_id_header, MakeRequestUuid))
-        .layer(RequestBodyLimitLayer::new(1024 * 1024))
+        .layer(RequestBodyLimitLayer::new(32 * 1024 * 1024))
         .layer(cors)
         .layer(CatchPanicLayer::new())
         .with_state(state)
@@ -312,5 +387,55 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(delete.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn project_profile_delete_route_is_registered() {
+        let config = Config::from_env().unwrap();
+        let pool = PgPoolOptions::new()
+            .connect_lazy("postgres://vifu@127.0.0.1:1/vifu")
+            .unwrap();
+        let profile_id = uuid::Uuid::new_v4();
+        let response = app(state(config, pool))
+            .oneshot(
+                Request::delete(format!("/v1/project/test/profiles/{profile_id}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn project_agent_and_provider_routes_require_admin_authority() {
+        let config = Config::from_env().unwrap();
+        let pool = PgPoolOptions::new()
+            .connect_lazy("postgres://vifu@127.0.0.1:1/vifu")
+            .unwrap();
+        let requests = [
+            Request::get("/v1/providers").body(Body::empty()).unwrap(),
+            Request::get("/v1/project/test/providers")
+                .body(Body::empty())
+                .unwrap(),
+            Request::get("/v1/project/test/agent-candidates")
+                .body(Body::empty())
+                .unwrap(),
+            Request::post("/v1/project/test/agents/import")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"gatewayId":"gateway","agentId":"guide","providerKey":"openclaw"}"#,
+                ))
+                .unwrap(),
+        ];
+
+        for request in requests {
+            let response = app(state(config.clone(), pool.clone()))
+                .oneshot(request)
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        }
     }
 }

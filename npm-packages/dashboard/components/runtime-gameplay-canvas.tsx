@@ -1,11 +1,12 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import {
   Background,
   Controls,
   Handle,
+  MarkerType,
   Position,
   ReactFlow,
   ReactFlowProvider,
@@ -16,18 +17,19 @@ import {
   useNodesState,
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
-import { Download, Plus, Upload, X } from "lucide-react";
+import { AlertCircle, ArrowRight, Bot, CheckCircle2, Gamepad2, Plus, RadioTower, X } from "lucide-react";
 import type {
   AgentBinding,
-  AgentEndpoint,
   AgentGateway,
   AgentProfile,
-  AvailableAgent,
   EndpointTrace,
   ProjectCanvas,
   ProjectCanvasNode,
+  ProviderAdapter,
+  ProviderStockItem,
   RuntimeProject,
 } from "../lib/runtime-types";
+import { RuntimeProfileWorkbench } from "./runtime-profile-workbench";
 
 type RuntimeNodeData = {
   title: string;
@@ -35,7 +37,7 @@ type RuntimeNodeData = {
   kind: "endpoint" | "agent" | "gateway";
   status: "ready" | "pending" | "off";
   meta: string;
-  exposed?: boolean;
+  detail?: string;
   canvasNode?: ProjectCanvasNode;
 };
 
@@ -45,9 +47,9 @@ type GameplayCanvasProps = {
   profiles: AgentProfile[];
   bindings: AgentBinding[];
   agentGateways: AgentGateway[];
-  availableAgents: AvailableAgent[];
-  endpoints: AgentEndpoint[];
   traces: EndpointTrace[];
+  providerAdapters: ProviderAdapter[];
+  providerConnections: ProviderStockItem[];
   browserApiBaseUrl: string;
 };
 
@@ -69,21 +71,18 @@ function RuntimeGameplayCanvasInner({
   profiles,
   bindings,
   agentGateways,
-  availableAgents,
-  endpoints,
   traces,
+  providerAdapters,
+  providerConnections,
   browserApiBaseUrl,
 }: GameplayCanvasProps) {
   const graph = useMemo(
-    () => buildGraph({ project, canvas, profiles, bindings, agentGateways, availableAgents, endpoints, browserApiBaseUrl }),
-    [project, canvas, profiles, bindings, agentGateways, availableAgents, endpoints, browserApiBaseUrl],
+    () => buildGraph({ project, canvas, profiles, bindings, agentGateways, providerAdapters, providerConnections, browserApiBaseUrl }),
+    [project, canvas, profiles, bindings, agentGateways, providerAdapters, providerConnections, browserApiBaseUrl],
   );
   const [nodes, setNodes, onNodesChange] = useNodesState<Node<RuntimeNodeData>>(graph.nodes);
   const [edges, setEdges, onEdgesChange] = useEdgesState(graph.edges);
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
-  const [actionError, setActionError] = useState<string | null>(null);
-  const [pendingResource, setPendingResource] = useState<string | null>(null);
-  const router = useRouter();
 
   useEffect(() => {
     setNodes(graph.nodes);
@@ -92,7 +91,14 @@ function RuntimeGameplayCanvasInner({
   }, [graph.nodes, graph.edges, setEdges, setNodes]);
 
   const selected = selectedNodeId ? nodes.find((node) => node.id === selectedNodeId) ?? null : null;
+  const selectedCanvasNode = selected?.data.canvasNode;
+  const selectedProfile = selectedCanvasNode?.profileId
+    ? profiles.find((profile) => profile.id === selectedCanvasNode.profileId) ?? null
+    : null;
   const latestFailure = traces.find((trace) => trace.status !== "completed" && trace.status !== "pending");
+  const gameAgentCount = canvas?.nodes.length ?? 0;
+  const readyAgentCount = graph.nodes.filter((node) => node.data.kind === "agent" && node.data.status === "ready").length;
+  const onlineGatewayCount = connectedGatewayCount(agentGateways);
 
   const onNodeDragStop = useCallback(async (_event: unknown, node: Node<RuntimeNodeData>) => {
     const canvasNode = node.data.canvasNode;
@@ -102,54 +108,30 @@ function RuntimeGameplayCanvasInner({
     });
   }, [project.slug]);
 
-  const addResource = useCallback(async (agent: AvailableAgent) => {
-    setActionError(null);
-    setPendingResource(`${agent.gatewayId}/${agent.id}`);
-    try {
-      await runtimeRequest(`project/${project.slug}/canvas/nodes`, "POST", {
-        kind: "agent",
-        gatewayId: agent.gatewayId,
-        resourceId: agent.id,
-        position: nextPalettePosition(nodes),
-        config: {
-          source: "detected-resource",
-          provider: "openclaw",
-          agentName: agent.name,
-          metadata: agent.metadata,
-        },
-        inputs: {},
-        outputs: {},
-        exposed: true,
-      });
-      router.refresh();
-    } catch (error) {
-      setActionError(errorMessage(error));
-    } finally {
-      setPendingResource(null);
-    }
-  }, [nodes, project.slug, router]);
-
   return (
-    <section className="gameplay-workspace">
+    <section className={`gameplay-workspace ${selectedProfile ? "has-profile-workbench" : ""}`}>
       <div className="gameplay-canvas">
-        <div className="canvas-tool-panel" aria-label="Canvas tools">
-          {graph.palette.length === 0 ? (
-            <button type="button" disabled title="All detected agents are on this canvas" aria-label="All detected agents are on this canvas">
-              <Plus aria-hidden="true" />
-            </button>
-          ) : (
-            graph.palette.map((agent) => {
-              const key = `${agent.gatewayId}/${agent.id}`;
-              return (
-                <button key={key} type="button" onClick={() => addResource(agent)} disabled={pendingResource === key} title={`Add ${agent.name}`} aria-label={`Add ${agent.name}`}>
-                  <Plus aria-hidden="true" />
-                  <span className="sr-only">Add {agent.name}</span>
-                </button>
-              );
-            })
-          )}
-        </div>
-        {actionError ? <p className="canvas-action-error" role="alert">{actionError}</p> : null}
+        <header className="canvas-command-bar">
+          <div className="canvas-runtime-path" aria-label="Runtime path">
+            <span><Gamepad2 aria-hidden="true" />Game API</span>
+            <ArrowRight aria-hidden="true" />
+            <span><Bot aria-hidden="true" />Agents</span>
+            <ArrowRight aria-hidden="true" />
+            <span><RadioTower aria-hidden="true" />Providers</span>
+          </div>
+          <div className="canvas-command-actions">
+            <span className={`canvas-ready-count ${readyAgentCount < gameAgentCount ? "warning" : ""}`}>
+              {readyAgentCount < gameAgentCount ? <AlertCircle aria-hidden="true" /> : <CheckCircle2 aria-hidden="true" />}
+              {gameAgentCount > 0 ? `${readyAgentCount}/${gameAgentCount} ready` : "No agents yet"}
+            </span>
+            <span className="canvas-provider-count">{onlineGatewayCount} connected</span>
+            <AddProfileDialog
+              project={project}
+              availableProfiles={graph.profilePalette}
+              nextPosition={() => nextPalettePosition(nodes)}
+            />
+          </div>
+        </header>
         <ReactFlow
           nodes={nodes}
           edges={edges}
@@ -160,7 +142,7 @@ function RuntimeGameplayCanvasInner({
           onPaneClick={() => setSelectedNodeId(null)}
           onNodeDragStop={onNodeDragStop}
           fitView
-          fitViewOptions={{ padding: 0.16, minZoom: 0.42, maxZoom: 1 }}
+          fitViewOptions={{ padding: 0.12, minZoom: 0.68, maxZoom: 0.92 }}
           minZoom={0.25}
           maxZoom={1.8}
           nodesConnectable={false}
@@ -172,118 +154,138 @@ function RuntimeGameplayCanvasInner({
         </ReactFlow>
         {nodes.length <= 2 ? (
           <div className="canvas-empty-hint">
-            <strong>Build this project from agent nodes.</strong>
-            <span>Start Vifu Gateway or add detected agents from the resource palette.</span>
+            <strong>Place a project agent</strong>
+            <span>Choose an Agent to include in this gameplay layout.</span>
           </div>
         ) : null}
       </div>
 
-      <NodeInspector
-        project={project}
-        selected={selected}
-        latestFailure={latestFailure}
-        onClose={() => setSelectedNodeId(null)}
-      />
+      {selectedProfile && selectedCanvasNode ? (
+        <RuntimeProfileWorkbench
+          project={project}
+          profile={selectedProfile}
+          providerAdapters={providerAdapters}
+          providerConnections={providerConnections}
+          onClose={() => setSelectedNodeId(null)}
+        />
+      ) : (
+        <NodeInspector selected={selected} latestFailure={latestFailure} onClose={() => setSelectedNodeId(null)} />
+      )}
     </section>
   );
 }
 
 function RuntimeNode({ data }: NodeProps<Node<RuntimeNodeData>>) {
+  const KindIcon = data.kind === "endpoint" ? Gamepad2 : data.kind === "gateway" ? RadioTower : Bot;
+  const statusLabel = data.status === "ready" ? "Ready" : data.status === "pending" ? "Setup needed" : "Offline";
   return (
     <div className={`gameplay-node ${data.kind} ${data.status}`}>
       <Handle type="target" position={Position.Left} />
       <div className="gameplay-node-header">
-        <span>{data.kind}</span>
-        {data.exposed !== undefined ? <small>{data.exposed ? "Exposed" : "Hidden"}</small> : null}
+        <span><KindIcon aria-hidden="true" />{nodeKindLabel(data.kind)}</span>
+        <small className={`gameplay-node-status ${data.status}`}>
+          {data.status === "off" ? <AlertCircle aria-hidden="true" /> : <CheckCircle2 aria-hidden="true" />}
+          {statusLabel}
+        </small>
       </div>
-      <strong>{data.title}</strong>
-      <p>{data.subtitle}</p>
-      <code>{data.meta}</code>
+      <div className="gameplay-node-identity">
+        {data.kind === "agent" ? <span className="gameplay-agent-mark" aria-hidden="true">{agentInitials(data.title)}</span> : null}
+        <div><strong>{data.title}</strong><p>{data.subtitle}</p></div>
+      </div>
+      <footer>
+        <span>{data.meta}</span>
+      </footer>
       <Handle type="source" position={Position.Right} />
     </div>
   );
 }
 
-function NodeInspector({
+function AddProfileDialog({
   project,
+  availableProfiles,
+  nextPosition,
+}: {
+  project: RuntimeProject;
+  availableProfiles: AgentProfile[];
+  nextPosition: () => { x: number; y: number };
+}) {
+  const dialogRef = useRef<HTMLDialogElement>(null);
+  const [pending, setPending] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const router = useRouter();
+
+  function open() {
+    setError(null);
+    dialogRef.current?.showModal();
+  }
+
+  async function addExistingProfile(profile: AgentProfile) {
+    setPending(true);
+    setError(null);
+    try {
+      await runtimeRequest(`project/${project.slug}/canvas/nodes`, "POST", {
+        kind: "agent",
+        profileId: profile.id,
+        position: nextPosition(),
+        config: { source: "profile" },
+        inputs: {},
+        outputs: {},
+      });
+      dialogRef.current?.close();
+      router.refresh();
+    } catch (nextError) {
+      setError(errorMessage(nextError));
+    } finally {
+      setPending(false);
+    }
+  }
+
+  return (
+    <>
+      <button className="canvas-add-agent-button" type="button" onClick={open}><Plus aria-hidden="true" /><span>Add agent</span></button>
+      <dialog
+        className="canvas-add-dialog"
+        ref={dialogRef}
+        onClick={(event) => { if (event.target === event.currentTarget) event.currentTarget.close(); }}
+      >
+        <div className="canvas-add-dialog-shell">
+          <header>
+            <div><span>Project Agents</span><h2>Place an Agent</h2></div>
+            <button className="icon-button" type="button" onClick={() => dialogRef.current?.close()} title="Close" aria-label="Close"><X aria-hidden="true" /></button>
+          </header>
+          <div className="canvas-detected-list">
+            {availableProfiles.map((profile) => (
+              <button type="button" key={profile.id} disabled={pending} onClick={() => void addExistingProfile(profile)}>
+                <span><strong>{profile.name}</strong><code>{profile.slug}</code></span>
+                <small>Project Agent</small>
+                <Plus aria-hidden="true" />
+              </button>
+            ))}
+            {availableProfiles.length === 0 ? (
+              <div className="canvas-dialog-empty">
+                <Bot aria-hidden="true" />
+                <strong>No unplaced Agents</strong>
+                <span>Add or detect Agents from the project library first.</span>
+                <button className="secondary-button" type="button" onClick={() => router.push(`/project/${project.slug}/agents`)}>Open Agents</button>
+              </div>
+            ) : null}
+          </div>
+          {error ? <p className="inline-error" role="alert">{error}</p> : null}
+        </div>
+      </dialog>
+    </>
+  );
+}
+
+function NodeInspector({
   selected,
   latestFailure,
   onClose,
 }: {
-  project: RuntimeProject;
   selected: Node<RuntimeNodeData> | null;
   latestFailure?: EndpointTrace;
   onClose: () => void;
 }) {
-  const [pending, setPending] = useState(false);
-  const [message, setMessage] = useState<string | null>(null);
-  const router = useRouter();
-  const canvasNode = selected?.data.canvasNode;
-
-  async function patchNode(body: Record<string, unknown>) {
-    if (!canvasNode) return;
-    setPending(true);
-    setMessage(null);
-    try {
-      await runtimeRequest(`project/${project.slug}/canvas/nodes/${canvasNode.id}`, "PATCH", body);
-      router.refresh();
-    } catch (error) {
-      setMessage(errorMessage(error));
-    } finally {
-      setPending(false);
-    }
-  }
-
-  async function removeNode() {
-    if (!canvasNode || !window.confirm(`Remove ${selected?.data.title ?? "node"} from this project?`)) return;
-    setPending(true);
-    setMessage(null);
-    try {
-      await runtimeRequest(`project/${project.slug}/canvas/nodes/${canvasNode.id}`, "DELETE");
-      router.refresh();
-    } catch (error) {
-      setMessage(errorMessage(error));
-    } finally {
-      setPending(false);
-    }
-  }
-
-  async function importProfile(file: File | null) {
-    if (!file || !canvasNode) return;
-    try {
-      const text = await file.text();
-      const profile = JSON.parse(text) as unknown;
-      await patchNode({ config: { ...canvasNode.config, importedProfile: profile } });
-    } catch (error) {
-      setMessage(errorMessage(error));
-    }
-  }
-
-  function exportProfile() {
-    if (!canvasNode || !selected) return;
-    const profile = {
-      profile: {
-        id: canvasNode.profileId,
-        name: selected.data.title,
-        kind: canvasNode.kind,
-        provider: "openclaw",
-        gatewayId: canvasNode.gatewayId,
-        resourceId: canvasNode.resourceId,
-        inputs: canvasNode.inputs,
-        outputs: canvasNode.outputs,
-        capabilities: canvasNode.config.capabilities ?? [],
-        metadata: canvasNode.config,
-      },
-    };
-    const blob = new Blob([JSON.stringify(profile, null, 2)], { type: "application/json" });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement("a");
-    link.href = url;
-    link.download = `${slugify(selected.data.title)}.vifu-profile.json`;
-    link.click();
-    URL.revokeObjectURL(url);
-  }
-
   if (!selected) {
     return latestFailure ? <p className="inspector-alert floating-alert">Latest issue: {latestFailure.error ?? latestFailure.status}</p> : null;
   }
@@ -292,32 +294,17 @@ function NodeInspector({
     <aside className="node-inspector">
       <header>
         <div>
-          <span>{selected.data.kind}</span>
+          <span>{nodeKindLabel(selected.data.kind)}</span>
           <strong>{selected.data.title}</strong>
         </div>
         <button type="button" onClick={onClose} aria-label="Close inspector"><X aria-hidden="true" /></button>
       </header>
       <dl>
-        <div><dt>Status</dt><dd>{selected.data.status}</dd></div>
-        <div><dt>Resource</dt><dd>{selected.data.meta}</dd></div>
-        <div><dt>Details</dt><dd>{selected.data.subtitle}</dd></div>
+        <div><dt>Status</dt><dd>{selected.data.status === "ready" ? "Ready" : selected.data.status === "pending" ? "Setup needed" : "Offline"}</dd></div>
+        <div><dt>{selected.data.kind === "endpoint" ? "Agents" : "Connection"}</dt><dd>{selected.data.meta}</dd></div>
+        <div><dt>{selected.data.kind === "endpoint" ? "Address" : "Runtime"}</dt><dd>{selected.data.detail ?? selected.data.subtitle}</dd></div>
       </dl>
-      {canvasNode ? (
-        <div className="inspector-actions">
-          <button type="button" className="secondary-button" disabled={pending} onClick={() => patchNode({ exposed: !canvasNode.exposed })}>
-            {canvasNode.exposed ? "Hide from endpoint" : "Expose to endpoint"}
-          </button>
-          <label className="file-action">
-            <Upload aria-hidden="true" /> Import profile
-            <input type="file" accept="application/json" onChange={(event) => importProfile(event.currentTarget.files?.[0] ?? null)} />
-          </label>
-          <button type="button" className="secondary-button" onClick={exportProfile}><Download aria-hidden="true" /> Export profile</button>
-          <button type="button" className="danger-text-button" disabled={pending} onClick={removeNode}>Remove node</button>
-          {message ? <p className="inline-error" role="alert">{message}</p> : null}
-        </div>
-      ) : (
-        <p>This node is generated from the project runtime and cannot be edited directly.</p>
-      )}
+      <p>{selected.data.kind === "endpoint" ? "Every active project Agent is available through this API." : "This provider supplies the Agents connected to the project."}</p>
     </aside>
   );
 }
@@ -328,32 +315,42 @@ function buildGraph({
   profiles,
   bindings,
   agentGateways,
-  availableAgents,
-  endpoints,
+  providerConnections,
   browserApiBaseUrl,
 }: Omit<GameplayCanvasProps, "traces">): {
   nodes: Node<RuntimeNodeData>[];
   edges: Edge[];
-  palette: AvailableAgent[];
+  profilePalette: AgentProfile[];
 } {
   const profileById = new Map(profiles.map((profile) => [profile.id, profile]));
   const bindingById = new Map(bindings.map((binding) => [binding.id, binding]));
   const gatewayById = gatewayStatusMap(agentGateways);
   const canvasNodes = canvas?.nodes ?? [];
-  const primaryEndpoint = endpoints[0];
-  const resourceKeys = new Set(canvasNodes.map((node) => `${node.gatewayId ?? ""}/${node.resourceId ?? ""}`));
-  const palette = availableAgents.filter((agent) => agent.status === "connected" && !resourceKeys.has(`${agent.gatewayId}/${agent.id}`));
+  const agentStatusByNodeId = new Map<string, RuntimeNodeData["status"]>();
+  const providerNodeIdByCanvasNodeId = new Map<string, string>();
+  const providerGroups = new Map<string, {
+    provider?: ProviderStockItem;
+    gatewayIds: Set<string>;
+    canvasNodeIds: string[];
+  }>();
+  const canvasProfileIds = new Set(canvasNodes.flatMap((node) => node.profileId ? [node.profileId] : []));
+  const profilePalette = profiles.filter((profile) => (
+    profile.projectId === project.id
+    && !profile.archivedAt
+    && !canvasProfileIds.has(profile.id)
+  ));
   const nodes: Node<RuntimeNodeData>[] = [
     {
       id: `endpoint:${project.id}`,
       type: "runtime",
       position: { x: 20, y: 230 },
       data: {
-        title: project.name,
-        subtitle: "Project endpoint",
+        title: "Game API",
+        subtitle: project.name,
         kind: "endpoint",
         status: project.enabled ? "ready" : "off",
-        meta: primaryEndpoint ? projectChatCompletionsUrl(project, browserApiBaseUrl) : "No endpoint yet",
+        meta: `${profiles.length} agent${profiles.length === 1 ? "" : "s"} available`,
+        detail: projectChatCompletionsUrl(project, browserApiBaseUrl),
       },
       draggable: false,
     },
@@ -363,57 +360,83 @@ function buildGraph({
     const profile = node.profileId ? profileById.get(node.profileId) : null;
     const binding = node.bindingId ? bindingById.get(node.bindingId) : null;
     const gateway = node.gatewayId ? gatewayById.get(node.gatewayId) : null;
+    const provider = providerForCanvasNode(node, providerConnections);
+    const status: RuntimeNodeData["status"] = gateway?.status === "connected" || provider?.status === "online"
+      ? "ready"
+      : profile?.activeVersionId
+        ? "pending"
+        : "off";
+    agentStatusByNodeId.set(node.id, status);
+    const providerNodeId = graphProviderNodeId(node, provider);
+    if (providerNodeId) {
+      providerNodeIdByCanvasNodeId.set(node.id, providerNodeId);
+      const group = providerGroups.get(providerNodeId) ?? {
+        provider,
+        gatewayIds: new Set<string>(),
+        canvasNodeIds: [],
+      };
+      if (node.gatewayId) group.gatewayIds.add(node.gatewayId);
+      group.canvasNodeIds.push(node.id);
+      providerGroups.set(providerNodeId, group);
+    }
     nodes.push({
       id: node.id,
       type: "runtime",
       position: readPosition(node.position, nodes.length),
       data: {
         title: profile?.name ?? String(node.config.agentName ?? node.resourceId ?? "Agent"),
-        subtitle: profile?.description ?? "Agent profile",
+        subtitle: profile?.description ?? "Ready to shape and playtest",
         kind: "agent",
-        status: gateway?.status === "connected" ? "ready" : "off",
-        meta: binding ? `${gatewayDisplayLabel(binding.gatewayId)} / ${binding.agentId}` : node.resourceId ?? "unbound",
-        exposed: node.exposed,
+        status,
+        meta: binding ? provider?.name ?? "OpenClaw" : provider?.name ?? "Provider not connected",
         canvasNode: node,
       },
     });
   }
 
-  const usedGateways = new Set(canvasNodes.flatMap((node) => node.gatewayId ? [node.gatewayId] : []));
-  for (const gatewayId of usedGateways) {
-    const gateway = gatewayById.get(gatewayId);
+  let providerIndex = 0;
+  for (const [providerNodeId, group] of providerGroups) {
+    const gateways = [...group.gatewayIds].flatMap((gatewayId) => {
+      const gateway = gatewayById.get(gatewayId);
+      return gateway ? [gateway] : [];
+    });
+    const readyAgents = group.canvasNodeIds.filter((nodeId) => agentStatusByNodeId.get(nodeId) === "ready").length;
+    const connected = gateways.some((gateway) => gateway.status === "connected") || group.provider?.status === "online";
     nodes.push({
-      id: `gateway:${gatewayId}`,
+      id: providerNodeId,
       type: "runtime",
-      position: { x: 880, y: 150 + nodes.filter((node) => node.id.startsWith("gateway:")).length * 210 },
+      position: { x: 880, y: 230 + providerIndex * 210 },
       data: {
-        title: gatewayDisplayLabel(gatewayId),
-        subtitle: gateway ? `${gateway.agents.length} detected agents` : "Agent Gateway",
+        title: group.provider?.name ?? "Agent provider",
+        subtitle: `${readyAgents}/${group.canvasNodeIds.length} agent${group.canvasNodeIds.length === 1 ? "" : "s"} ready`,
         kind: "gateway",
-        status: gateway?.status === "connected" ? "ready" : "off",
-        meta: gateway ? `Last seen ${formatTime(gateway.lastSeenAt)}` : "not connected",
+        status: connected ? "ready" : "off",
+        meta: connected ? "Connected" : "Needs connection",
+        detail: group.provider?.providerType ?? "Agent provider",
       },
       draggable: false,
     });
+    providerIndex += 1;
   }
 
   const edges: Edge[] = [];
   for (const node of canvasNodes) {
-    if (node.exposed) {
-      edges.push({
-        id: `endpoint:${node.id}`,
-        source: `endpoint:${project.id}`,
-        target: node.id,
-        animated: true,
-        className: "gameplay-edge exposed",
-      });
-    }
-    if (node.gatewayId) {
+    edges.push({
+      id: `endpoint:${node.id}`,
+      source: `endpoint:${project.id}`,
+      target: node.id,
+      animated: true,
+      className: "gameplay-edge runtime",
+      markerEnd: { type: MarkerType.ArrowClosed, color: "#5367e8" },
+    });
+    const providerNodeId = providerNodeIdByCanvasNodeId.get(node.id);
+    if (providerNodeId) {
       edges.push({
         id: `gateway:${node.id}`,
         source: node.id,
-        target: `gateway:${node.gatewayId}`,
+        target: providerNodeId,
         className: "gameplay-edge runtime",
+        markerEnd: { type: MarkerType.ArrowClosed, color: "#7d8796" },
       });
     }
   }
@@ -425,10 +448,11 @@ function buildGraph({
       sourceHandle: edge.sourceHandle ?? undefined,
       targetHandle: edge.targetHandle ?? undefined,
       className: "gameplay-edge custom",
+      markerEnd: { type: MarkerType.ArrowClosed, color: "#687284" },
     });
   }
 
-  return { nodes, edges, palette };
+  return { nodes, edges, profilePalette };
 }
 
 function readPosition(value: Record<string, unknown>, index: number): { x: number; y: number } {
@@ -466,13 +490,8 @@ async function runtimeRequest<T = unknown>(path: string, method: string, body?: 
   return (payload ?? {}) as T;
 }
 
-function formatTime(value: string): string {
-  const date = new Date(value);
-  return Number.isNaN(date.valueOf()) ? "-" : new Intl.DateTimeFormat("en", { dateStyle: "medium", timeStyle: "short" }).format(date);
-}
-
-function slugify(value: string): string {
-  return value.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "agent";
+function metadataString(value: Record<string, unknown>, key: string): string {
+  return typeof value[key] === "string" ? value[key] : "";
 }
 
 function errorMessage(error: unknown): string {
@@ -490,10 +509,32 @@ function gatewayStatusMap(gateways: AgentGateway[]): Map<string, AgentGateway> {
   return byId;
 }
 
-function shortId(value: string): string {
-  return value.length > 12 ? `${value.slice(0, 8)}...` : value;
+function providerForCanvasNode(node: ProjectCanvasNode, connections: ProviderStockItem[]): ProviderStockItem | undefined {
+  const providerKey = metadataString(node.config, "providerKey");
+  const providerType = metadataString(node.config, "providerType");
+  return connections.find((connection) => connection.providerKey === providerKey)
+    ?? connections.find((connection) => providerType && connection.providerType === providerType)
+    ?? (connections.length === 1 ? connections[0] : undefined);
 }
 
-function gatewayDisplayLabel(value: string): string {
-  return value.startsWith("gateway-") ? `Gateway ${shortId(value.replace(/^gateway-/, ""))}` : shortId(value);
+function graphProviderNodeId(node: ProjectCanvasNode, provider?: ProviderStockItem): string | null {
+  if (provider) return `provider:${provider.id}`;
+  const providerKey = metadataString(node.config, "providerKey");
+  if (providerKey) return `provider-key:${providerKey}`;
+  return node.gatewayId ? `gateway:${node.gatewayId}` : null;
+}
+
+function connectedGatewayCount(gateways: AgentGateway[]): number {
+  return [...gatewayStatusMap(gateways).values()].filter((gateway) => gateway.status === "connected").length;
+}
+
+function nodeKindLabel(kind: RuntimeNodeData["kind"]): string {
+  if (kind === "endpoint") return "Game entry";
+  if (kind === "gateway") return "Provider";
+  return "Agent";
+}
+
+function agentInitials(name: string): string {
+  const words = name.trim().split(/[\s_-]+/).filter(Boolean);
+  return words.slice(0, 2).map((word) => word[0]?.toUpperCase() ?? "").join("") || "AI";
 }

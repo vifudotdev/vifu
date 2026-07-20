@@ -265,9 +265,10 @@ mod tests {
     use super::{decode_command, encode_command};
     use crate::auth::hash_api_key;
     use crate::config::Config;
-    use crate::db::{self, NewEndpoint, NewProject};
+    use crate::db::{self, NewProject};
     use crate::models::{
-        ApiKeyAgentScope, ApiKeyPermissions, EndpointPermission, ResourcePermission,
+        ApiKeyAgentScope, ApiKeyPermissions, EndpointPermission, ProfileCapabilityDraft,
+        ResourcePermission,
     };
     use crate::{app, state};
 
@@ -471,7 +472,7 @@ mod tests {
             .unwrap();
         let trace = traces
             .iter()
-            .find(|trace| trace.endpoint_id == Some(seeded.endpoint_id))
+            .find(|trace| trace.profile_id == Some(seeded.profile_id))
             .expect("project invocation trace");
         assert_eq!(trace.project_id, Some(seeded.project_id));
 
@@ -511,6 +512,9 @@ mod tests {
                 agent_scope: &ApiKeyAgentScope::All,
                 permissions: &ApiKeyPermissions {
                     chat_completions: EndpointPermission::None,
+                    speech: EndpointPermission::None,
+                    transcriptions: EndpointPermission::None,
+                    realtime: EndpointPermission::None,
                     agents: ResourcePermission::Read,
                     project: ResourcePermission::Read,
                 },
@@ -549,7 +553,7 @@ mod tests {
                 project_id: seeded.project_id,
                 name: "Selected Wire Test Key",
                 agent_scope: &ApiKeyAgentScope::Selected {
-                    binding_ids: vec![seeded.binding_id],
+                    profile_ids: vec![seeded.profile_id],
                 },
                 permissions: &ApiKeyPermissions::default(),
                 key_prefix: "selected-test",
@@ -708,6 +712,7 @@ mod tests {
         endpoint_id: Uuid,
         endpoint_slug: String,
         other_endpoint_slug: String,
+        profile_id: Uuid,
         project_id: Uuid,
         project_slug: String,
         binding_id: Uuid,
@@ -718,20 +723,36 @@ mod tests {
         let config = Config::from_env().unwrap();
         let profile_id = Uuid::new_v4();
         let binding_id = Uuid::new_v4();
-        let endpoint_id = Uuid::new_v4();
         let other_profile_id = Uuid::new_v4();
         let other_binding_id = Uuid::new_v4();
-        let other_endpoint_id = Uuid::new_v4();
         let project_id = Uuid::new_v4();
         let suffix = Uuid::new_v4().simple().to_string();
         let profile_slug = format!("wire-test-profile-{suffix}");
-        let endpoint_slug = format!("wire-test-endpoint-{suffix}");
         let other_profile_slug = format!("wire-test-other-profile-{suffix}");
-        let other_endpoint_slug = format!("wire-test-other-endpoint-{suffix}");
         let project_slug = format!("wire-test-project-{suffix}");
-        db::create_profile(pool, profile_id, &profile_slug, "Wire Test", None)
-            .await
-            .unwrap();
+        db::create_project(
+            pool,
+            NewProject {
+                id: project_id,
+                slug: &project_slug,
+                name: "Wire Test Project",
+                description: None,
+                gateway_id,
+                binding_ids: &[],
+            },
+        )
+        .await
+        .unwrap();
+        db::create_profile(
+            pool,
+            profile_id,
+            project_id,
+            &profile_slug,
+            "Wire Test",
+            None,
+        )
+        .await
+        .unwrap();
         db::create_binding(
             pool,
             binding_id,
@@ -743,23 +764,10 @@ mod tests {
         )
         .await
         .unwrap();
-        db::create_endpoint(
-            pool,
-            NewEndpoint {
-                id: endpoint_id,
-                slug: &endpoint_slug,
-                name: "Wire Test",
-                profile_id,
-                binding_id,
-                enabled: true,
-                request_timeout_ms: 30_000,
-            },
-        )
-        .await
-        .unwrap();
         db::create_profile(
             pool,
             other_profile_id,
+            project_id,
             &other_profile_slug,
             "Other Wire Test",
             None,
@@ -777,34 +785,75 @@ mod tests {
         )
         .await
         .unwrap();
-        db::create_endpoint(
+        let capability = ProfileCapabilityDraft {
+            kind: "chat".to_string(),
+            provider_type: "openclaw".to_string(),
+            provider_key: "openclaw".to_string(),
+            resource_id: Some("guide-agent".to_string()),
+            config: json!({ "gatewayId": gateway_id }),
+            input_schema: json!({}),
+            output_schema: json!({}),
+        };
+        let version = db::create_profile_version(
             pool,
-            NewEndpoint {
-                id: other_endpoint_id,
-                slug: &other_endpoint_slug,
-                name: "Other Wire Test",
-                profile_id: other_profile_id,
-                binding_id: other_binding_id,
-                enabled: true,
-                request_timeout_ms: 30_000,
+            profile_id,
+            db::NewProfileVersion {
+                persona: &json!({ "files": {} }),
+                runtime: &json!({}),
+                presentation: &json!({}),
+                source: &json!({
+                    "type": "openclaw",
+                    "providerKey": "openclaw",
+                    "gatewayId": gateway_id,
+                    "resourceId": "guide-agent",
+                    "managed": false,
+                }),
+                capabilities: &[capability],
+                change_summary: Some("Wire test"),
             },
         )
         .await
         .unwrap();
-        let binding_ids = [binding_id, other_binding_id];
-        db::create_project(
+        let endpoint_id = db::list_profile_capabilities(pool, version.id)
+            .await
+            .unwrap()[0]
+            .id;
+        let other_capability = ProfileCapabilityDraft {
+            kind: "chat".to_string(),
+            provider_type: "openclaw".to_string(),
+            provider_key: "openclaw".to_string(),
+            resource_id: Some("other-agent".to_string()),
+            config: json!({ "gatewayId": gateway_id }),
+            input_schema: json!({}),
+            output_schema: json!({}),
+        };
+        db::create_profile_version(
             pool,
-            NewProject {
-                id: project_id,
-                slug: &project_slug,
-                name: "Wire Test Project",
-                description: None,
-                gateway_id,
-                binding_ids: &binding_ids,
+            other_profile_id,
+            db::NewProfileVersion {
+                persona: &json!({ "files": {} }),
+                runtime: &json!({}),
+                presentation: &json!({}),
+                source: &json!({
+                    "type": "openclaw",
+                    "providerKey": "openclaw",
+                    "gatewayId": gateway_id,
+                    "resourceId": "other-agent",
+                    "managed": false,
+                }),
+                capabilities: &[other_capability],
+                change_summary: Some("Wire test"),
             },
         )
         .await
         .unwrap();
+        db::attach_project_binding(pool, project_id, binding_id)
+            .await
+            .unwrap();
+        db::attach_project_binding(pool, project_id, other_binding_id)
+            .await
+            .unwrap();
+        db::get_project_canvas(pool, &project_slug).await.unwrap();
         let key_hash = hash_api_key(raw_api_key, &config.api_key_pepper);
         db::create_api_key(
             pool,
@@ -822,8 +871,9 @@ mod tests {
         .unwrap();
         SeededProject {
             endpoint_id,
-            endpoint_slug,
-            other_endpoint_slug,
+            endpoint_slug: profile_slug,
+            other_endpoint_slug: other_profile_slug,
+            profile_id,
             project_id,
             project_slug,
             binding_id,

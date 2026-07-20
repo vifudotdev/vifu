@@ -35,51 +35,104 @@ pub async fn run(
         let config = options.load_config()?;
         ensure_home_dir(&config)?;
         print_server_config(&config)?;
-        let Some(provider) = config.openclaw_provider().cloned() else {
+        let providers = config.openclaw_providers().cloned().collect::<Vec<_>>();
+        if providers.is_empty() {
             print_agent_provider_config(&config);
             wait_for_provider_retry("No agent provider is configured.", &mut shutdown).await;
             continue;
-        };
-
-        let report = openclaw::probe(&provider.url).await;
-        print_openclaw_report(&provider, &report);
-        if !matches!(report.status, ProbeStatus::Online) {
-            wait_for_provider_retry("OpenClaw Gateway is not reachable.", &mut shutdown).await;
-            continue;
         }
-
-        let agents =
-            match openclaw::discover_agents(&report.endpoint, provider.token.as_deref()).await {
+        let mut runtime_providers = Vec::new();
+        let mut agents = Vec::new();
+        for provider in providers {
+            let report = openclaw::probe(&provider.url).await;
+            print_openclaw_report(&provider, &report);
+            if !matches!(report.status, ProbeStatus::Online) {
+                continue;
+            }
+            let mut discovered = match openclaw::discover_agents(
+                &report.endpoint,
+                provider.token.as_deref(),
+            )
+            .await
+            {
                 Ok(agents) => agents,
                 Err(error) => {
-                    wait_for_provider_retry(
-                        &format!("OpenClaw agent discovery is unavailable ({error})."),
-                        &mut shutdown,
-                    )
-                    .await;
+                    eprintln!(
+                        "OpenClaw provider {} agent discovery is unavailable ({error}).",
+                        provider.id
+                    );
                     continue;
                 }
             };
-        println!("Agents: {} discovered", agents.len());
+            for agent in &mut discovered {
+                if !agent.metadata.is_object() {
+                    agent.metadata = serde_json::json!({});
+                }
+                let Some(metadata) = agent.metadata.as_object_mut() else {
+                    continue;
+                };
+                metadata.insert(
+                    "providerKey".to_string(),
+                    serde_json::Value::String(provider.id.clone()),
+                );
+                metadata.insert(
+                    "providerType".to_string(),
+                    serde_json::Value::String(provider.provider_type.clone()),
+                );
+            }
+            agents.extend(discovered);
+            runtime_providers.push(vifu_core::relay::OpenClawRuntimeProvider {
+                id: provider.id,
+                endpoint: report.endpoint,
+                token: provider.token,
+            });
+        }
+        if runtime_providers.is_empty() {
+            wait_for_provider_retry(
+                "No configured OpenClaw provider is reachable.",
+                &mut shutdown,
+            )
+            .await;
+            continue;
+        }
+        println!(
+            "Providers: {} connected; agents: {} discovered",
+            runtime_providers.len(),
+            agents.len()
+        );
         let mut session = load_or_create_session(&config)?;
         print_session(&session);
         let session_file = config.session_file();
         let runtime = relay::AgentGatewayRuntime {
             server_url: &config.server_url,
             agent_gateway_bootstrap_token: &config.agent_gateway_bootstrap_token,
-            provider_id: &provider.id,
-            endpoint: &report.endpoint,
-            openclaw_token: provider.token.as_deref(),
+            providers: &runtime_providers,
             agents: &agents,
             session_path: &session_file,
         };
+        let provider_file = config.agent_providers_file.clone();
+        let provider_snapshot = fs::read(&provider_file).unwrap_or_default();
         let result = tokio::select! {
-            result = relay::run_agent_gateway(runtime, &mut session) => result,
+            result = relay::run_agent_gateway(runtime, &mut session) => Some(result),
+            () = wait_for_provider_config_change(&provider_file, &provider_snapshot) => None,
             () = wait_for_shutdown(&mut shutdown) => return Ok(()),
+        };
+        let Some(result) = result else {
+            println!("Agent provider configuration changed; reconnecting.");
+            continue;
         };
         if let Err(error) = result {
             wait_for_provider_retry(&format!("Agent Gateway stopped ({error})."), &mut shutdown)
                 .await;
+        }
+    }
+}
+
+async fn wait_for_provider_config_change(path: &Path, snapshot: &[u8]) {
+    loop {
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        if fs::read(path).unwrap_or_default() != snapshot {
+            return;
         }
     }
 }
@@ -114,26 +167,35 @@ pub async fn status(config: &Config) -> Result<(), String> {
 pub async fn doctor(config: &Config) -> Result<(), String> {
     println!("Vifu Agent Gateway doctor");
     println!("State directory: {}", config.home_dir.display());
-    let Some((provider, report)) = print_agent_provider_status(config).await else {
-        print_server_config(config)?;
-        print_stored_session(config);
-        return Ok(());
-    };
+    let providers = print_agent_provider_status(config).await;
     print_server_config(config)?;
     print_stored_session(config);
-    match report.status {
-        ProbeStatus::Online => {
-            match openclaw::discover_agents(&report.endpoint, provider.token.as_deref()).await {
-                Ok(agents) => println!("OpenClaw API: ready ({} agents)", agents.len()),
-                Err(error) => println!("OpenClaw API: unavailable ({error})"),
+    for (provider, report) in providers {
+        match report.status {
+            ProbeStatus::Online => {
+                match openclaw::discover_agents(&report.endpoint, provider.token.as_deref()).await {
+                    Ok(agents) => println!(
+                        "OpenClaw provider {}: ready ({} agents)",
+                        provider.id,
+                        agents.len()
+                    ),
+                    Err(error) => {
+                        println!("OpenClaw provider {}: unavailable ({error})", provider.id)
+                    }
+                }
             }
-        }
-        ProbeStatus::Offline(_) => {
-            println!("OpenClaw: start the Gateway on loopback, for example:");
-            println!("  openclaw gateway --port 18789");
-        }
-        ProbeStatus::Unsupported(_) => {
-            println!("OpenClaw: use a loopback URL such as http://127.0.0.1:18789");
+            ProbeStatus::Offline(_) => {
+                println!(
+                    "OpenClaw provider {}: start its Gateway on loopback.",
+                    provider.id
+                );
+            }
+            ProbeStatus::Unsupported(_) => {
+                println!(
+                    "OpenClaw provider {}: use a loopback URL such as http://127.0.0.1:18789",
+                    provider.id
+                );
+            }
         }
     }
     Ok(())
@@ -141,14 +203,19 @@ pub async fn doctor(config: &Config) -> Result<(), String> {
 
 async fn print_agent_provider_status(
     config: &Config,
-) -> Option<(AgentProviderConfig, openclaw::ProbeReport)> {
-    let Some(provider) = config.openclaw_provider().cloned() else {
+) -> Vec<(AgentProviderConfig, openclaw::ProbeReport)> {
+    let providers = config.openclaw_providers().cloned().collect::<Vec<_>>();
+    if providers.is_empty() {
         print_agent_provider_config(config);
-        return None;
-    };
-    let report = openclaw::probe(&provider.url).await;
-    print_openclaw_report(&provider, &report);
-    Some((provider, report))
+        return Vec::new();
+    }
+    let mut reports = Vec::with_capacity(providers.len());
+    for provider in providers {
+        let report = openclaw::probe(&provider.url).await;
+        print_openclaw_report(&provider, &report);
+        reports.push((provider, report));
+    }
+    reports
 }
 
 pub fn logout(config: &Config) -> Result<(), String> {

@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { ChevronDown, FolderKanban, Plus, Search } from "lucide-react";
 import { useState } from "react";
-import type { AgentGateway, AvailableAgent, RuntimeProject } from "../lib/runtime-types";
+import type { RuntimeProject } from "../lib/runtime-types";
 import type { DashboardSection } from "./runtime-console";
 import { DismissibleDetails } from "./dismissible-details";
 import { ProjectCreateForm } from "./runtime-actions";
@@ -12,14 +12,10 @@ export function ProjectSwitcher({
   projects,
   selectedProject,
   activeSection,
-  availableAgents,
-  agentGateways,
 }: {
   projects: RuntimeProject[];
   selectedProject: RuntimeProject | null;
   activeSection: DashboardSection;
-  availableAgents: AvailableAgent[];
-  agentGateways: AgentGateway[];
 }) {
   const [query, setQuery] = useState("");
   const normalizedQuery = query.trim().toLocaleLowerCase();
@@ -56,7 +52,7 @@ export function ProjectSwitcher({
           </div>
           <section className="project-create-panel">
             <div className="project-create-header"><Plus aria-hidden="true" /><span>Create project</span></div>
-            <ProjectCreateForm availableAgents={availableAgents} agentGateways={agentGateways} variant="menu" />
+            <ProjectCreateForm variant="menu" />
           </section>
         </div>
       </DismissibleDetails>

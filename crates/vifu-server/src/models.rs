@@ -48,16 +48,11 @@ pub struct Project {
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CreateProject {
     pub slug: Option<String>,
     pub name: String,
     pub description: Option<String>,
-    pub gateway_id: Option<String>,
-    #[serde(default)]
-    pub binding_ids: Vec<Uuid>,
-    #[serde(default)]
-    pub agent_ids: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -125,8 +120,12 @@ pub struct ProjectCanvas {
 #[serde(rename_all = "camelCase")]
 pub struct ProviderAdapter {
     pub id: String,
+    pub category: String,
     pub name: String,
     pub description: String,
+    pub capabilities: Vec<String>,
+    pub execution_modes: Vec<String>,
+    pub supports_discovery: bool,
     pub fields: Vec<ProviderAdapterField>,
 }
 
@@ -174,6 +173,67 @@ pub struct ProviderConnectionSecret {
     pub last_checked_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, FromRow)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderStockItem {
+    pub id: Uuid,
+    pub provider_key: String,
+    pub name: String,
+    pub provider_type: String,
+    pub base_url: String,
+    pub config: Value,
+    pub secret_keys: Vec<String>,
+    pub display_secret: Option<String>,
+    pub status: String,
+    pub last_checked_at: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, FromRow)]
+pub struct ProviderStockSecret {
+    pub id: Uuid,
+    pub provider_key: String,
+    pub name: String,
+    pub provider_type: String,
+    pub base_url: String,
+    pub config: Value,
+    pub encrypted_secret_json: String,
+    pub secret_keys: Vec<String>,
+    pub display_secret: Option<String>,
+    pub status: String,
+    pub last_checked_at: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+impl From<ProviderStockSecret> for ProviderStockItem {
+    fn from(value: ProviderStockSecret) -> Self {
+        Self {
+            id: value.id,
+            provider_key: value.provider_key,
+            name: value.name,
+            provider_type: value.provider_type,
+            base_url: value.base_url,
+            config: value.config,
+            secret_keys: value.secret_keys,
+            display_secret: value.display_secret,
+            status: value.status,
+            last_checked_at: value.last_checked_at,
+            created_at: value.created_at,
+            updated_at: value.updated_at,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, FromRow)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectProviderAssignment {
+    pub project_id: Uuid,
+    pub provider_key: String,
+    pub created_at: DateTime<Utc>,
 }
 
 impl From<ProviderConnectionSecret> for ProviderConnection {
@@ -229,6 +289,14 @@ pub struct ImportProviderConnection {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ImportProjectAgent {
+    pub gateway_id: String,
+    pub agent_id: String,
+    pub provider_key: String,
+}
+
+#[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateCanvasNode {
     pub kind: String,
@@ -273,9 +341,12 @@ pub struct CreateCanvasEdge {
 #[serde(rename_all = "camelCase")]
 pub struct AgentProfile {
     pub id: Uuid,
+    pub project_id: Option<Uuid>,
     pub slug: String,
     pub name: String,
     pub description: Option<String>,
+    pub active_version_id: Option<Uuid>,
+    pub archived_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -283,9 +354,21 @@ pub struct AgentProfile {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateProfile {
+    pub project_id: Option<Uuid>,
     pub slug: Option<String>,
     pub name: String,
     pub description: Option<String>,
+    #[serde(default = "empty_object")]
+    pub persona: Value,
+    #[serde(default = "empty_object")]
+    pub runtime: Value,
+    #[serde(default = "empty_object")]
+    pub presentation: Value,
+    #[serde(default = "empty_object")]
+    pub source: Value,
+    #[serde(default)]
+    pub capabilities: Vec<ProfileCapabilityDraft>,
+    pub change_summary: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -294,6 +377,107 @@ pub struct UpdateProfile {
     pub slug: Option<String>,
     pub name: Option<String>,
     pub description: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, FromRow)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentProfileVersion {
+    pub id: Uuid,
+    pub profile_id: Uuid,
+    pub version_number: i32,
+    pub persona: Value,
+    pub runtime: Value,
+    pub presentation: Value,
+    pub source: Value,
+    pub content_hash: String,
+    pub change_summary: Option<String>,
+    pub archived_at: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, FromRow)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentProfileCapability {
+    pub id: Uuid,
+    pub profile_version_id: Uuid,
+    pub kind: String,
+    pub provider_type: String,
+    pub provider_key: String,
+    pub resource_id: Option<String>,
+    pub config: Value,
+    pub input_schema: Value,
+    pub output_schema: Value,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ProfileCapabilityDraft {
+    pub kind: String,
+    pub provider_type: String,
+    pub provider_key: String,
+    pub resource_id: Option<String>,
+    #[serde(default = "empty_object")]
+    pub config: Value,
+    #[serde(default = "empty_object")]
+    pub input_schema: Value,
+    #[serde(default = "empty_object")]
+    pub output_schema: Value,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CreateProfileVersion {
+    #[serde(default = "empty_object")]
+    pub persona: Value,
+    #[serde(default = "empty_object")]
+    pub runtime: Value,
+    #[serde(default = "empty_object")]
+    pub presentation: Value,
+    #[serde(default = "empty_object")]
+    pub source: Value,
+    #[serde(default)]
+    pub capabilities: Vec<ProfileCapabilityDraft>,
+    pub change_summary: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, FromRow)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentProfileRollout {
+    pub profile_id: Uuid,
+    pub profile_version_id: Uuid,
+    pub weight_bps: i32,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SetProfileRollout {
+    pub allocations: Vec<ProfileRolloutAllocation>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ProfileRolloutAllocation {
+    pub version_id: Uuid,
+    pub weight_bps: i32,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TestProfile {
+    pub version_id: Option<Uuid>,
+    #[serde(default = "default_chat_capability")]
+    pub capability: String,
+    pub input: Value,
+    pub user: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SyncProfileSource {
+    pub change_summary: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, FromRow)]
@@ -369,8 +553,8 @@ pub struct UpdateEndpoint {
 pub enum ApiKeyAgentScope {
     All,
     Selected {
-        #[serde(rename = "bindingIds")]
-        binding_ids: Vec<Uuid>,
+        #[serde(rename = "profileIds")]
+        profile_ids: Vec<Uuid>,
     },
 }
 
@@ -388,17 +572,17 @@ impl ApiKeyAgentScope {
         }
     }
 
-    pub fn binding_ids(&self) -> &[Uuid] {
+    pub fn profile_ids(&self) -> &[Uuid] {
         match self {
             Self::All => &[],
-            Self::Selected { binding_ids } => binding_ids,
+            Self::Selected { profile_ids } => profile_ids,
         }
     }
 
-    pub fn allows(&self, binding_id: Uuid) -> bool {
+    pub fn allows(&self, profile_id: Uuid) -> bool {
         match self {
             Self::All => true,
-            Self::Selected { binding_ids } => binding_ids.contains(&binding_id),
+            Self::Selected { profile_ids } => profile_ids.contains(&profile_id),
         }
     }
 }
@@ -422,6 +606,9 @@ pub enum ResourcePermission {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ApiKeyPermissions {
     pub chat_completions: EndpointPermission,
+    pub speech: EndpointPermission,
+    pub transcriptions: EndpointPermission,
+    pub realtime: EndpointPermission,
     pub agents: ResourcePermission,
     pub project: ResourcePermission,
 }
@@ -430,6 +617,9 @@ impl Default for ApiKeyPermissions {
     fn default() -> Self {
         Self {
             chat_completions: EndpointPermission::Access,
+            speech: EndpointPermission::None,
+            transcriptions: EndpointPermission::None,
+            realtime: EndpointPermission::None,
             agents: ResourcePermission::None,
             project: ResourcePermission::None,
         }
@@ -439,6 +629,18 @@ impl Default for ApiKeyPermissions {
 impl ApiKeyPermissions {
     pub fn chat_completions_allowed(&self) -> bool {
         self.chat_completions == EndpointPermission::Access
+    }
+
+    pub fn speech_allowed(&self) -> bool {
+        self.speech == EndpointPermission::Access
+    }
+
+    pub fn transcriptions_allowed(&self) -> bool {
+        self.transcriptions == EndpointPermission::Access
+    }
+
+    pub fn realtime_allowed(&self) -> bool {
+        self.realtime == EndpointPermission::Access
     }
 }
 
@@ -532,6 +734,15 @@ pub struct EndpointTrace {
     pub endpoint_id: Option<Uuid>,
     pub project_id: Option<Uuid>,
     pub gateway_session_id: Option<Uuid>,
+    pub profile_id: Option<Uuid>,
+    pub profile_version_id: Option<Uuid>,
+    pub profile_slug: Option<String>,
+    pub profile_name: Option<String>,
+    pub profile_version_number: Option<i32>,
+    pub operation: String,
+    pub provider_key: Option<String>,
+    pub capability_kind: Option<String>,
+    pub selection_key: Option<String>,
     pub status: String,
     pub latency_ms: Option<i64>,
     pub request: Value,
@@ -539,6 +750,48 @@ pub struct EndpointTrace {
     pub error: Option<String>,
     pub created_at: DateTime<Utc>,
     pub completed_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Serialize, FromRow)]
+#[serde(rename_all = "camelCase")]
+pub struct TraceSpan {
+    pub id: Uuid,
+    pub trace_id: Uuid,
+    pub parent_span_id: Option<Uuid>,
+    pub name: String,
+    pub kind: String,
+    pub status: String,
+    pub provider_key: Option<String>,
+    pub capability_kind: Option<String>,
+    pub duration_ms: Option<i64>,
+    pub input_summary: Option<Value>,
+    pub output_summary: Option<Value>,
+    pub attributes: Value,
+    pub error: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub completed_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, FromRow)]
+pub struct RealtimeSession {
+    pub id: Uuid,
+    pub project_id: Uuid,
+    pub profile_id: Uuid,
+    pub api_key_id: Option<Uuid>,
+    pub expires_at: DateTime<Utc>,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PublicAgent {
+    pub id: Uuid,
+    pub slug: String,
+    pub name: String,
+    pub description: Option<String>,
+    pub version: i32,
+    pub capabilities: Vec<String>,
+    pub presentation: Value,
 }
 
 #[derive(Debug, Clone, FromRow)]
@@ -552,6 +805,25 @@ pub struct EndpointRoute {
     pub gateway_id: String,
     pub agent_id: String,
     pub binding_config: Value,
+}
+
+#[derive(Debug, Clone, FromRow)]
+pub struct ProfileRoute {
+    pub profile_id: Uuid,
+    pub profile_slug: String,
+    pub profile_name: String,
+    pub profile_version_id: Uuid,
+    pub version_number: i32,
+    pub capability_id: Uuid,
+    pub capability_kind: String,
+    pub provider_type: String,
+    pub provider_key: String,
+    pub resource_id: Option<String>,
+    pub capability_config: Value,
+    pub persona: Value,
+    pub runtime: Value,
+    pub presentation: Value,
+    pub source: Value,
 }
 
 pub fn slugify(value: &str) -> String {
@@ -585,6 +857,10 @@ pub fn validate_slug(value: &str) -> bool {
 
 fn empty_object() -> Value {
     Value::Object(Default::default())
+}
+
+fn default_chat_capability() -> String {
+    "chat".to_string()
 }
 
 #[cfg(test)]

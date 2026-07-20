@@ -1,6 +1,8 @@
 pub mod config;
 pub mod gateway_frame;
 pub mod openclaw;
+pub mod openclaw_rpc;
 pub mod protocol;
+pub mod providers;
 pub mod relay;
 pub mod session;

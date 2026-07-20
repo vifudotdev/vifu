@@ -61,6 +61,12 @@ impl Config {
             .iter()
             .find(|provider| provider.provider_type == "openclaw")
     }
+
+    pub fn openclaw_providers(&self) -> impl Iterator<Item = &AgentProviderConfig> {
+        self.agent_providers
+            .iter()
+            .filter(|provider| provider.provider_type == "openclaw")
+    }
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -143,7 +149,17 @@ pub fn read_provider_registry_file(path: &Path) -> Result<AgentProvidersFile, St
 pub fn write_provider_registry_file(path: &Path, file: &AgentProvidersFile) -> Result<(), String> {
     let json = serde_json::to_string_pretty(file)
         .map_err(|error| format!("provider registry could not be encoded: {error}"))?;
-    write_private_file(path, &format!("{json}\n"))
+    let file_name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("providers.json");
+    let temporary = path.with_file_name(format!(".{file_name}.tmp-{}", std::process::id()));
+    write_private_file(&temporary, &format!("{json}\n"))?;
+    if let Err(error) = std::fs::rename(&temporary, path) {
+        let _ = std::fs::remove_file(&temporary);
+        return Err(format!("{} could not be replaced: {error}", path.display()));
+    }
+    Ok(())
 }
 
 pub fn write_private_file(path: &Path, contents: &str) -> Result<(), String> {
@@ -274,7 +290,12 @@ pub fn default_home_dir() -> Result<PathBuf, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Config, DEFAULT_OPENCLAW_URL, DEFAULT_SERVER_URL};
+    use super::{
+        read_provider_registry_file, write_provider_registry_file, AgentProviderAuthDefinition,
+        AgentProviderDefinition, AgentProvidersFile, Config, DEFAULT_OPENCLAW_URL,
+        DEFAULT_SERVER_URL,
+    };
+    use serde_json::json;
     use std::fs;
     use std::sync::{Mutex, OnceLock};
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -384,6 +405,44 @@ mod tests {
             "VIFU_AGENT_GATEWAY_BOOTSTRAP_TOKEN_FILE",
             previous_token_file,
         );
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn writes_and_reloads_multiple_provider_definitions() {
+        let dir = unique_directory("vifu-core-provider-write");
+        let path = dir.join("providers.json");
+        let providers = AgentProvidersFile {
+            providers: vec![
+                AgentProviderDefinition {
+                    key: "openclaw-primary".to_string(),
+                    name: Some("Primary Gateway".to_string()),
+                    provider_type: "openclaw".to_string(),
+                    url: "http://127.0.0.1:18789".to_string(),
+                    enabled: Some(true),
+                    auth: AgentProviderAuthDefinition {
+                        token: Some("synthetic-provider-token".to_string()),
+                    },
+                    config: json!({}),
+                },
+                AgentProviderDefinition {
+                    key: "openclaw-story".to_string(),
+                    name: Some("Story Gateway".to_string()),
+                    provider_type: "openclaw".to_string(),
+                    url: "http://127.0.0.1:18790".to_string(),
+                    enabled: Some(true),
+                    auth: AgentProviderAuthDefinition::default(),
+                    config: json!({ "channel": "story" }),
+                },
+            ],
+        };
+
+        write_provider_registry_file(&path, &providers).unwrap();
+        let loaded = read_provider_registry_file(&path).unwrap();
+
+        assert_eq!(loaded.providers.len(), 2);
+        assert_eq!(loaded.providers[1].key, "openclaw-story");
+        assert_eq!(loaded.providers[1].config["channel"], "story");
         fs::remove_dir_all(dir).unwrap();
     }
 

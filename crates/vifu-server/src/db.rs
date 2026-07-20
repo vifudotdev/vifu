@@ -2,6 +2,7 @@ use std::collections::HashSet;
 
 use chrono::{DateTime, Utc};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use sqlx::types::Json;
 use sqlx::{FromRow, PgPool, Postgres, QueryBuilder};
 use uuid::Uuid;
@@ -9,9 +10,12 @@ use uuid::Uuid;
 use crate::error::{map_database_error, ApiError};
 use crate::models::{
     slugify, validate_slug, AgentBinding, AgentEndpoint, AgentGatewayCredential,
-    AgentGatewaySession, AgentProfile, ApiKeyAgentScope, ApiKeyPermissions, ApiKeyRecord,
-    AvailableAgent, EndpointRoute, EndpointTrace, Project, ProjectCanvas, ProjectCanvasEdge,
-    ProjectCanvasNode, ProjectWithBindings, ProviderConnection, ProviderConnectionSecret,
+    AgentGatewaySession, AgentProfile, AgentProfileCapability, AgentProfileRollout,
+    AgentProfileVersion, ApiKeyAgentScope, ApiKeyPermissions, ApiKeyRecord, AvailableAgent,
+    EndpointRoute, EndpointTrace, ProfileCapabilityDraft, ProfileRoute, Project, ProjectCanvas,
+    ProjectCanvasEdge, ProjectCanvasNode, ProjectProviderAssignment, ProjectWithBindings,
+    ProviderConnection, ProviderConnectionSecret, ProviderStockItem, ProviderStockSecret,
+    PublicAgent, RealtimeSession, TraceSpan,
 };
 
 #[derive(Debug, FromRow)]
@@ -20,7 +24,7 @@ struct ApiKeyRow {
     project_id: Uuid,
     name: String,
     scope_mode: String,
-    binding_ids: Vec<Uuid>,
+    profile_ids: Vec<Uuid>,
     permissions: Json<ApiKeyPermissions>,
     key_prefix: String,
     created_at: DateTime<Utc>,
@@ -32,9 +36,9 @@ impl TryFrom<ApiKeyRow> for ApiKeyRecord {
 
     fn try_from(row: ApiKeyRow) -> Result<Self, Self::Error> {
         let agent_scope = match row.scope_mode.as_str() {
-            "all" if row.binding_ids.is_empty() => ApiKeyAgentScope::All,
+            "all" if row.profile_ids.is_empty() => ApiKeyAgentScope::All,
             "selected" => ApiKeyAgentScope::Selected {
-                binding_ids: row.binding_ids,
+                profile_ids: row.profile_ids,
             },
             _ => return Err(ApiError::Internal),
         };
@@ -147,7 +151,6 @@ pub async fn create_project(
             .await?;
     }
     transaction.commit().await?;
-    sync_project_canvas_nodes(pool, project.id).await?;
     Ok(ProjectWithBindings {
         project: created,
         binding_ids: project.binding_ids.to_vec(),
@@ -216,7 +219,6 @@ pub async fn update_project(
         current.binding_ids
     };
     transaction.commit().await?;
-    sync_project_canvas_nodes(pool, id).await?;
     Ok(ProjectWithBindings {
         project,
         binding_ids,
@@ -385,9 +387,273 @@ pub async fn delete_provider_connection_by_key(
     }
 }
 
+pub async fn list_provider_stock(pool: &PgPool) -> Result<Vec<ProviderStockItem>, ApiError> {
+    sqlx::query_as::<_, ProviderStockItem>(
+        "SELECT id, provider_key, name, provider_type, base_url, config,
+                secret_keys, display_secret, status, last_checked_at, created_at, updated_at
+         FROM provider_stock
+         ORDER BY name ASC, provider_key ASC",
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(ApiError::from)
+}
+
+pub async fn upsert_provider_stock(
+    pool: &PgPool,
+    connection: NewProviderConnection<'_>,
+) -> Result<ProviderStockItem, ApiError> {
+    sqlx::query_as::<_, ProviderStockItem>(
+        "INSERT INTO provider_stock
+            (id, provider_key, name, provider_type, base_url, config,
+             encrypted_secret_json, secret_keys, display_secret, status)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+         ON CONFLICT (provider_key) DO UPDATE SET
+            name = EXCLUDED.name,
+            provider_type = EXCLUDED.provider_type,
+            base_url = EXCLUDED.base_url,
+            config = EXCLUDED.config,
+            encrypted_secret_json = EXCLUDED.encrypted_secret_json,
+            secret_keys = EXCLUDED.secret_keys,
+            display_secret = EXCLUDED.display_secret,
+            status = EXCLUDED.status,
+            updated_at = NOW()
+         RETURNING id, provider_key, name, provider_type, base_url, config,
+                   secret_keys, display_secret, status, last_checked_at, created_at, updated_at",
+    )
+    .bind(Uuid::new_v4())
+    .bind(connection.provider_key)
+    .bind(connection.name)
+    .bind(connection.provider_type)
+    .bind(connection.base_url)
+    .bind(connection.config)
+    .bind(connection.encrypted_secret_json)
+    .bind(connection.secret_keys)
+    .bind(connection.display_secret)
+    .bind(connection.status)
+    .fetch_one(pool)
+    .await
+    .map_err(map_database_error)
+}
+
+pub async fn get_provider_stock_secret_by_key(
+    pool: &PgPool,
+    provider_key: &str,
+) -> Result<ProviderStockSecret, ApiError> {
+    sqlx::query_as::<_, ProviderStockSecret>(
+        "SELECT id, provider_key, name, provider_type, base_url, config,
+                encrypted_secret_json, secret_keys, display_secret, status,
+                last_checked_at, created_at, updated_at
+         FROM provider_stock
+         WHERE provider_key = $1",
+    )
+    .bind(provider_key)
+    .fetch_optional(pool)
+    .await?
+    .ok_or(ApiError::NotFound)
+}
+
+pub async fn update_provider_stock_status(
+    pool: &PgPool,
+    provider_key: &str,
+    status: &str,
+) -> Result<ProviderStockItem, ApiError> {
+    sqlx::query_as::<_, ProviderStockItem>(
+        "UPDATE provider_stock
+         SET status = $2, last_checked_at = NOW(), updated_at = NOW()
+         WHERE provider_key = $1
+         RETURNING id, provider_key, name, provider_type, base_url, config,
+                   secret_keys, display_secret, status, last_checked_at, created_at, updated_at",
+    )
+    .bind(provider_key)
+    .bind(status)
+    .fetch_optional(pool)
+    .await?
+    .ok_or(ApiError::NotFound)
+}
+
+pub async fn delete_provider_stock(pool: &PgPool, provider_key: &str) -> Result<(), ApiError> {
+    let assigned = sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS(
+            SELECT 1 FROM project_provider_assignments WHERE provider_key = $1
+         )",
+    )
+    .bind(provider_key)
+    .fetch_one(pool)
+    .await?;
+    if assigned {
+        return Err(ApiError::Conflict(
+            "remove this provider from every project before deleting it from Provider Stock"
+                .to_string(),
+        ));
+    }
+    let result = sqlx::query("DELETE FROM provider_stock WHERE provider_key = $1")
+        .bind(provider_key)
+        .execute(pool)
+        .await?;
+    if result.rows_affected() == 0 {
+        Err(ApiError::NotFound)
+    } else {
+        Ok(())
+    }
+}
+
+pub async fn list_project_provider_assignments(
+    pool: &PgPool,
+    project_id: Uuid,
+) -> Result<Vec<ProjectProviderAssignment>, ApiError> {
+    sqlx::query_as::<_, ProjectProviderAssignment>(
+        "SELECT project_id, provider_key, created_at
+         FROM project_provider_assignments
+         WHERE project_id = $1
+         ORDER BY created_at ASC, provider_key ASC",
+    )
+    .bind(project_id)
+    .fetch_all(pool)
+    .await
+    .map_err(ApiError::from)
+}
+
+pub async fn list_project_provider_stock(
+    pool: &PgPool,
+    project_id: Uuid,
+) -> Result<Vec<ProviderStockItem>, ApiError> {
+    sqlx::query_as::<_, ProviderStockItem>(
+        "SELECT stock.id, stock.provider_key, stock.name, stock.provider_type,
+                stock.base_url, stock.config, stock.secret_keys, stock.display_secret,
+                stock.status, stock.last_checked_at, stock.created_at, stock.updated_at
+         FROM project_provider_assignments AS assignment
+         JOIN provider_stock AS stock ON stock.provider_key = assignment.provider_key
+         WHERE assignment.project_id = $1
+         ORDER BY assignment.created_at ASC, stock.name ASC",
+    )
+    .bind(project_id)
+    .fetch_all(pool)
+    .await
+    .map_err(ApiError::from)
+}
+
+pub async fn assign_project_provider(
+    pool: &PgPool,
+    project_id: Uuid,
+    provider_key: &str,
+) -> Result<ProjectProviderAssignment, ApiError> {
+    sqlx::query_as::<_, ProjectProviderAssignment>(
+        "INSERT INTO project_provider_assignments (project_id, provider_key)
+         VALUES ($1, $2)
+         ON CONFLICT (project_id, provider_key) DO UPDATE
+            SET provider_key = EXCLUDED.provider_key
+         RETURNING project_id, provider_key, created_at",
+    )
+    .bind(project_id)
+    .bind(provider_key)
+    .fetch_one(pool)
+    .await
+    .map_err(map_database_error)
+}
+
+pub async fn project_provider_is_assigned(
+    pool: &PgPool,
+    project_id: Uuid,
+    provider_key: &str,
+) -> Result<bool, ApiError> {
+    sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS(
+            SELECT 1 FROM project_provider_assignments
+            WHERE project_id = $1 AND provider_key = $2
+         )",
+    )
+    .bind(project_id)
+    .bind(provider_key)
+    .fetch_one(pool)
+    .await
+    .map_err(ApiError::from)
+}
+
+pub async fn provider_has_project_assignments(
+    pool: &PgPool,
+    provider_key: &str,
+) -> Result<bool, ApiError> {
+    sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS(
+            SELECT 1 FROM project_provider_assignments WHERE provider_key = $1
+         )",
+    )
+    .bind(provider_key)
+    .fetch_one(pool)
+    .await
+    .map_err(ApiError::from)
+}
+
+pub async fn list_project_profile_provider_resources(
+    pool: &PgPool,
+    project_id: Uuid,
+) -> Result<Vec<(String, String)>, ApiError> {
+    sqlx::query_as::<_, (String, String)>(
+        "SELECT DISTINCT capability.provider_key,
+                COALESCE(capability.resource_id, version.source->>'resourceId') AS resource_id
+         FROM agent_profiles AS profile
+         JOIN agent_profile_versions AS version ON version.id = profile.active_version_id
+         JOIN agent_profile_capabilities AS capability
+           ON capability.profile_version_id = version.id
+         WHERE profile.project_id = $1
+           AND profile.archived_at IS NULL
+           AND COALESCE(capability.resource_id, version.source->>'resourceId') IS NOT NULL",
+    )
+    .bind(project_id)
+    .fetch_all(pool)
+    .await
+    .map_err(ApiError::from)
+}
+
+pub async fn unassign_project_provider(
+    pool: &PgPool,
+    project_id: Uuid,
+    provider_key: &str,
+) -> Result<(), ApiError> {
+    let referenced = sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS(
+            SELECT 1
+            FROM agent_profiles AS profile
+            JOIN agent_profile_versions AS version
+              ON version.id = profile.active_version_id
+            LEFT JOIN agent_profile_capabilities AS capability
+              ON capability.profile_version_id = version.id
+            WHERE profile.project_id = $1
+              AND profile.archived_at IS NULL
+              AND (
+                   capability.provider_key = $2
+                   OR version.source->>'providerKey' = $2
+              )
+         )",
+    )
+    .bind(project_id)
+    .bind(provider_key)
+    .fetch_one(pool)
+    .await?;
+    if referenced {
+        return Err(ApiError::Conflict(
+            "move or remove the agents using this provider before removing it from the project"
+                .to_string(),
+        ));
+    }
+    let result = sqlx::query(
+        "DELETE FROM project_provider_assignments
+         WHERE project_id = $1 AND provider_key = $2",
+    )
+    .bind(project_id)
+    .bind(provider_key)
+    .execute(pool)
+    .await?;
+    if result.rows_affected() == 0 {
+        Err(ApiError::NotFound)
+    } else {
+        Ok(())
+    }
+}
+
 pub async fn get_project_canvas(pool: &PgPool, slug: &str) -> Result<ProjectCanvas, ApiError> {
     let project = get_project_by_slug(pool, slug).await?;
-    sync_project_canvas_nodes(pool, project.project.id).await?;
     let project = get_project(pool, project.project.id).await?;
     Ok(ProjectCanvas {
         nodes: list_canvas_nodes(pool, project.project.id).await?,
@@ -402,24 +668,28 @@ pub async fn create_canvas_node(
     node: NewCanvasNode<'_>,
 ) -> Result<ProjectCanvasNode, ApiError> {
     let project = get_project_by_slug(pool, project_slug).await?;
-    let mut binding_id = node.binding_id;
+    let binding_id = node.binding_id;
     let mut profile_id = node.profile_id;
-    if binding_id.is_none() {
-        if let (Some(gateway_id), Some(resource_id)) = (node.gateway_id, node.resource_id) {
-            let agent_name = node
-                .config
-                .get("agentName")
-                .and_then(Value::as_str)
-                .filter(|value| !value.trim().is_empty())
-                .unwrap_or(resource_id);
-            let discovered_binding_id =
-                ensure_discovered_binding(pool, gateway_id, resource_id, agent_name).await?;
-            let binding = get_binding(pool, discovered_binding_id).await?;
-            binding_id = Some(binding.id);
-            profile_id = Some(binding.profile_id);
-        }
+    if let Some(requested_profile_id) = profile_id {
+        get_project_profile(pool, project.project.id, requested_profile_id).await?;
+    }
+    if binding_id.is_none() && (node.gateway_id.is_some() || node.resource_id.is_some()) {
+        return Err(ApiError::Conflict(
+            "add detected agents to the project before placing them on Gameplay".to_string(),
+        ));
     }
     if let Some(binding_id) = binding_id {
+        let binding = get_binding(pool, binding_id).await?;
+        get_project_profile(pool, project.project.id, binding.profile_id).await?;
+        match profile_id {
+            Some(profile_id) if profile_id != binding.profile_id => {
+                return Err(ApiError::Invalid(
+                    "canvas node profile and binding do not match".to_string(),
+                ));
+            }
+            None => profile_id = Some(binding.profile_id),
+            Some(_) => {}
+        }
         validate_project_bindings(pool, &project.project.gateway_id, &[binding_id]).await?;
         sqlx::query("INSERT INTO project_bindings (project_id, binding_id) VALUES ($1, $2) ON CONFLICT DO NOTHING")
             .bind(project.project.id)
@@ -615,6 +885,23 @@ async fn project_binding_ids(pool: &PgPool, project_id: Uuid) -> Result<Vec<Uuid
     .map_err(ApiError::from)
 }
 
+pub async fn assign_project_binding(
+    pool: &PgPool,
+    project_id: Uuid,
+    binding_id: Uuid,
+) -> Result<(), ApiError> {
+    sqlx::query(
+        "INSERT INTO project_bindings (project_id, binding_id)
+         VALUES ($1, $2)
+         ON CONFLICT DO NOTHING",
+    )
+    .bind(project_id)
+    .bind(binding_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 async fn list_canvas_nodes(
     pool: &PgPool,
     project_id: Uuid,
@@ -664,8 +951,19 @@ pub async fn sync_project_canvas_nodes(pool: &PgPool, project_id: Uuid) -> Resul
             if agent.status != "connected" {
                 continue;
             }
-            let binding_id =
-                ensure_discovered_binding(pool, &agent.gateway_id, &agent.id, &agent.name).await?;
+            let binding_id = ensure_discovered_binding(
+                pool,
+                project_id,
+                &agent.gateway_id,
+                &agent.id,
+                &agent.name,
+                agent
+                    .metadata
+                    .get("providerKey")
+                    .and_then(Value::as_str)
+                    .unwrap_or("openclaw"),
+            )
+            .await?;
             sqlx::query(
                 "INSERT INTO project_bindings (project_id, binding_id)
                  VALUES ($1, $2)
@@ -737,6 +1035,24 @@ fn default_canvas_position(index: usize) -> Value {
     })
 }
 
+pub async fn attach_project_binding(
+    pool: &PgPool,
+    project_id: Uuid,
+    binding_id: Uuid,
+) -> Result<(), ApiError> {
+    validate_project_bindings(pool, "", &[binding_id]).await?;
+    sqlx::query(
+        "INSERT INTO project_bindings (project_id, binding_id)
+         VALUES ($1, $2)
+         ON CONFLICT DO NOTHING",
+    )
+    .bind(project_id)
+    .bind(binding_id)
+    .execute(pool)
+    .await?;
+    seed_canvas_nodes_for_bindings(pool, project_id, &[binding_id]).await
+}
+
 async fn validate_project_bindings(
     pool: &PgPool,
     _gateway_id: &str,
@@ -763,9 +1079,29 @@ async fn validate_project_bindings(
 
 pub async fn list_profiles(pool: &PgPool) -> Result<Vec<AgentProfile>, ApiError> {
     sqlx::query_as::<_, AgentProfile>(
-        "SELECT id, slug, name, description, created_at, updated_at
-         FROM agent_profiles ORDER BY created_at ASC",
+        "SELECT id, project_id, slug, name, description, active_version_id, archived_at,
+                created_at, updated_at
+         FROM agent_profiles
+         WHERE archived_at IS NULL
+         ORDER BY created_at ASC",
     )
+    .fetch_all(pool)
+    .await
+    .map_err(ApiError::from)
+}
+
+pub async fn list_project_profiles(
+    pool: &PgPool,
+    project_id: Uuid,
+) -> Result<Vec<AgentProfile>, ApiError> {
+    sqlx::query_as::<_, AgentProfile>(
+        "SELECT id, project_id, slug, name, description, active_version_id, archived_at,
+                created_at, updated_at
+         FROM agent_profiles
+         WHERE project_id = $1 AND archived_at IS NULL
+         ORDER BY created_at ASC",
+    )
+    .bind(project_id)
     .fetch_all(pool)
     .await
     .map_err(ApiError::from)
@@ -773,7 +1109,8 @@ pub async fn list_profiles(pool: &PgPool) -> Result<Vec<AgentProfile>, ApiError>
 
 pub async fn get_profile(pool: &PgPool, id: Uuid) -> Result<AgentProfile, ApiError> {
     sqlx::query_as::<_, AgentProfile>(
-        "SELECT id, slug, name, description, created_at, updated_at
+        "SELECT id, project_id, slug, name, description, active_version_id, archived_at,
+                created_at, updated_at
          FROM agent_profiles WHERE id = $1",
     )
     .bind(id)
@@ -782,19 +1119,40 @@ pub async fn get_profile(pool: &PgPool, id: Uuid) -> Result<AgentProfile, ApiErr
     .ok_or(ApiError::NotFound)
 }
 
+pub async fn get_project_profile(
+    pool: &PgPool,
+    project_id: Uuid,
+    id: Uuid,
+) -> Result<AgentProfile, ApiError> {
+    sqlx::query_as::<_, AgentProfile>(
+        "SELECT id, project_id, slug, name, description, active_version_id, archived_at,
+                created_at, updated_at
+         FROM agent_profiles
+         WHERE id = $1 AND project_id = $2 AND archived_at IS NULL",
+    )
+    .bind(id)
+    .bind(project_id)
+    .fetch_optional(pool)
+    .await?
+    .ok_or(ApiError::NotFound)
+}
+
 pub async fn create_profile(
     pool: &PgPool,
     id: Uuid,
+    project_id: Uuid,
     slug: &str,
     name: &str,
     description: Option<&str>,
 ) -> Result<AgentProfile, ApiError> {
     sqlx::query_as::<_, AgentProfile>(
-        "INSERT INTO agent_profiles (id, slug, name, description)
-         VALUES ($1, $2, $3, $4)
-         RETURNING id, slug, name, description, created_at, updated_at",
+        "INSERT INTO agent_profiles (id, project_id, slug, name, description)
+         VALUES ($1, $2, $3, $4, $5)
+         RETURNING id, project_id, slug, name, description, active_version_id, archived_at,
+                   created_at, updated_at",
     )
     .bind(id)
+    .bind(project_id)
     .bind(slug)
     .bind(name)
     .bind(description)
@@ -815,7 +1173,8 @@ pub async fn update_profile(
             description = CASE WHEN $4 THEN $5 ELSE description END,
             updated_at = NOW()
          WHERE id = $1
-         RETURNING id, slug, name, description, created_at, updated_at",
+         RETURNING id, project_id, slug, name, description, active_version_id, archived_at,
+                   created_at, updated_at",
     )
     .bind(id)
     .bind(patch.slug)
@@ -836,7 +1195,519 @@ pub struct ProfilePatch<'a> {
 }
 
 pub async fn delete_profile(pool: &PgPool, id: Uuid) -> Result<(), ApiError> {
-    delete_by_id(pool, "agent_profiles", id).await
+    let result = sqlx::query(
+        "UPDATE agent_profiles
+         SET archived_at = COALESCE(archived_at, NOW()), updated_at = NOW()
+         WHERE id = $1",
+    )
+    .bind(id)
+    .execute(pool)
+    .await?;
+    if result.rows_affected() == 0 {
+        Err(ApiError::NotFound)
+    } else {
+        Ok(())
+    }
+}
+
+pub async fn archive_project_profile(
+    pool: &PgPool,
+    project_id: Uuid,
+    profile_id: Uuid,
+) -> Result<(), ApiError> {
+    let mut transaction = pool.begin().await?;
+    let archived = sqlx::query(
+        "UPDATE agent_profiles
+         SET archived_at = COALESCE(archived_at, NOW()), updated_at = NOW()
+         WHERE id = $1 AND project_id = $2",
+    )
+    .bind(profile_id)
+    .bind(project_id)
+    .execute(&mut *transaction)
+    .await?;
+    if archived.rows_affected() == 0 {
+        return Err(ApiError::NotFound);
+    }
+
+    sqlx::query(
+        "UPDATE agent_endpoints
+         SET enabled = FALSE, updated_at = NOW()
+         WHERE profile_id = $1",
+    )
+    .bind(profile_id)
+    .execute(&mut *transaction)
+    .await?;
+
+    sqlx::query(
+        "DELETE FROM project_canvas_nodes
+         WHERE project_id = $1 AND profile_id = $2",
+    )
+    .bind(project_id)
+    .bind(profile_id)
+    .execute(&mut *transaction)
+    .await?;
+
+    sqlx::query(
+        "DELETE FROM project_bindings AS project_binding
+         USING agent_bindings AS binding
+         WHERE project_binding.project_id = $1
+           AND project_binding.binding_id = binding.id
+           AND binding.profile_id = $2",
+    )
+    .bind(project_id)
+    .bind(profile_id)
+    .execute(&mut *transaction)
+    .await?;
+
+    transaction.commit().await?;
+    Ok(())
+}
+
+pub struct NewProfileVersion<'a> {
+    pub persona: &'a Value,
+    pub runtime: &'a Value,
+    pub presentation: &'a Value,
+    pub source: &'a Value,
+    pub capabilities: &'a [ProfileCapabilityDraft],
+    pub change_summary: Option<&'a str>,
+}
+
+pub async fn create_profile_version(
+    pool: &PgPool,
+    profile_id: Uuid,
+    input: NewProfileVersion<'_>,
+) -> Result<AgentProfileVersion, ApiError> {
+    let content_hash = profile_version_content_hash(&input)?;
+    let mut transaction = pool.begin().await?;
+    let active_version_id = sqlx::query_scalar::<_, Option<Uuid>>(
+        "SELECT active_version_id FROM agent_profiles WHERE id = $1 FOR UPDATE",
+    )
+    .bind(profile_id)
+    .fetch_optional(&mut *transaction)
+    .await?
+    .ok_or(ApiError::NotFound)?;
+    let version_number = sqlx::query_scalar::<_, i32>(
+        "SELECT COALESCE(MAX(version_number), 0) + 1
+         FROM agent_profile_versions
+         WHERE profile_id = $1",
+    )
+    .bind(profile_id)
+    .fetch_one(&mut *transaction)
+    .await?;
+    let version_id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO agent_profile_versions
+            (id, profile_id, version_number, persona, runtime, presentation, source,
+             content_hash, change_summary)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+    )
+    .bind(version_id)
+    .bind(profile_id)
+    .bind(version_number)
+    .bind(input.persona)
+    .bind(input.runtime)
+    .bind(input.presentation)
+    .bind(input.source)
+    .bind(content_hash)
+    .bind(input.change_summary)
+    .execute(&mut *transaction)
+    .await
+    .map_err(map_database_error)?;
+    for capability in input.capabilities {
+        sqlx::query(
+            "INSERT INTO agent_profile_capabilities
+                (id, profile_version_id, kind, provider_type, provider_key, resource_id,
+                 config, input_schema, output_schema)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+        )
+        .bind(Uuid::new_v4())
+        .bind(version_id)
+        .bind(&capability.kind)
+        .bind(&capability.provider_type)
+        .bind(&capability.provider_key)
+        .bind(&capability.resource_id)
+        .bind(&capability.config)
+        .bind(&capability.input_schema)
+        .bind(&capability.output_schema)
+        .execute(&mut *transaction)
+        .await
+        .map_err(map_database_error)?;
+    }
+    if active_version_id.is_none() {
+        sqlx::query(
+            "UPDATE agent_profiles
+             SET active_version_id = $2, updated_at = NOW()
+             WHERE id = $1",
+        )
+        .bind(profile_id)
+        .bind(version_id)
+        .execute(&mut *transaction)
+        .await?;
+        sqlx::query(
+            "INSERT INTO agent_profile_rollouts
+                (profile_id, profile_version_id, weight_bps)
+             VALUES ($1, $2, 10000)",
+        )
+        .bind(profile_id)
+        .bind(version_id)
+        .execute(&mut *transaction)
+        .await?;
+    }
+    transaction.commit().await?;
+    get_profile_version(pool, profile_id, version_id).await
+}
+
+pub async fn list_profile_versions(
+    pool: &PgPool,
+    profile_id: Uuid,
+) -> Result<Vec<AgentProfileVersion>, ApiError> {
+    sqlx::query_as::<_, AgentProfileVersion>(
+        "SELECT id, profile_id, version_number, persona, runtime, presentation, source,
+                content_hash, change_summary, archived_at, created_at
+         FROM agent_profile_versions
+         WHERE profile_id = $1
+         ORDER BY version_number DESC",
+    )
+    .bind(profile_id)
+    .fetch_all(pool)
+    .await
+    .map_err(ApiError::from)
+}
+
+pub async fn get_profile_version(
+    pool: &PgPool,
+    profile_id: Uuid,
+    version_id: Uuid,
+) -> Result<AgentProfileVersion, ApiError> {
+    sqlx::query_as::<_, AgentProfileVersion>(
+        "SELECT id, profile_id, version_number, persona, runtime, presentation, source,
+                content_hash, change_summary, archived_at, created_at
+         FROM agent_profile_versions
+         WHERE id = $1 AND profile_id = $2",
+    )
+    .bind(version_id)
+    .bind(profile_id)
+    .fetch_optional(pool)
+    .await?
+    .ok_or(ApiError::NotFound)
+}
+
+pub async fn list_profile_capabilities(
+    pool: &PgPool,
+    version_id: Uuid,
+) -> Result<Vec<AgentProfileCapability>, ApiError> {
+    sqlx::query_as::<_, AgentProfileCapability>(
+        "SELECT id, profile_version_id, kind, provider_type, provider_key, resource_id,
+                config, input_schema, output_schema, created_at
+         FROM agent_profile_capabilities
+         WHERE profile_version_id = $1
+         ORDER BY created_at ASC",
+    )
+    .bind(version_id)
+    .fetch_all(pool)
+    .await
+    .map_err(ApiError::from)
+}
+
+pub async fn list_profile_rollout(
+    pool: &PgPool,
+    profile_id: Uuid,
+) -> Result<Vec<AgentProfileRollout>, ApiError> {
+    sqlx::query_as::<_, AgentProfileRollout>(
+        "SELECT profile_id, profile_version_id, weight_bps, created_at, updated_at
+         FROM agent_profile_rollouts
+         WHERE profile_id = $1
+         ORDER BY weight_bps DESC, created_at ASC",
+    )
+    .bind(profile_id)
+    .fetch_all(pool)
+    .await
+    .map_err(ApiError::from)
+}
+
+pub async fn set_profile_rollout(
+    pool: &PgPool,
+    profile_id: Uuid,
+    allocations: &[(Uuid, i32)],
+) -> Result<Vec<AgentProfileRollout>, ApiError> {
+    if allocations.is_empty() || allocations.len() > 10 {
+        return Err(ApiError::Invalid(
+            "a rollout requires between 1 and 10 versions".to_string(),
+        ));
+    }
+    let mut unique = HashSet::new();
+    let total = allocations
+        .iter()
+        .try_fold(0_i32, |total, (version_id, weight)| {
+            if *weight <= 0 || !unique.insert(*version_id) {
+                return Err(ApiError::Invalid(
+                    "rollout versions must be unique and have a positive weight".to_string(),
+                ));
+            }
+            total
+                .checked_add(*weight)
+                .ok_or_else(|| ApiError::Invalid("rollout weights are invalid".to_string()))
+        })?;
+    if total != 10_000 {
+        return Err(ApiError::Invalid(
+            "rollout weights must total 10000 basis points".to_string(),
+        ));
+    }
+
+    let version_ids = allocations
+        .iter()
+        .map(|(version_id, _)| *version_id)
+        .collect::<Vec<_>>();
+    let versions = sqlx::query_as::<_, AgentProfileVersion>(
+        "SELECT id, profile_id, version_number, persona, runtime, presentation, source,
+                content_hash, change_summary, archived_at, created_at
+         FROM agent_profile_versions
+         WHERE profile_id = $1 AND id = ANY($2) AND archived_at IS NULL",
+    )
+    .bind(profile_id)
+    .bind(&version_ids)
+    .fetch_all(pool)
+    .await?;
+    if versions.len() != allocations.len() {
+        return Err(ApiError::Invalid(
+            "rollout versions must be active versions of this profile".to_string(),
+        ));
+    }
+    let source_managed = versions.iter().any(|version| {
+        version.source.get("type").and_then(Value::as_str) == Some("openclaw")
+            && version
+                .source
+                .get("managed")
+                .and_then(Value::as_bool)
+                .unwrap_or(true)
+    });
+    if source_managed && allocations.len() != 1 {
+        return Err(ApiError::Conflict(
+            "source-managed OpenClaw profiles support one active version at a time".to_string(),
+        ));
+    }
+
+    let active_version_id = allocations
+        .iter()
+        .max_by_key(|(_, weight)| *weight)
+        .map(|(version_id, _)| *version_id)
+        .ok_or(ApiError::Internal)?;
+    let mut transaction = pool.begin().await?;
+    sqlx::query("DELETE FROM agent_profile_rollouts WHERE profile_id = $1")
+        .bind(profile_id)
+        .execute(&mut *transaction)
+        .await?;
+    for (version_id, weight_bps) in allocations {
+        sqlx::query(
+            "INSERT INTO agent_profile_rollouts
+                (profile_id, profile_version_id, weight_bps)
+             VALUES ($1, $2, $3)",
+        )
+        .bind(profile_id)
+        .bind(version_id)
+        .bind(weight_bps)
+        .execute(&mut *transaction)
+        .await?;
+    }
+    sqlx::query(
+        "UPDATE agent_profiles
+         SET active_version_id = $2, updated_at = NOW()
+         WHERE id = $1",
+    )
+    .bind(profile_id)
+    .bind(active_version_id)
+    .execute(&mut *transaction)
+    .await?;
+    transaction.commit().await?;
+    list_profile_rollout(pool, profile_id).await
+}
+
+pub async fn archive_profile_version(
+    pool: &PgPool,
+    profile_id: Uuid,
+    version_id: Uuid,
+) -> Result<AgentProfileVersion, ApiError> {
+    let in_rollout = sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS(
+            SELECT 1 FROM agent_profile_rollouts
+            WHERE profile_id = $1 AND profile_version_id = $2
+         )",
+    )
+    .bind(profile_id)
+    .bind(version_id)
+    .fetch_one(pool)
+    .await?;
+    if in_rollout {
+        return Err(ApiError::Conflict(
+            "an active rollout version cannot be archived".to_string(),
+        ));
+    }
+    sqlx::query(
+        "UPDATE agent_profile_versions
+         SET archived_at = COALESCE(archived_at, NOW())
+         WHERE id = $1 AND profile_id = $2",
+    )
+    .bind(version_id)
+    .bind(profile_id)
+    .execute(pool)
+    .await?;
+    get_profile_version(pool, profile_id, version_id).await
+}
+
+fn profile_version_content_hash(input: &NewProfileVersion<'_>) -> Result<String, ApiError> {
+    let payload = json!({
+        "persona": input.persona,
+        "runtime": input.runtime,
+        "presentation": input.presentation,
+        "source": input.source,
+        "capabilities": input.capabilities,
+    });
+    let encoded = serde_json::to_vec(&payload).map_err(|_| ApiError::Internal)?;
+    Ok(format!("{:x}", Sha256::digest(encoded)))
+}
+
+pub async fn resolve_profile_route(
+    pool: &PgPool,
+    project_id: Uuid,
+    model: &str,
+    capability_kind: &str,
+    selection_key: Option<&str>,
+    version_id: Option<Uuid>,
+) -> Result<ProfileRoute, ApiError> {
+    let profile_id = if let Ok(profile_id) = Uuid::parse_str(model) {
+        sqlx::query_scalar::<_, Uuid>(
+            "SELECT profile.id
+             FROM agent_profiles AS profile
+             WHERE profile.id = $1
+               AND profile.project_id = $2
+               AND profile.archived_at IS NULL",
+        )
+        .bind(profile_id)
+        .bind(project_id)
+        .fetch_optional(pool)
+        .await?
+        .ok_or(ApiError::NotFound)?
+    } else {
+        sqlx::query_scalar::<_, Uuid>(
+            "SELECT profile.id
+             FROM agent_profiles AS profile
+             WHERE profile.project_id = $1
+               AND profile.slug = $2
+               AND profile.archived_at IS NULL",
+        )
+        .bind(project_id)
+        .bind(model)
+        .fetch_optional(pool)
+        .await?
+        .ok_or(ApiError::NotFound)?
+    };
+    let version_id = match version_id {
+        Some(version_id) => {
+            get_profile_version(pool, profile_id, version_id).await?;
+            version_id
+        }
+        None => select_profile_version(pool, profile_id, selection_key).await?,
+    };
+    sqlx::query_as::<_, ProfileRoute>(
+        "SELECT profile.id AS profile_id,
+                profile.slug AS profile_slug,
+                profile.name AS profile_name,
+                version.id AS profile_version_id,
+                version.version_number,
+                capability.id AS capability_id,
+                capability.kind AS capability_kind,
+                capability.provider_type,
+                capability.provider_key,
+                capability.resource_id,
+                capability.config AS capability_config,
+                version.persona,
+                version.runtime,
+                version.presentation,
+                version.source
+         FROM agent_profiles AS profile
+         JOIN agent_profile_versions AS version
+           ON version.id = $2
+          AND version.profile_id = profile.id
+          AND version.archived_at IS NULL
+         JOIN agent_profile_capabilities AS capability
+           ON capability.profile_version_id = version.id
+          AND capability.kind = $3
+         WHERE profile.id = $1
+         ORDER BY capability.created_at ASC
+         LIMIT 1",
+    )
+    .bind(profile_id)
+    .bind(version_id)
+    .bind(capability_kind)
+    .fetch_optional(pool)
+    .await?
+    .ok_or(ApiError::NotFound)
+}
+
+pub async fn list_public_agents(
+    pool: &PgPool,
+    project_id: Uuid,
+    allowed_profile_ids: Option<&[Uuid]>,
+) -> Result<Vec<PublicAgent>, ApiError> {
+    let profiles = list_project_profiles(pool, project_id).await?;
+    let mut agents = Vec::new();
+    for profile in profiles {
+        if allowed_profile_ids.is_some_and(|ids| !ids.contains(&profile.id)) {
+            continue;
+        }
+        let Some(version_id) = profile.active_version_id else {
+            continue;
+        };
+        let version = get_profile_version(pool, profile.id, version_id).await?;
+        let capabilities = list_profile_capabilities(pool, version.id)
+            .await?
+            .into_iter()
+            .map(|capability| capability.kind)
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        agents.push(PublicAgent {
+            id: profile.id,
+            slug: profile.slug,
+            name: profile.name,
+            description: profile.description,
+            version: version.version_number,
+            capabilities,
+            presentation: version.presentation,
+        });
+    }
+    agents.sort_by(|left, right| left.slug.cmp(&right.slug));
+    Ok(agents)
+}
+
+async fn select_profile_version(
+    pool: &PgPool,
+    profile_id: Uuid,
+    selection_key: Option<&str>,
+) -> Result<Uuid, ApiError> {
+    let rollout = list_profile_rollout(pool, profile_id).await?;
+    if rollout.is_empty() {
+        return get_profile(pool, profile_id)
+            .await?
+            .active_version_id
+            .ok_or(ApiError::NotFound);
+    }
+    let mut hasher = Sha256::new();
+    hasher.update(profile_id.as_bytes());
+    hasher.update(selection_key.unwrap_or("anonymous").as_bytes());
+    let digest = hasher.finalize();
+    let bucket = u16::from_be_bytes([digest[0], digest[1]]) as i32 % 10_000;
+    let mut cursor = 0_i32;
+    for allocation in &rollout {
+        cursor += allocation.weight_bps;
+        if bucket < cursor {
+            return Ok(allocation.profile_version_id);
+        }
+    }
+    rollout
+        .last()
+        .map(|allocation| allocation.profile_version_id)
+        .ok_or(ApiError::NotFound)
 }
 
 pub async fn list_bindings(pool: &PgPool) -> Result<Vec<AgentBinding>, ApiError> {
@@ -888,11 +1759,17 @@ pub async fn create_binding(
 
 pub async fn ensure_discovered_binding(
     pool: &PgPool,
+    project_id: Uuid,
     gateway_id: &str,
     agent_id: &str,
     agent_name: &str,
+    provider_key: &str,
 ) -> Result<Uuid, ApiError> {
-    if let Some(binding) = find_binding_by_agent_gateway_agent(pool, gateway_id, agent_id).await? {
+    if let Some(binding) =
+        find_binding_by_agent_gateway_agent(pool, project_id, gateway_id, agent_id, provider_key)
+            .await?
+    {
+        assign_project_binding(pool, project_id, binding.id).await?;
         return Ok(binding.id);
     }
 
@@ -902,50 +1779,170 @@ pub async fn ensure_discovered_binding(
     } else {
         display_name
     };
+    let provider_key =
+        if vifu_core::protocol::validate_identifier("provider key", provider_key).is_ok() {
+            provider_key
+        } else {
+            "openclaw"
+        };
     let slug = unique_profile_slug(
         pool,
+        project_id,
         &discovered_profile_slug(gateway_id, agent_id, display_name),
     )
     .await?;
-    let profile = create_profile(
-        pool,
-        Uuid::new_v4(),
-        &slug,
-        display_name,
-        Some("Discovered from OpenClaw"),
-    )
-    .await?;
-    let config = json!({
+    let profile_id = Uuid::new_v4();
+    let binding_id = Uuid::new_v4();
+    let version_id = Uuid::new_v4();
+    let binding_config = json!({
         "source": "openclaw-discovery",
         "agentName": display_name,
+        "providerKey": provider_key,
     });
-    let binding = create_binding(
-        pool,
-        Uuid::new_v4(),
-        profile.id,
-        "openclaw",
-        gateway_id,
-        agent_id,
-        &config,
+    let persona = json!({ "files": {} });
+    let runtime = json!({});
+    let presentation = json!({});
+    let source = json!({
+        "type": "openclaw",
+        "providerKey": provider_key,
+        "gatewayId": gateway_id,
+        "resourceId": agent_id,
+        "managed": true,
+    });
+    let capability = ProfileCapabilityDraft {
+        kind: "chat".to_string(),
+        provider_type: "openclaw".to_string(),
+        provider_key: provider_key.to_string(),
+        resource_id: Some(agent_id.to_string()),
+        config: json!({
+            "gatewayId": gateway_id,
+            "source": "openclaw-discovery",
+        }),
+        input_schema: json!({}),
+        output_schema: json!({}),
+    };
+    let capabilities = [capability];
+    let version_input = NewProfileVersion {
+        persona: &persona,
+        runtime: &runtime,
+        presentation: &presentation,
+        source: &source,
+        capabilities: &capabilities,
+        change_summary: Some("Discovered from OpenClaw"),
+    };
+    let content_hash = profile_version_content_hash(&version_input)?;
+    let mut transaction = pool.begin().await?;
+    sqlx::query(
+        "INSERT INTO agent_profiles (id, project_id, slug, name, description)
+         VALUES ($1, $2, $3, $4, $5)",
     )
+    .bind(profile_id)
+    .bind(project_id)
+    .bind(&slug)
+    .bind(display_name)
+    .bind("Discovered from OpenClaw")
+    .execute(&mut *transaction)
+    .await
+    .map_err(map_database_error)?;
+    sqlx::query(
+        "INSERT INTO agent_bindings
+            (id, profile_id, provider, gateway_id, agent_id, config)
+         VALUES ($1, $2, 'openclaw', $3, $4, $5)",
+    )
+    .bind(binding_id)
+    .bind(profile_id)
+    .bind(gateway_id)
+    .bind(agent_id)
+    .bind(&binding_config)
+    .execute(&mut *transaction)
+    .await
+    .map_err(map_database_error)?;
+    sqlx::query(
+        "INSERT INTO agent_profile_versions
+            (id, profile_id, version_number, persona, runtime, presentation, source,
+             content_hash, change_summary)
+         VALUES ($1, $2, 1, $3, $4, $5, $6, $7, $8)",
+    )
+    .bind(version_id)
+    .bind(profile_id)
+    .bind(&persona)
+    .bind(&runtime)
+    .bind(&presentation)
+    .bind(&source)
+    .bind(content_hash)
+    .bind("Discovered from OpenClaw")
+    .execute(&mut *transaction)
+    .await
+    .map_err(map_database_error)?;
+    sqlx::query(
+        "INSERT INTO agent_profile_capabilities
+            (id, profile_version_id, kind, provider_type, provider_key, resource_id,
+             config, input_schema, output_schema)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+    )
+    .bind(Uuid::new_v4())
+    .bind(version_id)
+    .bind(&capabilities[0].kind)
+    .bind(&capabilities[0].provider_type)
+    .bind(&capabilities[0].provider_key)
+    .bind(&capabilities[0].resource_id)
+    .bind(&capabilities[0].config)
+    .bind(&capabilities[0].input_schema)
+    .bind(&capabilities[0].output_schema)
+    .execute(&mut *transaction)
+    .await
+    .map_err(map_database_error)?;
+    sqlx::query("UPDATE agent_profiles SET active_version_id = $2 WHERE id = $1")
+        .bind(profile_id)
+        .bind(version_id)
+        .execute(&mut *transaction)
+        .await?;
+    sqlx::query(
+        "INSERT INTO agent_profile_rollouts
+            (profile_id, profile_version_id, weight_bps)
+         VALUES ($1, $2, 10000)",
+    )
+    .bind(profile_id)
+    .bind(version_id)
+    .execute(&mut *transaction)
     .await?;
-    Ok(binding.id)
+    sqlx::query(
+        "INSERT INTO project_bindings (project_id, binding_id)
+         VALUES ($1, $2)
+         ON CONFLICT DO NOTHING",
+    )
+    .bind(project_id)
+    .bind(binding_id)
+    .execute(&mut *transaction)
+    .await?;
+    transaction.commit().await?;
+    Ok(binding_id)
 }
 
 async fn find_binding_by_agent_gateway_agent(
     pool: &PgPool,
+    project_id: Uuid,
     gateway_id: &str,
     agent_id: &str,
+    provider_key: &str,
 ) -> Result<Option<AgentBinding>, ApiError> {
     sqlx::query_as::<_, AgentBinding>(
-        "SELECT id, profile_id, provider, gateway_id, agent_id, config, created_at, updated_at
-         FROM agent_bindings
-         WHERE gateway_id = $1 AND agent_id = $2
-         ORDER BY created_at ASC
+        "SELECT binding.id, binding.profile_id, binding.provider, binding.gateway_id,
+                binding.agent_id, binding.config, binding.created_at, binding.updated_at
+         FROM agent_bindings AS binding
+         JOIN agent_profiles AS profile ON profile.id = binding.profile_id
+         WHERE profile.project_id = $1
+           AND profile.archived_at IS NULL
+           AND binding.gateway_id = $2
+           AND binding.agent_id = $3
+           AND COALESCE(NULLIF(binding.config->>'providerKey', ''), binding.provider) = $4
+         ORDER BY binding.created_at ASC
          LIMIT 1",
     )
+    .bind(project_id)
     .bind(gateway_id)
     .bind(agent_id)
+    .bind(provider_key)
     .fetch_optional(pool)
     .await
     .map_err(ApiError::from)
@@ -970,7 +1967,11 @@ fn discovered_profile_slug(gateway_id: &str, agent_id: &str, agent_name: &str) -
         .collect()
 }
 
-async fn unique_profile_slug(pool: &PgPool, base: &str) -> Result<String, ApiError> {
+async fn unique_profile_slug(
+    pool: &PgPool,
+    project_id: Uuid,
+    base: &str,
+) -> Result<String, ApiError> {
     let base = if validate_slug(base) {
         base.to_string()
     } else {
@@ -979,8 +1980,12 @@ async fn unique_profile_slug(pool: &PgPool, base: &str) -> Result<String, ApiErr
     let mut candidate = base.clone();
     for index in 2..=999 {
         let exists = sqlx::query_scalar::<_, bool>(
-            "SELECT EXISTS(SELECT 1 FROM agent_profiles WHERE slug = $1)",
+            "SELECT EXISTS(
+                SELECT 1 FROM agent_profiles
+                WHERE project_id = $1 AND slug = $2
+             )",
         )
+        .bind(project_id)
         .bind(&candidate)
         .fetch_one(pool)
         .await?;
@@ -1068,7 +2073,6 @@ pub async fn list_enabled_endpoints_for_project_id(
     pool: &PgPool,
     project_id: Uuid,
 ) -> Result<Vec<AgentEndpoint>, ApiError> {
-    sync_project_canvas_nodes(pool, project_id).await?;
     sqlx::query_as::<_, AgentEndpoint>(
         "SELECT endpoint.id, endpoint.slug, endpoint.name, endpoint.profile_id,
                 endpoint.binding_id, endpoint.enabled, endpoint.request_timeout_ms,
@@ -1076,10 +2080,6 @@ pub async fn list_enabled_endpoints_for_project_id(
          FROM agent_endpoints endpoint
          JOIN project_bindings pb ON pb.binding_id = endpoint.binding_id
          JOIN projects project ON project.id = pb.project_id
-         JOIN project_canvas_nodes node
-           ON node.project_id = project.id
-          AND node.binding_id = endpoint.binding_id
-          AND node.exposed = TRUE
          WHERE endpoint.enabled = TRUE
            AND project.enabled = TRUE
            AND project.id = $1
@@ -1213,13 +2213,13 @@ pub async fn list_api_keys(pool: &PgPool) -> Result<Vec<ApiKeyRecord>, ApiError>
     let rows = sqlx::query_as::<_, ApiKeyRow>(
         "SELECT key.id, key.project_id, key.name, key.scope_mode,
                 COALESCE(
-                    ARRAY_AGG(scope.binding_id ORDER BY scope.binding_id)
-                        FILTER (WHERE scope.binding_id IS NOT NULL),
+                    ARRAY_AGG(scope.profile_id ORDER BY scope.profile_id)
+                        FILTER (WHERE scope.profile_id IS NOT NULL),
                     ARRAY[]::UUID[]
-                ) AS binding_ids,
+                ) AS profile_ids,
                 key.permissions, key.key_prefix, key.created_at, key.revoked_at
          FROM api_keys key
-         LEFT JOIN api_key_agent_scopes scope ON scope.api_key_id = key.id
+         LEFT JOIN api_key_profile_scopes scope ON scope.api_key_id = key.id
          GROUP BY key.id
          ORDER BY key.created_at DESC",
     )
@@ -1256,11 +2256,11 @@ pub async fn create_api_key(pool: &PgPool, input: NewApiKey<'_>) -> Result<ApiKe
     .execute(&mut *transaction)
     .await
     .map_err(map_database_error)?;
-    insert_api_key_agent_scopes(
+    insert_api_key_profile_scopes(
         &mut transaction,
         input.id,
         input.project_id,
-        input.agent_scope.binding_ids(),
+        input.agent_scope.profile_ids(),
     )
     .await?;
     transaction.commit().await?;
@@ -1271,13 +2271,13 @@ pub async fn get_api_key(pool: &PgPool, id: Uuid) -> Result<ApiKeyRecord, ApiErr
     let row = sqlx::query_as::<_, ApiKeyRow>(
         "SELECT key.id, key.project_id, key.name, key.scope_mode,
                 COALESCE(
-                    ARRAY_AGG(scope.binding_id ORDER BY scope.binding_id)
-                        FILTER (WHERE scope.binding_id IS NOT NULL),
+                    ARRAY_AGG(scope.profile_id ORDER BY scope.profile_id)
+                        FILTER (WHERE scope.profile_id IS NOT NULL),
                     ARRAY[]::UUID[]
-                ) AS binding_ids,
+                ) AS profile_ids,
                 key.permissions, key.key_prefix, key.created_at, key.revoked_at
          FROM api_keys key
-         LEFT JOIN api_key_agent_scopes scope ON scope.api_key_id = key.id
+         LEFT JOIN api_key_profile_scopes scope ON scope.api_key_id = key.id
          WHERE key.id = $1
          GROUP BY key.id",
     )
@@ -1311,7 +2311,7 @@ pub async fn update_api_key(
     validate_api_key_agent_scope(pool, project_id, agent_scope).await?;
 
     let mut transaction = pool.begin().await?;
-    sqlx::query("DELETE FROM api_key_agent_scopes WHERE api_key_id = $1")
+    sqlx::query("DELETE FROM api_key_profile_scopes WHERE api_key_id = $1")
         .bind(id)
         .execute(&mut *transaction)
         .await?;
@@ -1332,11 +2332,11 @@ pub async fn update_api_key(
     .fetch_optional(&mut *transaction)
     .await?
     .ok_or_else(|| ApiError::Conflict("only active API keys can be edited".to_string()))?;
-    insert_api_key_agent_scopes(
+    insert_api_key_profile_scopes(
         &mut transaction,
         updated,
         project_id,
-        agent_scope.binding_ids(),
+        agent_scope.profile_ids(),
     )
     .await?;
     transaction.commit().await?;
@@ -1377,6 +2377,52 @@ pub async fn delete_api_key(pool: &PgPool, id: Uuid) -> Result<(), ApiError> {
     }
 }
 
+pub async fn create_realtime_session(
+    pool: &PgPool,
+    id: Uuid,
+    project_id: Uuid,
+    profile_id: Uuid,
+    api_key_id: Option<Uuid>,
+    token_hash: &[u8],
+    expires_at: DateTime<Utc>,
+) -> Result<RealtimeSession, ApiError> {
+    sqlx::query("DELETE FROM realtime_sessions WHERE expires_at <= NOW()")
+        .execute(pool)
+        .await?;
+    sqlx::query_as::<_, RealtimeSession>(
+        "INSERT INTO realtime_sessions
+            (id, project_id, profile_id, api_key_id, token_hash, expires_at)
+         VALUES ($1, $2, $3, $4, $5, $6)
+         RETURNING id, project_id, profile_id, api_key_id, expires_at, created_at",
+    )
+    .bind(id)
+    .bind(project_id)
+    .bind(profile_id)
+    .bind(api_key_id)
+    .bind(token_hash)
+    .bind(expires_at)
+    .fetch_one(pool)
+    .await
+    .map_err(map_database_error)
+}
+
+pub async fn active_realtime_session_by_hash(
+    pool: &PgPool,
+    project_id: Uuid,
+    token_hash: &[u8],
+) -> Result<RealtimeSession, ApiError> {
+    sqlx::query_as::<_, RealtimeSession>(
+        "SELECT id, project_id, profile_id, api_key_id, expires_at, created_at
+         FROM realtime_sessions
+         WHERE project_id = $1 AND token_hash = $2 AND expires_at > NOW()",
+    )
+    .bind(project_id)
+    .bind(token_hash)
+    .fetch_optional(pool)
+    .await?
+    .ok_or(ApiError::Unauthorized)
+}
+
 pub async fn active_api_key_by_hash(
     pool: &PgPool,
     key_hash: &[u8],
@@ -1384,13 +2430,13 @@ pub async fn active_api_key_by_hash(
     let row = sqlx::query_as::<_, ApiKeyRow>(
         "SELECT key.id, key.project_id, key.name, key.scope_mode,
                 COALESCE(
-                    ARRAY_AGG(scope.binding_id ORDER BY scope.binding_id)
-                        FILTER (WHERE scope.binding_id IS NOT NULL),
+                    ARRAY_AGG(scope.profile_id ORDER BY scope.profile_id)
+                        FILTER (WHERE scope.profile_id IS NOT NULL),
                     ARRAY[]::UUID[]
-                ) AS binding_ids,
+                ) AS profile_ids,
                 key.permissions, key.key_prefix, key.created_at, key.revoked_at
          FROM api_keys key
-         LEFT JOIN api_key_agent_scopes scope ON scope.api_key_id = key.id
+         LEFT JOIN api_key_profile_scopes scope ON scope.api_key_id = key.id
          WHERE key.key_hash = $1 AND key.revoked_at IS NULL
          GROUP BY key.id",
     )
@@ -1406,44 +2452,44 @@ async fn validate_api_key_agent_scope(
     project_id: Uuid,
     agent_scope: &ApiKeyAgentScope,
 ) -> Result<(), ApiError> {
-    let ApiKeyAgentScope::Selected { binding_ids } = agent_scope else {
+    let ApiKeyAgentScope::Selected { profile_ids } = agent_scope else {
         return Ok(());
     };
-    if binding_ids.is_empty() || binding_ids.len() > 256 {
+    if profile_ids.is_empty() || profile_ids.len() > 256 {
         return Err(ApiError::Invalid(
             "selected agent access requires between 1 and 256 agents".to_string(),
         ));
     }
     let count = sqlx::query_scalar::<_, i64>(
-        "SELECT COUNT(*) FROM project_bindings
-         WHERE project_id = $1 AND binding_id = ANY($2)",
+        "SELECT COUNT(*) FROM agent_profiles
+         WHERE project_id = $1 AND id = ANY($2) AND archived_at IS NULL",
     )
     .bind(project_id)
-    .bind(binding_ids)
+    .bind(profile_ids)
     .fetch_one(pool)
     .await?;
-    if usize::try_from(count).ok() != Some(binding_ids.len()) {
+    if usize::try_from(count).ok() != Some(profile_ids.len()) {
         return Err(ApiError::Invalid(
-            "selected agents must belong to the API key project".to_string(),
+            "selected profiles must belong to the API key project".to_string(),
         ));
     }
     Ok(())
 }
 
-async fn insert_api_key_agent_scopes(
+async fn insert_api_key_profile_scopes(
     transaction: &mut sqlx::Transaction<'_, Postgres>,
     api_key_id: Uuid,
     project_id: Uuid,
-    binding_ids: &[Uuid],
+    profile_ids: &[Uuid],
 ) -> Result<(), ApiError> {
-    for binding_id in binding_ids {
+    for profile_id in profile_ids {
         sqlx::query(
-            "INSERT INTO api_key_agent_scopes (api_key_id, project_id, binding_id)
+            "INSERT INTO api_key_profile_scopes (api_key_id, project_id, profile_id)
              VALUES ($1, $2, $3)",
         )
         .bind(api_key_id)
         .bind(project_id)
-        .bind(binding_id)
+        .bind(profile_id)
         .execute(&mut **transaction)
         .await
         .map_err(map_database_error)?;
@@ -1484,8 +2530,6 @@ pub async fn resolve_project_endpoint_route(
     project_slug: &str,
     id_or_slug: &str,
 ) -> Result<EndpointRoute, ApiError> {
-    let project = get_project_by_slug(pool, project_slug).await?;
-    sync_project_canvas_nodes(pool, project.project.id).await?;
     const SELECT: &str =
         "SELECT e.id AS endpoint_id, e.slug AS endpoint_slug, e.name AS endpoint_name,
                 e.request_timeout_ms, profile.id AS profile_id, binding.id AS binding_id,
@@ -1495,10 +2539,6 @@ pub async fn resolve_project_endpoint_route(
          JOIN agent_bindings binding ON binding.id = e.binding_id
          JOIN project_bindings pb ON pb.binding_id = binding.id
          JOIN projects project ON project.id = pb.project_id
-         JOIN project_canvas_nodes node
-           ON node.project_id = project.id
-          AND node.binding_id = binding.id
-          AND node.exposed = TRUE
          WHERE e.enabled = TRUE
            AND project.enabled = TRUE
            AND project.slug = $1
@@ -1526,7 +2566,6 @@ pub async fn resolve_project_model_route(
     project_id: Uuid,
     model: &str,
 ) -> Result<EndpointRoute, ApiError> {
-    sync_project_canvas_nodes(pool, project_id).await?;
     sqlx::query_as::<_, EndpointRoute>(
         "SELECT endpoint.id AS endpoint_id, endpoint.slug AS endpoint_slug,
                 endpoint.name AS endpoint_name, endpoint.request_timeout_ms,
@@ -1537,10 +2576,6 @@ pub async fn resolve_project_model_route(
          JOIN agent_bindings binding ON binding.id = endpoint.binding_id
          JOIN project_bindings pb ON pb.binding_id = binding.id
          JOIN projects project ON project.id = pb.project_id
-         JOIN project_canvas_nodes node
-           ON node.project_id = project.id
-          AND node.binding_id = binding.id
-          AND node.exposed = TRUE
          WHERE endpoint.enabled = TRUE
            AND project.enabled = TRUE
            AND project.id = $1
@@ -1767,10 +2802,6 @@ pub async fn list_available_agents(pool: &PgPool) -> Result<Vec<AvailableAgent>,
             if id.is_empty() {
                 continue;
             }
-            let key = (session.gateway_id.clone(), id.to_string());
-            if !seen.insert(key) {
-                continue;
-            }
             let name = item
                 .get("name")
                 .and_then(Value::as_str)
@@ -1783,6 +2814,18 @@ pub async fn list_available_agents(pool: &PgPool) -> Result<Vec<AvailableAgent>,
                 .cloned()
                 .filter(Value::is_object)
                 .unwrap_or_else(|| json!({}));
+            let provider_key = metadata
+                .get("providerKey")
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            let key = (
+                session.gateway_id.clone(),
+                provider_key.to_string(),
+                id.to_string(),
+            );
+            if !seen.insert(key) {
+                continue;
+            }
             agents.push(AvailableAgent {
                 gateway_id: session.gateway_id.clone(),
                 id: id.to_string(),
@@ -1796,28 +2839,101 @@ pub async fn list_available_agents(pool: &PgPool) -> Result<Vec<AvailableAgent>,
     Ok(agents)
 }
 
-pub async fn create_trace(
-    pool: &PgPool,
-    request_id: Uuid,
-    endpoint_id: Uuid,
-    project_id: Option<Uuid>,
-    gateway_session_id: Option<Uuid>,
-    request: &Value,
-) -> Result<(), ApiError> {
+pub struct NewTrace<'a> {
+    pub request_id: Uuid,
+    pub endpoint_id: Option<Uuid>,
+    pub project_id: Option<Uuid>,
+    pub gateway_session_id: Option<Uuid>,
+    pub profile_id: Option<Uuid>,
+    pub profile_version_id: Option<Uuid>,
+    pub operation: &'a str,
+    pub provider_key: Option<&'a str>,
+    pub capability_kind: Option<&'a str>,
+    pub selection_key: Option<&'a str>,
+    pub request: &'a Value,
+}
+
+pub async fn create_trace(pool: &PgPool, trace: NewTrace<'_>) -> Result<Uuid, ApiError> {
+    let trace_id = Uuid::new_v4();
     sqlx::query(
         "INSERT INTO endpoint_traces
-            (id, request_id, endpoint_id, project_id, gateway_session_id, status, request)
-         VALUES ($1, $2, $3, $4, $5, 'pending', $6)",
+            (id, request_id, endpoint_id, project_id, gateway_session_id, profile_id,
+             profile_version_id, operation, provider_key, capability_kind, selection_key,
+             status, request)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 'pending', $12)",
     )
-    .bind(Uuid::new_v4())
-    .bind(request_id)
-    .bind(endpoint_id)
-    .bind(project_id)
-    .bind(gateway_session_id)
-    .bind(request)
+    .bind(trace_id)
+    .bind(trace.request_id)
+    .bind(trace.endpoint_id)
+    .bind(trace.project_id)
+    .bind(trace.gateway_session_id)
+    .bind(trace.profile_id)
+    .bind(trace.profile_version_id)
+    .bind(trace.operation)
+    .bind(trace.provider_key)
+    .bind(trace.capability_kind)
+    .bind(trace.selection_key)
+    .bind(trace.request)
     .execute(pool)
     .await
     .map_err(map_database_error)?;
+    Ok(trace_id)
+}
+
+pub struct NewTraceSpan<'a> {
+    pub trace_id: Uuid,
+    pub parent_span_id: Option<Uuid>,
+    pub name: &'a str,
+    pub kind: &'a str,
+    pub provider_key: Option<&'a str>,
+    pub capability_kind: Option<&'a str>,
+    pub input_summary: Option<&'a Value>,
+    pub attributes: &'a Value,
+}
+
+pub async fn create_trace_span(pool: &PgPool, span: NewTraceSpan<'_>) -> Result<Uuid, ApiError> {
+    let span_id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO trace_spans
+            (id, trace_id, parent_span_id, name, kind, status, provider_key,
+             capability_kind, input_summary, attributes)
+         VALUES ($1, $2, $3, $4, $5, 'pending', $6, $7, $8, $9)",
+    )
+    .bind(span_id)
+    .bind(span.trace_id)
+    .bind(span.parent_span_id)
+    .bind(span.name)
+    .bind(span.kind)
+    .bind(span.provider_key)
+    .bind(span.capability_kind)
+    .bind(span.input_summary)
+    .bind(span.attributes)
+    .execute(pool)
+    .await?;
+    Ok(span_id)
+}
+
+pub async fn complete_trace_span(
+    pool: &PgPool,
+    span_id: Uuid,
+    status: &str,
+    duration_ms: i64,
+    output_summary: Option<&Value>,
+    error: Option<&str>,
+) -> Result<(), ApiError> {
+    sqlx::query(
+        "UPDATE trace_spans
+         SET status = $2, duration_ms = $3, output_summary = $4, error = $5,
+             completed_at = NOW()
+         WHERE id = $1",
+    )
+    .bind(span_id)
+    .bind(status)
+    .bind(duration_ms)
+    .bind(output_summary)
+    .bind(error)
+    .execute(pool)
+    .await?;
     Ok(())
 }
 
@@ -1852,10 +2968,17 @@ pub async fn list_traces(
 ) -> Result<Vec<EndpointTrace>, ApiError> {
     let mut query = QueryBuilder::<Postgres>::new(
         "SELECT trace.id, trace.request_id, trace.endpoint_id,
-                trace.project_id,
-                trace.gateway_session_id, trace.status, trace.latency_ms,
+                trace.project_id, trace.gateway_session_id, trace.profile_id,
+                trace.profile_version_id, profile.slug AS profile_slug,
+                profile.name AS profile_name,
+                profile_version.version_number AS profile_version_number,
+                trace.operation, trace.provider_key,
+                trace.capability_kind, trace.selection_key, trace.status, trace.latency_ms,
                 trace.request, trace.response, trace.error, trace.created_at, trace.completed_at
-         FROM endpoint_traces trace",
+         FROM endpoint_traces trace
+         LEFT JOIN agent_profiles profile ON profile.id = trace.profile_id
+         LEFT JOIN agent_profile_versions profile_version
+            ON profile_version.id = trace.profile_version_id",
     );
     if let Some(endpoint_id) = endpoint_id {
         query
@@ -1874,6 +2997,21 @@ pub async fn list_traces(
         .fetch_all(pool)
         .await
         .map_err(ApiError::from)
+}
+
+pub async fn list_trace_spans(pool: &PgPool, trace_id: Uuid) -> Result<Vec<TraceSpan>, ApiError> {
+    sqlx::query_as::<_, TraceSpan>(
+        "SELECT id, trace_id, parent_span_id, name, kind, status, provider_key,
+                capability_kind, duration_ms, input_summary, output_summary, attributes,
+                error, created_at, completed_at
+         FROM trace_spans
+         WHERE trace_id = $1
+         ORDER BY created_at ASC",
+    )
+    .bind(trace_id)
+    .fetch_all(pool)
+    .await
+    .map_err(ApiError::from)
 }
 
 async fn delete_by_id(pool: &PgPool, table: &str, id: Uuid) -> Result<(), ApiError> {

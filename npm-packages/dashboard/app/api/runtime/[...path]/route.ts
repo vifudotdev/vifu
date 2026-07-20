@@ -14,6 +14,7 @@ const ALLOWED_ROOTS = new Set([
   "project",
   "provider-adapters",
   "provider-connections",
+  "providers",
   "traces",
 ]);
 const MAX_BODY_BYTES = 1024 * 1024;
@@ -88,13 +89,18 @@ async function readBody(request: Request): Promise<ArrayBuffer> {
 }
 
 function isAllowedPath(path: string[]): boolean {
-  if (path.length < 1 || path.length > 5) return false;
+  if (path.length < 1 || path.length > 7) return false;
   if (!path.every((segment) => /^[A-Za-z0-9._:-]{1,128}$/.test(segment))) return false;
   if (isProjectScopedOpenAiPath(path)) return true;
   if (!ALLOWED_ROOTS.has(path[0] ?? "")) return false;
   if (path[0] === "chat") return path.length === 2 && path[1] === "completions";
   if (path[0] === "models") return path.length === 1;
   if (path[0] === "provider-adapters") return path.length === 1;
+  if (path[0] === "providers") {
+    return path.length === 1
+      || path.length === 2
+      || (path.length === 3 && path[2] === "test");
+  }
   if (path[0] === "provider-connections") {
     return path.length === 2 || (path.length === 3 && (path[2] === "test" || path[2] === "discover-agents"));
   }
@@ -109,6 +115,19 @@ function isAllowedPath(path: string[]): boolean {
       if (path.length === 3) return true;
       if (path.length === 4) return path[3] === "import" || Boolean(path[3]);
       return path.length === 5 && (path[4] === "test" || path[4] === "discover-agents");
+    }
+    if (path[2] === "providers") return path.length === 3 || path.length === 4;
+    if (path[2] === "agent-candidates") return path.length === 3;
+    if (path[2] === "agents") return path.length === 4 && path[3] === "import";
+    if (path[2] === "profiles") {
+      if (path.length === 3 || path.length === 4) return true;
+      if (path.length === 5) {
+        return path[4] === "versions" || path[4] === "rollout" || path[4] === "test";
+      }
+      if (path.length === 6) return path[4] === "source" && path[5] === "sync";
+      return path.length === 7
+        && path[4] === "versions"
+        && (path[6] === "activate" || path[6] === "archive");
     }
     return false;
   }

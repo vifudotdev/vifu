@@ -16,7 +16,7 @@ pub enum ApiError {
     NotFound,
     #[error("{0}")]
     Conflict(String),
-    #[error("model is required for project API keys")]
+    #[error("model is required")]
     ModelRequired,
     #[error("the requested agent is not available to this project key")]
     AgentAccessDenied,
@@ -32,6 +32,8 @@ pub enum ApiError {
     Timeout,
     #[error("{0}")]
     AgentGateway(String),
+    #[error("{0}")]
+    Provider(String),
     #[error("database request failed")]
     Database(#[from] sqlx::Error),
     #[error("migration failed")]
@@ -60,6 +62,7 @@ impl IntoResponse for ApiError {
             Self::Backpressure => (StatusCode::TOO_MANY_REQUESTS, "BACKPRESSURE"),
             Self::Timeout => (StatusCode::GATEWAY_TIMEOUT, "REQUEST_TIMEOUT"),
             Self::AgentGateway(_) => (StatusCode::BAD_GATEWAY, "AGENT_GATEWAY_ERROR"),
+            Self::Provider(_) => (StatusCode::BAD_GATEWAY, "PROVIDER_ERROR"),
             Self::Database(_) | Self::Migration(_) | Self::Internal => {
                 (StatusCode::INTERNAL_SERVER_ERROR, "INTERNAL_ERROR")
             }

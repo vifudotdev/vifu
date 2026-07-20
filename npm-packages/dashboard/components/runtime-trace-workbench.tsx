@@ -5,7 +5,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties } from "react";
 import { Group as PanelGroup, Panel, Separator as PanelResizeHandle } from "react-resizable-panels";
 import { List } from "react-window";
-import type { EndpointTrace } from "../lib/runtime-types";
+import type { EndpointTrace, TraceSpan } from "../lib/runtime-types";
 
 const MAX_LOGS = 100;
 const ROW_HEIGHT = 32;
@@ -20,6 +20,11 @@ type RuntimeTraceResponse = {
   error?: { message?: string };
 };
 
+type RuntimeTraceSpansResponse = {
+  spans?: TraceSpan[];
+  error?: { message?: string };
+};
+
 export function RuntimeTraceWorkbench({ projectId, traces: initialTraces }: RuntimeTraceWorkbenchProps) {
   const [traces, setTraces] = useState(() => sortTraces(initialTraces).slice(0, MAX_LOGS));
   const [pausedTraces, setPausedTraces] = useState<EndpointTrace[]>([]);
@@ -29,6 +34,9 @@ export function RuntimeTraceWorkbench({ projectId, traces: initialTraces }: Runt
   const [statusFilter, setStatusFilter] = useState("all");
   const [hiddenTraceIds, setHiddenTraceIds] = useState<Set<string>>(() => new Set());
   const [selectedTraceId, setSelectedTraceId] = useState<string | null>(null);
+  const [selectedSpans, setSelectedSpans] = useState<TraceSpan[]>([]);
+  const [spansLoading, setSpansLoading] = useState(false);
+  const [spansError, setSpansError] = useState<string | null>(null);
   const [streamError, setStreamError] = useState<string | null>(null);
   const tracesRef = useRef(traces);
   const pausedTracesRef = useRef(pausedTraces);
@@ -101,6 +109,35 @@ export function RuntimeTraceWorkbench({ projectId, traces: initialTraces }: Runt
   const selectedTrace = selectedTraceId
     ? visibleTraces.find((trace) => trace.id === selectedTraceId) ?? traces.find((trace) => trace.id === selectedTraceId) ?? null
     : null;
+
+  useEffect(() => {
+    const controller = new AbortController();
+    if (!selectedTraceId) {
+      setSelectedSpans([]);
+      setSpansError(null);
+      setSpansLoading(false);
+      return () => controller.abort();
+    }
+    setSelectedSpans([]);
+    setSpansError(null);
+    setSpansLoading(true);
+    void fetch(`/api/runtime/traces/${encodeURIComponent(selectedTraceId)}/spans`, {
+      cache: "no-store",
+      signal: controller.signal,
+    })
+      .then(async (response) => {
+        const payload = await response.json() as RuntimeTraceSpansResponse;
+        if (!response.ok) throw new Error(payload.error?.message ?? "Failed to load trace spans.");
+        setSelectedSpans(payload.spans ?? []);
+      })
+      .catch((error: unknown) => {
+        if (!controller.signal.aborted) setSpansError(error instanceof Error ? error.message : "Failed to load trace spans.");
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setSpansLoading(false);
+      });
+    return () => controller.abort();
+  }, [selectedTraceId]);
 
   const selectTrace = useCallback((trace: EndpointTrace) => {
     setSelectedTraceId(trace.id);
@@ -202,6 +239,9 @@ export function RuntimeTraceWorkbench({ projectId, traces: initialTraces }: Runt
               <Panel id="log-drilldown-panel" minSize={28} defaultSize={38}>
                 <TraceDrilldown
                   trace={selectedTrace}
+                  spans={selectedSpans}
+                  spansLoading={spansLoading}
+                  spansError={spansError}
                   onClose={() => setSelectedTraceId(null)}
                   onFilterByRequestId={(requestId) => setQuery(requestId)}
                 />
@@ -257,10 +297,16 @@ function TraceDrilldown({
   onClose,
   onFilterByRequestId,
   trace,
+  spans,
+  spansLoading,
+  spansError,
 }: {
   onClose: () => void;
   onFilterByRequestId: (requestId: string) => void;
   trace: EndpointTrace;
+  spans: TraceSpan[];
+  spansLoading: boolean;
+  spansError: string | null;
 }) {
   return (
     <aside className="convex-log-drilldown">
@@ -277,15 +323,50 @@ function TraceDrilldown({
       <dl className="convex-log-metadata">
         <div><dt>Request ID</dt><dd><code>{trace.requestId}</code></dd></div>
         <div><dt>Agent</dt><dd>{traceAgentLabel(trace)}</dd></div>
+        <div><dt>Operation</dt><dd><code>{trace.operation}</code></dd></div>
+        <div><dt>Profile</dt><dd><code title={trace.profileId ?? undefined}>{trace.profileSlug ?? (trace.profileId ? shortId(trace.profileId, 12) : "-")}</code></dd></div>
+        <div><dt>Version</dt><dd><code title={trace.profileVersionId ?? undefined}>{trace.profileVersionNumber === null ? (trace.profileVersionId ? shortId(trace.profileVersionId, 12) : "-") : `v${trace.profileVersionNumber}`}</code></dd></div>
+        <div><dt>Capability</dt><dd>{trace.capabilityKind ?? "-"}</dd></div>
+        <div><dt>Provider</dt><dd><code>{trace.providerKey ?? "-"}</code></dd></div>
         <div><dt>Latency</dt><dd>{trace.latencyMs === null ? "-" : `${trace.latencyMs} ms`}</dd></div>
         <div><dt>Gateway</dt><dd>{trace.gatewaySessionId ? shortId(trace.gatewaySessionId, 12) : "-"}</dd></div>
       </dl>
+      <TraceSpanTimeline spans={spans} loading={spansLoading} error={spansError} />
       <div className="convex-log-detail-tabs">
         <TracePayload title="Request" value={trace.request} />
         <TracePayload title="Response" value={trace.response} />
         {trace.error ? <TracePayload title="Error" value={trace.error} tone="error" /> : null}
       </div>
     </aside>
+  );
+}
+
+function TraceSpanTimeline({ spans, loading, error }: { spans: TraceSpan[]; loading: boolean; error: string | null }) {
+  return (
+    <section className="trace-span-timeline">
+      <header><strong>Execution</strong><span>{spans.length} spans</span></header>
+      {loading ? <p>Loading execution spans...</p> : null}
+      {error ? <p className="inline-error" role="alert">{error}</p> : null}
+      {!loading && !error && spans.length === 0 ? <p>No execution spans recorded.</p> : null}
+      {spans.map((span) => (
+        <details key={span.id}>
+          <summary>
+            <span className={`trace-span-status ${span.status}`} />
+            <strong>{span.name}</strong>
+            <small>{span.providerKey ?? span.kind}</small>
+            <time>{span.durationMs === null ? "-" : `${span.durationMs} ms`}</time>
+          </summary>
+          <dl>
+            <div><dt>Kind</dt><dd>{span.kind}</dd></div>
+            <div><dt>Capability</dt><dd>{span.capabilityKind ?? "-"}</dd></div>
+            <div><dt>Status</dt><dd>{span.status}</dd></div>
+          </dl>
+          {span.inputSummary !== null ? <TracePayload title="Input" value={span.inputSummary} /> : null}
+          {span.outputSummary !== null ? <TracePayload title="Output" value={span.outputSummary} /> : null}
+          {span.error ? <TracePayload title="Error" value={span.error} tone="error" /> : null}
+        </details>
+      ))}
+    </section>
   );
 }
 
@@ -351,15 +432,23 @@ function readLogLevel(value: unknown): "debug" | "info" | "warn" | "error" | nul
 }
 
 function traceAgentLabel(trace: EndpointTrace): string {
+  if (trace.profileName?.trim()) return trace.profileName;
+  if (trace.profileSlug?.trim()) return trace.profileSlug;
+  if (isRecord(trace.request) && typeof trace.request.model === "string") return trace.request.model;
   if (isRecord(trace.response) && typeof trace.response.agentId === "string") return trace.response.agentId;
   if (isRecord(trace.request) && isRecord(trace.request.metadata) && typeof trace.request.metadata.agent === "string") {
     return trace.request.metadata.agent;
   }
+  if (trace.profileId) return `Profile ${shortId(trace.profileId, 8)}`;
   return trace.gatewaySessionId ? `Gateway ${shortId(trace.gatewaySessionId, 8)}` : "Agent";
 }
 
 function tracePreview(trace: EndpointTrace): string {
   if (trace.error) return trace.error;
+  if (isRecord(trace.request) && Array.isArray(trace.request.messages)) {
+    const last = [...trace.request.messages].reverse().find(isRecord);
+    if (last && typeof last.content === "string" && last.content.trim()) return last.content;
+  }
   if (isRecord(trace.request) && typeof trace.request.message === "string" && trace.request.message.trim()) {
     return trace.request.message;
   }
@@ -373,6 +462,14 @@ function traceSearchText(trace: EndpointTrace): string {
   return [
     trace.requestId,
     trace.status,
+    trace.operation,
+    trace.providerKey ?? "",
+    trace.capabilityKind ?? "",
+    trace.profileId ?? "",
+    trace.profileVersionId ?? "",
+    trace.profileSlug ?? "",
+    trace.profileName ?? "",
+    trace.profileVersionNumber?.toString() ?? "",
     traceAgentLabel(trace),
     tracePreview(trace),
     trace.error ?? "",
