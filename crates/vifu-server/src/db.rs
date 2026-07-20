@@ -12,10 +12,10 @@ use crate::models::{
     slugify, validate_slug, AgentBinding, AgentEndpoint, AgentGatewayCredential,
     AgentGatewaySession, AgentProfile, AgentProfileCapability, AgentProfileRollout,
     AgentProfileVersion, ApiKeyAgentScope, ApiKeyPermissions, ApiKeyRecord, AvailableAgent,
-    EndpointRoute, EndpointTrace, ProfileCapabilityDraft, ProfileRoute, Project, ProjectCanvas,
-    ProjectCanvasEdge, ProjectCanvasNode, ProjectProviderAssignment, ProjectWithBindings,
-    ProviderConnection, ProviderConnectionSecret, ProviderStockItem, ProviderStockSecret,
-    PublicAgent, RealtimeSession, TraceSpan,
+    CustomProvider, CustomProviderSecret, EndpointRoute, EndpointTrace, ProfileCapabilityDraft,
+    ProfileRoute, Project, ProjectCanvas, ProjectCanvasEdge, ProjectCanvasNode,
+    ProjectWithBindings, ProviderConnection, ProviderConnectionSecret, PublicAgent,
+    RealtimeSession, TraceSpan,
 };
 
 #[derive(Debug, FromRow)]
@@ -241,6 +241,8 @@ pub async fn delete_project(pool: &PgPool, id: Uuid) -> Result<(), ApiError> {
 
 pub struct NewProviderConnection<'a> {
     pub provider_key: &'a str,
+    pub source_kind: &'a str,
+    pub source_key: &'a str,
     pub name: &'a str,
     pub provider_type: &'a str,
     pub base_url: &'a str,
@@ -257,7 +259,8 @@ pub async fn list_provider_connections(
 ) -> Result<Vec<ProviderConnection>, ApiError> {
     let project = get_project_by_slug(pool, project_slug).await?;
     let connections = sqlx::query_as::<_, ProviderConnection>(
-        "SELECT id, project_id, provider_key, name, provider_type, base_url, config,
+        "SELECT id, project_id, provider_key, source_kind, source_key,
+                name, provider_type, base_url, config,
                 secret_keys, display_secret, status, last_checked_at, created_at, updated_at
          FROM provider_connections
          WHERE project_id = $1
@@ -277,10 +280,13 @@ pub async fn upsert_provider_connection(
     let project = get_project_by_slug(pool, project_slug).await?;
     sqlx::query_as::<_, ProviderConnection>(
         "INSERT INTO provider_connections
-            (id, project_id, provider_key, name, provider_type, base_url, config,
+            (id, project_id, provider_key, source_kind, source_key,
+             name, provider_type, base_url, config,
              encrypted_secret_json, secret_keys, display_secret, status)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
          ON CONFLICT (project_id, provider_key) DO UPDATE SET
+            source_kind = EXCLUDED.source_kind,
+            source_key = EXCLUDED.source_key,
             name = EXCLUDED.name,
             provider_type = EXCLUDED.provider_type,
             base_url = EXCLUDED.base_url,
@@ -290,12 +296,15 @@ pub async fn upsert_provider_connection(
             display_secret = EXCLUDED.display_secret,
             status = EXCLUDED.status,
             updated_at = NOW()
-         RETURNING id, project_id, provider_key, name, provider_type, base_url, config,
+         RETURNING id, project_id, provider_key, source_kind, source_key,
+                   name, provider_type, base_url, config,
                    secret_keys, display_secret, status, last_checked_at, created_at, updated_at",
     )
     .bind(Uuid::new_v4())
     .bind(project.project.id)
     .bind(connection.provider_key)
+    .bind(connection.source_kind)
+    .bind(connection.source_key)
     .bind(connection.name)
     .bind(connection.provider_type)
     .bind(connection.base_url)
@@ -314,7 +323,8 @@ pub async fn get_provider_connection_secret(
     id: Uuid,
 ) -> Result<ProviderConnectionSecret, ApiError> {
     sqlx::query_as::<_, ProviderConnectionSecret>(
-        "SELECT id, project_id, provider_key, name, provider_type, base_url, config,
+        "SELECT id, project_id, provider_key, source_kind, source_key,
+                name, provider_type, base_url, config,
                 encrypted_secret_json, secret_keys, display_secret, status,
                 last_checked_at, created_at, updated_at
          FROM provider_connections
@@ -333,7 +343,8 @@ pub async fn get_provider_connection_secret_by_key(
 ) -> Result<ProviderConnectionSecret, ApiError> {
     let project = get_project_by_slug(pool, project_slug).await?;
     sqlx::query_as::<_, ProviderConnectionSecret>(
-        "SELECT id, project_id, provider_key, name, provider_type, base_url, config,
+        "SELECT id, project_id, provider_key, source_kind, source_key,
+                name, provider_type, base_url, config,
                 encrypted_secret_json, secret_keys, display_secret, status,
                 last_checked_at, created_at, updated_at
          FROM provider_connections
@@ -354,7 +365,8 @@ pub async fn update_provider_connection_status(
     sqlx::query_as::<_, ProviderConnection>(
         "UPDATE provider_connections SET status = $2, last_checked_at = NOW(), updated_at = NOW()
          WHERE id = $1
-         RETURNING id, project_id, provider_key, name, provider_type, base_url, config,
+         RETURNING id, project_id, provider_key, source_kind, source_key,
+                   name, provider_type, base_url, config,
                    secret_keys, display_secret, status, last_checked_at, created_at, updated_at",
     )
     .bind(id)
@@ -364,34 +376,11 @@ pub async fn update_provider_connection_status(
     .ok_or(ApiError::NotFound)
 }
 
-pub async fn delete_provider_connection(pool: &PgPool, id: Uuid) -> Result<(), ApiError> {
-    delete_by_id(pool, "provider_connections", id).await
-}
-
-pub async fn delete_provider_connection_by_key(
-    pool: &PgPool,
-    project_slug: &str,
-    provider_key: &str,
-) -> Result<(), ApiError> {
-    let project = get_project_by_slug(pool, project_slug).await?;
-    let result =
-        sqlx::query("DELETE FROM provider_connections WHERE project_id = $1 AND provider_key = $2")
-            .bind(project.project.id)
-            .bind(provider_key)
-            .execute(pool)
-            .await?;
-    if result.rows_affected() == 0 {
-        Err(ApiError::NotFound)
-    } else {
-        Ok(())
-    }
-}
-
-pub async fn list_provider_stock(pool: &PgPool) -> Result<Vec<ProviderStockItem>, ApiError> {
-    sqlx::query_as::<_, ProviderStockItem>(
+pub async fn list_custom_providers(pool: &PgPool) -> Result<Vec<CustomProvider>, ApiError> {
+    sqlx::query_as::<_, CustomProvider>(
         "SELECT id, provider_key, name, provider_type, base_url, config,
                 secret_keys, display_secret, status, last_checked_at, created_at, updated_at
-         FROM provider_stock
+         FROM custom_providers
          ORDER BY name ASC, provider_key ASC",
     )
     .fetch_all(pool)
@@ -399,12 +388,12 @@ pub async fn list_provider_stock(pool: &PgPool) -> Result<Vec<ProviderStockItem>
     .map_err(ApiError::from)
 }
 
-pub async fn upsert_provider_stock(
+pub async fn upsert_custom_provider(
     pool: &PgPool,
     connection: NewProviderConnection<'_>,
-) -> Result<ProviderStockItem, ApiError> {
-    sqlx::query_as::<_, ProviderStockItem>(
-        "INSERT INTO provider_stock
+) -> Result<CustomProvider, ApiError> {
+    sqlx::query_as::<_, CustomProvider>(
+        "INSERT INTO custom_providers
             (id, provider_key, name, provider_type, base_url, config,
              encrypted_secret_json, secret_keys, display_secret, status)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
@@ -436,120 +425,21 @@ pub async fn upsert_provider_stock(
     .map_err(map_database_error)
 }
 
-pub async fn get_provider_stock_secret_by_key(
+pub async fn get_custom_provider_secret_by_key(
     pool: &PgPool,
     provider_key: &str,
-) -> Result<ProviderStockSecret, ApiError> {
-    sqlx::query_as::<_, ProviderStockSecret>(
+) -> Result<CustomProviderSecret, ApiError> {
+    sqlx::query_as::<_, CustomProviderSecret>(
         "SELECT id, provider_key, name, provider_type, base_url, config,
                 encrypted_secret_json, secret_keys, display_secret, status,
                 last_checked_at, created_at, updated_at
-         FROM provider_stock
+         FROM custom_providers
          WHERE provider_key = $1",
     )
     .bind(provider_key)
     .fetch_optional(pool)
     .await?
     .ok_or(ApiError::NotFound)
-}
-
-pub async fn update_provider_stock_status(
-    pool: &PgPool,
-    provider_key: &str,
-    status: &str,
-) -> Result<ProviderStockItem, ApiError> {
-    sqlx::query_as::<_, ProviderStockItem>(
-        "UPDATE provider_stock
-         SET status = $2, last_checked_at = NOW(), updated_at = NOW()
-         WHERE provider_key = $1
-         RETURNING id, provider_key, name, provider_type, base_url, config,
-                   secret_keys, display_secret, status, last_checked_at, created_at, updated_at",
-    )
-    .bind(provider_key)
-    .bind(status)
-    .fetch_optional(pool)
-    .await?
-    .ok_or(ApiError::NotFound)
-}
-
-pub async fn delete_provider_stock(pool: &PgPool, provider_key: &str) -> Result<(), ApiError> {
-    let assigned = sqlx::query_scalar::<_, bool>(
-        "SELECT EXISTS(
-            SELECT 1 FROM project_provider_assignments WHERE provider_key = $1
-         )",
-    )
-    .bind(provider_key)
-    .fetch_one(pool)
-    .await?;
-    if assigned {
-        return Err(ApiError::Conflict(
-            "remove this provider from every project before deleting it from Provider Stock"
-                .to_string(),
-        ));
-    }
-    let result = sqlx::query("DELETE FROM provider_stock WHERE provider_key = $1")
-        .bind(provider_key)
-        .execute(pool)
-        .await?;
-    if result.rows_affected() == 0 {
-        Err(ApiError::NotFound)
-    } else {
-        Ok(())
-    }
-}
-
-pub async fn list_project_provider_assignments(
-    pool: &PgPool,
-    project_id: Uuid,
-) -> Result<Vec<ProjectProviderAssignment>, ApiError> {
-    sqlx::query_as::<_, ProjectProviderAssignment>(
-        "SELECT project_id, provider_key, created_at
-         FROM project_provider_assignments
-         WHERE project_id = $1
-         ORDER BY created_at ASC, provider_key ASC",
-    )
-    .bind(project_id)
-    .fetch_all(pool)
-    .await
-    .map_err(ApiError::from)
-}
-
-pub async fn list_project_provider_stock(
-    pool: &PgPool,
-    project_id: Uuid,
-) -> Result<Vec<ProviderStockItem>, ApiError> {
-    sqlx::query_as::<_, ProviderStockItem>(
-        "SELECT stock.id, stock.provider_key, stock.name, stock.provider_type,
-                stock.base_url, stock.config, stock.secret_keys, stock.display_secret,
-                stock.status, stock.last_checked_at, stock.created_at, stock.updated_at
-         FROM project_provider_assignments AS assignment
-         JOIN provider_stock AS stock ON stock.provider_key = assignment.provider_key
-         WHERE assignment.project_id = $1
-         ORDER BY assignment.created_at ASC, stock.name ASC",
-    )
-    .bind(project_id)
-    .fetch_all(pool)
-    .await
-    .map_err(ApiError::from)
-}
-
-pub async fn assign_project_provider(
-    pool: &PgPool,
-    project_id: Uuid,
-    provider_key: &str,
-) -> Result<ProjectProviderAssignment, ApiError> {
-    sqlx::query_as::<_, ProjectProviderAssignment>(
-        "INSERT INTO project_provider_assignments (project_id, provider_key)
-         VALUES ($1, $2)
-         ON CONFLICT (project_id, provider_key) DO UPDATE
-            SET provider_key = EXCLUDED.provider_key
-         RETURNING project_id, provider_key, created_at",
-    )
-    .bind(project_id)
-    .bind(provider_key)
-    .fetch_one(pool)
-    .await
-    .map_err(map_database_error)
 }
 
 pub async fn project_provider_is_assigned(
@@ -559,7 +449,7 @@ pub async fn project_provider_is_assigned(
 ) -> Result<bool, ApiError> {
     sqlx::query_scalar::<_, bool>(
         "SELECT EXISTS(
-            SELECT 1 FROM project_provider_assignments
+            SELECT 1 FROM provider_connections
             WHERE project_id = $1 AND provider_key = $2
          )",
     )
@@ -570,17 +460,19 @@ pub async fn project_provider_is_assigned(
     .map_err(ApiError::from)
 }
 
-pub async fn provider_has_project_assignments(
+pub async fn list_projects_for_provider_key(
     pool: &PgPool,
     provider_key: &str,
-) -> Result<bool, ApiError> {
-    sqlx::query_scalar::<_, bool>(
-        "SELECT EXISTS(
-            SELECT 1 FROM project_provider_assignments WHERE provider_key = $1
-         )",
+) -> Result<Vec<(Uuid, String)>, ApiError> {
+    sqlx::query_as::<_, (Uuid, String)>(
+        "SELECT project.id, project.slug
+         FROM provider_connections AS provider
+         JOIN projects AS project ON project.id = provider.project_id
+         WHERE provider.provider_key = $1 AND project.enabled = TRUE
+         ORDER BY project.created_at ASC",
     )
     .bind(provider_key)
-    .fetch_one(pool)
+    .fetch_all(pool)
     .await
     .map_err(ApiError::from)
 }
@@ -604,6 +496,122 @@ pub async fn list_project_profile_provider_resources(
     .fetch_all(pool)
     .await
     .map_err(ApiError::from)
+}
+
+pub async fn list_archived_project_agent_sources(
+    pool: &PgPool,
+    project_id: Uuid,
+) -> Result<Vec<crate::models::ArchivedProjectAgentSource>, ApiError> {
+    sqlx::query_as::<_, crate::models::ArchivedProjectAgentSource>(
+        "SELECT profile.id AS profile_id,
+                profile.name,
+                COALESCE(binding.gateway_id, '') AS gateway_id,
+                COALESCE(binding.agent_id, version.source->>'resourceId', profile.slug)
+                    AS agent_id,
+                COALESCE(
+                    NULLIF(binding.config->>'providerKey', ''),
+                    capability.provider_key,
+                    version.source->>'providerKey',
+                    ''
+                ) AS provider_key,
+                COALESCE(binding.provider, capability.provider_type, version.source->>'type', 'custom')
+                    AS provider_type
+         FROM agent_profiles AS profile
+         LEFT JOIN agent_bindings AS binding ON binding.profile_id = profile.id
+         LEFT JOIN agent_profile_versions AS version ON version.id = profile.active_version_id
+         LEFT JOIN LATERAL (
+             SELECT provider_key, provider_type
+             FROM agent_profile_capabilities
+             WHERE profile_version_id = version.id
+             ORDER BY created_at ASC
+             LIMIT 1
+         ) AS capability ON TRUE
+         WHERE profile.project_id = $1
+           AND profile.archived_at IS NOT NULL
+         ORDER BY profile.updated_at DESC, profile.name ASC",
+    )
+    .bind(project_id)
+    .fetch_all(pool)
+    .await
+    .map_err(ApiError::from)
+}
+
+pub async fn restore_project_profile(
+    pool: &PgPool,
+    project_id: Uuid,
+    profile_id: Uuid,
+) -> Result<AgentProfile, ApiError> {
+    let mut transaction = pool.begin().await?;
+    let profile = sqlx::query_as::<_, AgentProfile>(
+        "UPDATE agent_profiles
+         SET archived_at = NULL, updated_at = NOW()
+         WHERE id = $1 AND project_id = $2 AND archived_at IS NOT NULL
+         RETURNING id, project_id, slug, name, description, active_version_id, archived_at,
+                   created_at, updated_at",
+    )
+    .bind(profile_id)
+    .bind(project_id)
+    .fetch_optional(&mut *transaction)
+    .await?
+    .ok_or(ApiError::NotFound)?;
+    sqlx::query(
+        "INSERT INTO project_bindings (project_id, binding_id)
+         SELECT $1, id FROM agent_bindings WHERE profile_id = $2
+         ON CONFLICT DO NOTHING",
+    )
+    .bind(project_id)
+    .bind(profile_id)
+    .execute(&mut *transaction)
+    .await?;
+    transaction.commit().await?;
+    Ok(profile)
+}
+
+pub async fn find_project_profile_by_provider_resource(
+    pool: &PgPool,
+    project_id: Uuid,
+    provider_key: &str,
+    agent_id: &str,
+) -> Result<Option<(Uuid, bool, Uuid)>, ApiError> {
+    sqlx::query_as::<_, (Uuid, bool, Uuid)>(
+        "SELECT profile.id,
+                profile.archived_at IS NOT NULL AS archived,
+                binding.id
+         FROM agent_profiles AS profile
+         JOIN agent_bindings AS binding ON binding.profile_id = profile.id
+         WHERE profile.project_id = $1
+           AND binding.agent_id = $2
+           AND COALESCE(NULLIF(binding.config->>'providerKey', ''), binding.provider) = $3
+         ORDER BY profile.archived_at NULLS FIRST, profile.created_at ASC
+         LIMIT 1",
+    )
+    .bind(project_id)
+    .bind(agent_id)
+    .bind(provider_key)
+    .fetch_optional(pool)
+    .await
+    .map_err(ApiError::from)
+}
+
+pub async fn refresh_discovered_binding(
+    pool: &PgPool,
+    binding_id: Uuid,
+    gateway_id: &str,
+    agent_name: &str,
+) -> Result<(), ApiError> {
+    sqlx::query(
+        "UPDATE agent_bindings
+         SET gateway_id = $2,
+             config = jsonb_set(config, '{agentName}', to_jsonb($3::text), true),
+             updated_at = NOW()
+         WHERE id = $1",
+    )
+    .bind(binding_id)
+    .bind(gateway_id)
+    .bind(agent_name)
+    .execute(pool)
+    .await?;
+    Ok(())
 }
 
 pub async fn unassign_project_provider(
@@ -638,7 +646,7 @@ pub async fn unassign_project_provider(
         ));
     }
     let result = sqlx::query(
-        "DELETE FROM project_provider_assignments
+        "DELETE FROM provider_connections
          WHERE project_id = $1 AND provider_key = $2",
     )
     .bind(project_id)

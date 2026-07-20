@@ -110,7 +110,7 @@ export type ProviderAdapter = {
   fields: ProviderAdapterField[];
 };
 
-export type ProviderStockItem = {
+export type CustomProvider = {
   id: string;
   providerKey: string;
   name: string;
@@ -123,6 +123,17 @@ export type ProviderStockItem = {
   lastCheckedAt: string | null;
   createdAt: string;
   updatedAt: string;
+};
+
+export type ProjectProvider = CustomProvider & {
+  projectId: string;
+  sourceKind: "registry" | "custom";
+  sourceKey: string;
+};
+
+export type ProviderCatalog = {
+  registry: ProviderAdapter[];
+  custom: CustomProvider[];
 };
 
 export type RuntimeStatus = {
@@ -267,6 +278,7 @@ export type AvailableAgent = {
 };
 
 export type ProjectAgentCandidate = {
+  profileId: string | null;
   gatewayId: string;
   id: string;
   name: string;

@@ -132,22 +132,18 @@ pub fn app(state: AppState) -> Router {
             delete(api::delete_canvas_edge),
         )
         .route("/v1/provider-adapters", get(api::list_provider_adapters))
-        .route("/v1/providers", get(api::list_provider_stock))
-        .route(
-            "/v1/providers/{provider_key}",
-            put(api::upsert_provider_stock).delete(api::delete_provider_stock),
-        )
-        .route(
-            "/v1/providers/{provider_key}/test",
-            post(api::test_provider_stock),
-        )
+        .route("/v1/provider-catalog", get(api::list_provider_catalog))
         .route(
             "/v1/project/{slug}/providers",
-            get(api::list_project_providers),
+            get(api::list_project_providers).post(api::create_project_provider),
         )
         .route(
             "/v1/project/{slug}/providers/{provider_key}",
-            put(api::assign_project_provider).delete(api::unassign_project_provider),
+            patch(api::update_project_provider).delete(api::delete_project_provider),
+        )
+        .route(
+            "/v1/project/{slug}/providers/{provider_key}/test",
+            post(api::test_project_provider),
         )
         .route(
             "/v1/project/{slug}/agent-candidates",
@@ -158,36 +154,8 @@ pub fn app(state: AppState) -> Router {
             post(api::import_project_agent),
         )
         .route(
-            "/v1/project/{slug}/provider-connections",
-            get(api::list_provider_connections),
-        )
-        .route(
-            "/v1/project/{slug}/provider-connections/import",
-            post(api::import_provider_connections),
-        )
-        .route(
-            "/v1/project/{slug}/provider-connections/{provider_key}",
-            put(api::upsert_provider_connection).delete(api::delete_project_provider_connection),
-        )
-        .route(
-            "/v1/project/{slug}/provider-connections/{provider_key}/test",
-            post(api::test_project_provider_connection),
-        )
-        .route(
-            "/v1/project/{slug}/provider-connections/{provider_key}/discover-agents",
-            post(api::discover_project_provider_agents),
-        )
-        .route(
-            "/v1/provider-connections/{id}",
-            delete(api::delete_provider_connection),
-        )
-        .route(
-            "/v1/provider-connections/{id}/test",
-            post(api::test_provider_connection),
-        )
-        .route(
-            "/v1/provider-connections/{id}/discover-agents",
-            post(api::discover_provider_agents),
+            "/v1/project/{slug}/agents/{profile_id}/restore",
+            post(api::restore_project_agent),
         )
         .route(
             "/v1/profiles",
@@ -415,7 +383,9 @@ mod tests {
             .connect_lazy("postgres://vifu@127.0.0.1:1/vifu")
             .unwrap();
         let requests = [
-            Request::get("/v1/providers").body(Body::empty()).unwrap(),
+            Request::get("/v1/provider-catalog")
+                .body(Body::empty())
+                .unwrap(),
             Request::get("/v1/project/test/providers")
                 .body(Body::empty())
                 .unwrap(),
@@ -428,6 +398,13 @@ mod tests {
                     r#"{"gatewayId":"gateway","agentId":"guide","providerKey":"openclaw"}"#,
                 ))
                 .unwrap(),
+            Request::post(format!(
+                "/v1/project/test/agents/{}/restore",
+                uuid::Uuid::new_v4()
+            ))
+            .header("content-type", "application/json")
+            .body(Body::from("{}"))
+            .unwrap(),
         ];
 
         for request in requests {
@@ -437,5 +414,23 @@ mod tests {
                 .unwrap();
             assert_eq!(response.status(), StatusCode::FORBIDDEN);
         }
+    }
+
+    #[tokio::test]
+    async fn legacy_provider_connection_routes_are_not_registered() {
+        let config = Config::from_env().unwrap();
+        let pool = PgPoolOptions::new()
+            .connect_lazy("postgres://vifu@127.0.0.1:1/vifu")
+            .unwrap();
+        let response = app(state(config, pool))
+            .oneshot(
+                Request::get("/v1/project/test/provider-connections")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 }

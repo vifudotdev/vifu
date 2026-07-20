@@ -1,9 +1,8 @@
 "use client";
 
-import Link from "next/link";
+import { Bot, ChevronRight, Plus, Search, X } from "lucide-react";
 import { useRouter } from "next/navigation";
-import { Bot, ChevronRight, Plus, Sparkles, X } from "lucide-react";
-import { useMemo, useRef, useState, type FormEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import type {
   AgentBinding,
   AgentProfile,
@@ -11,8 +10,8 @@ import type {
   AvailableAgent,
   ProfileCapabilityKind,
   ProjectAgentCandidate,
+  ProjectProvider,
   ProviderAdapter,
-  ProviderStockItem,
   RuntimeProject,
 } from "../lib/runtime-types";
 import { RuntimeProfileWorkbench } from "./runtime-profile-workbench";
@@ -25,68 +24,47 @@ type AgentsViewProps = {
   availableAgents: AvailableAgent[];
   candidates: ProjectAgentCandidate[];
   providerAdapters: ProviderAdapter[];
-  projectProviders: ProviderStockItem[];
+  projectProviders: ProjectProvider[];
 };
 
 export function RuntimeAgentsView(props: AgentsViewProps) {
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [adding, setAdding] = useState(false);
   const selected = props.profiles.find((profile) => profile.id === selectedId) ?? null;
   return (
     <div className={`agents-management${selected ? " has-workbench" : ""}`}>
       <main className="agents-library">
-        <section className="agents-section">
-          <header className="agents-section-heading">
-            <div><h2>Agents</h2><span>{props.profiles.length}</span></div>
-            <CreateAgentButton
-              project={props.project}
-              providers={props.projectProviders}
-              adapters={props.providerAdapters}
-            />
-          </header>
-          {props.profiles.length > 0 ? (
-            <div className="agent-card-grid">
-              {props.profiles.map((profile) => (
-                <AgentCard
-                  key={profile.id}
-                  profile={profile}
-                  detail={props.profileDetails.find((item) => item.profile.id === profile.id)}
-                  binding={props.bindings.find((binding) => binding.profileId === profile.id)}
-                  providers={props.projectProviders}
-                  availableAgents={props.availableAgents}
-                  onSelect={() => setSelectedId(profile.id)}
-                />
-              ))}
-            </div>
-          ) : (
-            <div className="agents-empty-state">
-              <Bot aria-hidden="true" />
-              <strong>Add the first agent to this project</strong>
-              <span>Choose a detected agent below or create one from an assigned provider.</span>
-            </div>
-          )}
-        </section>
+        <header className="resource-page-heading agents-page-heading">
+          <div className="resource-page-summary">
+            <strong>{props.profiles.length} {props.profiles.length === 1 ? "agent" : "agents"}</strong>
+            <span>Characters and AI roles available to this project.</span>
+          </div>
+          <button className="primary-button compact" type="button" onClick={() => setAdding(true)}><Plus aria-hidden="true" />Add agent</button>
+        </header>
 
-        <section className="agents-section detected-agents-section">
-          <header className="agents-section-heading">
-            <div><h2>Detected agents</h2><span>{props.candidates.length}</span></div>
-            <p>Available from assigned Gateway providers</p>
-          </header>
-          {props.candidates.length > 0 ? (
-            <div className="agent-card-grid detected">
-              {props.candidates.map((candidate) => (
-                <DetectedAgentCard project={props.project} candidate={candidate} key={`${candidate.gatewayId}:${candidate.providerKey}:${candidate.id}`} />
-              ))}
-            </div>
-          ) : (
-            <div className="detected-agents-empty">
-              <span>No new agents detected.</span>
-              {props.projectProviders.length === 0
-                ? <Link href={`/project/${props.project.slug}/providers`}>Assign a provider</Link>
-                : <small>New Gateway agents will appear here when they are online.</small>}
-            </div>
-          )}
-        </section>
+        {props.profiles.length > 0 ? (
+          <div className="agent-card-grid project-agent-grid">
+            {props.profiles.map((profile) => (
+              <AgentCard
+                key={profile.id}
+                profile={profile}
+                detail={props.profileDetails.find((item) => item.profile.id === profile.id)}
+                binding={props.bindings.find((binding) => binding.profileId === profile.id)}
+                providers={props.projectProviders}
+                availableAgents={props.availableAgents}
+                onSelect={() => setSelectedId(profile.id)}
+              />
+            ))}
+          </div>
+        ) : (
+          <button className="resource-empty-action" type="button" onClick={() => setAdding(true)}>
+            <span className="resource-empty-icon"><Bot aria-hidden="true" /></span>
+            <strong>Add the first agent</strong>
+            <span>Choose an available provider agent or create a new game character.</span>
+          </button>
+        )}
       </main>
+
       {selected ? (
         <RuntimeProfileWorkbench
           project={props.project}
@@ -94,6 +72,15 @@ export function RuntimeAgentsView(props: AgentsViewProps) {
           providerAdapters={props.providerAdapters}
           providerConnections={props.projectProviders}
           onClose={() => setSelectedId(null)}
+        />
+      ) : null}
+      {adding ? (
+        <AddAgentDialog
+          project={props.project}
+          candidates={props.candidates}
+          providers={props.projectProviders}
+          adapters={props.providerAdapters}
+          onClose={() => setAdding(false)}
         />
       ) : null}
     </div>
@@ -111,7 +98,7 @@ function AgentCard({
   profile: AgentProfile;
   detail?: AgentProfileDetail;
   binding?: AgentBinding;
-  providers: ProviderStockItem[];
+  providers: ProjectProvider[];
   availableAgents: AvailableAgent[];
   onSelect: () => void;
 }) {
@@ -160,62 +147,41 @@ function AgentCard({
   );
 }
 
-function DetectedAgentCard({ project, candidate }: { project: RuntimeProject; candidate: ProjectAgentCandidate }) {
-  const router = useRouter();
-  const [pending, setPending] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  async function add() {
-    setPending(true);
-    setError(null);
-    try {
-      await runtimeRequest(`project/${project.slug}/agents/import`, "POST", {
-        gatewayId: candidate.gatewayId,
-        agentId: candidate.id,
-        providerKey: candidate.providerKey,
-      });
-      router.refresh();
-    } catch (nextError) {
-      setError(errorMessage(nextError));
-    } finally {
-      setPending(false);
-    }
-  }
-
-  return (
-    <article className="detected-agent-card">
-      <div className="detected-agent-card-content">
-        <span className="agent-card-avatar muted">{initials(candidate.name)}</span>
-        <div><strong>{candidate.name}</strong><code>{candidate.id}</code></div>
-        <span className="agent-card-provider">{candidate.providerKey}</span>
-      </div>
-      <button type="button" disabled={pending} onClick={add} aria-label={`Add ${candidate.name} to project`} title={`Add ${candidate.name}`}>
-        <Plus aria-hidden="true" />
-      </button>
-      {error ? <span className="detected-agent-error" role="alert">{error}</span> : null}
-    </article>
-  );
-}
-
-function CreateAgentButton({
+function AddAgentDialog({
   project,
+  candidates,
   providers,
   adapters,
+  onClose,
 }: {
   project: RuntimeProject;
-  providers: ProviderStockItem[];
+  candidates: ProjectAgentCandidate[];
+  providers: ProjectProvider[];
   adapters: ProviderAdapter[];
+  onClose: () => void;
 }) {
   const router = useRouter();
   const dialogRef = useRef<HTMLDialogElement>(null);
-  const directProviders = providers.filter((provider) => provider.providerType !== "openclaw");
-  const [providerKey, setProviderKey] = useState(directProviders[0]?.providerKey ?? "");
+  const creatableProviders = providers.filter((provider) => !adapters.find((adapter) => adapter.id === provider.providerType)?.supportsDiscovery);
+  const [mode, setMode] = useState<"available" | "create">(candidates.length > 0 ? "available" : "create");
+  const [query, setQuery] = useState("");
+  const [selected, setSelected] = useState<ProjectAgentCandidate | null>(null);
+  const [providerKey, setProviderKey] = useState(creatableProviders[0]?.providerKey ?? "");
   const selectedProvider = providers.find((provider) => provider.providerKey === providerKey);
   const adapter = adapters.find((item) => item.id === selectedProvider?.providerType);
   const supported = adapter?.capabilities ?? [];
   const [capability, setCapability] = useState<ProfileCapabilityKind>(supported[0] ?? "chat");
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    dialogRef.current?.showModal();
+  }, []);
+
+  const filtered = useMemo(() => {
+    const needle = query.trim().toLowerCase();
+    return candidates.filter((candidate) => !needle || `${candidate.name} ${candidate.id} ${candidate.providerKey}`.toLowerCase().includes(needle));
+  }, [candidates, query]);
 
   function selectProvider(nextKey: string) {
     setProviderKey(nextKey);
@@ -224,10 +190,32 @@ function CreateAgentButton({
     setCapability(nextAdapter?.capabilities[0] ?? "chat");
   }
 
+  async function addAvailable() {
+    if (!selected) return;
+    setPending(true);
+    setError(null);
+    try {
+      if (selected.profileId) {
+        await runtimeRequest(`project/${project.slug}/agents/${selected.profileId}/restore`, "POST", {});
+      } else {
+        await runtimeRequest(`project/${project.slug}/agents/import`, "POST", {
+          gatewayId: selected.gatewayId,
+          agentId: selected.id,
+          providerKey: selected.providerKey,
+        });
+      }
+      router.refresh();
+      dialogRef.current?.close();
+    } catch (nextError) {
+      setError(errorMessage(nextError));
+    } finally {
+      setPending(false);
+    }
+  }
+
   async function create(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    const formElement = event.currentTarget;
-    const form = new FormData(formElement);
+    const form = new FormData(event.currentTarget);
     const name = String(form.get("name") ?? "").trim();
     const description = String(form.get("description") ?? "").trim();
     const resourceId = String(form.get("resourceId") ?? "").trim();
@@ -258,9 +246,8 @@ function CreateAgentButton({
         }],
         changeSummary: "Created in Vifu",
       });
-      dialogRef.current?.close();
-      formElement.reset();
       router.refresh();
+      dialogRef.current?.close();
     } catch (nextError) {
       setError(errorMessage(nextError));
     } finally {
@@ -269,27 +256,58 @@ function CreateAgentButton({
   }
 
   return (
-    <>
-      <button className="primary-button compact" type="button" onClick={() => dialogRef.current?.showModal()}><Plus aria-hidden="true" />Add agent</button>
-      <dialog className="resource-dialog" ref={dialogRef} onClick={(event) => { if (event.target === event.currentTarget) event.currentTarget.close(); }}>
-        <form className="resource-dialog-shell" onSubmit={create}>
-          <header><div><span>New agent</span><h2>Add an agent</h2></div><button className="icon-button" type="button" onClick={() => dialogRef.current?.close()} aria-label="Close"><X aria-hidden="true" /></button></header>
-          {directProviders.length > 0 ? (
-            <div className="resource-dialog-fields">
-              <label><span>Name</span><input name="name" required maxLength={128} autoFocus placeholder="Town guide" /></label>
-              <label><span>Role</span><textarea name="description" maxLength={4096} placeholder="How this agent appears in the game" /></label>
-              <label><span>Provider</span><select value={providerKey} onChange={(event) => selectProvider(event.target.value)}>{directProviders.map((provider) => <option key={provider.id} value={provider.providerKey}>{provider.name}</option>)}</select></label>
-              <label><span>Ability</span><select value={capability} onChange={(event) => setCapability(event.target.value as ProfileCapabilityKind)}>{supported.map((item) => <option key={item} value={item}>{capabilityLabel(item)}</option>)}</select></label>
-              <label><span>{resourceLabel(capability)}</span><input name="resourceId" required placeholder={resourcePlaceholder(capability)} /></label>
+    <dialog className="resource-dialog agent-picker-dialog" ref={dialogRef} onClose={onClose} onClick={(event) => { if (event.target === event.currentTarget) event.currentTarget.close(); }}>
+      <div className="resource-dialog-shell agent-picker-shell">
+        <header><div><span>Add agent</span><h2>Choose an agent</h2></div><button className="icon-button" type="button" onClick={() => dialogRef.current?.close()} aria-label="Close"><X aria-hidden="true" /></button></header>
+        <div className="resource-mode-switch" role="tablist" aria-label="Agent source">
+          <button type="button" role="tab" aria-selected={mode === "available"} className={mode === "available" ? "active" : ""} onClick={() => { setMode("available"); setError(null); }}>Available</button>
+          <button type="button" role="tab" aria-selected={mode === "create"} className={mode === "create" ? "active" : ""} onClick={() => { setMode("create"); setError(null); }}>Create new</button>
+        </div>
+
+        {mode === "available" ? (
+          <div className="agent-picker-content">
+            <label className="resource-picker-search"><Search aria-hidden="true" /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search agents" autoFocus /></label>
+            <div className="agent-picker-list" role="listbox" aria-label="Available agents">
+              {filtered.map((candidate) => (
+                <button
+                  type="button"
+                  role="option"
+                  aria-selected={selected === candidate}
+                  className={selected === candidate ? "selected" : ""}
+                  key={`${candidate.profileId ?? candidate.gatewayId}:${candidate.providerKey}:${candidate.id}`}
+                  onClick={() => setSelected(candidate)}
+                >
+                  <span className="agent-card-avatar muted">{initials(candidate.name)}</span>
+                  <span><strong>{candidate.name}</strong><small>{candidate.id}</small></span>
+                  <span className="agent-picker-provider">{candidate.providerKey}</span>
+                </button>
+              ))}
+              {filtered.length === 0 ? <div className="resource-picker-empty">No agents available to add.</div> : null}
             </div>
-          ) : (
-            <div className="resource-dialog-empty"><Sparkles aria-hidden="true" /><strong>Assign a model provider first</strong><span>Gateway agents are added from the Detected agents section.</span><Link href={`/project/${project.slug}/providers`} onClick={() => dialogRef.current?.close()}>Open Providers</Link></div>
-          )}
-          {error ? <p className="inline-error" role="alert">{error}</p> : null}
-          <footer><button className="secondary-button" type="button" onClick={() => dialogRef.current?.close()}>Cancel</button>{directProviders.length > 0 ? <button className="primary-button" type="submit" disabled={pending}>{pending ? "Adding" : "Add agent"}</button> : null}</footer>
-        </form>
-      </dialog>
-    </>
+          </div>
+        ) : creatableProviders.length > 0 ? (
+          <form id="create-agent-form" className="resource-dialog-fields agent-create-fields" onSubmit={create}>
+            <label><span>Name</span><input name="name" required maxLength={128} autoFocus placeholder="Town guide" /></label>
+            <label><span>Role</span><textarea name="description" maxLength={4096} placeholder="How this agent appears in the game" /></label>
+            <label><span>Provider</span><select value={providerKey} onChange={(event) => selectProvider(event.target.value)}>{creatableProviders.map((provider) => <option key={provider.id} value={provider.providerKey}>{provider.name}</option>)}</select></label>
+            <label><span>Ability</span><select value={capability} onChange={(event) => setCapability(event.target.value as ProfileCapabilityKind)}>{supported.map((item) => <option key={item} value={item}>{capabilityLabel(item)}</option>)}</select></label>
+            <label><span>{resourceLabel(capability)}</span><input name="resourceId" required placeholder={resourcePlaceholder(capability)} /></label>
+          </form>
+        ) : (
+          <div className="resource-dialog-empty"><Bot aria-hidden="true" /><strong>Add a model provider first</strong><span>Provider-managed agents appear automatically when their Gateway connects.</span></div>
+        )}
+
+        {error ? <p className="inline-error" role="alert">{error}</p> : null}
+        <footer>
+          <button className="secondary-button" type="button" onClick={() => dialogRef.current?.close()}>Cancel</button>
+          {mode === "available"
+            ? <button className="primary-button" type="button" disabled={!selected || pending} onClick={addAvailable}>{pending ? "Adding" : "Add agent"}</button>
+            : creatableProviders.length > 0
+              ? <button className="primary-button" type="submit" form="create-agent-form" disabled={pending}>{pending ? "Creating" : "Create agent"}</button>
+              : null}
+        </footer>
+      </div>
+    </dialog>
   );
 }
 
@@ -324,7 +342,7 @@ function initials(name: string): string {
   return name.trim().split(/[\s_-]+/).filter(Boolean).slice(0, 2).map((part) => part[0]?.toUpperCase() ?? "").join("") || "AI";
 }
 
-function capabilityLabel(kind: string): string {
+function capabilityLabel(kind: string) {
   if (kind === "chat") return "Conversation";
   if (kind === "speech") return "Voice";
   if (kind === "transcription") return "Listening";
@@ -333,13 +351,13 @@ function capabilityLabel(kind: string): string {
   return kind;
 }
 
-function resourceLabel(kind: ProfileCapabilityKind): string {
+function resourceLabel(kind: ProfileCapabilityKind) {
   if (kind === "speech") return "Voice ID";
   if (kind === "tool") return "Tool set";
   return "Model";
 }
 
-function resourcePlaceholder(kind: ProfileCapabilityKind): string {
+function resourcePlaceholder(kind: ProfileCapabilityKind) {
   if (kind === "speech") return "voice-id";
   if (kind === "transcription") return "whisper-1";
   if (kind === "tool") return "tool-set";

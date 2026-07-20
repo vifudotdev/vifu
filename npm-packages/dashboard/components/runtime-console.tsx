@@ -188,9 +188,8 @@ function ProjectSectionView({
     return (
       <RuntimeProvidersView
         project={project}
-        adapters={data.runtime.providerAdapters}
-        stock={data.providerStock}
-        assigned={data.projectProviders}
+        catalog={data.providerCatalog}
+        providers={data.projectProviders}
         availableAgents={data.runtime.availableAgents}
       />
     );

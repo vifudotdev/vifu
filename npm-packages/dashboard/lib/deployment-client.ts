@@ -10,8 +10,9 @@ import type {
   EndpointTrace,
   ProjectCanvas,
   ProjectAgentCandidate,
+  ProviderCatalog,
   ProviderAdapter,
-  ProviderStockItem,
+  ProjectProvider,
   RuntimeStatus,
   RuntimeProject,
 } from "./runtime-types";
@@ -97,12 +98,13 @@ export class DeploymentClient {
     return (await this.request<{ providerAdapters: ProviderAdapter[] }>("/v1/provider-adapters")).providerAdapters ?? [];
   }
 
-  async providerStock(): Promise<ProviderStockItem[]> {
-    return (await this.request<{ providers: ProviderStockItem[] }>("/v1/providers")).providers ?? [];
+  async providerCatalog(): Promise<ProviderCatalog> {
+    const catalog = await this.request<Partial<ProviderCatalog>>("/v1/provider-catalog");
+    return { registry: catalog.registry ?? [], custom: catalog.custom ?? [] };
   }
 
-  async projectProviders(slug: string): Promise<ProviderStockItem[]> {
-    return (await this.request<{ providers: ProviderStockItem[] }>(`/v1/project/${encodeURIComponent(slug)}/providers`)).providers ?? [];
+  async projectProviders(slug: string): Promise<ProjectProvider[]> {
+    return (await this.request<{ providers: ProjectProvider[] }>(`/v1/project/${encodeURIComponent(slug)}/providers`)).providers ?? [];
   }
 
   async projectAgentCandidates(slug: string): Promise<ProjectAgentCandidate[]> {

@@ -1,13 +1,14 @@
 "use client";
 
 import {
+  ArrowLeft,
   Bot,
   Cloud,
   Cpu,
   Mic2,
-  MoreHorizontal,
   Plus,
   RefreshCw,
+  Search,
   Trash2,
   Volume2,
   X,
@@ -17,104 +18,78 @@ import { useRouter } from "next/navigation";
 import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import type {
   AvailableAgent,
+  CustomProvider,
+  ProjectProvider,
   ProviderAdapter,
-  ProviderStockItem,
+  ProviderCatalog,
+  ProviderAdapterField,
   RuntimeProject,
 } from "../lib/runtime-types";
 
 type ProvidersViewProps = {
   project: RuntimeProject;
-  adapters: ProviderAdapter[];
-  stock: ProviderStockItem[];
-  assigned: ProviderStockItem[];
+  catalog: ProviderCatalog;
+  providers: ProjectProvider[];
   availableAgents: AvailableAgent[];
 };
 
-type ConfigureTarget = {
-  adapter: ProviderAdapter;
-  provider?: ProviderStockItem;
-} | null;
+type ProviderChoice = {
+  source: { kind: "registry" | "custom"; key: string };
+  name: string;
+  providerType: string;
+  description: string;
+  capabilities: string[];
+  fields: ProviderAdapterField[];
+  baseUrl: string;
+  config: Record<string, unknown>;
+  secretKeys: string[];
+};
 
-export function RuntimeProvidersView({ project, adapters, stock, assigned, availableAgents }: ProvidersViewProps) {
-  const assignedKeys = useMemo(() => new Set(assigned.map((provider) => provider.providerKey)), [assigned]);
-  const [configure, setConfigure] = useState<ConfigureTarget>(null);
+export function RuntimeProvidersView({ project, catalog, providers, availableAgents }: ProvidersViewProps) {
+  const [dialog, setDialog] = useState<{ provider?: ProjectProvider } | null>(null);
   return (
-    <div className="providers-page">
-      <ProviderSection title="Project providers" count={assigned.length} description="Providers this project can use for agents and abilities.">
-        {assigned.length > 0 ? (
-          <div className="provider-card-grid">
-            {assigned.map((provider) => (
-              <ProjectProviderCard
-                key={provider.id}
-                project={project}
-                provider={provider}
-                adapter={adapters.find((adapter) => adapter.id === provider.providerType)}
-                online={providerOnline(provider, availableAgents)}
-                onConfigure={() => setConfigure({ adapter: adapterFor(provider, adapters), provider })}
-              />
-            ))}
-          </div>
-        ) : <ProviderEmpty title="No providers assigned" detail="Add a configured provider from Provider Stock below." />}
-      </ProviderSection>
+    <div className="providers-page providers-page-simple">
+      <header className="resource-page-heading">
+        <div className="resource-page-summary">
+          <strong>{providers.length} {providers.length === 1 ? "provider" : "providers"}</strong>
+          <span>Connections available to agents in this project.</span>
+        </div>
+        <button className="primary-button compact" type="button" onClick={() => setDialog({})}>
+          <Plus aria-hidden="true" />Add provider
+        </button>
+      </header>
 
-      <ProviderSection title="Provider Stock" count={stock.length} description="Your configured providers, shared across projects on this Vifu deployment.">
-        {stock.length > 0 ? (
-          <div className="provider-card-grid">
-            {stock.map((provider) => (
-              <StockProviderCard
-                key={provider.id}
-                project={project}
-                provider={provider}
-                adapter={adapters.find((adapter) => adapter.id === provider.providerType)}
-                assigned={assignedKeys.has(provider.providerKey)}
-                online={providerOnline(provider, availableAgents)}
-                onConfigure={() => setConfigure({ adapter: adapterFor(provider, adapters), provider })}
-              />
-            ))}
-          </div>
-        ) : <ProviderEmpty title="Provider Stock is empty" detail="Configure a provider from the registry to make it available to projects." />}
-      </ProviderSection>
-
-      <ProviderSection title="Provider Registry" count={adapters.length} description="Supported provider templates for local agents, models, voice, and realtime abilities.">
-        <div className="provider-card-grid registry">
-          {adapters.map((adapter) => (
-            <button className="provider-registry-card" type="button" key={adapter.id} onClick={() => setConfigure({ adapter })}>
-              <ProviderMark type={adapter.id} />
-              <div><strong>{adapter.name}</strong><p>{adapter.description}</p></div>
-              <footer>{adapter.capabilities.map((capability) => <span key={capability}>{capabilityLabel(capability)}</span>)}</footer>
-              <Plus aria-hidden="true" />
-            </button>
+      {providers.length > 0 ? (
+        <div className="provider-card-grid project-provider-grid">
+          {providers.map((provider) => (
+            <ProjectProviderCard
+              key={provider.id}
+              project={project}
+              provider={provider}
+              adapter={catalog.registry.find((adapter) => adapter.id === provider.providerType)}
+              online={providerOnline(provider, availableAgents)}
+              onConfigure={() => setDialog({ provider })}
+            />
           ))}
         </div>
-      </ProviderSection>
+      ) : (
+        <button className="resource-empty-action" type="button" onClick={() => setDialog({})}>
+          <span className="resource-empty-icon"><Plus aria-hidden="true" /></span>
+          <strong>Add your first provider</strong>
+          <span>Connect an agent runtime, model, voice, or transcription provider.</span>
+        </button>
+      )}
 
-      {configure ? (
+      {dialog ? (
         <ProviderDialog
-          target={configure}
-          stock={stock}
-          onClose={() => setConfigure(null)}
+          project={project}
+          catalog={catalog}
+          providers={providers}
+          provider={dialog.provider}
+          onClose={() => setDialog(null)}
         />
       ) : null}
     </div>
-  );
-}
-
-function ProviderSection({
-  title,
-  count,
-  description,
-  children,
-}: {
-  title: string;
-  count: number;
-  description: string;
-  children: React.ReactNode;
-}) {
-  return (
-    <section className="providers-section">
-      <header><div><h2>{title}</h2><span>{count}</span></div><p>{description}</p></header>
-      {children}
-    </section>
   );
 }
 
@@ -126,7 +101,7 @@ function ProjectProviderCard({
   onConfigure,
 }: {
   project: RuntimeProject;
-  provider: ProviderStockItem;
+  provider: ProjectProvider;
   adapter?: ProviderAdapter;
   online: boolean;
   onConfigure: () => void;
@@ -149,124 +124,99 @@ function ProjectProviderCard({
     }
   }
 
+  const status = online ? "Online" : provider.status === "configured" ? "Configured" : titleCase(provider.status);
   return (
-    <article className="provider-resource-card">
+    <article className="provider-resource-card project-provider-card">
       <button className="provider-resource-main" type="button" onClick={onConfigure}>
         <ProviderMark type={provider.providerType} />
-        <div><strong>{provider.name}</strong><code>{provider.providerKey}</code><p>{adapter?.description ?? provider.baseUrl}</p></div>
-        <span className={`provider-health ${online ? "online" : "offline"}`}><i />{online ? "Online" : provider.status}</span>
+        <div>
+          <strong>{provider.name}</strong>
+          <p>{adapter?.description ?? provider.baseUrl}</p>
+        </div>
+        <span className={`provider-health ${online ? "online" : provider.status === "configured" ? "configured" : "offline"}`}>
+          <i />{status}
+        </span>
       </button>
       <footer>
-        <span>{provider.secretKeys.length > 0 ? "Credentials configured" : "No credentials"}</span>
-        <button className="icon-text-button" type="button" disabled={pending} onClick={remove}><X aria-hidden="true" />Remove</button>
+        <span>{capabilitySummary(adapter?.capabilities ?? [])}</span>
+        <button className="icon-button danger" type="button" disabled={pending} onClick={remove} title="Remove provider" aria-label={`Remove ${provider.name}`}>
+          <Trash2 aria-hidden="true" />
+        </button>
       </footer>
       {error ? <p className="provider-card-error" role="alert">{error}</p> : null}
     </article>
   );
 }
 
-function StockProviderCard({
+function ProviderDialog({
   project,
+  catalog,
+  providers,
   provider,
-  adapter,
-  assigned,
-  online,
-  onConfigure,
+  onClose,
 }: {
   project: RuntimeProject;
-  provider: ProviderStockItem;
-  adapter?: ProviderAdapter;
-  assigned: boolean;
-  online: boolean;
-  onConfigure: () => void;
+  catalog: ProviderCatalog;
+  providers: ProjectProvider[];
+  provider?: ProjectProvider;
+  onClose: () => void;
 }) {
   const router = useRouter();
-  const [pending, setPending] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  async function assign() {
-    setPending(true);
-    setError(null);
-    try {
-      await runtimeRequest(`project/${project.slug}/providers/${provider.providerKey}`, "PUT", {});
-      router.refresh();
-    } catch (nextError) {
-      setError(errorMessage(nextError));
-    } finally {
-      setPending(false);
-    }
-  }
-
-  async function removeFromStock() {
-    if (!window.confirm(`Delete ${provider.name} from Provider Stock?`)) return;
-    setPending(true);
-    setError(null);
-    try {
-      await runtimeRequest(`providers/${provider.providerKey}`, "DELETE");
-      router.refresh();
-    } catch (nextError) {
-      setError(errorMessage(nextError));
-    } finally {
-      setPending(false);
-    }
-  }
-
-  return (
-    <article className={`provider-resource-card stock${assigned ? " assigned" : ""}`}>
-      <button className="provider-resource-main" type="button" onClick={onConfigure}>
-        <ProviderMark type={provider.providerType} />
-        <div><strong>{provider.name}</strong><code>{provider.providerKey}</code><p>{adapter?.description ?? provider.baseUrl}</p></div>
-        <span className={`provider-health ${online ? "online" : "offline"}`}><i />{online ? "Online" : provider.status}</span>
-      </button>
-      <footer>
-        <span>{assigned ? `Assigned to ${project.name}` : "Available to projects"}</span>
-        <span className="provider-stock-actions">
-          {!assigned ? <button className="provider-assign-button" type="button" disabled={pending} onClick={assign} title={`Add ${provider.name} to project`} aria-label={`Add ${provider.name} to project`}><Plus aria-hidden="true" /></button> : null}
-          {!assigned ? <button className="icon-button danger" type="button" disabled={pending} onClick={removeFromStock} title="Delete from Provider Stock" aria-label="Delete from Provider Stock"><Trash2 aria-hidden="true" /></button> : null}
-        </span>
-      </footer>
-      {error ? <p className="provider-card-error" role="alert">{error}</p> : null}
-    </article>
-  );
-}
-
-function ProviderDialog({ target, stock, onClose }: { target: NonNullable<ConfigureTarget>; stock: ProviderStockItem[]; onClose: () => void }) {
-  const router = useRouter();
   const dialogRef = useRef<HTMLDialogElement>(null);
+  const choices = useMemo(() => catalogChoices(catalog).filter((item) => (
+    item.source.kind === "registry"
+      || !providers.some((current) => current.sourceKind === "custom" && current.sourceKey === item.source.key)
+  )), [catalog, providers]);
+  const initial = provider ? choiceForProvider(provider, catalog) : null;
+  const [choice, setChoice] = useState<ProviderChoice | null>(initial);
+  const [query, setQuery] = useState("");
   const [pending, setPending] = useState(false);
   const [testing, setTesting] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const providerKey = target.provider?.providerKey ?? uniqueProviderKey(target.adapter.id, stock);
+  const [notice, setNotice] = useState<string | null>(null);
 
   useEffect(() => {
     dialogRef.current?.showModal();
   }, []);
 
+  const filtered = choices.filter((item) => {
+    const needle = query.trim().toLowerCase();
+    return !needle || `${item.name} ${item.providerType} ${item.description}`.toLowerCase().includes(needle);
+  });
+
   async function save(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    if (!choice) return;
     const form = new FormData(event.currentTarget);
-    const config: Record<string, unknown> = { ...(target.provider?.config ?? {}) };
+    const config: Record<string, unknown> = {};
     const secrets: Record<string, string> = {};
-    for (const field of target.adapter.fields) {
-      const fieldValue = String(form.get(field.key) ?? "").trim();
-      if (!fieldValue || field.key === "baseUrl") continue;
-      if (field.secret) secrets[field.key] = fieldValue;
-      else config[field.key] = fieldValue;
+    for (const field of choice.fields) {
+      if (field.key === "baseUrl") continue;
+      const value = String(form.get(field.key) ?? "").trim();
+      if (!value) continue;
+      if (field.secret) secrets[field.key] = value;
+      else config[field.key] = value;
     }
-    const key = target.provider?.providerKey ?? String(form.get("providerKey") ?? providerKey).trim();
-    const baseUrl = String(form.get("baseUrl") ?? target.provider?.baseUrl ?? `local://${target.adapter.id}`).trim();
+    const body = {
+      ...(provider ? {} : { source: choice.source }),
+      name: String(form.get("name") ?? choice.name).trim(),
+      baseUrl: String(form.get("baseUrl") ?? choice.baseUrl).trim(),
+      config,
+      secrets,
+    };
     setPending(true);
     setError(null);
+    setNotice(null);
     try {
-      await runtimeRequest(`providers/${key}`, "PUT", {
-        name: String(form.get("name") ?? target.adapter.name).trim(),
-        providerType: target.adapter.id,
-        baseUrl,
-        config,
-        secrets,
-      });
+      const result = await runtimeRequest<{ message?: string; addedAgents?: number }>(
+        provider ? `project/${project.slug}/providers/${provider.providerKey}` : `project/${project.slug}/providers`,
+        provider ? "PATCH" : "POST",
+        body,
+      );
+      const discovered = result.addedAgents ? ` ${result.addedAgents} agents added.` : "";
+      if (result.message) setNotice(`${result.message}.${discovered}`);
       router.refresh();
-      onClose();
+      dialogRef.current?.close();
     } catch (nextError) {
       setError(errorMessage(nextError));
     } finally {
@@ -275,11 +225,17 @@ function ProviderDialog({ target, stock, onClose }: { target: NonNullable<Config
   }
 
   async function test() {
-    if (!target.provider) return;
+    if (!provider) return;
     setTesting(true);
     setError(null);
+    setNotice(null);
     try {
-      await runtimeRequest(`providers/${target.provider.providerKey}/test`, "POST", {});
+      const result = await runtimeRequest<{ message?: string; addedAgents?: number }>(
+        `project/${project.slug}/providers/${provider.providerKey}/test`,
+        "POST",
+        {},
+      );
+      setNotice(result.message ?? "Connection test complete.");
       router.refresh();
     } catch (nextError) {
       setError(errorMessage(nextError));
@@ -289,41 +245,138 @@ function ProviderDialog({ target, stock, onClose }: { target: NonNullable<Config
   }
 
   return (
-    <dialog className="resource-dialog provider-config-dialog" ref={dialogRef} onClose={onClose} onClick={(event) => { if (event.target === event.currentTarget) event.currentTarget.close(); }}>
-      <form className="resource-dialog-shell" onSubmit={save}>
-        <header><div><span>{target.provider ? "Provider Stock" : "Provider Registry"}</span><h2>{target.provider ? `Configure ${target.provider.name}` : `Add ${target.adapter.name}`}</h2></div><button className="icon-button" type="button" onClick={() => dialogRef.current?.close()} aria-label="Close"><X aria-hidden="true" /></button></header>
-        <div className="provider-dialog-identity"><ProviderMark type={target.adapter.id} /><div><strong>{target.adapter.name}</strong><p>{target.adapter.description}</p></div></div>
-        <div className="resource-dialog-fields">
-          <label><span>Provider key</span>{target.provider ? <code className="provider-key-readonly">{target.provider.providerKey}</code> : <input name="providerKey" required maxLength={64} defaultValue={providerKey} />}</label>
-          <label><span>Name</span><input name="name" required maxLength={128} defaultValue={target.provider?.name ?? target.adapter.name} /></label>
-          {target.adapter.fields.map((field) => (
-            <label key={field.key}><span>{field.label}</span><input
-              name={field.key}
-              type={field.secret ? "password" : field.kind === "url" ? "url" : "text"}
-              required={field.required && !(target.provider && field.secret && target.provider.secretKeys.includes(field.key))}
-              defaultValue={field.secret ? "" : field.key === "baseUrl" ? target.provider?.baseUrl ?? "" : stringValue(target.provider?.config[field.key])}
-              placeholder={field.secret && target.provider?.secretKeys.includes(field.key) ? "Leave blank to keep current value" : undefined}
-              autoComplete={field.secret ? "off" : undefined}
-            /></label>
-          ))}
+    <dialog className="resource-dialog provider-config-dialog provider-picker-dialog" ref={dialogRef} onClose={onClose} onClick={(event) => { if (event.target === event.currentTarget) event.currentTarget.close(); }}>
+      {choice ? (
+        <form className="resource-dialog-shell" onSubmit={save}>
+          <header>
+            <div className="dialog-title-with-back">
+              {!provider ? <button className="icon-button" type="button" onClick={() => { setChoice(null); setError(null); }} aria-label="Back to providers"><ArrowLeft aria-hidden="true" /></button> : null}
+              <div><span>{provider ? "Provider settings" : "Add provider"}</span><h2>{choice.name}</h2></div>
+            </div>
+            <button className="icon-button" type="button" onClick={() => dialogRef.current?.close()} aria-label="Close"><X aria-hidden="true" /></button>
+          </header>
+          <div className="provider-dialog-identity"><ProviderMark type={choice.providerType} /><div><strong>{choice.name}</strong><p>{choice.description}</p></div></div>
+          <div className="resource-dialog-fields">
+            <label><span>Name</span><input name="name" required maxLength={128} defaultValue={provider?.name ?? choice.name} autoFocus /></label>
+            {choice.fields.map((field) => (
+              <label key={field.key}><span>{field.label}</span><input
+                name={field.key}
+                type={field.secret ? "password" : field.kind === "url" ? "url" : "text"}
+                required={field.required && !(field.secret && (provider?.secretKeys.includes(field.key) || choice.secretKeys.includes(field.key)))}
+                defaultValue={field.secret ? "" : field.key === "baseUrl" ? provider?.baseUrl ?? choice.baseUrl : stringValue(provider?.config[field.key] ?? choice.config[field.key])}
+                placeholder={field.secret && (provider?.secretKeys.includes(field.key) || choice.secretKeys.includes(field.key)) ? "Leave blank to keep the configured value" : undefined}
+                autoComplete={field.secret ? "off" : undefined}
+              /></label>
+            ))}
+          </div>
+          {error ? <p className="inline-error" role="alert">{error}</p> : null}
+          {notice ? <p className="inline-success" role="status">{notice}</p> : null}
+          <footer>
+            <span>{provider ? <button className="secondary-button" type="button" disabled={testing || pending} onClick={test}><RefreshCw aria-hidden="true" />{testing ? "Testing" : "Test connection"}</button> : null}</span>
+            <span><button className="secondary-button" type="button" onClick={() => dialogRef.current?.close()}>Cancel</button><button className="primary-button" type="submit" disabled={pending}>{pending ? "Saving" : provider ? "Save changes" : "Add provider"}</button></span>
+          </footer>
+        </form>
+      ) : (
+        <div className="resource-dialog-shell provider-picker-shell">
+          <header><div><span>Add provider</span><h2>Choose a provider</h2></div><button className="icon-button" type="button" onClick={() => dialogRef.current?.close()} aria-label="Close"><X aria-hidden="true" /></button></header>
+          <label className="resource-picker-search"><Search aria-hidden="true" /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search providers" autoFocus /></label>
+          <div className="provider-picker-list">
+            <ProviderChoiceGroup title="Vifu Registry" items={filtered.filter((item) => item.source.kind === "registry")} onSelect={setChoice} />
+            <ProviderChoiceGroup title="Custom Providers" items={filtered.filter((item) => item.source.kind === "custom")} onSelect={setChoice} />
+            {filtered.length === 0 ? <div className="resource-picker-empty">No providers match your search.</div> : null}
+          </div>
+          <footer><span /><button className="secondary-button" type="button" onClick={() => dialogRef.current?.close()}>Cancel</button></footer>
         </div>
-        {error ? <p className="inline-error" role="alert">{error}</p> : null}
-        <footer>
-          <span>{target.provider ? <button className="secondary-button" type="button" disabled={testing || pending} onClick={test}><RefreshCw aria-hidden="true" />{testing ? "Testing" : "Test connection"}</button> : null}</span>
-          <span><button className="secondary-button" type="button" onClick={() => dialogRef.current?.close()}>Cancel</button><button className="primary-button" type="submit" disabled={pending}>{pending ? "Saving" : "Save provider"}</button></span>
-        </footer>
-      </form>
+      )}
     </dialog>
   );
+}
+
+function ProviderChoiceGroup({ title, items, onSelect }: { title: string; items: ProviderChoice[]; onSelect: (choice: ProviderChoice) => void }) {
+  if (items.length === 0) return null;
+  return (
+    <section className="provider-choice-group">
+      <h3>{title}</h3>
+      {items.map((item) => (
+        <button type="button" key={`${item.source.kind}:${item.source.key}`} onClick={() => onSelect(item)}>
+          <ProviderMark type={item.providerType} />
+          <span><strong>{item.name}</strong><small>{item.description}</small></span>
+          <Plus aria-hidden="true" />
+        </button>
+      ))}
+    </section>
+  );
+}
+
+function catalogChoices(catalog: ProviderCatalog): ProviderChoice[] {
+  const registry = catalog.registry.map((adapter) => ({
+    source: { kind: "registry" as const, key: adapter.id },
+    name: adapter.name,
+    providerType: adapter.id,
+    description: adapter.description,
+    capabilities: adapter.capabilities,
+    fields: adapter.fields,
+    baseUrl: "",
+    config: {},
+    secretKeys: [],
+  }));
+  const custom = catalog.custom.map((provider) => customChoice(provider, catalog.registry));
+  return [...registry, ...custom];
+}
+
+function customChoice(provider: CustomProvider, adapters: ProviderAdapter[]): ProviderChoice {
+  const adapter = adapters.find((item) => item.id === provider.providerType) ?? fallbackAdapter(provider.providerType);
+  return {
+    source: { kind: "custom", key: provider.providerKey },
+    name: provider.name,
+    providerType: provider.providerType,
+    description: `Custom ${adapter.name} configuration`,
+    capabilities: adapter.capabilities,
+    fields: adapter.fields,
+    baseUrl: provider.baseUrl,
+    config: provider.config,
+    secretKeys: provider.secretKeys,
+  };
+}
+
+function choiceForProvider(provider: ProjectProvider, catalog: ProviderCatalog): ProviderChoice {
+  if (provider.sourceKind === "custom") {
+    const source = catalog.custom.find((item) => item.providerKey === provider.sourceKey);
+    if (source) return customChoice(source, catalog.registry);
+  }
+  const adapter = catalog.registry.find((item) => item.id === provider.providerType) ?? fallbackAdapter(provider.providerType);
+  return {
+    source: { kind: provider.sourceKind, key: provider.sourceKey },
+    name: provider.name,
+    providerType: provider.providerType,
+    description: adapter.description,
+    capabilities: adapter.capabilities,
+    fields: adapter.fields,
+    baseUrl: provider.baseUrl,
+    config: provider.config,
+    secretKeys: provider.secretKeys,
+  };
+}
+
+function fallbackAdapter(type: string): ProviderAdapter {
+  return {
+    id: type,
+    category: "custom",
+    name: titleCase(type),
+    description: "Custom provider configuration.",
+    capabilities: ["chat"],
+    executionModes: ["server"],
+    supportsDiscovery: false,
+    fields: [
+      { key: "baseUrl", label: "Base URL", kind: "url", required: true, secret: false },
+      { key: "token", label: "API key", kind: "password", required: false, secret: true },
+    ],
+  };
 }
 
 function ProviderMark({ type }: { type: string }) {
   const Icon = providerIcon(type);
   return <span className={`provider-mark ${providerTone(type)}`}><Icon aria-hidden="true" /></span>;
-}
-
-function ProviderEmpty({ title, detail }: { title: string; detail: string }) {
-  return <div className="provider-empty"><MoreHorizontal aria-hidden="true" /><strong>{title}</strong><span>{detail}</span></div>;
 }
 
 function providerIcon(type: string): LucideIcon {
@@ -341,46 +394,16 @@ function providerTone(type: string): string {
   return "blue";
 }
 
-function providerOnline(provider: ProviderStockItem, agents: AvailableAgent[]): boolean {
+function providerOnline(provider: ProjectProvider, agents: AvailableAgent[]): boolean {
   if (provider.providerType === "openclaw") {
     return agents.some((agent) => agent.status === "connected" && stringValue(agent.metadata.providerKey) === provider.providerKey);
   }
   return provider.status === "online";
 }
 
-function adapterFor(provider: ProviderStockItem, adapters: ProviderAdapter[]): ProviderAdapter {
-  return adapters.find((adapter) => adapter.id === provider.providerType) ?? {
-    id: provider.providerType,
-    category: "custom",
-    name: provider.providerType,
-    description: "Custom provider configuration.",
-    capabilities: [],
-    executionModes: ["server"],
-    supportsDiscovery: false,
-    fields: [
-      { key: "baseUrl", label: "Base URL", kind: "url", required: true, secret: false },
-      { key: "token", label: "API key", kind: "password", required: false, secret: true },
-    ],
-  };
-}
-
-function uniqueProviderKey(base: string, providers: ProviderStockItem[]): string {
-  const keys = new Set(providers.map((provider) => provider.providerKey));
-  if (!keys.has(base)) return base;
-  for (let suffix = 2; suffix < 1000; suffix += 1) {
-    const candidate = `${base}-${suffix}`;
-    if (!keys.has(candidate)) return candidate;
-  }
-  return `${base}-new`;
-}
-
-function capabilityLabel(value: string): string {
-  if (value === "chat") return "Conversation";
-  if (value === "speech") return "Voice";
-  if (value === "transcription") return "Listening";
-  if (value === "realtime") return "Realtime";
-  if (value === "tool") return "Tools";
-  return value;
+function capabilitySummary(capabilities: string[]): string {
+  if (capabilities.length === 0) return "Custom provider";
+  return capabilities.slice(0, 3).map((value) => value === "chat" ? "Conversation" : titleCase(value)).join(" · ");
 }
 
 async function runtimeRequest<T = unknown>(path: string, method: string, body?: unknown): Promise<T> {
@@ -408,4 +431,8 @@ function errorMessage(error: unknown): string {
 
 function stringValue(value: unknown): string {
   return typeof value === "string" ? value : "";
+}
+
+function titleCase(value: string): string {
+  return value.replace(/[-_]/g, " ").replace(/\b\w/g, (letter) => letter.toUpperCase());
 }

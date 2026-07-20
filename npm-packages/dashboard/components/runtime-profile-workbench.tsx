@@ -28,7 +28,7 @@ import type {
   ProfileCapabilityKind,
   ProfileVersionWithCapabilities,
   ProviderAdapter,
-  ProviderStockItem,
+  ProjectProvider,
   RuntimeProject,
 } from "../lib/runtime-types";
 
@@ -36,7 +36,7 @@ type ProfileWorkbenchProps = {
   project: RuntimeProject;
   profile: AgentProfile;
   providerAdapters: ProviderAdapter[];
-  providerConnections: ProviderStockItem[];
+  providerConnections: ProjectProvider[];
   onClose: () => void;
 };
 
@@ -241,7 +241,7 @@ export function RuntimeProfileWorkbench({
   }
 
   async function deleteProfile() {
-    if (!window.confirm(`Delete ${profile.name} from this project? Its saved versions will no longer be available.`)) return;
+    if (!window.confirm(`Remove ${profile.name} from this project? You can add it again later.`)) return;
     setPending("delete-profile");
     setMessage(null);
     try {
@@ -461,7 +461,7 @@ function OverviewPanel({
       </details>
       <section className="profile-game-access">
         <div><strong>Available through the project API</strong><span>Requests can select this agent using its Agent ID.</span></div>
-        <button className="danger-text-button" type="button" disabled={pending !== null} onClick={onRemove}><Trash2 aria-hidden="true" />Delete agent from project</button>
+        <button className="danger-text-button" type="button" disabled={pending !== null} onClick={onRemove}><Trash2 aria-hidden="true" />Remove agent</button>
       </section>
     </div>
   );
@@ -540,7 +540,7 @@ function CapabilitiesPanel({
 }: {
   capabilities: CapabilityDraft[];
   providerAdapters: ProviderAdapter[];
-  providerConnections: ProviderStockItem[];
+  providerConnections: ProjectProvider[];
   sourceManaged: boolean;
   settingsHref: string;
   onChange: (capabilities: CapabilityDraft[]) => void;
@@ -836,7 +836,7 @@ function ToolSummary({ capability }: { capability: CapabilityDraft }) {
   return <p className="profile-tool-summary">{tools.length > 0 ? `${tools.length} tools detected from the provider.` : "Tool availability is resolved by the provider at runtime."}</p>;
 }
 
-function ProviderLegend({ adapters, connections }: { adapters: ProviderAdapter[]; connections: ProviderStockItem[] }) {
+function ProviderLegend({ adapters, connections }: { adapters: ProviderAdapter[]; connections: ProjectProvider[] }) {
   const adapterById = new Map(adapters.map((adapter) => [adapter.id, adapter]));
   return (
     <div className="profile-provider-legend">

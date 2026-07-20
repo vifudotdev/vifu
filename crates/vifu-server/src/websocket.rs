@@ -77,6 +77,9 @@ async fn run_socket(
     )
     .await
     .map_err(|error| error.to_string())?;
+    reconcile_project_agents(state, gateway_id, &agents)
+        .await
+        .map_err(|error| error.to_string())?;
     let connection_id = Uuid::new_v4();
     let (sender, mut receiver) = state.relay.channel();
     state
@@ -178,6 +181,55 @@ async fn run_socket(
     }
     info!(%gateway_id, %connection_id, %session_id, "agent gateway disconnected");
     result
+}
+
+async fn reconcile_project_agents(
+    state: &AppState,
+    gateway_id: &str,
+    agents: &[vifu_core::protocol::AgentDescriptor],
+) -> Result<(), crate::error::ApiError> {
+    for agent in agents {
+        let Some(provider_key) = agent
+            .metadata
+            .get("providerKey")
+            .and_then(serde_json::Value::as_str)
+        else {
+            continue;
+        };
+        for (project_id, _) in db::list_projects_for_provider_key(&state.pool, provider_key).await?
+        {
+            match db::find_project_profile_by_provider_resource(
+                &state.pool,
+                project_id,
+                provider_key,
+                &agent.id,
+            )
+            .await?
+            {
+                Some((_profile_id, _archived, binding_id)) => {
+                    db::refresh_discovered_binding(
+                        &state.pool,
+                        binding_id,
+                        gateway_id,
+                        &agent.name,
+                    )
+                    .await?;
+                }
+                None => {
+                    db::ensure_discovered_binding(
+                        &state.pool,
+                        project_id,
+                        gateway_id,
+                        &agent.id,
+                        &agent.name,
+                        provider_key,
+                    )
+                    .await?;
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 async fn receive_command(socket: &mut WebSocket) -> Result<AgentGatewayCommand, String> {

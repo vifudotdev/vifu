@@ -145,6 +145,8 @@ pub struct ProviderConnection {
     pub id: Uuid,
     pub project_id: Uuid,
     pub provider_key: String,
+    pub source_kind: String,
+    pub source_key: String,
     pub name: String,
     pub provider_type: String,
     pub base_url: String,
@@ -162,6 +164,8 @@ pub struct ProviderConnectionSecret {
     pub id: Uuid,
     pub project_id: Uuid,
     pub provider_key: String,
+    pub source_kind: String,
+    pub source_key: String,
     pub name: String,
     pub provider_type: String,
     pub base_url: String,
@@ -177,7 +181,7 @@ pub struct ProviderConnectionSecret {
 
 #[derive(Debug, Clone, Serialize, FromRow)]
 #[serde(rename_all = "camelCase")]
-pub struct ProviderStockItem {
+pub struct CustomProvider {
     pub id: Uuid,
     pub provider_key: String,
     pub name: String,
@@ -193,7 +197,7 @@ pub struct ProviderStockItem {
 }
 
 #[derive(Debug, Clone, FromRow)]
-pub struct ProviderStockSecret {
+pub struct CustomProviderSecret {
     pub id: Uuid,
     pub provider_key: String,
     pub name: String,
@@ -209,8 +213,8 @@ pub struct ProviderStockSecret {
     pub updated_at: DateTime<Utc>,
 }
 
-impl From<ProviderStockSecret> for ProviderStockItem {
-    fn from(value: ProviderStockSecret) -> Self {
+impl From<CustomProviderSecret> for CustomProvider {
+    fn from(value: CustomProviderSecret) -> Self {
         Self {
             id: value.id,
             provider_key: value.provider_key,
@@ -228,20 +232,14 @@ impl From<ProviderStockSecret> for ProviderStockItem {
     }
 }
 
-#[derive(Debug, Clone, Serialize, FromRow)]
-#[serde(rename_all = "camelCase")]
-pub struct ProjectProviderAssignment {
-    pub project_id: Uuid,
-    pub provider_key: String,
-    pub created_at: DateTime<Utc>,
-}
-
 impl From<ProviderConnectionSecret> for ProviderConnection {
     fn from(value: ProviderConnectionSecret) -> Self {
         Self {
             id: value.id,
             project_id: value.project_id,
             provider_key: value.provider_key,
+            source_kind: value.source_kind,
+            source_key: value.source_key,
             name: value.name,
             provider_type: value.provider_type,
             base_url: value.base_url,
@@ -269,23 +267,31 @@ pub struct UpsertProviderConnection {
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ImportProviderConnections {
-    #[serde(default)]
-    pub providers: Vec<ImportProviderConnection>,
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ProviderSourceInput {
+    pub kind: String,
+    pub key: String,
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ImportProviderConnection {
-    pub key: String,
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CreateProjectProvider {
+    pub source: ProviderSourceInput,
     pub name: Option<String>,
-    pub provider_type: String,
-    pub base_url: String,
+    pub base_url: Option<String>,
     #[serde(default = "empty_object")]
     pub config: Value,
     #[serde(default = "empty_object")]
     pub secrets: Value,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct UpdateProjectProvider {
+    pub name: Option<String>,
+    pub base_url: Option<String>,
+    pub config: Option<Value>,
+    pub secrets: Option<Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -724,6 +730,16 @@ pub struct AvailableAgent {
     pub name: String,
     pub status: String,
     pub metadata: Value,
+}
+
+#[derive(Debug, Clone, FromRow)]
+pub struct ArchivedProjectAgentSource {
+    pub profile_id: Uuid,
+    pub name: String,
+    pub gateway_id: String,
+    pub agent_id: String,
+    pub provider_key: String,
+    pub provider_type: String,
 }
 
 #[derive(Debug, Clone, Serialize, FromRow)]

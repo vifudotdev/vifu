@@ -13,8 +13,7 @@ const ALLOWED_ROOTS = new Set([
   "agent-gateways",
   "project",
   "provider-adapters",
-  "provider-connections",
-  "providers",
+  "provider-catalog",
   "traces",
 ]);
 const MAX_BODY_BYTES = 1024 * 1024;
@@ -64,7 +63,7 @@ async function proxyRuntimeRequest(
     return response === undefined
       ? new Response(null, { status: 204 })
       : NextResponse.json(response, {
-        status: method === "POST" && !["completions", "test", "discover-agents", "revoke"].includes(path.at(-1) ?? "") ? 201 : 200,
+        status: method === "POST" && !["completions", "test", "discover-agents", "restore", "revoke"].includes(path.at(-1) ?? "") ? 201 : 200,
       });
   } catch (error) {
     if (error instanceof AuthorityError || error instanceof VifuHttpError) {
@@ -96,14 +95,7 @@ function isAllowedPath(path: string[]): boolean {
   if (path[0] === "chat") return path.length === 2 && path[1] === "completions";
   if (path[0] === "models") return path.length === 1;
   if (path[0] === "provider-adapters") return path.length === 1;
-  if (path[0] === "providers") {
-    return path.length === 1
-      || path.length === 2
-      || (path.length === 3 && path[2] === "test");
-  }
-  if (path[0] === "provider-connections") {
-    return path.length === 2 || (path.length === 3 && (path[2] === "test" || path[2] === "discover-agents"));
-  }
+  if (path[0] === "provider-catalog") return path.length === 1;
   if (path[0] === "project") {
     if (path.length < 3) return false;
     if (path[2] === "canvas") {
@@ -111,14 +103,16 @@ function isAllowedPath(path: string[]): boolean {
       if (path.length === 4) return path[3] === "nodes" || path[3] === "edges";
       return (path[3] === "nodes" || path[3] === "edges") && Boolean(path[4]);
     }
-    if (path[2] === "provider-connections") {
-      if (path.length === 3) return true;
-      if (path.length === 4) return path[3] === "import" || Boolean(path[3]);
-      return path.length === 5 && (path[4] === "test" || path[4] === "discover-agents");
+    if (path[2] === "providers") {
+      return path.length === 3
+        || path.length === 4
+        || (path.length === 5 && path[4] === "test");
     }
-    if (path[2] === "providers") return path.length === 3 || path.length === 4;
     if (path[2] === "agent-candidates") return path.length === 3;
-    if (path[2] === "agents") return path.length === 4 && path[3] === "import";
+    if (path[2] === "agents") {
+      return (path.length === 4 && path[3] === "import")
+        || (path.length === 5 && path[4] === "restore");
+    }
     if (path[2] === "profiles") {
       if (path.length === 3 || path.length === 4) return true;
       if (path.length === 5) {

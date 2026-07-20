@@ -32,12 +32,12 @@ use crate::error::ApiError;
 use crate::models::{
     slugify, validate_slug, AgentEndpoint, ApiKeyAgentScope, ApiKeyPermissions, ApiKeyRecord,
     Capabilities, CreateApiKey, CreateBinding, CreateCanvasEdge, CreateCanvasNode, CreateEndpoint,
-    CreateProfile, CreateProfileVersion, CreateProject, CreatedApiKey, EndpointRoute,
-    ImportProjectAgent, ImportProviderConnections, ProfileCapabilityDraft, ProviderAdapter,
-    ProviderAdapterField, ProviderConnection, ProviderConnectionSecret, ProviderStockItem,
-    ProviderStockSecret, RegisterAgentGateway, SetProfileRollout, SyncProfileSource, TestProfile,
-    UpdateApiKey, UpdateBinding, UpdateCanvasNode, UpdateEndpoint, UpdateProfile, UpdateProject,
-    UpsertProviderConnection,
+    CreateProfile, CreateProfileVersion, CreateProject, CreateProjectProvider, CreatedApiKey,
+    CustomProvider, CustomProviderSecret, EndpointRoute, ImportProjectAgent,
+    ProfileCapabilityDraft, ProviderAdapter, ProviderAdapterField, ProviderConnection,
+    ProviderConnectionSecret, RegisterAgentGateway, SetProfileRollout, SyncProfileSource,
+    TestProfile, UpdateApiKey, UpdateBinding, UpdateCanvasNode, UpdateEndpoint, UpdateProfile,
+    UpdateProject, UpdateProjectProvider, UpsertProviderConnection,
 };
 use crate::openclaw_device;
 use crate::relay::RelayCallError;
@@ -1305,103 +1305,23 @@ pub async fn list_provider_adapters(
     Ok(Json(json!({ "providerAdapters": provider_adapters() })))
 }
 
-pub async fn list_provider_stock(
+pub async fn list_provider_catalog(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<Value>, ApiError> {
     admin(&state, &headers).await?;
-    let providers = if let Some(path) = active_provider_registry_file(&state) {
+    let custom = if let Some(path) = active_provider_registry_file(&state) {
         read_provider_registry(&path)?
             .providers
             .into_iter()
-            .map(file_provider_stock_item)
+            .map(file_custom_provider)
             .collect::<Result<Vec<_>, _>>()?
     } else {
-        db::list_provider_stock(&state.pool).await?
+        db::list_custom_providers(&state.pool).await?
     };
-    Ok(Json(json!({ "providers": providers })))
-}
-
-pub async fn upsert_provider_stock(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Path(provider_key): Path<String>,
-    Json(input): Json<UpsertProviderConnection>,
-) -> Result<Json<Value>, ApiError> {
-    admin(&state, &headers).await?;
-    let provider = if let Some(path) = active_provider_registry_file(&state) {
-        let connection = save_file_provider_connection(&path, Uuid::nil(), &provider_key, input)?;
-        provider_connection_to_stock(connection)
-    } else {
-        let secrets =
-            provider_stock_secrets_or_existing(&state, &provider_key, input.secrets).await?;
-        let prepared = prepare_provider_connection(
-            &state,
-            PreparedProviderSource {
-                key: &provider_key,
-                name: input.name.as_deref(),
-                provider_type: &input.provider_type,
-                base_url: &input.base_url,
-                config: input.config,
-                secrets,
-            },
-        )?;
-        save_provider_stock(&state, prepared).await?
-    };
-    Ok(Json(json!({ "provider": provider })))
-}
-
-pub async fn delete_provider_stock(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Path(provider_key): Path<String>,
-) -> Result<StatusCode, ApiError> {
-    admin(&state, &headers).await?;
-    let provider_key = required_identifier("provider key", &provider_key)?;
-    if db::provider_has_project_assignments(&state.pool, provider_key).await? {
-        return Err(ApiError::Conflict(
-            "remove this provider from every project before deleting it from Provider Stock"
-                .to_string(),
-        ));
-    }
-    if let Some(path) = active_provider_registry_file(&state) {
-        delete_file_provider_connection(&path, provider_key)?;
-    } else {
-        db::delete_provider_stock(&state.pool, provider_key).await?;
-    }
-    Ok(StatusCode::NO_CONTENT)
-}
-
-pub async fn test_provider_stock(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Path(provider_key): Path<String>,
-) -> Result<Json<Value>, ApiError> {
-    admin(&state, &headers).await?;
-    let provider_key = required_identifier("provider key", &provider_key)?;
-    if let Some(path) = active_provider_registry_file(&state) {
-        let file = read_provider_registry(&path)?;
-        let definition = file
-            .providers
-            .into_iter()
-            .find(|provider| provider.key == provider_key)
-            .ok_or(ApiError::NotFound)?;
-        let token = vifu_core::config::resolve_provider_token(&definition.key, &definition.auth)
-            .map_err(ApiError::Invalid)?;
-        let (status, message) = probe_runtime_provider(
-            &definition.provider_type,
-            &definition.url,
-            token.as_deref(),
-            &definition.config,
-        )
-        .await;
-        let mut provider = file_provider_stock_item(definition)?;
-        provider.status = status.to_string();
-        provider.last_checked_at = Some(Utc::now());
-        return Ok(Json(json!({ "provider": provider, "message": message })));
-    }
-    let provider = db::get_provider_stock_secret_by_key(&state.pool, provider_key).await?;
-    test_db_provider_stock(&state, provider).await
+    Ok(Json(
+        json!({ "registry": provider_adapters(), "custom": custom }),
+    ))
 }
 
 pub async fn list_project_providers(
@@ -1410,42 +1330,131 @@ pub async fn list_project_providers(
     Path(slug): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
     admin(&state, &headers).await?;
-    let project = db::get_project_by_slug(&state.pool, &slug).await?;
-    let providers = if let Some(path) = active_provider_registry_file(&state) {
-        let assigned = db::list_project_provider_assignments(&state.pool, project.project.id)
-            .await?
-            .into_iter()
-            .map(|assignment| assignment.provider_key)
-            .collect::<HashSet<_>>();
-        read_provider_registry(&path)?
-            .providers
-            .into_iter()
-            .filter(|provider| assigned.contains(&provider.key))
-            .map(file_provider_stock_item)
-            .collect::<Result<Vec<_>, _>>()?
-    } else {
-        db::list_project_provider_stock(&state.pool, project.project.id).await?
-    };
+    db::get_project_by_slug(&state.pool, &slug).await?;
+    let mut providers = Vec::new();
+    for connection in db::list_provider_connections(&state.pool, &slug).await? {
+        providers.push(effective_provider_connection(&state, connection).await?);
+    }
     Ok(Json(json!({ "providers": providers })))
 }
 
-pub async fn assign_project_provider(
+pub async fn create_project_provider(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Path((slug, provider_key)): Path<(String, String)>,
-) -> Result<Json<Value>, ApiError> {
+    Path(slug): Path<String>,
+    Json(input): Json<CreateProjectProvider>,
+) -> Result<(StatusCode, Json<Value>), ApiError> {
     admin(&state, &headers).await?;
-    let provider_key = required_identifier("provider key", &provider_key)?;
-    let project = db::get_project_by_slug(&state.pool, &slug).await?;
-    let provider = provider_stock_item(&state, provider_key).await?;
-    let assignment =
-        db::assign_project_provider(&state.pool, project.project.id, provider_key).await?;
-    Ok(Json(
-        json!({ "assignment": assignment, "provider": provider }),
+    db::get_project_by_slug(&state.pool, &slug).await?;
+    let mut source =
+        resolve_project_provider_source(&state, &input.source.kind, &input.source.key).await?;
+    let provider_key = if source.kind == "registry" {
+        let key = unique_custom_provider_key(&state, &format!("{}-{}", slug, source.key)).await?;
+        let base_url = input
+            .base_url
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| ApiError::Invalid("provider base URL is required".to_string()))?;
+        upsert_custom_provider_source(
+            &state,
+            &key,
+            input.name.as_deref().unwrap_or(&source.name),
+            &source.provider_type,
+            base_url,
+            input.config.clone(),
+            input.secrets.clone(),
+        )
+        .await?;
+        source = resolve_project_provider_source(&state, "custom", &key).await?;
+        key
+    } else {
+        match db::get_provider_connection_secret_by_key(&state.pool, &slug, &source.key).await {
+            Ok(_) => {
+                return Err(ApiError::Conflict(
+                    "this provider is already available in the project".to_string(),
+                ));
+            }
+            Err(ApiError::NotFound) => source.key.clone(),
+            Err(error) => return Err(error),
+        }
+    };
+    let inherited = source.key == provider_key && input.source.kind == "registry";
+    let prepared = prepare_project_provider(
+        &state,
+        &provider_key,
+        input.name.as_deref().unwrap_or(&source.name),
+        &source,
+        if inherited {
+            None
+        } else {
+            input.base_url.as_deref()
+        },
+        if inherited { json!({}) } else { input.config },
+        if inherited { json!({}) } else { input.secrets },
+    )?;
+    let connection =
+        save_provider_connection(&state, &slug, &source.kind, &source.key, prepared).await?;
+    let (provider, message, added_agents) =
+        refresh_project_provider(&state, &slug, connection).await?;
+    Ok((
+        StatusCode::CREATED,
+        Json(json!({
+            "provider": provider,
+            "message": message,
+            "addedAgents": added_agents,
+        })),
     ))
 }
 
-pub async fn unassign_project_provider(
+pub async fn update_project_provider(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((slug, provider_key)): Path<(String, String)>,
+    Json(input): Json<UpdateProjectProvider>,
+) -> Result<Json<Value>, ApiError> {
+    admin(&state, &headers).await?;
+    let provider_key = required_identifier("provider key", &provider_key)?;
+    let current =
+        db::get_provider_connection_secret_by_key(&state.pool, &slug, provider_key).await?;
+    let source =
+        resolve_project_provider_source(&state, &current.source_kind, &current.source_key).await?;
+    let current_secrets = decrypted_provider_secrets(&state, &current)?;
+    let secrets = match input.secrets {
+        Some(secrets) if !is_json_object_empty(&secrets) => {
+            merge_json_objects(&current_secrets, &secrets)?
+        }
+        Some(_) | None => current_secrets,
+    };
+    let config = match input.config {
+        Some(config) => merge_json_objects(&current.config, &config)?,
+        None => current.config.clone(),
+    };
+    let prepared = prepare_project_provider(
+        &state,
+        provider_key,
+        input.name.as_deref().unwrap_or(&current.name),
+        &source,
+        input.base_url.as_deref().or(Some(&current.base_url)),
+        config,
+        secrets,
+    )?;
+    let connection = save_provider_connection(
+        &state,
+        &slug,
+        &current.source_kind,
+        &current.source_key,
+        prepared,
+    )
+    .await?;
+    let (provider, message, added_agents) =
+        refresh_project_provider(&state, &slug, connection).await?;
+    Ok(Json(
+        json!({ "provider": provider, "message": message, "addedAgents": added_agents }),
+    ))
+}
+
+pub async fn delete_project_provider(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path((slug, provider_key)): Path<(String, String)>,
@@ -1457,6 +1466,21 @@ pub async fn unassign_project_provider(
     Ok(StatusCode::NO_CONTENT)
 }
 
+pub async fn test_project_provider(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((slug, provider_key)): Path<(String, String)>,
+) -> Result<Json<Value>, ApiError> {
+    admin(&state, &headers).await?;
+    let connection =
+        db::get_provider_connection_secret_by_key(&state.pool, &slug, &provider_key).await?;
+    let (provider, message, added_agents) =
+        refresh_project_provider(&state, &slug, connection.into()).await?;
+    Ok(Json(
+        json!({ "provider": provider, "message": message, "addedAgents": added_agents }),
+    ))
+}
+
 pub async fn list_project_agent_candidates(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -1464,45 +1488,69 @@ pub async fn list_project_agent_candidates(
 ) -> Result<Json<Value>, ApiError> {
     admin(&state, &headers).await?;
     let project = db::get_project_by_slug(&state.pool, &slug).await?;
-    let assigned = db::list_project_provider_assignments(&state.pool, project.project.id)
+    let assigned = db::list_provider_connections(&state.pool, &slug)
         .await?
         .into_iter()
-        .map(|assignment| assignment.provider_key)
+        .map(|provider| provider.provider_key)
         .collect::<HashSet<_>>();
     let imported = db::list_project_profile_provider_resources(&state.pool, project.project.id)
         .await?
         .into_iter()
         .collect::<HashSet<_>>();
-    let candidates = db::list_available_agents(&state.pool)
-        .await?
+    let archived = db::list_archived_project_agent_sources(&state.pool, project.project.id).await?;
+    let archived_resources = archived
+        .iter()
+        .map(|agent| (agent.provider_key.clone(), agent.agent_id.clone()))
+        .collect::<HashSet<_>>();
+    let mut candidates = archived
         .into_iter()
-        .filter_map(|agent| {
-            let provider_key = agent
-                .metadata
-                .get("providerKey")
-                .and_then(Value::as_str)?
-                .to_string();
-            if !assigned.contains(&provider_key)
-                || imported.contains(&(provider_key.clone(), agent.id.clone()))
-            {
-                return None;
-            }
-            let provider_type = agent
-                .metadata
-                .get("providerType")
-                .and_then(Value::as_str)
-                .unwrap_or("openclaw");
-            Some(json!({
+        .filter(|agent| assigned.contains(&agent.provider_key))
+        .map(|agent| {
+            json!({
+                "profileId": agent.profile_id,
                 "gatewayId": agent.gateway_id,
-                "id": agent.id,
+                "id": agent.agent_id,
                 "name": agent.name,
-                "status": agent.status,
-                "providerKey": provider_key,
-                "providerType": provider_type,
-                "metadata": agent.metadata,
-            }))
+                "status": "removed",
+                "providerKey": agent.provider_key,
+                "providerType": agent.provider_type,
+                "metadata": {},
+            })
         })
         .collect::<Vec<_>>();
+    candidates.extend(
+        db::list_available_agents(&state.pool)
+            .await?
+            .into_iter()
+            .filter_map(|agent| {
+                let provider_key = agent
+                    .metadata
+                    .get("providerKey")
+                    .and_then(Value::as_str)?
+                    .to_string();
+                if !assigned.contains(&provider_key)
+                    || imported.contains(&(provider_key.clone(), agent.id.clone()))
+                    || archived_resources.contains(&(provider_key.clone(), agent.id.clone()))
+                {
+                    return None;
+                }
+                let provider_type = agent
+                    .metadata
+                    .get("providerType")
+                    .and_then(Value::as_str)
+                    .unwrap_or("openclaw");
+                Some(json!({
+                    "profileId": null,
+                    "gatewayId": agent.gateway_id,
+                    "id": agent.id,
+                    "name": agent.name,
+                    "status": agent.status,
+                    "providerKey": provider_key,
+                    "providerType": provider_type,
+                    "metadata": agent.metadata,
+                }))
+            }),
+    );
     Ok(Json(json!({ "candidates": candidates })))
 }
 
@@ -1531,278 +1579,51 @@ pub async fn import_project_agent(
                 && agent.metadata.get("providerKey").and_then(Value::as_str) == Some(provider_key)
         })
         .ok_or(ApiError::NotFound)?;
-    let binding_id = db::ensure_discovered_binding(
-        &state.pool,
-        project.project.id,
-        gateway_id,
-        agent_id,
-        &agent.name,
-        provider_key,
-    )
-    .await?;
-    db::assign_project_binding(&state.pool, project.project.id, binding_id).await?;
-    let binding = db::get_binding(&state.pool, binding_id).await?;
-    let profile =
-        db::get_project_profile(&state.pool, project.project.id, binding.profile_id).await?;
+    let profile = if let Some((profile_id, archived, binding_id)) =
+        db::find_project_profile_by_provider_resource(
+            &state.pool,
+            project.project.id,
+            provider_key,
+            agent_id,
+        )
+        .await?
+    {
+        db::refresh_discovered_binding(&state.pool, binding_id, gateway_id, &agent.name).await?;
+        if archived {
+            db::restore_project_profile(&state.pool, project.project.id, profile_id).await?
+        } else {
+            db::assign_project_binding(&state.pool, project.project.id, binding_id).await?;
+            db::get_project_profile(&state.pool, project.project.id, profile_id).await?
+        }
+    } else {
+        let binding_id = db::ensure_discovered_binding(
+            &state.pool,
+            project.project.id,
+            gateway_id,
+            agent_id,
+            &agent.name,
+            provider_key,
+        )
+        .await?;
+        db::assign_project_binding(&state.pool, project.project.id, binding_id).await?;
+        let binding = db::get_binding(&state.pool, binding_id).await?;
+        db::get_project_profile(&state.pool, project.project.id, binding.profile_id).await?
+    };
     Ok((
         StatusCode::CREATED,
         Json(profile_detail_payload(&state, profile).await?),
     ))
 }
 
-pub async fn list_provider_connections(
+pub async fn restore_project_agent(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Path(slug): Path<String>,
+    Path((slug, profile_id)): Path<(String, Uuid)>,
 ) -> Result<Json<Value>, ApiError> {
     admin(&state, &headers).await?;
-    if let Some(path) = active_provider_registry_file(&state) {
-        let project = db::get_project_by_slug(&state.pool, &slug).await?;
-        let file = read_provider_registry(&path)?;
-        let provider_connections = file
-            .providers
-            .into_iter()
-            .map(|provider| file_provider_connection(project.project.id, provider))
-            .collect::<Result<Vec<_>, _>>()?;
-        return Ok(Json(json!({ "providerConnections": provider_connections })));
-    }
-    Ok(Json(json!({
-        "providerConnections": db::list_provider_connections(&state.pool, &slug).await?
-    })))
-}
-
-pub async fn upsert_provider_connection(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Path((slug, provider_key)): Path<(String, String)>,
-    Json(input): Json<UpsertProviderConnection>,
-) -> Result<Json<Value>, ApiError> {
-    admin(&state, &headers).await?;
-    if let Some(path) = active_provider_registry_file(&state) {
-        let project = db::get_project_by_slug(&state.pool, &slug).await?;
-        let connection =
-            save_file_provider_connection(&path, project.project.id, &provider_key, input)?;
-        return Ok(Json(json!({ "providerConnection": connection })));
-    }
-    let secrets = provider_secrets_or_existing(&state, &slug, &provider_key, input.secrets).await?;
-    let prepared = prepare_provider_connection(
-        &state,
-        PreparedProviderSource {
-            key: &provider_key,
-            name: input.name.as_deref(),
-            provider_type: &input.provider_type,
-            base_url: &input.base_url,
-            config: input.config,
-            secrets,
-        },
-    )?;
-    let connection = save_provider_connection(&state, &slug, prepared).await?;
-    Ok(Json(json!({ "providerConnection": connection })))
-}
-
-pub async fn import_provider_connections(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Path(slug): Path<String>,
-    Json(input): Json<ImportProviderConnections>,
-) -> Result<Json<Value>, ApiError> {
-    admin(&state, &headers).await?;
-    if input.providers.len() > 100 {
-        return Err(ApiError::Invalid(
-            "provider import supports at most 100 providers".to_string(),
-        ));
-    }
-    if let Some(path) = active_provider_registry_file(&state) {
-        let project = db::get_project_by_slug(&state.pool, &slug).await?;
-        let mut connections = Vec::with_capacity(input.providers.len());
-        for provider in input.providers {
-            connections.push(save_file_provider_connection(
-                &path,
-                project.project.id,
-                &provider.key,
-                UpsertProviderConnection {
-                    name: provider.name,
-                    provider_type: provider.provider_type,
-                    base_url: provider.base_url,
-                    config: provider.config,
-                    secrets: provider.secrets,
-                },
-            )?);
-        }
-        return Ok(Json(json!({ "providerConnections": connections })));
-    }
-    let mut connections = Vec::with_capacity(input.providers.len());
-    for provider in input.providers {
-        let secrets =
-            provider_secrets_or_existing(&state, &slug, &provider.key, provider.secrets).await?;
-        let prepared = prepare_provider_connection(
-            &state,
-            PreparedProviderSource {
-                key: &provider.key,
-                name: provider.name.as_deref(),
-                provider_type: &provider.provider_type,
-                base_url: &provider.base_url,
-                config: provider.config,
-                secrets,
-            },
-        )?;
-        connections.push(save_provider_connection(&state, &slug, prepared).await?);
-    }
-    Ok(Json(json!({ "providerConnections": connections })))
-}
-
-pub async fn delete_project_provider_connection(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Path((slug, provider_key)): Path<(String, String)>,
-) -> Result<StatusCode, ApiError> {
-    admin(&state, &headers).await?;
-    if let Some(path) = active_provider_registry_file(&state) {
-        delete_file_provider_connection(&path, &provider_key)?;
-    } else {
-        db::delete_provider_connection_by_key(&state.pool, &slug, &provider_key).await?;
-    }
-    Ok(StatusCode::NO_CONTENT)
-}
-
-pub async fn delete_provider_connection(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Path(id): Path<Uuid>,
-) -> Result<StatusCode, ApiError> {
-    admin(&state, &headers).await?;
-    db::delete_provider_connection(&state.pool, id).await?;
-    Ok(StatusCode::NO_CONTENT)
-}
-
-pub async fn test_project_provider_connection(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Path((slug, provider_key)): Path<(String, String)>,
-) -> Result<Json<Value>, ApiError> {
-    admin(&state, &headers).await?;
-    if let Some(path) = active_provider_registry_file(&state) {
-        let project = db::get_project_by_slug(&state.pool, &slug).await?;
-        let (definition, mut connection) =
-            get_file_provider_definition_and_connection(&path, project.project.id, &provider_key)?;
-        let token = vifu_core::config::resolve_provider_token(&definition.key, &definition.auth)
-            .map_err(ApiError::Invalid)?;
-        let (status, message) = probe_runtime_provider(
-            &definition.provider_type,
-            &definition.url,
-            token.as_deref(),
-            &definition.config,
-        )
-        .await;
-        connection.status = status.to_string();
-        connection.last_checked_at = Some(Utc::now());
-        return Ok(Json(
-            json!({ "providerConnection": connection, "message": message }),
-        ));
-    }
-    let connection =
-        db::get_provider_connection_secret_by_key(&state.pool, &slug, &provider_key).await?;
-    test_db_provider_connection(&state, connection).await
-}
-
-pub async fn test_provider_connection(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Path(id): Path<Uuid>,
-) -> Result<Json<Value>, ApiError> {
-    admin(&state, &headers).await?;
-    let connection = db::get_provider_connection_secret(&state.pool, id).await?;
-    test_db_provider_connection(&state, connection).await
-}
-
-async fn test_db_provider_connection(
-    state: &AppState,
-    connection: ProviderConnectionSecret,
-) -> Result<Json<Value>, ApiError> {
-    let secrets = decrypted_provider_secrets(state, &connection)?;
-    let token = provider_token(&secrets)?;
-    let (status, message) = probe_runtime_provider(
-        &connection.provider_type,
-        &connection.base_url,
-        token.as_deref(),
-        &connection.config,
-    )
-    .await;
-    let updated = db::update_provider_connection_status(&state.pool, connection.id, status).await?;
-    Ok(Json(
-        json!({ "providerConnection": updated, "message": message }),
-    ))
-}
-
-async fn test_db_provider_stock(
-    state: &AppState,
-    provider: ProviderStockSecret,
-) -> Result<Json<Value>, ApiError> {
-    let secrets = decrypted_provider_stock_secrets(state, &provider)?;
-    let token = provider_token(&secrets)?;
-    let (status, message) = probe_runtime_provider(
-        &provider.provider_type,
-        &provider.base_url,
-        token.as_deref(),
-        &provider.config,
-    )
-    .await;
-    let updated =
-        db::update_provider_stock_status(&state.pool, &provider.provider_key, status).await?;
-    Ok(Json(json!({ "provider": updated, "message": message })))
-}
-
-pub async fn discover_project_provider_agents(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Path((slug, provider_key)): Path<(String, String)>,
-) -> Result<Json<Value>, ApiError> {
-    admin(&state, &headers).await?;
-    if let Some(path) = active_provider_registry_file(&state) {
-        let project = db::get_project_by_slug(&state.pool, &slug).await?;
-        let (definition, mut connection) =
-            get_file_provider_definition_and_connection(&path, project.project.id, &provider_key)?;
-        let agents = discover_file_provider_agents(&definition).await?;
-        connection.status = "online".to_string();
-        connection.last_checked_at = Some(Utc::now());
-        return Ok(Json(
-            json!({ "providerConnection": connection, "agents": agents }),
-        ));
-    }
-    let connection =
-        db::get_provider_connection_secret_by_key(&state.pool, &slug, &provider_key).await?;
-    discover_db_provider_agents(&state, connection).await
-}
-
-pub async fn discover_provider_agents(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Path(id): Path<Uuid>,
-) -> Result<Json<Value>, ApiError> {
-    admin(&state, &headers).await?;
-    let connection = db::get_provider_connection_secret(&state.pool, id).await?;
-    discover_db_provider_agents(&state, connection).await
-}
-
-async fn discover_db_provider_agents(
-    state: &AppState,
-    connection: ProviderConnectionSecret,
-) -> Result<Json<Value>, ApiError> {
-    if connection.provider_type != "openclaw" {
-        return Err(ApiError::Invalid("unsupported provider type".to_string()));
-    }
-    let endpoint =
-        vifu_core::openclaw::parse_endpoint(&connection.base_url).map_err(ApiError::Invalid)?;
-    let secrets = decrypted_provider_secrets(state, &connection)?;
-    let token = provider_token(&secrets)?;
-    let agents = vifu_core::openclaw::discover_agents(&endpoint, token.as_deref())
-        .await
-        .map_err(ApiError::AgentGateway)?;
-    let updated =
-        db::update_provider_connection_status(&state.pool, connection.id, "online").await?;
-    Ok(Json(
-        json!({ "providerConnection": updated, "agents": agents }),
-    ))
+    let project = db::get_project_by_slug(&state.pool, &slug).await?;
+    let profile = db::restore_project_profile(&state.pool, project.project.id, profile_id).await?;
+    Ok(Json(profile_detail_payload(&state, profile).await?))
 }
 
 #[derive(Debug, Deserialize)]
@@ -3496,6 +3317,15 @@ struct PreparedProviderSource<'a> {
     secrets: Value,
 }
 
+struct ProjectProviderSource {
+    kind: String,
+    key: String,
+    name: String,
+    provider_type: String,
+    base_url: String,
+    config: Value,
+}
+
 struct ResolvedRuntimeProvider {
     provider_type: String,
     base_url: String,
@@ -3753,29 +3583,40 @@ async fn resolve_runtime_provider(
     project_slug: &str,
     provider_key: &str,
 ) -> Result<ResolvedRuntimeProvider, ApiError> {
-    let project = db::get_project_by_slug(&state.pool, project_slug).await?;
-    if !db::project_provider_is_assigned(&state.pool, project.project.id, provider_key).await? {
-        return Err(ApiError::Forbidden);
-    }
-    if let Some(path) = active_provider_registry_file(state) {
-        let (definition, _) =
-            get_file_provider_definition_and_connection(&path, project.project.id, provider_key)?;
-        let token = vifu_core::config::resolve_provider_token(&definition.key, &definition.auth)
-            .map_err(ApiError::Invalid)?;
-        return Ok(ResolvedRuntimeProvider {
-            provider_type: definition.provider_type,
-            base_url: definition.url,
-            token,
-            config: definition.config,
-        });
-    }
-    let connection = db::get_provider_stock_secret_by_key(&state.pool, provider_key).await?;
-    let secrets = decrypted_provider_stock_secrets(state, &connection)?;
+    let connection =
+        db::get_provider_connection_secret_by_key(&state.pool, project_slug, provider_key).await?;
+    let overrides = decrypted_provider_secrets(state, &connection)?;
+    let (provider_type, base_url, config, secrets) = if connection.source_kind == "custom" {
+        let source =
+            resolve_project_provider_source(state, &connection.source_kind, &connection.source_key)
+                .await?;
+        let base_url = if connection.base_url.trim().is_empty() {
+            source.base_url
+        } else {
+            connection.base_url.clone()
+        };
+        (
+            source.provider_type,
+            base_url,
+            merge_json_objects(&source.config, &connection.config)?,
+            merge_json_objects(
+                &custom_provider_secrets(state, &connection.source_key).await?,
+                &overrides,
+            )?,
+        )
+    } else {
+        (
+            connection.provider_type.clone(),
+            connection.base_url.clone(),
+            connection.config.clone(),
+            overrides,
+        )
+    };
     Ok(ResolvedRuntimeProvider {
-        provider_type: connection.provider_type,
-        base_url: connection.base_url,
+        provider_type,
+        base_url,
         token: provider_token(&secrets)?,
-        config: connection.config,
+        config,
     })
 }
 
@@ -3884,10 +3725,7 @@ fn active_provider_registry_file(state: &AppState) -> Option<std::path::PathBuf>
     state.config.provider_registry_file.clone()
 }
 
-async fn provider_stock_item(
-    state: &AppState,
-    provider_key: &str,
-) -> Result<ProviderStockItem, ApiError> {
+async fn custom_provider(state: &AppState, provider_key: &str) -> Result<CustomProvider, ApiError> {
     if let Some(path) = active_provider_registry_file(state) {
         let file = read_provider_registry(&path)?;
         let provider = file
@@ -3895,10 +3733,10 @@ async fn provider_stock_item(
             .into_iter()
             .find(|provider| provider.key == provider_key)
             .ok_or(ApiError::NotFound)?;
-        return file_provider_stock_item(provider);
+        return file_custom_provider(provider);
     }
     Ok(
-        db::get_provider_stock_secret_by_key(&state.pool, provider_key)
+        db::get_custom_provider_secret_by_key(&state.pool, provider_key)
             .await?
             .into(),
     )
@@ -3955,33 +3793,6 @@ fn save_file_provider_connection(
     file_provider_connection(project_id, definition)
 }
 
-fn delete_file_provider_connection(path: &FsPath, provider_key: &str) -> Result<(), ApiError> {
-    let key = required_identifier("provider key", provider_key)?;
-    let mut file = read_provider_registry(path)?;
-    let before = file.providers.len();
-    file.providers.retain(|provider| provider.key != key);
-    if file.providers.len() == before {
-        return Err(ApiError::NotFound);
-    }
-    write_provider_registry(path, &file)
-}
-
-fn get_file_provider_definition_and_connection(
-    path: &FsPath,
-    project_id: Uuid,
-    provider_key: &str,
-) -> Result<(AgentProviderDefinition, ProviderConnection), ApiError> {
-    let key = required_identifier("provider key", provider_key)?;
-    let file = read_provider_registry(path)?;
-    let definition = file
-        .providers
-        .into_iter()
-        .find(|provider| provider.key == key)
-        .ok_or(ApiError::NotFound)?;
-    let connection = file_provider_connection(project_id, definition.clone())?;
-    Ok((definition, connection))
-}
-
 fn file_provider_connection(
     project_id: Uuid,
     provider: AgentProviderDefinition,
@@ -3996,7 +3807,9 @@ fn file_provider_connection(
     Ok(ProviderConnection {
         id: deterministic_provider_connection_id(project_id, &key),
         project_id,
-        provider_key: key,
+        provider_key: key.clone(),
+        source_kind: "custom".to_string(),
+        source_key: key,
         name,
         provider_type,
         base_url,
@@ -4014,17 +3827,14 @@ fn file_provider_connection(
     })
 }
 
-fn file_provider_stock_item(
-    provider: AgentProviderDefinition,
-) -> Result<ProviderStockItem, ApiError> {
-    Ok(provider_connection_to_stock(file_provider_connection(
-        Uuid::nil(),
-        provider,
-    )?))
+fn file_custom_provider(provider: AgentProviderDefinition) -> Result<CustomProvider, ApiError> {
+    Ok(provider_connection_to_custom_provider(
+        file_provider_connection(Uuid::nil(), provider)?,
+    ))
 }
 
-fn provider_connection_to_stock(connection: ProviderConnection) -> ProviderStockItem {
-    ProviderStockItem {
+fn provider_connection_to_custom_provider(connection: ProviderConnection) -> CustomProvider {
+    CustomProvider {
         id: connection.id,
         provider_key: connection.provider_key,
         name: connection.name,
@@ -4095,37 +3905,293 @@ fn is_json_object_empty(value: &Value) -> bool {
     value.as_object().is_some_and(serde_json::Map::is_empty)
 }
 
-async fn provider_secrets_or_existing(
+async fn resolve_project_provider_source(
     state: &AppState,
-    slug: &str,
-    provider_key: &str,
-    secrets: Value,
-) -> Result<Value, ApiError> {
-    validate_json_object("secrets", &secrets, 64 * 1024)?;
-    if !is_json_object_empty(&secrets) {
-        return Ok(secrets);
-    }
-    match db::get_provider_connection_secret_by_key(&state.pool, slug, provider_key).await {
-        Ok(connection) => decrypted_provider_secrets(state, &connection),
-        Err(ApiError::NotFound) => Ok(secrets),
-        Err(error) => Err(error),
+    kind: &str,
+    key: &str,
+) -> Result<ProjectProviderSource, ApiError> {
+    let kind = required_identifier("provider source kind", kind)?;
+    let key = required_identifier("provider source key", key)?;
+    match kind {
+        "registry" => {
+            let adapter = provider_adapters()
+                .into_iter()
+                .find(|adapter| adapter.id == key)
+                .ok_or(ApiError::NotFound)?;
+            Ok(ProjectProviderSource {
+                kind: kind.to_string(),
+                key: key.to_string(),
+                name: adapter.name,
+                provider_type: adapter.id,
+                base_url: String::new(),
+                config: json!({}),
+            })
+        }
+        "custom" => {
+            let provider = custom_provider(state, key).await?;
+            Ok(ProjectProviderSource {
+                kind: kind.to_string(),
+                key: key.to_string(),
+                name: provider.name,
+                provider_type: provider.provider_type,
+                base_url: provider.base_url,
+                config: provider.config,
+            })
+        }
+        _ => Err(ApiError::Invalid(
+            "provider source kind must be registry or custom".to_string(),
+        )),
     }
 }
 
-async fn provider_stock_secrets_or_existing(
+async fn unique_custom_provider_key(state: &AppState, requested: &str) -> Result<String, ApiError> {
+    let existing = if let Some(path) = active_provider_registry_file(state) {
+        read_provider_registry(&path)?
+            .providers
+            .into_iter()
+            .map(|provider| provider.key)
+            .collect::<HashSet<_>>()
+    } else {
+        db::list_custom_providers(&state.pool)
+            .await?
+            .into_iter()
+            .map(|provider| provider.provider_key)
+            .collect::<HashSet<_>>()
+    };
+    let base = slugify(requested);
+    if !existing.contains(&base) {
+        return Ok(base);
+    }
+    for suffix in 2..1000 {
+        let suffix = format!("-{suffix}");
+        let available = 64_usize.saturating_sub(suffix.len());
+        let candidate = format!(
+            "{}{}",
+            base.chars().take(available).collect::<String>(),
+            suffix
+        );
+        if !existing.contains(&candidate) {
+            return Ok(candidate);
+        }
+    }
+    Err(ApiError::Conflict(
+        "could not allocate a custom provider key".to_string(),
+    ))
+}
+
+async fn upsert_custom_provider_source(
     state: &AppState,
     provider_key: &str,
+    name: &str,
+    provider_type: &str,
+    base_url: &str,
+    config: Value,
     secrets: Value,
-) -> Result<Value, ApiError> {
-    validate_json_object("secrets", &secrets, 64 * 1024)?;
-    if !is_json_object_empty(&secrets) {
-        return Ok(secrets);
+) -> Result<(), ApiError> {
+    if let Some(path) = active_provider_registry_file(state) {
+        save_file_provider_connection(
+            &path,
+            Uuid::nil(),
+            provider_key,
+            UpsertProviderConnection {
+                name: Some(name.to_string()),
+                provider_type: provider_type.to_string(),
+                base_url: base_url.to_string(),
+                config,
+                secrets,
+            },
+        )?;
+        return Ok(());
     }
-    match db::get_provider_stock_secret_by_key(&state.pool, provider_key).await {
-        Ok(provider) => decrypted_provider_stock_secrets(state, &provider),
-        Err(ApiError::NotFound) => Ok(secrets),
-        Err(error) => Err(error),
+    let prepared = prepare_provider_connection(
+        state,
+        PreparedProviderSource {
+            key: provider_key,
+            name: Some(name),
+            provider_type,
+            base_url,
+            config,
+            secrets,
+        },
+    )?;
+    save_custom_provider(state, prepared).await?;
+    Ok(())
+}
+
+fn prepare_project_provider(
+    state: &AppState,
+    provider_key: &str,
+    name: &str,
+    source: &ProjectProviderSource,
+    base_url: Option<&str>,
+    config: Value,
+    secrets: Value,
+) -> Result<PreparedProviderInput, ApiError> {
+    validate_json_object("config", &config, 64 * 1024)?;
+    let base_override = base_url.map(str::trim).unwrap_or("");
+    let effective_base = if base_override.is_empty() {
+        source.base_url.as_str()
+    } else {
+        base_override
+    };
+    if effective_base.is_empty() {
+        return Err(ApiError::Invalid(
+            "provider base URL is required".to_string(),
+        ));
     }
+    let effective_config = merge_json_objects(&source.config, &config)?;
+    let mut prepared = prepare_provider_connection(
+        state,
+        PreparedProviderSource {
+            key: provider_key,
+            name: Some(name),
+            provider_type: &source.provider_type,
+            base_url: effective_base,
+            config: effective_config,
+            secrets,
+        },
+    )?;
+    prepared.base_url = if source.kind == "custom" && base_override == source.base_url {
+        String::new()
+    } else {
+        base_override.to_string()
+    };
+    prepared.config = config;
+    Ok(prepared)
+}
+
+fn merge_json_objects(base: &Value, overrides: &Value) -> Result<Value, ApiError> {
+    let mut merged = base
+        .as_object()
+        .cloned()
+        .ok_or_else(|| ApiError::Invalid("provider config must be an object".to_string()))?;
+    let overrides = overrides
+        .as_object()
+        .ok_or_else(|| ApiError::Invalid("provider config must be an object".to_string()))?;
+    for (key, value) in overrides {
+        merged.insert(key.clone(), value.clone());
+    }
+    Ok(Value::Object(merged))
+}
+
+async fn effective_provider_connection(
+    state: &AppState,
+    mut connection: ProviderConnection,
+) -> Result<ProviderConnection, ApiError> {
+    if connection.source_kind != "custom" {
+        return Ok(connection);
+    }
+    let source = match custom_provider(state, &connection.source_key).await {
+        Ok(source) => source,
+        Err(ApiError::NotFound) => {
+            connection.status = "missing_source".to_string();
+            return Ok(connection);
+        }
+        Err(error) => return Err(error),
+    };
+    if connection.base_url.trim().is_empty() {
+        connection.base_url = source.base_url;
+    }
+    connection.provider_type = source.provider_type;
+    connection.config = merge_json_objects(&source.config, &connection.config)?;
+    connection.secret_keys.extend(source.secret_keys);
+    connection.secret_keys.sort();
+    connection.secret_keys.dedup();
+    Ok(connection)
+}
+
+async fn custom_provider_secrets(state: &AppState, key: &str) -> Result<Value, ApiError> {
+    if let Some(path) = active_provider_registry_file(state) {
+        let definition = read_provider_registry(&path)?
+            .providers
+            .into_iter()
+            .find(|provider| provider.key == key)
+            .ok_or(ApiError::NotFound)?;
+        let token = vifu_core::config::resolve_provider_token(&definition.key, &definition.auth)
+            .map_err(ApiError::Invalid)?;
+        return Ok(token.map_or_else(|| json!({}), |token| json!({ "token": token })));
+    }
+    let provider = db::get_custom_provider_secret_by_key(&state.pool, key).await?;
+    decrypted_custom_provider_secrets(state, &provider)
+}
+
+async fn reconcile_project_provider_agents(
+    state: &AppState,
+    project_slug: &str,
+    provider_key: &str,
+) -> Result<usize, ApiError> {
+    let project = db::get_project_by_slug(&state.pool, project_slug).await?;
+    let agents = db::list_available_agents(&state.pool).await?;
+    let mut added = 0_usize;
+    for agent in agents.into_iter().filter(|agent| {
+        agent.metadata.get("providerKey").and_then(Value::as_str) == Some(provider_key)
+            && agent.status == "connected"
+    }) {
+        match db::find_project_profile_by_provider_resource(
+            &state.pool,
+            project.project.id,
+            provider_key,
+            &agent.id,
+        )
+        .await?
+        {
+            Some((_profile_id, true, binding_id)) => {
+                db::refresh_discovered_binding(
+                    &state.pool,
+                    binding_id,
+                    &agent.gateway_id,
+                    &agent.name,
+                )
+                .await?;
+            }
+            Some((_profile_id, false, binding_id)) => {
+                db::refresh_discovered_binding(
+                    &state.pool,
+                    binding_id,
+                    &agent.gateway_id,
+                    &agent.name,
+                )
+                .await?;
+                db::assign_project_binding(&state.pool, project.project.id, binding_id).await?;
+            }
+            None => {
+                db::ensure_discovered_binding(
+                    &state.pool,
+                    project.project.id,
+                    &agent.gateway_id,
+                    &agent.id,
+                    &agent.name,
+                    provider_key,
+                )
+                .await?;
+                added += 1;
+            }
+        }
+    }
+    Ok(added)
+}
+
+async fn refresh_project_provider(
+    state: &AppState,
+    project_slug: &str,
+    connection: ProviderConnection,
+) -> Result<(ProviderConnection, Option<String>, usize), ApiError> {
+    let resolved = resolve_runtime_provider(state, project_slug, &connection.provider_key).await?;
+    let (status, message) = probe_runtime_provider(
+        &resolved.provider_type,
+        &resolved.base_url,
+        resolved.token.as_deref(),
+        &resolved.config,
+    )
+    .await;
+    let updated = db::update_provider_connection_status(&state.pool, connection.id, status).await?;
+    let added_agents =
+        reconcile_project_provider_agents(state, project_slug, &connection.provider_key).await?;
+    Ok((
+        effective_provider_connection(state, updated).await?,
+        message,
+        added_agents,
+    ))
 }
 
 async fn probe_runtime_provider(
@@ -4178,20 +4244,6 @@ fn probe_result(result: Result<(), String>) -> (&'static str, Option<String>) {
     }
 }
 
-async fn discover_file_provider_agents(
-    provider: &AgentProviderDefinition,
-) -> Result<Vec<vifu_core::protocol::AgentDescriptor>, ApiError> {
-    if provider.provider_type != "openclaw" {
-        return Err(ApiError::Invalid("unsupported provider type".to_string()));
-    }
-    let endpoint = vifu_core::openclaw::parse_endpoint(&provider.url).map_err(ApiError::Invalid)?;
-    let token = vifu_core::config::resolve_provider_token(&provider.key, &provider.auth)
-        .map_err(ApiError::Invalid)?;
-    vifu_core::openclaw::discover_agents(&endpoint, token.as_deref())
-        .await
-        .map_err(ApiError::AgentGateway)
-}
-
 fn prepare_provider_connection(
     state: &AppState,
     source: PreparedProviderSource<'_>,
@@ -4228,6 +4280,8 @@ fn prepare_provider_connection(
 async fn save_provider_connection(
     state: &AppState,
     project_slug: &str,
+    source_kind: &str,
+    source_key: &str,
     input: PreparedProviderInput,
 ) -> Result<crate::models::ProviderConnection, ApiError> {
     db::upsert_provider_connection(
@@ -4235,6 +4289,8 @@ async fn save_provider_connection(
         project_slug,
         db::NewProviderConnection {
             provider_key: &input.key,
+            source_kind,
+            source_key,
             name: &input.name,
             provider_type: &input.provider_type,
             base_url: &input.base_url,
@@ -4248,14 +4304,16 @@ async fn save_provider_connection(
     .await
 }
 
-async fn save_provider_stock(
+async fn save_custom_provider(
     state: &AppState,
     input: PreparedProviderInput,
-) -> Result<ProviderStockItem, ApiError> {
-    db::upsert_provider_stock(
+) -> Result<CustomProvider, ApiError> {
+    db::upsert_custom_provider(
         &state.pool,
         db::NewProviderConnection {
             provider_key: &input.key,
+            source_kind: "custom",
+            source_key: &input.key,
             name: &input.name,
             provider_type: &input.provider_type,
             base_url: &input.base_url,
@@ -4305,9 +4363,9 @@ fn decrypted_provider_secrets(
     Ok(secrets)
 }
 
-fn decrypted_provider_stock_secrets(
+fn decrypted_custom_provider_secrets(
     state: &AppState,
-    provider: &ProviderStockSecret,
+    provider: &CustomProviderSecret,
 ) -> Result<Value, ApiError> {
     let plaintext = decrypt_secret_json(
         &provider.encrypted_secret_json,
@@ -4643,7 +4701,8 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        patch_text, profile_slug, project_slug, validate_profile_version_input, validate_timeout,
+        merge_json_objects, patch_text, profile_slug, project_slug, validate_profile_version_input,
+        validate_timeout,
     };
     use crate::models::ProfileCapabilityDraft;
 
@@ -4665,6 +4724,17 @@ mod tests {
     fn validates_endpoint_timeouts() {
         assert!(validate_timeout(30_000).is_ok());
         assert!(validate_timeout(100).is_err());
+    }
+
+    #[test]
+    fn project_provider_configuration_overrides_its_source() {
+        let merged = merge_json_objects(
+            &json!({ "model": "source-model", "timeout": 10 }),
+            &json!({ "model": "project-model" }),
+        )
+        .unwrap();
+
+        assert_eq!(merged, json!({ "model": "project-model", "timeout": 10 }));
     }
 
     #[test]

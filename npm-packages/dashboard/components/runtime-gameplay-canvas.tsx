@@ -26,7 +26,7 @@ import type {
   ProjectCanvas,
   ProjectCanvasNode,
   ProviderAdapter,
-  ProviderStockItem,
+  ProjectProvider,
   RuntimeProject,
 } from "../lib/runtime-types";
 import { RuntimeProfileWorkbench } from "./runtime-profile-workbench";
@@ -49,7 +49,7 @@ type GameplayCanvasProps = {
   agentGateways: AgentGateway[];
   traces: EndpointTrace[];
   providerAdapters: ProviderAdapter[];
-  providerConnections: ProviderStockItem[];
+  providerConnections: ProjectProvider[];
   browserApiBaseUrl: string;
 };
 
@@ -329,7 +329,7 @@ function buildGraph({
   const agentStatusByNodeId = new Map<string, RuntimeNodeData["status"]>();
   const providerNodeIdByCanvasNodeId = new Map<string, string>();
   const providerGroups = new Map<string, {
-    provider?: ProviderStockItem;
+    provider?: ProjectProvider;
     gatewayIds: Set<string>;
     canvasNodeIds: string[];
   }>();
@@ -509,7 +509,7 @@ function gatewayStatusMap(gateways: AgentGateway[]): Map<string, AgentGateway> {
   return byId;
 }
 
-function providerForCanvasNode(node: ProjectCanvasNode, connections: ProviderStockItem[]): ProviderStockItem | undefined {
+function providerForCanvasNode(node: ProjectCanvasNode, connections: ProjectProvider[]): ProjectProvider | undefined {
   const providerKey = metadataString(node.config, "providerKey");
   const providerType = metadataString(node.config, "providerType");
   return connections.find((connection) => connection.providerKey === providerKey)
@@ -517,7 +517,7 @@ function providerForCanvasNode(node: ProjectCanvasNode, connections: ProviderSto
     ?? (connections.length === 1 ? connections[0] : undefined);
 }
 
-function graphProviderNodeId(node: ProjectCanvasNode, provider?: ProviderStockItem): string | null {
+function graphProviderNodeId(node: ProjectCanvasNode, provider?: ProjectProvider): string | null {
   if (provider) return `provider:${provider.id}`;
   const providerKey = metadataString(node.config, "providerKey");
   if (providerKey) return `provider-key:${providerKey}`;
