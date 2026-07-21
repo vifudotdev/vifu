@@ -251,6 +251,27 @@ impl OpenClawGatewayClient {
             .await
     }
 
+    pub async fn invoke_tool(
+        &mut self,
+        agent_id: &str,
+        name: &str,
+        args: Value,
+        idempotency_key: &str,
+    ) -> Result<Value, String> {
+        let payload = self
+            .call(
+                "tools.invoke",
+                json!({
+                    "agentId": agent_id,
+                    "name": name,
+                    "args": args,
+                    "idempotencyKey": idempotency_key,
+                }),
+            )
+            .await?;
+        parse_tool_result(payload)
+    }
+
     pub async fn close(mut self) -> Result<(), String> {
         self.socket
             .close(None)
@@ -444,6 +465,19 @@ fn sanitize_error(value: &str) -> String {
         .to_string()
 }
 
+fn parse_tool_result(payload: Value) -> Result<Value, String> {
+    if payload.get("ok").and_then(Value::as_bool) == Some(true) {
+        return Ok(payload.get("output").cloned().unwrap_or(Value::Null));
+    }
+    let message = payload
+        .pointer("/error/message")
+        .and_then(Value::as_str)
+        .map(sanitize_error)
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "tool invocation was rejected".to_string());
+    Err(format!("OpenClaw tools.invoke failed: {message}"))
+}
+
 #[cfg(test)]
 mod tests {
     use futures_util::{SinkExt, StreamExt};
@@ -452,9 +486,28 @@ mod tests {
     use tokio_tungstenite::accept_async;
     use tokio_tungstenite::tungstenite::Message;
 
-    use super::{pairing_required_error, Endpoint, OpenClawDeviceSigner, OpenClawGatewayClient};
+    use super::{
+        pairing_required_error, parse_tool_result, Endpoint, OpenClawDeviceSigner,
+        OpenClawGatewayClient,
+    };
 
     struct TestDeviceSigner;
+
+    #[test]
+    fn tool_result_exposes_output_and_sanitizes_failures() {
+        assert_eq!(
+            parse_tool_result(json!({"ok": true, "output": {"value": 1}})).unwrap(),
+            json!({"value": 1})
+        );
+        assert_eq!(
+            parse_tool_result(json!({
+                "ok": false,
+                "error": {"message": "denied\nby policy"}
+            }))
+            .unwrap_err(),
+            "OpenClaw tools.invoke failed: deniedby policy"
+        );
+    }
 
     impl OpenClawDeviceSigner for TestDeviceSigner {
         fn device_id(&self) -> &str {
@@ -471,7 +524,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn client_should_complete_gateway_handshake_before_calling_agents() {
+    async fn client_should_complete_gateway_handshake_before_provider_calls() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         let server = tokio::spawn(async move {
@@ -535,7 +588,10 @@ mod tests {
                         "payload": {
                             "type": "hello-ok",
                             "protocol": 4,
-                            "features": { "methods": ["agents.list"], "events": [] }
+                            "features": {
+                                "methods": ["agents.list", "tools.invoke"],
+                                "events": []
+                            }
                         }
                     })
                     .to_string()
@@ -565,6 +621,34 @@ mod tests {
                 ))
                 .await
                 .unwrap();
+
+            let tool_request = receive_value(&mut socket).await;
+            assert_eq!(tool_request["method"], "tools.invoke");
+            assert_eq!(tool_request["params"]["agentId"], "steward");
+            assert_eq!(tool_request["params"]["name"], "inventory.read");
+            assert_eq!(tool_request["params"]["args"], json!({"item": "key"}));
+            assert_eq!(
+                tool_request["params"]["idempotencyKey"],
+                "game-session:effect-1"
+            );
+            let request_id = tool_request.get("id").and_then(Value::as_str).unwrap();
+            socket
+                .send(Message::Text(
+                    json!({
+                        "type": "res",
+                        "id": request_id,
+                        "ok": true,
+                        "payload": {
+                            "ok": true,
+                            "toolName": "inventory.read",
+                            "output": {"found": true}
+                        }
+                    })
+                    .to_string()
+                    .into(),
+                ))
+                .await
+                .unwrap();
         });
 
         let endpoint = Endpoint {
@@ -579,6 +663,18 @@ mod tests {
         let agents = client.agents().await.unwrap();
         assert_eq!(agents.len(), 1);
         assert_eq!(agents[0].id, "steward");
+        assert_eq!(
+            client
+                .invoke_tool(
+                    "steward",
+                    "inventory.read",
+                    json!({"item": "key"}),
+                    "game-session:effect-1",
+                )
+                .await
+                .unwrap(),
+            json!({"found": true})
+        );
         let _ = client.close().await;
         server.await.unwrap();
     }

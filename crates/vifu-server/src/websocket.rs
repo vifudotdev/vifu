@@ -319,8 +319,8 @@ mod tests {
     use crate::config::Config;
     use crate::db::{self, NewProject};
     use crate::models::{
-        ApiKeyAgentScope, ApiKeyPermissions, EndpointPermission, ProfileCapabilityDraft,
-        ResourcePermission,
+        ApiKeyAgentScope, ApiKeyPermissions, EndpointPermission, GamePermission,
+        ProfileCapabilityDraft, ResourcePermission,
     };
     use crate::{app, state};
 
@@ -569,6 +569,7 @@ mod tests {
                     realtime: EndpointPermission::None,
                     agents: ResourcePermission::Read,
                     project: ResourcePermission::Read,
+                    game: GamePermission::None,
                 },
                 key_prefix: "denied-test",
                 key_hash: &denied_key_hash,

@@ -2,15 +2,19 @@ import Image from "next/image";
 import Link from "next/link";
 import type { LucideIcon } from "lucide-react";
 import {
+  BarChart3,
   Bot,
+  Boxes,
   ChevronDown,
-  Gamepad2,
-  HeartPulse,
+  Clapperboard,
+  FlaskConical,
   KeyRound,
+  LayoutDashboard,
   LogOut,
   Plug,
   ScrollText,
   Settings,
+  Workflow,
 } from "lucide-react";
 import type { DashboardData } from "../lib/dashboard-data";
 import { authRequired } from "../lib/auth-providers";
@@ -20,7 +24,6 @@ import type {
   AgentGateway,
   AvailableAgent,
   EndpointTrace,
-  ProjectCanvas,
   RuntimeProject,
   ServerCapabilities,
 } from "../lib/runtime-types";
@@ -32,11 +35,26 @@ import {
   DeleteResourceButton,
   ProjectCreateForm,
 } from "./runtime-actions";
-import { RuntimeGameplayCanvas } from "./runtime-gameplay-canvas";
+import { RuntimeGameCanvas } from "./game-authoring/canvas";
+import { RuntimeShortDrama } from "./game-authoring/short-drama";
 import { RuntimeAgentsView } from "./runtime-agents";
+import { RuntimeGameAnalytics } from "./runtime-game-analytics";
+import { RuntimeGamePreview } from "./runtime-game-preview";
+import { RuntimeGameResources } from "./runtime-game-resources";
 import { RuntimeProvidersView } from "./runtime-providers";
 
-export type DashboardSection = "health" | "agents" | "providers" | "gameplay" | "api" | "logs" | "settings";
+export type DashboardSection =
+  | "overview"
+  | "canvas"
+  | "short-drama"
+  | "agents"
+  | "resources"
+  | "providers"
+  | "preview"
+  | "api"
+  | "analytics"
+  | "logs"
+  | "settings";
 
 type NavigationItem = {
   id: DashboardSection;
@@ -46,21 +64,29 @@ type NavigationItem = {
 };
 
 const PROJECT_NAVIGATION: NavigationItem[] = [
-  { id: "health", label: "Health", icon: HeartPulse },
+  { id: "overview", label: "Overview", icon: LayoutDashboard },
+  { id: "canvas", label: "Canvas", icon: Workflow, capability: "gameRuntime" },
+  { id: "short-drama", label: "Short Drama", icon: Clapperboard, capability: "gameRuntime" },
   { id: "agents", label: "Agents", icon: Bot, capability: "profiles" },
+  { id: "resources", label: "Resources", icon: Boxes, capability: "gameRuntime" },
   { id: "providers", label: "Providers", icon: Plug, capability: "providerConnections" },
-  { id: "gameplay", label: "Gameplay", icon: Gamepad2, capability: "canvas" },
-  { id: "api", label: "API", icon: KeyRound, capability: "apiKeys" },
+  { id: "preview", label: "Preview & QA", icon: FlaskConical, capability: "gameRuntime" },
+  { id: "api", label: "Publish & API", icon: KeyRound, capability: "apiKeys" },
+  { id: "analytics", label: "Analytics", icon: BarChart3, capability: "gameRuntime" },
   { id: "logs", label: "Logs", icon: ScrollText, capability: "traces" },
   { id: "settings", label: "Settings", icon: Settings },
 ];
 
 const SECTION_TITLES: Record<DashboardSection, string> = {
-  health: "Health",
+  overview: "Overview",
+  canvas: "Canvas",
+  "short-drama": "Short Drama",
   agents: "Agents",
+  resources: "Resources",
   providers: "Providers",
-  gameplay: "Gameplay",
+  preview: "Preview & QA",
   api: "API Integrations",
+  analytics: "Analytics",
   logs: "Logs",
   settings: "Settings",
 };
@@ -77,9 +103,10 @@ export function RuntimeConsole({
   browserApiBaseUrl: string;
 }) {
   const capabilities = data.authority.status.capabilities;
-  const activeSection = isSectionAvailable(section, capabilities) ? section : "health";
-  const selectedProject = selectProject(data.runtime.projects, projectSlug, data.canvas);
+  const activeSection = isSectionAvailable(section, capabilities) ? section : "overview";
+  const selectedProject = selectProject(data.runtime.projects, projectSlug);
   const title = SECTION_TITLES[activeSection];
+  const editorWorkspace = activeSection === "canvas" || activeSection === "short-drama";
   return (
     <AppLayout
       sidebar={(
@@ -116,9 +143,7 @@ export function RuntimeConsole({
     >
       {selectedProject ? (
         <>
-          <header className="page-header project-page-header">
-            <h1>{title}</h1>
-          </header>
+          {!editorWorkspace ? <header className="page-header project-page-header"><h1>{title}</h1></header> : null}
           <div className={`console-content ${activeSection}-content`}>
             <ProjectSectionView
               section={activeSection}
@@ -194,27 +219,39 @@ function ProjectSectionView({
       />
     );
   }
-  if (section === "gameplay") {
+  if (section === "canvas") {
+    if (!data.gameDraft) return <EmptyState>The game draft is unavailable.</EmptyState>;
     return (
-      <RuntimeGameplayCanvas
+      <RuntimeGameCanvas
         project={project}
-        canvas={data.canvas}
+        draft={data.gameDraft}
+        definitions={data.gameNodeDefinitions}
         profiles={data.runtime.profiles}
-        bindings={data.runtime.bindings}
-        agentGateways={data.runtime.agentGateways}
-        traces={projectTraces(data.runtime.traces, project)}
-        providerAdapters={data.runtime.providerAdapters}
-        providerConnections={data.projectProviders}
-        browserApiBaseUrl={browserApiBaseUrl}
+        resources={data.gameResources}
+        assets={data.gameAssets}
       />
     );
   }
+  if (section === "short-drama") {
+    if (!data.gameDraft) return <EmptyState>The game draft is unavailable.</EmptyState>;
+    return <RuntimeShortDrama project={project} draft={data.gameDraft} definitions={data.gameNodeDefinitions} profiles={data.runtime.profiles} resources={data.gameResources} assets={data.gameAssets} />;
+  }
+  if (section === "resources") {
+    if (!data.gameDraft) return <EmptyState>The game draft is unavailable.</EmptyState>;
+    return <RuntimeGameResources project={project} draft={data.gameDraft} resources={data.gameResources} assets={data.gameAssets} />;
+  }
+  if (section === "preview") {
+    return <RuntimeGamePreview project={project} overview={data.gameOverview} qa={data.gameQa} recentSessions={data.gameSessions} />;
+  }
+  if (section === "analytics") return <RuntimeGameAnalytics analytics={data.gameAnalytics} />;
   if (section === "api") {
     return (
       <ApiIntegrationsView
         project={project}
         keys={data.runtime.apiKeys}
         profiles={data.runtime.profiles}
+        gameOverview={data.gameOverview}
+        gameReleases={data.gameReleases}
         browserApiBaseUrl={browserApiBaseUrl}
       />
     );
@@ -578,8 +615,7 @@ function EmptyState({ children }: { children: React.ReactNode }) {
   return <div className="empty-state">{children}</div>;
 }
 
-function selectProject(projects: RuntimeProject[], projectSlug: string | undefined, canvas: ProjectCanvas | undefined): RuntimeProject | null {
-  if (canvas?.project) return canvas.project;
+function selectProject(projects: RuntimeProject[], projectSlug: string | undefined): RuntimeProject | null {
   return projects.find((project) => project.slug === projectSlug) ?? projects[0] ?? null;
 }
 

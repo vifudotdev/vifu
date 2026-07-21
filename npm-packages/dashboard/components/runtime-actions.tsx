@@ -41,7 +41,7 @@ export function ProjectCreateForm({
       const slug = payload.project?.slug ?? null;
       setCreatedSlug(slug);
       setState({ tone: "success", message: "Project created." });
-      if (isMenu && slug) router.push(`/project/${slug}/health`);
+      if (isMenu && slug) router.push(`/project/${slug}`);
     } catch (error) {
       setState({ tone: "error", message: errorMessage(error) });
     } finally {
@@ -66,7 +66,7 @@ export function ProjectCreateForm({
       </div>
       <div className="form-actions">
         <button className="primary-button" type="submit" disabled={pending}><Plus aria-hidden="true" />{pending ? "Creating" : "Create project"}</button>
-        {createdSlug && !isMenu ? <button className="secondary-button" type="button" onClick={() => router.push(`/project/${createdSlug}/health`)}>Open project</button> : null}
+        {createdSlug && !isMenu ? <button className="secondary-button" type="button" onClick={() => router.push(`/project/${createdSlug}`)}>Open project</button> : null}
         <ActionMessage state={state} />
       </div>
     </form>

@@ -18,6 +18,7 @@ export type ServerCapabilities = {
   agentGateways: boolean;
   providerConnections: boolean;
   traces: boolean;
+  gameRuntime: boolean;
 };
 
 export type AuthCapability = {
@@ -89,6 +90,285 @@ export type ProjectCanvas = {
   project: RuntimeProject;
   nodes: ProjectCanvasNode[];
   edges: ProjectCanvasEdge[];
+};
+
+export type GameMetadata = {
+  name: string;
+  description?: string | null;
+  tags: string[];
+};
+
+export type GamePortReference = {
+  nodeId: string;
+  port: string;
+};
+
+export type GameSourceNode = {
+  id: string;
+  type: string;
+  version: number;
+  config: Record<string, unknown>;
+  parentId?: string | null;
+  label?: string | null;
+  notes?: string | null;
+};
+
+export type GameSourceEdge = {
+  id: string;
+  source: GamePortReference;
+  target: GamePortReference;
+  condition?: Record<string, unknown> | null;
+};
+
+export type GameAgentReference = {
+  id: string;
+  profileId: string;
+  profileVersionId?: string | null;
+  capabilities: string[];
+  executionDescriptor: Record<string, unknown>;
+};
+
+export type GameResourceReference = {
+  id: string;
+  versionId: string;
+  kind: string;
+  contentHash: string;
+  approved: boolean;
+};
+
+export type GamePresentationResource = {
+  id: string;
+  kind: string;
+  requiredCapabilities: string[];
+  required: boolean;
+  fallback?: unknown;
+};
+
+export type GameSource = {
+  schemaVersion: number;
+  metadata: GameMetadata;
+  entryNodeId: string;
+  graph: {
+    nodes: GameSourceNode[];
+    edges: GameSourceEdge[];
+  };
+  inputs: Record<string, unknown>;
+  outputs: Record<string, unknown>;
+  variables: Array<{ id: string; initialValue: unknown; public: boolean }>;
+  agents: GameAgentReference[];
+  resources: GameResourceReference[];
+  presentationResources: GamePresentationResource[];
+  locales: string[];
+  views: Record<string, unknown>;
+};
+
+export type GameDraft = {
+  projectId: string;
+  source: GameSource;
+  revision: number;
+  contentHash: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type GameReleaseSummary = {
+  id: string;
+  releaseNumber: number;
+  sourceRevision: number;
+  contentHash: string;
+  createdAt: string;
+};
+
+export type GameOverview = {
+  projectId: string;
+  projectSlug: string;
+  draftRevision: number;
+  draftHash: string;
+  activeRelease: GameReleaseSummary | null;
+  unpublishedChanges: boolean;
+};
+
+export type GameNodePortDefinition = {
+  name: string;
+  direction: "input" | "output";
+  valueSchema: Record<string, unknown>;
+  required: boolean;
+};
+
+export type GameNodeDefinition = {
+  type: string;
+  version: number;
+  phase: "production" | "runtime";
+  title: string;
+  category: string;
+  configSchema: Record<string, unknown>;
+  ports: GameNodePortDefinition[];
+  dynamicInputs: boolean;
+  dynamicOutputs: boolean;
+  timelineCompatible: boolean;
+};
+
+export type GameValidationIssue = {
+  severity: "error" | "warning";
+  code: string;
+  message: string;
+  nodeId?: string | null;
+  edgeId?: string | null;
+  path?: string | null;
+};
+
+export type GameBackendResourceSnapshot = {
+  id: string;
+  versionId: string;
+  version: number;
+  kind: string;
+  contentHash: string;
+  content: unknown;
+};
+
+export type GameRelease = GameReleaseSummary & {
+  projectId: string;
+  plan: Record<string, unknown>;
+  manifest: Record<string, unknown>;
+  backendResources: GameBackendResourceSnapshot[];
+  changeSummary: string | null;
+};
+
+export type GameResource = {
+  id: string;
+  projectId: string;
+  resourceKey: string;
+  name: string;
+  kind: string;
+  content: unknown;
+  version: number;
+  contentHash: string;
+  approved: boolean;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type GameAssetVersion = {
+  id: string;
+  projectId: string;
+  assetId: string;
+  contentHash: string;
+  mimeType: string;
+  sizeBytes: number;
+  metadata: Record<string, unknown>;
+  provenance: Record<string, unknown>;
+  rightsStatus: string;
+  approvalStatus: "pending" | "approved" | "rejected";
+  createdAt: string;
+};
+
+export type GameAsset = {
+  id: string;
+  projectId: string;
+  assetKey: string;
+  name: string;
+  kind: string;
+  createdAt: string;
+  updatedAt: string;
+  versions: GameAssetVersion[];
+};
+
+export type GameBuild = {
+  id: string;
+  projectId: string;
+  sourceRevision: number;
+  kind: string;
+  status: "queued" | "running" | "completed" | "failed" | "cancelled";
+  inputHash: string;
+  input: Record<string, unknown>;
+  output: Record<string, unknown> | null;
+  error: Record<string, unknown> | null;
+  attempts: number;
+  createdAt: string;
+  startedAt: string | null;
+  completedAt: string | null;
+};
+
+export type GameQa = {
+  draftRevision: number;
+  ready: boolean;
+  blockerCount: number;
+  warningCount: number;
+  issues: GameValidationIssue[];
+  requiredHostCapabilities: string[];
+  optionalHostCapabilities: string[];
+};
+
+export type GameEvent = {
+  specversion: string;
+  id: string;
+  source: string;
+  type: string;
+  subject?: string | null;
+  sequence: number;
+  data: unknown;
+};
+
+export type GameSnapshot = {
+  schemaVersion: number;
+  status: "running" | "waiting_input" | "waiting_effect" | "waiting_host" | "completed" | "failed" | "cancelled";
+  revision: number;
+  state: Record<string, unknown>;
+  pendingHostAction?: {
+    actionId: string;
+    nodeId: string;
+    target: string;
+    action: string;
+    arguments: unknown;
+  } | null;
+  publicOutput?: unknown;
+  failure?: { code: string; message: string; nodeId?: string | null } | null;
+};
+
+export type GameAdvance = {
+  snapshot: GameSnapshot;
+  events: GameEvent[];
+  effects: Array<Record<string, unknown>>;
+  nodeExecutions?: Array<{
+    sequence: number;
+    ordinal: number;
+    nodeId: string;
+    nodeType: string;
+  }>;
+};
+
+export type PublicGameAdvance = {
+  status: GameSnapshot["status"];
+  revision: number;
+  publicOutput?: unknown;
+  outstandingHostActions: NonNullable<GameSnapshot["pendingHostAction"]>[];
+  failure?: GameSnapshot["failure"];
+  events: GameEvent[];
+};
+
+export type GameSession = {
+  id: string;
+  projectId: string;
+  gameReleaseId: string | null;
+  sourceRevision: number | null;
+  preview: boolean;
+  status: GameSnapshot["status"];
+  revision: number;
+  snapshot: GameSnapshot;
+  host: Record<string, unknown>;
+  publicOutput: unknown;
+  failure: unknown;
+  createdAt: string;
+  updatedAt: string;
+  completedAt: string | null;
+};
+
+export type GameAnalytics = {
+  totalSessions: number;
+  averageDurationMs: number;
+  events: Array<{ eventType: string; count: number }>;
+  sessionStatuses: Array<{ status: string; count: number }>;
+  recentSessions: GameSession[];
 };
 
 export type ProviderAdapterField = {
@@ -243,6 +523,7 @@ export type ApiKeyPermissions = {
   realtime: "none" | "access";
   agents: "none" | "read" | "write";
   project: "none" | "read" | "write";
+  game: "none" | "execute";
 };
 
 export type ApiKeyRecord = {

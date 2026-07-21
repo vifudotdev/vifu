@@ -144,6 +144,19 @@ of agent bindings. The server stores only peppered key hashes and returns a raw
 key once when it is created. Removing an agent from the Gameplay canvas or
 turning off its exposure makes it unavailable through the project API.
 
+## Game Runtime
+
+Canvas and Short Drama edit one revisioned gameplay graph. Publishing creates
+an immutable Game Release that a web game, native engine, or headless process
+can run through durable HTTP sessions and CloudEvents over SSE. Presentation
+bindings are versioned separately, so each host can map stable logical resource
+IDs to its own engine objects and assets.
+
+The Dashboard's **Publish & API** page provides Game-only keys, cURL examples,
+release activation, and host-binding export. See the [Game Runtime guide](docs/game-runtime.md)
+for draft Preview, pinned Agent and Tool effects, sessions, reconnect, and
+host-action contracts.
+
 ## Architecture And Security
 
 The Vifu Server role owns the core runtime contract:

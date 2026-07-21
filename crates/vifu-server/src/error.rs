@@ -1,8 +1,9 @@
-use axum::http::StatusCode;
+use axum::http::{header::CONTENT_RANGE, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde_json::json;
 use thiserror::Error;
+use vifu_game_runtime::ValidationIssue;
 
 #[derive(Debug, Error)]
 pub enum ApiError {
@@ -14,8 +15,12 @@ pub enum ApiError {
     Invalid(String),
     #[error("resource not found")]
     NotFound,
+    #[error("byte range is not satisfiable for a {0}-byte resource")]
+    RangeNotSatisfiable(u64),
     #[error("{0}")]
     Conflict(String),
+    #[error("game source failed validation")]
+    Validation(Vec<ValidationIssue>),
     #[error("model is required")]
     ModelRequired,
     #[error("the requested agent is not available to this project key")]
@@ -44,12 +49,30 @@ pub enum ApiError {
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
+        if let Self::RangeNotSatisfiable(size) = &self {
+            let mut response = (
+                StatusCode::RANGE_NOT_SATISFIABLE,
+                Json(json!({
+                    "error": {
+                        "code": "RANGE_NOT_SATISFIABLE",
+                        "message": format!("byte range is not satisfiable for a {size}-byte resource")
+                    }
+                })),
+            )
+                .into_response();
+            if let Ok(value) = HeaderValue::from_str(&format!("bytes */{size}")) {
+                response.headers_mut().insert(CONTENT_RANGE, value);
+            }
+            return response;
+        }
         let (status, code) = match &self {
             Self::Unauthorized => (StatusCode::UNAUTHORIZED, "UNAUTHORIZED"),
             Self::Forbidden => (StatusCode::FORBIDDEN, "FORBIDDEN"),
             Self::Invalid(_) => (StatusCode::BAD_REQUEST, "INVALID_REQUEST"),
             Self::NotFound => (StatusCode::NOT_FOUND, "NOT_FOUND"),
+            Self::RangeNotSatisfiable(_) => unreachable!("range errors return above"),
             Self::Conflict(_) => (StatusCode::CONFLICT, "CONFLICT"),
+            Self::Validation(_) => (StatusCode::UNPROCESSABLE_ENTITY, "VALIDATION_FAILED"),
             Self::ModelRequired => (StatusCode::BAD_REQUEST, "model_required"),
             Self::AgentAccessDenied => (StatusCode::FORBIDDEN, "agent_access_denied"),
             Self::EndpointAccessDenied => (StatusCode::FORBIDDEN, "endpoint_access_denied"),
@@ -72,11 +95,11 @@ impl IntoResponse for ApiError {
         } else {
             self.to_string()
         };
-        (
-            status,
-            Json(json!({ "error": { "code": code, "message": message } })),
-        )
-            .into_response()
+        let mut error = json!({ "code": code, "message": message });
+        if let Self::Validation(issues) = &self {
+            error["issues"] = json!(issues);
+        }
+        (status, Json(json!({ "error": error }))).into_response()
     }
 }
 

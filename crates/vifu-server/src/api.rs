@@ -3097,6 +3097,281 @@ async fn invoke_profile_chat(
     }
 }
 
+pub(crate) struct GameProviderEffect<'a> {
+    pub project_id: Uuid,
+    pub project_slug: &'a str,
+    pub profile_id: Uuid,
+    pub profile_version_id: Uuid,
+    pub request_id: Uuid,
+    pub effect_id: &'a str,
+    pub descriptor: &'a Value,
+    pub input: Value,
+    pub trace_context: Option<crate::game::models::GameEffectTrace>,
+}
+
+pub(crate) async fn invoke_game_agent(
+    state: &AppState,
+    effect: GameProviderEffect<'_>,
+) -> Result<Value, ApiError> {
+    let GameProviderEffect {
+        project_id,
+        project_slug,
+        profile_id,
+        profile_version_id,
+        request_id,
+        effect_id,
+        descriptor: _,
+        input,
+        trace_context,
+    } = effect;
+    let route = db::resolve_profile_route(
+        &state.pool,
+        project_id,
+        &profile_id.to_string(),
+        "chat",
+        Some(effect_id),
+        Some(profile_version_id),
+    )
+    .await?;
+    let request = game_agent_request(&route.profile_slug, input);
+    let span_id = if let Some(context) = trace_context {
+        match db::create_trace_span(
+            &state.pool,
+            db::NewTraceSpan {
+                trace_id: context.trace_id,
+                parent_span_id: Some(context.parent_span_id),
+                name: "game.agent.effect",
+                kind: "provider",
+                provider_key: Some(&route.provider_key),
+                capability_kind: Some("chat"),
+                input_summary: Some(&json!({"effectId": effect_id})),
+                attributes: &json!({
+                    "profileId": route.profile_id,
+                    "profileVersionId": route.profile_version_id,
+                    "nodeEffectId": effect_id
+                }),
+            },
+        )
+        .await
+        {
+            Ok(span_id) => Some(span_id),
+            Err(error) => {
+                warn!(%error, %effect_id, "could not create game Agent effect span");
+                None
+            }
+        }
+    } else {
+        None
+    };
+    let timeout = profile_timeout(&route.runtime, state.config.request_timeout);
+    let started_at = Instant::now();
+    match invoke_profile_chat(state, project_slug, &route, request_id, request, timeout).await {
+        Ok(response) => {
+            let output = normalize_game_agent_output(response);
+            if let Some(span_id) = span_id {
+                if let Err(error) = db::complete_trace_span(
+                    &state.pool,
+                    span_id,
+                    "completed",
+                    db::elapsed_millis(started_at),
+                    Some(&json!({"effectId": effect_id})),
+                    None,
+                )
+                .await
+                {
+                    warn!(%error, %effect_id, "could not complete game Agent effect span");
+                }
+            }
+            Ok(output)
+        }
+        Err(error) => {
+            let message = error.to_string();
+            if let Some(span_id) = span_id {
+                if let Err(trace_error) = db::complete_trace_span(
+                    &state.pool,
+                    span_id,
+                    "failed",
+                    db::elapsed_millis(started_at),
+                    None,
+                    Some(&message),
+                )
+                .await
+                {
+                    warn!(error = %trace_error, %effect_id, "could not fail game Agent effect span");
+                }
+            }
+            Err(error)
+        }
+    }
+}
+
+pub(crate) async fn invoke_game_tool(
+    state: &AppState,
+    effect: GameProviderEffect<'_>,
+) -> Result<Value, ApiError> {
+    let GameProviderEffect {
+        project_id,
+        project_slug,
+        profile_id,
+        profile_version_id,
+        request_id,
+        effect_id,
+        descriptor,
+        input,
+        trace_context,
+    } = effect;
+    let tool = descriptor
+        .get("tool")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| ApiError::Invalid("Tool effect is missing a tool name".to_string()))?;
+    let route = db::resolve_profile_route(
+        &state.pool,
+        project_id,
+        &profile_id.to_string(),
+        "tool",
+        Some(effect_id),
+        Some(profile_version_id),
+    )
+    .await?;
+    if route.provider_type != "openclaw" {
+        return Err(ApiError::Invalid(format!(
+            "provider type {} does not support direct Tool invocation",
+            route.provider_type
+        )));
+    }
+    if !crate::game::service::profile_tool_is_available(&route.capability_config, tool) {
+        return Err(ApiError::Invalid(format!(
+            "Tool {tool} is not available in the published Profile version"
+        )));
+    }
+    let agent_id = route.resource_id.as_deref().ok_or_else(|| {
+        ApiError::Invalid("OpenClaw Tool capability is missing its Agent ID".to_string())
+    })?;
+    let span_id = if let Some(context) = trace_context {
+        match db::create_trace_span(
+            &state.pool,
+            db::NewTraceSpan {
+                trace_id: context.trace_id,
+                parent_span_id: Some(context.parent_span_id),
+                name: "game.tool.effect",
+                kind: "provider",
+                provider_key: Some(&route.provider_key),
+                capability_kind: Some("tool"),
+                input_summary: Some(&json!({"effectId": effect_id, "tool": tool})),
+                attributes: &json!({
+                    "profileId": route.profile_id,
+                    "profileVersionId": route.profile_version_id,
+                    "nodeEffectId": effect_id,
+                    "tool": tool
+                }),
+            },
+        )
+        .await
+        {
+            Ok(span_id) => Some(span_id),
+            Err(error) => {
+                warn!(%error, %effect_id, "could not create game Tool effect span");
+                None
+            }
+        }
+    } else {
+        None
+    };
+    let started_at = Instant::now();
+    let result = async {
+        let mut client =
+            connect_openclaw_management_client(state, project_slug, &route.provider_key).await?;
+        let invocation = client
+            .invoke_tool(agent_id, tool, input, &request_id.to_string())
+            .await;
+        let close = client.close().await;
+        match (invocation, close) {
+            (Ok(output), Ok(())) => Ok(output),
+            (Err(error), _) | (Ok(_), Err(error)) => Err(ApiError::Provider(error)),
+        }
+    }
+    .await;
+    match result {
+        Ok(output) => {
+            if let Some(span_id) = span_id {
+                if let Err(error) = db::complete_trace_span(
+                    &state.pool,
+                    span_id,
+                    "completed",
+                    db::elapsed_millis(started_at),
+                    Some(&json!({"effectId": effect_id})),
+                    None,
+                )
+                .await
+                {
+                    warn!(%error, %effect_id, "could not complete game Tool effect span");
+                }
+            }
+            Ok(output)
+        }
+        Err(error) => {
+            let message = error.to_string();
+            if let Some(span_id) = span_id {
+                if let Err(trace_error) = db::complete_trace_span(
+                    &state.pool,
+                    span_id,
+                    "failed",
+                    db::elapsed_millis(started_at),
+                    None,
+                    Some(&message),
+                )
+                .await
+                {
+                    warn!(error = %trace_error, %effect_id, "could not fail game Tool effect span");
+                }
+            }
+            Err(error)
+        }
+    }
+}
+
+fn game_agent_request(model: &str, input: Value) -> Value {
+    if input.get("messages").and_then(Value::as_array).is_some() {
+        let mut request = input;
+        if let Some(object) = request.as_object_mut() {
+            object.insert("model".to_string(), Value::String(model.to_string()));
+            object.insert("stream".to_string(), Value::Bool(false));
+        }
+        return request;
+    }
+    let content = input
+        .as_str()
+        .map(str::to_string)
+        .unwrap_or_else(|| serde_json::to_string(&input).unwrap_or_else(|_| "null".to_string()));
+    json!({
+        "model": model,
+        "stream": false,
+        "messages": [{"role": "user", "content": content}]
+    })
+}
+
+fn normalize_game_agent_output(response: Value) -> Value {
+    if response.get("dialogue").is_some() || response.get("stateChanges").is_some() {
+        return response;
+    }
+    let Some(content) = response
+        .get("choices")
+        .and_then(Value::as_array)
+        .and_then(|choices| choices.first())
+        .and_then(|choice| choice.get("message"))
+        .and_then(|message| message.get("content"))
+        .and_then(Value::as_str)
+    else {
+        return response;
+    };
+    serde_json::from_str::<Value>(content)
+        .ok()
+        .filter(Value::is_object)
+        .unwrap_or_else(|| json!({"dialogue": content}))
+}
+
 fn profile_gateway_id(route: &crate::models::ProfileRoute) -> Option<String> {
     route
         .capability_config

@@ -16,6 +16,7 @@ pub struct Capabilities {
     pub agent_gateways: bool,
     pub provider_connections: bool,
     pub traces: bool,
+    pub game_runtime: bool,
 }
 
 impl Capabilities {
@@ -30,6 +31,7 @@ impl Capabilities {
             agent_gateways: true,
             provider_connections: true,
             traces: true,
+            game_runtime: true,
         }
     }
 }
@@ -554,20 +556,15 @@ pub struct UpdateEndpoint {
     pub request_timeout_ms: Option<i32>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "mode", rename_all = "lowercase", deny_unknown_fields)]
 pub enum ApiKeyAgentScope {
+    #[default]
     All,
     Selected {
         #[serde(rename = "profileIds")]
         profile_ids: Vec<Uuid>,
     },
-}
-
-impl Default for ApiKeyAgentScope {
-    fn default() -> Self {
-        Self::All
-    }
 }
 
 impl ApiKeyAgentScope {
@@ -608,6 +605,13 @@ pub enum ResourcePermission {
     Write,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum GamePermission {
+    None,
+    Execute,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ApiKeyPermissions {
@@ -617,6 +621,7 @@ pub struct ApiKeyPermissions {
     pub realtime: EndpointPermission,
     pub agents: ResourcePermission,
     pub project: ResourcePermission,
+    pub game: GamePermission,
 }
 
 impl Default for ApiKeyPermissions {
@@ -628,6 +633,7 @@ impl Default for ApiKeyPermissions {
             realtime: EndpointPermission::None,
             agents: ResourcePermission::None,
             project: ResourcePermission::None,
+            game: GamePermission::None,
         }
     }
 }
@@ -647,6 +653,10 @@ impl ApiKeyPermissions {
 
     pub fn realtime_allowed(&self) -> bool {
         self.realtime == EndpointPermission::Access
+    }
+
+    pub fn game_allowed(&self) -> bool {
+        self.game == GamePermission::Execute
     }
 }
 

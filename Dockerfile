@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 
-ARG RUST_VERSION=1.90
+ARG RUST_VERSION=1.95
 FROM rust:${RUST_VERSION}-bookworm AS build
 
 RUN apt-get update \
@@ -13,6 +13,7 @@ ENV GGML_NATIVE=OFF
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
 COPY crates/vifu-core/Cargo.toml crates/vifu-core/Cargo.toml
+COPY crates/vifu-game-runtime/Cargo.toml crates/vifu-game-runtime/Cargo.toml
 COPY crates/vifu/Cargo.toml crates/vifu/Cargo.toml
 COPY crates/vifu-server/Cargo.toml crates/vifu-server/Cargo.toml
 COPY crates/vifu-server/build.rs crates/vifu-server/build.rs

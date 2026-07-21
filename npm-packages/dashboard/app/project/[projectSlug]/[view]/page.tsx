@@ -5,17 +5,37 @@ import { loadDashboardData } from "../../../../lib/dashboard-data";
 
 export const dynamic = "force-dynamic";
 
-const VIEWS = new Set<DashboardSection>(["health", "agents", "providers", "gameplay", "api", "logs", "settings"]);
+const VIEWS = new Set<DashboardSection>([
+  "overview",
+  "canvas",
+  "short-drama",
+  "agents",
+  "resources",
+  "providers",
+  "preview",
+  "api",
+  "analytics",
+  "logs",
+  "settings",
+]);
 
 export default async function ProjectViewPage({ params }: {
   params: Promise<{ projectSlug: string; view: string }>;
 }) {
   const { projectSlug, view } = await params;
   if (!VIEWS.has(view as DashboardSection)) notFound();
-  const data = await loadDashboardData(`/project/${projectSlug}/${view}`, projectSlug);
+  const section = view as DashboardSection;
+  const data = await loadDashboardData(`/project/${projectSlug}/${view}`, projectSlug, {
+    includeGameSource: section === "canvas" || section === "short-drama" || section === "resources",
+    includeGameLibraries: section === "canvas" || section === "short-drama" || section === "resources",
+    includeGameQa: section === "preview",
+    includeGameAnalytics: section === "analytics",
+    includeGameSessions: section === "preview",
+    includeGameReleases: section === "preview" || section === "api",
+  });
   return (
     <RuntimeConsole
-      section={view as DashboardSection}
+      section={section}
       projectSlug={projectSlug}
       data={data}
       browserApiBaseUrl={configuredBrowserApiBaseUrl()}

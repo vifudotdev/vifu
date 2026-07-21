@@ -9,5 +9,5 @@ export default async function ProjectHomePage({ params }: {
 }) {
   const { projectSlug } = await params;
   const data = await loadDashboardData(`/project/${projectSlug}`, projectSlug);
-  return <RuntimeConsole section="health" projectSlug={projectSlug} data={data} browserApiBaseUrl={configuredBrowserApiBaseUrl()} />;
+  return <RuntimeConsole section="overview" projectSlug={projectSlug} data={data} browserApiBaseUrl={configuredBrowserApiBaseUrl()} />;
 }

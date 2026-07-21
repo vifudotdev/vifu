@@ -1,5 +1,6 @@
 [workspace]
 members = [
+  "crates/vifu-game-runtime",
   "crates/vifu-core",
   "crates/vifu-mobile-ffi",
   "crates/vifu",
@@ -14,10 +15,18 @@ authors = ["Vifu Contributors"]
 license = "Apache-2.0"
 repository = "https://github.com/vifudotdev/vifu"
 homepage = "https://vifu.dev"
-rust-version = "1.90"
+rust-version = "1.95"
 
 [workspace.dependencies]
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 thiserror = "2"
 uniffi = { version = "0.30", features = ["build", "cli"] }
+bevy_app = { version = "0.19", default-features = false }
+bevy_ecs = { version = "0.19", default-features = false, features = ["std"] }
+jsonschema = { version = "0.37", default-features = false }
+petgraph = { version = "0.8", default-features = false, features = ["graphmap", "stable_graph", "std"] }
+schemars = { version = "1.2", features = ["derive"] }
+serde_json_canonicalizer = "0.3"
+serde-saphyr = "0.0.17"
+sha2 = "0.10"

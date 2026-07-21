@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "engine": "custom",
+  "adapterVersion": "example-v1",
+  "bindings": {
+    "scene.tavern.background": {
+      "kind": "native-id",
+      "value": "Backgrounds/Tavern"
+    },
+    "world.main-gate": {
+      "kind": "native-id",
+      "value": "World/MainGate"
+    }
+  }
+}

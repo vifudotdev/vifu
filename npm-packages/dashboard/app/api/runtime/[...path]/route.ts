@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { AuthorityError, resolveAuthority } from "../../../../lib/authority";
 import { VifuHttpError } from "../../../../lib/deployment-client";
+import { isAllowedProjectGamePath } from "../../../../lib/runtime-proxy-policy";
 
 const ALLOWED_ROOTS = new Set([
   "chat",
@@ -15,8 +16,9 @@ const ALLOWED_ROOTS = new Set([
   "provider-adapters",
   "provider-catalog",
   "traces",
+  "game",
 ]);
-const MAX_BODY_BYTES = 1024 * 1024;
+const MAX_BODY_BYTES = 32 * 1024 * 1024;
 
 type RuntimeRouteContext = {
   params: Promise<{ path: string[] }>;
@@ -56,14 +58,17 @@ async function proxyRuntimeRequest(
     const authority = await resolveAuthority({ redirectToLogin: false });
     const query = new URL(request.url).search;
     const runtimePath = runtimeApiPath(path);
+    const headers = new Headers();
+    const contentType = request.headers.get("content-type");
+    if (contentType) headers.set("content-type", contentType);
     const response = await authority.deployment.request<unknown>(
       `${runtimePath}${query}`,
-      { method, body },
+      { method, body, headers },
     );
     return response === undefined
       ? new Response(null, { status: 204 })
       : NextResponse.json(response, {
-        status: method === "POST" && !["completions", "test", "discover-agents", "restore", "revoke"].includes(path.at(-1) ?? "") ? 201 : 200,
+        status: method === "POST" && !["commands", "completions", "test", "discover-agents", "restore", "revoke"].includes(path.at(-1) ?? "") ? 201 : 200,
       });
   } catch (error) {
     if (error instanceof AuthorityError || error instanceof VifuHttpError) {
@@ -88,9 +93,9 @@ async function readBody(request: Request): Promise<ArrayBuffer> {
 }
 
 function isAllowedPath(path: string[]): boolean {
-  if (path.length < 1 || path.length > 7) return false;
+  if (path.length < 1 || path.length > 8) return false;
   if (!path.every((segment) => /^[A-Za-z0-9._:-]{1,128}$/.test(segment))) return false;
-  if (isProjectScopedOpenAiPath(path)) return true;
+  if (isProjectScopedRuntimePath(path)) return true;
   if (!ALLOWED_ROOTS.has(path[0] ?? "")) return false;
   if (path[0] === "chat") return path.length === 2 && path[1] === "completions";
   if (path[0] === "models") return path.length === 1;
@@ -98,6 +103,9 @@ function isAllowedPath(path: string[]): boolean {
   if (path[0] === "provider-catalog") return path.length === 1;
   if (path[0] === "project") {
     if (path.length < 3) return false;
+    if (path[2] === "game") {
+      return isAllowedProjectGamePath(path);
+    }
     if (path[2] === "canvas") {
       if (path.length === 3) return true;
       if (path.length === 4) return path[3] === "nodes" || path[3] === "edges";
@@ -125,6 +133,7 @@ function isAllowedPath(path: string[]): boolean {
     }
     return false;
   }
+  if (path[0] === "game") return path.length === 2 && path[1] === "node-definitions";
   if (path[0] === "projects" && path.length >= 3) {
     if (path[2] !== "canvas") return false;
     if (path.length === 3) return true;
@@ -136,16 +145,27 @@ function isAllowedPath(path: string[]): boolean {
 }
 
 function runtimeApiPath(path: string[]): string {
-  if (isProjectScopedOpenAiPath(path)) {
+  if (isProjectScopedRuntimePath(path)) {
     return `/${path.map(encodeURIComponent).join("/")}`;
   }
   return `/v1/${path.map(encodeURIComponent).join("/")}`;
 }
 
-function isProjectScopedOpenAiPath(path: string[]): boolean {
+function isProjectScopedRuntimePath(path: string[]): boolean {
   if (path[1] !== "v1") return false;
   if (path.length === 3) return path[2] === "models";
-  return path.length === 4 && path[2] === "chat" && path[3] === "completions";
+  if (path.length === 4 && path[2] === "chat") return path[3] === "completions";
+  if (path[2] !== "game") return false;
+  if (path.length === 3) return true;
+  if (path.length === 4) {
+    return ["manifest", "presentation", "sessions", "run"].includes(path[3] ?? "");
+  }
+  if (path.length === 5) {
+    return path[3] === "assets" || path[3] === "sessions";
+  }
+  return path.length === 6
+    && path[3] === "sessions"
+    && ["commands", "events"].includes(path[5] ?? "");
 }
 
 function errorResponse(status: number, code: string, message: string): Response {

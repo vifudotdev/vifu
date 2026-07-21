@@ -282,10 +282,8 @@ fn read_models(value: Value) -> Vec<AgentDescriptor> {
                 return None;
             } else if let Some(id) = model_id.strip_prefix("openclaw/") {
                 id
-            } else if let Some(id) = model_id.strip_prefix("openclaw:") {
-                id
             } else {
-                return None;
+                model_id.strip_prefix("openclaw:")?
             };
             if protocol::validate_identifier("agent id", id).is_err()
                 || !seen.insert(id.to_string())
