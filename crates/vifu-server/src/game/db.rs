@@ -294,6 +294,9 @@ pub async fn create_game_session(
         release.plan.entry_node,
         &release.plan.variables,
         random_seed,
+        host.locale
+            .as_deref()
+            .unwrap_or(&release.plan.localization.default_locale),
     );
     let session_id = Uuid::new_v4();
     sqlx::query(
@@ -323,7 +326,14 @@ pub async fn create_preview_game_session(
     host: &HostDescriptor,
     random_seed: u64,
 ) -> Result<GameSession, ApiError> {
-    let snapshot = GameSnapshotV1::initial(plan.entry_node, &plan.variables, random_seed);
+    let snapshot = GameSnapshotV1::initial(
+        plan.entry_node,
+        &plan.variables,
+        random_seed,
+        host.locale
+            .as_deref()
+            .unwrap_or(&plan.localization.default_locale),
+    );
     let session_id = Uuid::new_v4();
     sqlx::query(
         "INSERT INTO game_sessions (

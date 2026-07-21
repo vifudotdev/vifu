@@ -12,6 +12,7 @@ pub mod websocket;
 use std::future::Future;
 use std::sync::Arc;
 
+use axum::extract::DefaultBodyLimit;
 use axum::http::header::{AUTHORIZATION, CONTENT_TYPE};
 use axum::http::{HeaderName, Method};
 use axum::routing::{delete, get, patch, post, put};
@@ -123,6 +124,10 @@ pub fn app(state: AppState) -> Router {
             post(game::api::validate_game),
         )
         .route(
+            "/v1/project/{slug}/game/localization/translate",
+            post(game::management_api::translate_messages),
+        )
+        .route(
             "/v1/project/{slug}/game/publish",
             post(game::api::publish_game),
         )
@@ -158,6 +163,10 @@ pub fn app(state: AppState) -> Router {
         .route(
             "/v1/project/{slug}/game/assets/{asset_id}/versions/{version_id}/approve",
             post(game::assets::approve_asset_version),
+        )
+        .route(
+            "/v1/project/{slug}/game/assets/{asset_id}/versions/{version_id}/content",
+            get(game::assets::serve_authoring_asset),
         )
         .route(
             "/v1/project/{slug}/game/builds",
@@ -406,6 +415,7 @@ pub fn app(state: AppState) -> Router {
         .layer(PropagateRequestIdLayer::new(request_id_header.clone()))
         .layer(TraceLayer::new_for_http())
         .layer(SetRequestIdLayer::new(request_id_header, MakeRequestUuid))
+        .layer(DefaultBodyLimit::max(32 * 1024 * 1024))
         .layer(RequestBodyLimitLayer::new(32 * 1024 * 1024))
         .layer(cors)
         .layer(CatchPanicLayer::new())

@@ -9,7 +9,7 @@ use crate::condition::{evaluate_condition, ConditionExpression};
 use crate::contract::{
     CompiledNode, ConversationMessage, EffectKind, EffectRequest, EffectResult, GameCommand,
     GameEvent, GamePlanV1, GameSnapshotV1, PendingHostAction, RuntimeAdvance, RuntimeFailure,
-    SessionStatus,
+    SessionStatus, StateMutationOperation, StateMutationV1,
 };
 use crate::error::GameRuntimeError;
 use crate::GAME_SCHEMA_VERSION;
@@ -98,7 +98,25 @@ pub struct GameRuntime {
 
 impl GameRuntime {
     pub fn new(plan: GamePlanV1, random_seed: u64) -> Result<Self, GameRuntimeError> {
-        let snapshot = GameSnapshotV1::initial(plan.entry_node, &plan.variables, random_seed);
+        let locale = plan.localization.default_locale.clone();
+        Self::new_with_locale(plan, random_seed, &locale)
+    }
+
+    pub fn new_with_locale(
+        plan: GamePlanV1,
+        random_seed: u64,
+        locale: &str,
+    ) -> Result<Self, GameRuntimeError> {
+        if !plan
+            .localization
+            .supported_locales()
+            .iter()
+            .any(|supported| supported == locale)
+        {
+            return Err(GameRuntimeError::UnsupportedLocale(locale.to_string()));
+        }
+        let snapshot =
+            GameSnapshotV1::initial(plan.entry_node, &plan.variables, random_seed, locale);
         Self::restore(plan, snapshot)
     }
 
@@ -130,6 +148,14 @@ impl GameRuntime {
             return Err(GameRuntimeError::InvalidState(
                 "snapshot references a node that is not in the plan".to_string(),
             ));
+        }
+        if !plan
+            .localization
+            .supported_locales()
+            .iter()
+            .any(|locale| locale == &snapshot.locale)
+        {
+            return Err(GameRuntimeError::UnsupportedLocale(snapshot.locale));
         }
 
         let mut app = App::empty();
@@ -273,6 +299,7 @@ fn resume_input(context: &mut RuntimeContext, command: &GameCommand) {
 
     let expected = match node.node_type.as_str() {
         "choice" => "player.choice",
+        "dialogue" | "agent" => "player.continue",
         "input" | "event" => node
             .config
             .get("commandType")
@@ -314,6 +341,41 @@ fn resume_input(context: &mut RuntimeContext, command: &GameCommand) {
             ));
             return;
         };
+        let Some(option) = node
+            .config
+            .get("options")
+            .and_then(Value::as_array)
+            .and_then(|options| {
+                options
+                    .iter()
+                    .find(|option| option.get("id").and_then(Value::as_str) == Some(option_id))
+            })
+        else {
+            context.error = Some(GameRuntimeError::InvalidState(format!(
+                "Choice option `{option_id}` does not exist"
+            )));
+            return;
+        };
+        if option
+            .get("condition")
+            .and_then(|condition| {
+                serde_json::from_value::<ConditionExpression>(condition.clone()).ok()
+            })
+            .is_some_and(|condition| {
+                !evaluate_condition(&condition, &runtime_context_value(context))
+            })
+        {
+            context.error = Some(GameRuntimeError::InvalidState(format!(
+                "Choice option `{option_id}` is locked"
+            )));
+            return;
+        }
+        if let Some(mutations) = option.get("mutations").and_then(Value::as_array) {
+            if let Err(error) = apply_mutations(context, &node, mutations) {
+                context.error = Some(error);
+                return;
+            }
+        }
         emit_event(
             context,
             "choice.selected",
@@ -321,7 +383,38 @@ fn resume_input(context: &mut RuntimeContext, command: &GameCommand) {
             json!({"optionId": option_id}),
         );
         option_id.to_string()
+    } else if matches!(node.node_type.as_str(), "dialogue" | "agent") {
+        if node.node_type == "dialogue" {
+            emit_event(
+                context,
+                "dialogue.completed",
+                Some(node.id.clone()),
+                resolve_value(&node.config, &runtime_context_value(context), &context.plan),
+            );
+        }
+        "next".to_string()
     } else {
+        if let Some(key) = node
+            .config
+            .get("saveAs")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|key| !key.is_empty())
+        {
+            let value = command
+                .data
+                .get("value")
+                .or_else(|| command.data.get("text"))
+                .cloned()
+                .unwrap_or_else(|| command.data.clone());
+            set_state_value(&mut context.snapshot.state, key, value.clone());
+            emit_event(
+                context,
+                "state.changed",
+                Some(node.id.clone()),
+                json!({"key": key, "value": value}),
+            );
+        }
         "next".to_string()
     };
     context.snapshot.status = SessionStatus::Running;
@@ -378,6 +471,10 @@ fn resume_effect(context: &mut RuntimeContext, command: &GameCommand) {
             Some(node.id.clone()),
             json!({"code": error.code, "message": error.message}),
         );
+        if let Some(fallback) = resolved_agent_fallback(context, &node) {
+            complete_agent_output(context, &node, fallback, true);
+            return;
+        }
         if has_route(context, node.ordinal, "error") {
             route_from_node(context, node.ordinal, "error", false);
         } else {
@@ -387,43 +484,52 @@ fn resume_effect(context: &mut RuntimeContext, command: &GameCommand) {
     }
 
     let output = result.output.unwrap_or(Value::Null);
-    if let Some(schema) = node.config.get("outputSchema") {
+    let validation_error = if let Some(schema) = node.config.get("outputSchema") {
         match jsonschema::validator_for(schema) {
-            Ok(validator) => {
-                if let Err(error) = validator.validate(&output) {
-                    fail_runtime(
-                        context,
-                        "agent_output_invalid",
-                        error.to_string(),
-                        Some(node.id),
-                    );
-                    return;
-                }
-            }
-            Err(error) => {
-                fail_runtime(
-                    context,
-                    "agent_output_schema_invalid",
-                    error.to_string(),
-                    Some(node.id),
-                );
-                return;
-            }
+            Ok(validator) => validator
+                .validate(&output)
+                .err()
+                .map(|error| error.to_string()),
+            Err(error) => Some(format!("configured output schema is invalid: {error}")),
         }
+    } else if node.node_type == "agent" {
+        validate_agent_output(&output).err()
+    } else {
+        None
+    };
+    if let Some(error) = validation_error {
+        emit_event(
+            context,
+            "agent.failed",
+            Some(node.id.clone()),
+            json!({"code": "agent_output_invalid", "message": error}),
+        );
+        if let Some(fallback) = resolved_agent_fallback(context, &node) {
+            complete_agent_output(context, &node, fallback, true);
+        } else {
+            fail_runtime(
+                context,
+                "agent_output_invalid",
+                error,
+                Some(node.id.clone()),
+            );
+        }
+        return;
     }
     if node.node_type == "agent" {
-        apply_agent_output(context, &node, &output);
+        complete_agent_output(context, &node, output, false);
+        return;
     }
     context
         .snapshot
         .node_outputs
         .insert(node.id.clone(), output.clone());
-    let (event_type, public_output) = if node.node_type == "agent" {
-        ("agent.completed", public_agent_output(&output))
-    } else {
-        ("tool.completed", json!({"effectId": result.effect_id}))
-    };
-    emit_event(context, event_type, Some(node.id.clone()), public_output);
+    emit_event(
+        context,
+        "tool.completed",
+        Some(node.id.clone()),
+        json!({"effectId": result.effect_id}),
+    );
     route_from_node(context, node.ordinal, "next", false);
 }
 
@@ -564,7 +670,7 @@ fn execute_node(context: &mut RuntimeContext, node: &CompiledNode) {
             let output = node
                 .config
                 .get("output")
-                .map(|value| resolve_value(value, &runtime_context_value(context)))
+                .map(|value| resolve_value(value, &runtime_context_value(context), &context.plan))
                 .unwrap_or_else(|| {
                     context
                         .snapshot
@@ -586,26 +692,85 @@ fn execute_node(context: &mut RuntimeContext, node: &CompiledNode) {
         }
         "input" | "event" => {
             context.snapshot.status = SessionStatus::WaitingInput;
+            let command_type = node
+                .config
+                .get("commandType")
+                .and_then(Value::as_str)
+                .unwrap_or("player.text");
+            if node.node_type == "input" {
+                emit_event(
+                    context,
+                    "player.input.requested",
+                    Some(node.id.clone()),
+                    json!({
+                        "prompt": node.config.get("prompt")
+                            .map(|value| resolve_value(value, &runtime_context_value(context), &context.plan))
+                            .unwrap_or(Value::Null),
+                        "commandType": command_type,
+                        "multiline": node.config.get("multiline").and_then(Value::as_bool).unwrap_or(false)
+                    }),
+                );
+            }
             emit_event(
                 context,
                 "game.session.waiting",
                 Some(node.id.clone()),
                 json!({
                     "for": "input",
-                    "commandType": node.config.get("commandType").and_then(Value::as_str).unwrap_or("player.text")
+                    "commandType": command_type
                 }),
             );
         }
         "choice" => {
             context.snapshot.status = SessionStatus::WaitingInput;
+            let runtime_context = runtime_context_value(context);
+            let options = node
+                .config
+                .get("options")
+                .and_then(Value::as_array)
+                .map(|options| {
+                    options
+                        .iter()
+                        .map(|option| {
+                            let mut public = option.clone();
+                            if let Some(object) = public.as_object_mut() {
+                                let available = option
+                                    .get("condition")
+                                    .and_then(|condition| {
+                                        serde_json::from_value::<ConditionExpression>(
+                                            condition.clone(),
+                                        )
+                                        .ok()
+                                    })
+                                    .is_none_or(|condition| {
+                                        evaluate_condition(&condition, &runtime_context)
+                                    });
+                                object.insert("available".to_string(), Value::Bool(available));
+                                object.remove("condition");
+                                object.remove("mutations");
+                                object.remove("targetNodeId");
+                            }
+                            resolve_value(&public, &runtime_context, &context.plan)
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
             emit_event(
                 context,
                 "choice.presented",
                 Some(node.id.clone()),
                 json!({
-                    "prompt": node.config.get("prompt").cloned().unwrap_or(Value::Null),
-                    "options": node.config.get("options").cloned().unwrap_or_else(|| json!([]))
+                    "prompt": node.config.get("prompt")
+                        .map(|value| resolve_value(value, &runtime_context, &context.plan))
+                        .unwrap_or(Value::Null),
+                    "options": options
                 }),
+            );
+            emit_event(
+                context,
+                "game.session.waiting",
+                Some(node.id.clone()),
+                json!({"for": "choice", "commandType": "player.choice"}),
             );
         }
         "agent" | "tool" => request_effect(context, node),
@@ -651,15 +816,22 @@ fn execute_node(context: &mut RuntimeContext, node: &CompiledNode) {
                 let value = node
                     .config
                     .get("value")
-                    .map(|value| resolve_value(value, &runtime_context_value(context)))
+                    .map(|value| {
+                        resolve_value(value, &runtime_context_value(context), &context.plan)
+                    })
                     .unwrap_or(Value::Null);
-                set_state_value(&mut context.snapshot.state, key, value.clone());
-                emit_event(
-                    context,
-                    "state.changed",
-                    Some(node.id.clone()),
-                    json!({"key": key, "value": value}),
-                );
+                let mutation = StateMutationV1 {
+                    key: key.to_string(),
+                    op: match node.config.get("op").and_then(Value::as_str) {
+                        Some("increment") => StateMutationOperation::Increment,
+                        _ => StateMutationOperation::Set,
+                    },
+                    value,
+                };
+                if let Err(error) = apply_mutation(context, node, mutation) {
+                    context.error = Some(error);
+                    return;
+                }
             }
             route_from_node(context, node.ordinal, "next", false);
         }
@@ -667,7 +839,7 @@ fn execute_node(context: &mut RuntimeContext, node: &CompiledNode) {
             let value = node
                 .config
                 .get("value")
-                .map(|value| resolve_value(value, &runtime_context_value(context)))
+                .map(|value| resolve_value(value, &runtime_context_value(context), &context.plan))
                 .unwrap_or_else(|| context.snapshot.state.clone());
             if let Err(error) = validate_value(&context.plan.outputs, &value) {
                 fail_runtime(context, "game_output_invalid", error, Some(node.id.clone()));
@@ -677,35 +849,42 @@ fn execute_node(context: &mut RuntimeContext, node: &CompiledNode) {
             route_from_node(context, node.ordinal, "next", false);
         }
         "scene" => {
-            emit_event(
-                context,
-                "scene.entered",
-                Some(node.id.clone()),
-                node.config.clone(),
-            );
+            let data = resolve_value(&node.config, &runtime_context_value(context), &context.plan);
+            emit_event(context, "scene.entered", Some(node.id.clone()), data);
             route_from_node(context, node.ordinal, "next", false);
         }
         "dialogue" => {
+            let data = resolve_value(&node.config, &runtime_context_value(context), &context.plan);
             emit_event(
                 context,
                 "dialogue.started",
                 Some(node.id.clone()),
-                node.config.clone(),
+                data.clone(),
             );
-            emit_event(
-                context,
-                "dialogue.completed",
-                Some(node.id.clone()),
-                node.config.clone(),
-            );
-            route_from_node(context, node.ordinal, "next", false);
+            if node
+                .config
+                .get("blocking")
+                .and_then(Value::as_bool)
+                .unwrap_or(true)
+            {
+                context.snapshot.status = SessionStatus::WaitingInput;
+                emit_event(
+                    context,
+                    "game.session.waiting",
+                    Some(node.id.clone()),
+                    json!({"for": "continue", "commandType": "player.continue"}),
+                );
+            } else {
+                emit_event(context, "dialogue.completed", Some(node.id.clone()), data);
+                route_from_node(context, node.ordinal, "next", false);
+            }
         }
         "ending" => {
             emit_event(
                 context,
                 "ending.reached",
                 Some(node.id.clone()),
-                node.config.clone(),
+                resolve_value(&node.config, &runtime_context_value(context), &context.plan),
             );
             route_from_node(context, node.ordinal, "next", false);
         }
@@ -715,7 +894,7 @@ fn execute_node(context: &mut RuntimeContext, node: &CompiledNode) {
                 context,
                 presentation_event_type(&node.node_type),
                 Some(node.id.clone()),
-                node.config.clone(),
+                resolve_value(&node.config, &runtime_context_value(context), &context.plan),
             );
             route_from_node(context, node.ordinal, "next", false);
         }
@@ -765,11 +944,14 @@ fn request_effect(context: &mut RuntimeContext, node: &CompiledNode) {
         }
         descriptor
     };
-    let input = node
-        .config
-        .get("input")
-        .map(|value| resolve_value(value, &runtime_context_value(context)))
-        .unwrap_or_else(|| context.last_command_data.clone());
+    let input = if kind == EffectKind::Agent {
+        build_agent_input(context, node)
+    } else {
+        node.config
+            .get("input")
+            .map(|value| resolve_value(value, &runtime_context_value(context), &context.plan))
+            .unwrap_or_else(|| context.last_command_data.clone())
+    };
     let effect = EffectRequest {
         effect_id,
         node_id: node.id.clone(),
@@ -813,7 +995,7 @@ fn request_host_action(context: &mut RuntimeContext, node: &CompiledNode) {
         arguments: node
             .config
             .get("arguments")
-            .cloned()
+            .map(|value| resolve_value(value, &runtime_context_value(context), &context.plan))
             .unwrap_or_else(|| json!({})),
     };
     let completion_required = node
@@ -1021,6 +1203,71 @@ fn current_node(context: &RuntimeContext) -> Option<&CompiledNode> {
         .find(|node| node.ordinal == ordinal)
 }
 
+fn complete_agent_output(
+    context: &mut RuntimeContext,
+    node: &CompiledNode,
+    output: Value,
+    used_fallback: bool,
+) {
+    apply_agent_output(context, node, &output);
+    context
+        .snapshot
+        .node_outputs
+        .insert(node.id.clone(), output.clone());
+    let mut public = public_agent_output(&output);
+    if let Some(object) = public.as_object_mut() {
+        object.insert("fallback".to_string(), Value::Bool(used_fallback));
+    }
+    emit_event(context, "agent.completed", Some(node.id.clone()), public);
+    if node
+        .config
+        .get("blocking")
+        .and_then(Value::as_bool)
+        .unwrap_or(true)
+    {
+        context.snapshot.status = SessionStatus::WaitingInput;
+        emit_event(
+            context,
+            "game.session.waiting",
+            Some(node.id.clone()),
+            json!({"for": "continue", "commandType": "player.continue"}),
+        );
+    } else {
+        route_from_node(context, node.ordinal, "next", false);
+    }
+}
+
+fn resolved_agent_fallback(context: &RuntimeContext, node: &CompiledNode) -> Option<Value> {
+    node.config
+        .get("fallback")
+        .map(|fallback| resolve_value(fallback, &runtime_context_value(context), &context.plan))
+}
+
+fn validate_agent_output(output: &Value) -> Result<(), String> {
+    let object = output
+        .as_object()
+        .ok_or_else(|| "Agent output must be a JSON object".to_string())?;
+    if object.get("dialogue").and_then(Value::as_str).is_none() {
+        return Err("Agent output requires a string `dialogue` field".to_string());
+    }
+    if object
+        .get("emotion")
+        .is_some_and(|value| !value.is_string())
+    {
+        return Err("Agent output `emotion` must be a string".to_string());
+    }
+    if let Some(changes) = object.get("stateChanges") {
+        let changes = changes
+            .as_array()
+            .ok_or_else(|| "Agent output `stateChanges` must be an array".to_string())?;
+        for change in changes {
+            serde_json::from_value::<StateMutationV1>(change.clone())
+                .map_err(|error| format!("Agent state mutation is invalid: {error}"))?;
+        }
+    }
+    Ok(())
+}
+
 fn apply_agent_output(context: &mut RuntimeContext, node: &CompiledNode, output: &Value) {
     let allowed: BTreeMap<_, _> = node
         .config
@@ -1031,10 +1278,13 @@ fn apply_agent_output(context: &mut RuntimeContext, node: &CompiledNode, output:
         .filter_map(Value::as_str)
         .map(|key| (key, ()))
         .collect();
-    if let Some(changes) = output.get("stateChanges").and_then(Value::as_object) {
-        for (key, value) in changes {
-            if allowed.contains_key(key.as_str()) {
-                set_state_value(&mut context.snapshot.state, key, value.clone());
+    if let Some(changes) = output.get("stateChanges").and_then(Value::as_array) {
+        for change in changes {
+            let Ok(mutation) = serde_json::from_value::<StateMutationV1>(change.clone()) else {
+                continue;
+            };
+            if allowed.contains_key(mutation.key.as_str()) {
+                let _ = apply_mutation(context, node, mutation);
             }
         }
     }
@@ -1057,6 +1307,70 @@ fn apply_agent_output(context: &mut RuntimeContext, node: &CompiledNode, output:
     }
 }
 
+fn apply_mutations(
+    context: &mut RuntimeContext,
+    node: &CompiledNode,
+    mutations: &[Value],
+) -> Result<(), GameRuntimeError> {
+    for mutation in mutations {
+        let mutation =
+            serde_json::from_value::<StateMutationV1>(mutation.clone()).map_err(|error| {
+                GameRuntimeError::InvalidState(format!(
+                    "Choice `{}` contains an invalid state mutation: {error}",
+                    node.id
+                ))
+            })?;
+        apply_mutation(context, node, mutation)?;
+    }
+    Ok(())
+}
+
+fn apply_mutation(
+    context: &mut RuntimeContext,
+    node: &CompiledNode,
+    mutation: StateMutationV1,
+) -> Result<(), GameRuntimeError> {
+    if mutation.key.trim().is_empty() || mutation.key.starts_with("__vifu_") {
+        return Err(GameRuntimeError::InvalidState(format!(
+            "node `{}` attempted to mutate invalid state key `{}`",
+            node.id, mutation.key
+        )));
+    }
+    let value = match mutation.op {
+        StateMutationOperation::Set => mutation.value,
+        StateMutationOperation::Increment => {
+            let current = context
+                .snapshot
+                .state
+                .get(&mutation.key)
+                .cloned()
+                .unwrap_or_else(|| json!(0));
+            increment_values(&current, &mutation.value).ok_or_else(|| {
+                GameRuntimeError::InvalidState(format!(
+                    "state mutation `{}` requires numeric values",
+                    mutation.key
+                ))
+            })?
+        }
+    };
+    set_state_value(&mut context.snapshot.state, &mutation.key, value.clone());
+    emit_event(
+        context,
+        "state.changed",
+        Some(node.id.clone()),
+        json!({"key": mutation.key, "op": mutation.op, "value": value}),
+    );
+    Ok(())
+}
+
+fn increment_values(left: &Value, right: &Value) -> Option<Value> {
+    if let (Some(left), Some(right)) = (left.as_i64(), right.as_i64()) {
+        return left.checked_add(right).map(Value::from);
+    }
+    let value = left.as_f64()? + right.as_f64()?;
+    value.is_finite().then(|| json!(value))
+}
+
 fn public_agent_output(output: &Value) -> Value {
     let mut public = serde_json::Map::new();
     for field in ["dialogue", "emotion", "presentationIntent", "stateChanges"] {
@@ -1072,20 +1386,92 @@ fn runtime_context_value(context: &RuntimeContext) -> Value {
         "state": context.snapshot.state,
         "input": context.last_command_data,
         "outputs": context.snapshot.node_outputs,
-        "publicOutput": context.snapshot.public_output
+        "publicOutput": context.snapshot.public_output,
+        "locale": context.snapshot.locale
     })
 }
 
-fn resolve_value(value: &Value, context: &Value) -> Value {
-    if let Some(pointer) = value
-        .as_object()
-        .filter(|object| object.len() == 1)
-        .and_then(|object| object.get("$ref"))
-        .and_then(Value::as_str)
-    {
-        return context.pointer(pointer).cloned().unwrap_or(Value::Null);
+fn build_agent_input(context: &RuntimeContext, node: &CompiledNode) -> Value {
+    let runtime_context = runtime_context_value(context);
+    if let Some(input) = node.config.get("input") {
+        return resolve_value(input, &runtime_context, &context.plan);
     }
-    value.clone()
+    let prompt = node
+        .config
+        .get("prompt")
+        .map(|value| resolve_value(value, &runtime_context, &context.plan))
+        .and_then(|value| value.as_str().map(str::to_string))
+        .unwrap_or_else(|| "Respond in character to the player's latest input.".to_string());
+    let allowed = node
+        .config
+        .get("allowedStateChanges")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let user_input = context
+        .last_command_data
+        .get("text")
+        .or_else(|| context.last_command_data.get("value"))
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .unwrap_or_else(|| context.last_command_data.to_string());
+    json!({
+        "messages": [
+            {
+                "role": "system",
+                "content": format!(
+                    "{prompt}\nReply in locale {}. Return only one json object with: dialogue (string), emotion (short string), and stateChanges (array of {{key, op: set|increment, value}}). You may mutate only these state keys: {}. Do not invent or change canonical plot facts.",
+                    context.snapshot.locale,
+                    Value::Array(allowed)
+                )
+            },
+            {
+                "role": "user",
+                "content": format!(
+                    "Return json for this player input: {user_input}\nCurrent game state: {}",
+                    context.snapshot.state
+                )
+            }
+        ],
+        "response_format": {"type": "json_object"},
+        "stream": false
+    })
+}
+
+fn resolve_value(value: &Value, context: &Value, plan: &GamePlanV1) -> Value {
+    if let Some(object) = value.as_object().filter(|object| object.len() == 1) {
+        if let Some(pointer) = object.get("$ref").and_then(Value::as_str) {
+            return context.pointer(pointer).cloned().unwrap_or(Value::Null);
+        }
+        if let Some(message_id) = object.get("$message").and_then(Value::as_str) {
+            return plan
+                .localization
+                .message(
+                    context
+                        .get("locale")
+                        .and_then(Value::as_str)
+                        .unwrap_or(&plan.localization.default_locale),
+                    message_id,
+                )
+                .map(|message| Value::String(message.to_string()))
+                .unwrap_or(Value::Null);
+        }
+    }
+    match value {
+        Value::Array(values) => Value::Array(
+            values
+                .iter()
+                .map(|value| resolve_value(value, context, plan))
+                .collect(),
+        ),
+        Value::Object(object) => Value::Object(
+            object
+                .iter()
+                .map(|(key, value)| (key.clone(), resolve_value(value, context, plan)))
+                .collect(),
+        ),
+        _ => value.clone(),
+    }
 }
 
 fn validate_value(schema: &Value, value: &Value) -> Result<(), String> {
@@ -1201,8 +1587,9 @@ mod tests {
     use serde_json::json;
 
     use crate::{
-        AgentReference, GameCompiler, GameSourceV1, LogicalPresentationResource, PortReference,
-        SourceEdge, SourceNode,
+        localization_source_hash, AgentReference, GameCompiler, GameSourceV1, GameVariable,
+        LogicalPresentationResource, PortReference, SourceEdge, SourceNode, TranslationPackStatus,
+        TranslationPackV1,
     };
 
     use super::*;
@@ -1219,6 +1606,7 @@ mod tests {
                 port: "in".to_string(),
             },
             condition: None,
+            managed_by: None,
         }
     }
 
@@ -1245,7 +1633,11 @@ mod tests {
                 id: "agent".to_string(),
                 node_type: "agent".to_string(),
                 version: 1,
-                config: json!({"agentId": "guide", "allowedStateChanges": ["trust"]}),
+                config: json!({
+                    "agentId": "guide",
+                    "allowedStateChanges": ["trust"],
+                    "blocking": false
+                }),
                 parent_id: None,
                 label: None,
                 notes: None,
@@ -1322,6 +1714,158 @@ mod tests {
     }
 
     #[test]
+    fn localizes_blocking_dialogue_and_enforces_choice_conditions_and_mutations() {
+        let mut source = GameSourceV1::new("Localized drama");
+        source.variables.push(GameVariable {
+            id: "trust".to_string(),
+            initial_value: json!(2),
+            public: true,
+        });
+        source.localization.source_locale = "zh-CN".to_string();
+        source.localization.default_locale = "ja".to_string();
+        source.localization.target_locales = vec!["ja".to_string()];
+        source.localization.source_messages.extend([
+            ("opening".to_string(), "列车到了。".to_string()),
+            ("prompt".to_string(), "相信她吗？".to_string()),
+            ("true".to_string(), "一起打破契约".to_string()),
+            ("wait".to_string(), "再寻找线索".to_string()),
+            ("locked".to_string(), "需要更多信任".to_string()),
+        ]);
+        let source_hash = localization_source_hash(&source.localization.source_messages);
+        source.localization.packs.insert(
+            "ja".to_string(),
+            TranslationPackV1 {
+                source_hash,
+                status: TranslationPackStatus::Reviewed,
+                messages: [
+                    ("opening", "列車が到着した。"),
+                    ("prompt", "彼女を信じますか？"),
+                    ("true", "一緒に契約を破る"),
+                    ("wait", "もう一度手がかりを探す"),
+                    ("locked", "もっと信頼が必要です"),
+                ]
+                .into_iter()
+                .map(|(key, value)| (key.to_string(), value.to_string()))
+                .collect(),
+            },
+        );
+        source.graph.nodes.extend([
+            SourceNode {
+                id: "dialogue".to_string(),
+                node_type: "dialogue".to_string(),
+                version: 1,
+                config: json!({"text": {"$message": "opening"}, "blocking": true}),
+                parent_id: None,
+                label: None,
+                notes: None,
+            },
+            SourceNode {
+                id: "choice".to_string(),
+                node_type: "choice".to_string(),
+                version: 1,
+                config: json!({
+                    "prompt": {"$message": "prompt"},
+                    "options": [
+                        {
+                            "id": "true-ending",
+                            "label": {"$message": "true"},
+                            "lockedReason": {"$message": "locked"},
+                            "condition": {
+                                "op": "gte",
+                                "left": {"pointer": "/state/trust"},
+                                "right": {"value": 3}
+                            }
+                        },
+                        {
+                            "id": "wait",
+                            "label": {"$message": "wait"},
+                            "mutations": [
+                                {"key": "trust", "op": "increment", "value": 1}
+                            ]
+                        }
+                    ]
+                }),
+                parent_id: None,
+                label: None,
+                notes: None,
+            },
+            SourceNode {
+                id: "end".to_string(),
+                node_type: "end".to_string(),
+                version: 1,
+                config: json!({}),
+                parent_id: None,
+                label: None,
+                notes: None,
+            },
+        ]);
+        source.graph.edges.extend([
+            edge("1", "start", "next", "dialogue"),
+            edge("2", "dialogue", "next", "choice"),
+            edge("3", "choice", "true-ending", "end"),
+            edge("4", "choice", "wait", "end"),
+        ]);
+        let plan = GameCompiler::default()
+            .compile(&source)
+            .expect("compile localized plan")
+            .plan;
+        let mut runtime =
+            GameRuntime::new_with_locale(plan, 9, "ja").expect("create localized runtime");
+
+        let dialogue = runtime
+            .dispatch(GameCommand {
+                idempotency_key: "start".to_string(),
+                expected_revision: None,
+                command_type: "game.start".to_string(),
+                data: json!({}),
+            })
+            .expect("start");
+        assert_eq!(dialogue.snapshot.status, SessionStatus::WaitingInput);
+        assert!(dialogue.events.iter().any(|event| {
+            event.event_type == "dialogue.started" && event.data["text"] == "列車が到着した。"
+        }));
+
+        let choice = runtime
+            .dispatch(GameCommand {
+                idempotency_key: "continue".to_string(),
+                expected_revision: None,
+                command_type: "player.continue".to_string(),
+                data: json!({}),
+            })
+            .expect("continue dialogue");
+        let presented = choice
+            .events
+            .iter()
+            .find(|event| event.event_type == "choice.presented")
+            .expect("choice event");
+        assert_eq!(presented.data["prompt"], "彼女を信じますか？");
+        assert_eq!(presented.data["options"][0]["available"], false);
+        assert_eq!(
+            presented.data["options"][0]["lockedReason"],
+            "もっと信頼が必要です"
+        );
+
+        let forged = runtime.dispatch(GameCommand {
+            idempotency_key: "forged".to_string(),
+            expected_revision: None,
+            command_type: "player.choice".to_string(),
+            data: json!({"optionId": "true-ending"}),
+        });
+        assert!(matches!(forged, Err(GameRuntimeError::InvalidState(_))));
+
+        let completed = runtime
+            .dispatch(GameCommand {
+                idempotency_key: "wait".to_string(),
+                expected_revision: None,
+                command_type: "player.choice".to_string(),
+                data: json!({"optionId": "wait"}),
+            })
+            .expect("select available option");
+        assert_eq!(completed.snapshot.status, SessionStatus::Completed);
+        assert_eq!(completed.snapshot.state["trust"], 3);
+    }
+
+    #[test]
     fn advances_across_effect_host_action_and_player_choice() {
         let mut runtime = GameRuntime::new(interactive_plan(), 7).expect("create runtime");
         let started = runtime
@@ -1352,7 +1896,10 @@ mod tests {
                     effect_id: effect.effect_id,
                     output: Some(json!({
                         "dialogue": "The gate is ready.",
-                        "stateChanges": {"trust": 2, "notAllowed": true}
+                        "stateChanges": [
+                            {"key": "trust", "op": "set", "value": 2},
+                            {"key": "notAllowed", "op": "set", "value": true}
+                        ]
                     })),
                     error: None,
                 })
@@ -1397,6 +1944,24 @@ mod tests {
             .events
             .iter()
             .any(|event| event.event_type == "ending.reached"));
+    }
+
+    #[test]
+    fn agent_effect_prompt_is_compatible_with_json_object_response_format() {
+        let mut runtime = GameRuntime::new(interactive_plan(), 7).expect("create runtime");
+        let started = runtime
+            .dispatch(GameCommand {
+                idempotency_key: "start".to_string(),
+                expected_revision: None,
+                command_type: "game.start".to_string(),
+                data: json!({}),
+            })
+            .expect("start game");
+
+        let user_prompt = started.effects[0].input["messages"][1]["content"]
+            .as_str()
+            .expect("user prompt");
+        assert!(user_prompt.contains("json"));
     }
 
     #[test]
@@ -1448,7 +2013,7 @@ mod tests {
                 id: "left".to_string(),
                 node_type: "state".to_string(),
                 version: 1,
-                config: json!({"key": "left", "value": true}),
+                config: json!({"key": "left", "op": "set", "value": true}),
                 parent_id: None,
                 label: None,
                 notes: None,
@@ -1457,7 +2022,7 @@ mod tests {
                 id: "right".to_string(),
                 node_type: "state".to_string(),
                 version: 1,
-                config: json!({"key": "right", "value": true}),
+                config: json!({"key": "right", "op": "set", "value": true}),
                 parent_id: None,
                 label: None,
                 notes: None,

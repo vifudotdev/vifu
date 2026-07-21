@@ -455,6 +455,13 @@ pub fn validate_host(
     manifest: &GameManifestV1,
     host: &HostDescriptor,
 ) -> Result<Vec<String>, ApiError> {
+    if host
+        .locale
+        .as_deref()
+        .is_some_and(|locale| !manifest.locales.iter().any(|supported| supported == locale))
+    {
+        return Err(ApiError::LocaleNotSupported);
+    }
     let capabilities: HashSet<_> = host.capabilities.iter().map(String::as_str).collect();
     let missing: Vec<_> = manifest
         .required_host_capabilities

@@ -23,7 +23,7 @@ use crate::AppState;
 
 use super::api::authorize_game_project;
 use super::db::{self, NewGameAssetVersion};
-use super::models::ApproveGameAssetVersion;
+use super::models::{ApproveGameAssetVersion, GameAssetVersion};
 
 const MAX_ASSET_BYTES: u64 = 30 * 1024 * 1024;
 
@@ -200,8 +200,30 @@ pub async fn serve_runtime_asset(
     let project = authorize_game_project(&state, &headers, &project_slug).await?;
     let version =
         db::active_presentation_asset(&state.pool, project.project.id, version_id).await?;
+    serve_asset_file(&state, &headers, version).await
+}
+
+pub async fn serve_authoring_asset(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((project_slug, asset_id, version_id)): Path<(String, Uuid, Uuid)>,
+) -> Result<Response, ApiError> {
+    require_admin(&headers, &state.config.admin_key)?;
+    let project = runtime_db::get_project_by_slug(&state.pool, &project_slug).await?;
+    let version = db::get_game_asset_version(&state.pool, project.project.id, version_id).await?;
+    if version.asset_id != asset_id {
+        return Err(ApiError::NotFound);
+    }
+    serve_asset_file(&state, &headers, version).await
+}
+
+async fn serve_asset_file(
+    state: &AppState,
+    headers: &HeaderMap,
+    version: GameAssetVersion,
+) -> Result<Response, ApiError> {
     let storage_key = safe_storage_key(&version.storage_key)?;
-    let path = asset_storage_root(&state).join(storage_key);
+    let path = asset_storage_root(state).join(storage_key);
     let mut file = File::open(path).await.map_err(|_| ApiError::NotFound)?;
     let file_size = file.metadata().await.map_err(|_| ApiError::NotFound)?.len();
     if i64::try_from(file_size).ok() != Some(version.size_bytes) {

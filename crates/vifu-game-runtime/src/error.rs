@@ -67,6 +67,8 @@ pub enum GameRuntimeError {
     Validation(Vec<ValidationIssue>),
     #[error("unsupported game schema version {0}")]
     UnsupportedSchemaVersion(u32),
+    #[error("locale `{0}` is not supported by this game")]
+    UnsupportedLocale(String),
     #[error("node `{node_type}` version {version} is not registered")]
     UnknownNode { node_type: String, version: u32 },
     #[error("runtime is waiting for `{expected}`, not `{actual}`")]

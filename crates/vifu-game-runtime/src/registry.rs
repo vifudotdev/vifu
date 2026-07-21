@@ -155,7 +155,12 @@ fn default_definitions() -> Vec<NodeDefinition> {
         passthrough_ports(),
         json!({
             "type": "object",
-            "properties": {"commandType": {"type": "string"}},
+            "properties": {
+                "commandType": {"type": "string", "title": "Command"},
+                "prompt": {"title": "Prompt"},
+                "saveAs": {"type": "string", "title": "Save response as"},
+                "multiline": {"type": "boolean", "title": "Allow a longer response"}
+            },
             "additionalProperties": true
         }),
         NodeBehavior::timeline(),
@@ -170,7 +175,7 @@ fn default_definitions() -> Vec<NodeDefinition> {
             "type": "object",
             "required": ["options"],
             "properties": {
-                "prompt": {"type": "string"},
+                "prompt": {"title": "Prompt"},
                 "options": {
                     "type": "array",
                     "minItems": 1,
@@ -179,7 +184,23 @@ fn default_definitions() -> Vec<NodeDefinition> {
                         "required": ["id", "label"],
                         "properties": {
                             "id": {"type": "string", "minLength": 1},
-                            "label": {"type": "string", "minLength": 1}
+                            "label": {},
+                            "condition": {"type": "object"},
+                            "lockedReason": {},
+                            "targetNodeId": {"type": "string"},
+                            "mutations": {
+                                "type": "array",
+                                "items": {
+                                    "type": "object",
+                                    "required": ["key", "op", "value"],
+                                    "properties": {
+                                        "key": {"type": "string", "minLength": 1},
+                                        "op": {"enum": ["set", "increment"]},
+                                        "value": {}
+                                    },
+                                    "additionalProperties": false
+                                }
+                            }
                         },
                         "additionalProperties": false
                     }
@@ -213,9 +234,11 @@ fn default_definitions() -> Vec<NodeDefinition> {
             "required": ["agentId"],
             "properties": {
                 "agentId": {"type": "string", "minLength": 1},
+                "prompt": {},
                 "input": {},
                 "allowedStateChanges": {"type": "array", "items": {"type": "string"}},
-                "fallback": {}
+                "fallback": {},
+                "blocking": {"type": "boolean"}
             },
             "additionalProperties": true
         }),
@@ -266,12 +289,9 @@ fn default_definitions() -> Vec<NodeDefinition> {
         passthrough_ports(),
         json!({
             "type": "object",
-            "required": ["locale"],
             "properties": {
-                "locale": {"type": "string", "minLength": 1, "title": "Locale"},
-                "subtitleKey": {"type": "string", "minLength": 1, "title": "Subtitle key"},
                 "logicalResourceId": {"type": "string", "minLength": 1, "title": "Logical resource"},
-                "text": {"type": "string", "title": "Subtitle text"}
+                "text": {"title": "Subtitle text"}
             },
             "additionalProperties": true
         }),
@@ -306,13 +326,84 @@ fn default_definitions() -> Vec<NodeDefinition> {
         ("state", "State", "Logic", false),
         ("transform", "Transform", "Logic", false),
     ] {
+        let config_schema = match node_type {
+            "scene" => json!({
+                "type": "object",
+                "properties": {
+                    "title": {"title": "Scene title"},
+                    "description": {"title": "Direction"}
+                },
+                "additionalProperties": true
+            }),
+            "dialogue" => json!({
+                "type": "object",
+                "required": ["text"],
+                "properties": {
+                    "speakerId": {"type": "string", "title": "Speaker"},
+                    "text": {"title": "Dialogue"},
+                    "blocking": {"type": "boolean", "title": "Wait for player"}
+                },
+                "additionalProperties": true
+            }),
+            "ending" => json!({
+                "type": "object",
+                "properties": {
+                    "endingId": {"type": "string", "title": "Ending ID"},
+                    "title": {"title": "Ending title"},
+                    "text": {"title": "Ending text"}
+                },
+                "additionalProperties": true
+            }),
+            "state" | "character_state" | "relationship" | "memory" => json!({
+                "type": "object",
+                "required": ["key", "op", "value"],
+                "properties": {
+                    "key": {"type": "string", "minLength": 1, "title": "State variable"},
+                    "op": {"enum": ["set", "increment"], "title": "Operation"},
+                    "value": {"title": "Value"}
+                },
+                "additionalProperties": true
+            }),
+            "background" | "character_visual" | "video" => json!({
+                "type": "object",
+                "required": ["logicalResourceId"],
+                "properties": {
+                    "logicalResourceId": {"type": "string", "minLength": 1, "title": "Media"},
+                    "characterId": {"type": "string", "title": "Character"},
+                    "loop": {"type": "boolean", "title": "Loop"},
+                    "fit": {"enum": ["cover", "contain"], "title": "Framing"}
+                },
+                "additionalProperties": true
+            }),
+            "audio" | "voice" => json!({
+                "type": "object",
+                "required": ["logicalResourceId"],
+                "properties": {
+                    "logicalResourceId": {"type": "string", "minLength": 1, "title": "Media"},
+                    "characterId": {"type": "string", "title": "Character"},
+                    "loop": {"type": "boolean", "title": "Loop"}
+                },
+                "additionalProperties": true
+            }),
+            "expression" => json!({
+                "type": "object",
+                "required": ["characterId", "expression"],
+                "properties": {
+                    "characterId": {"type": "string", "minLength": 1, "title": "Character"},
+                    "expression": {"type": "string", "minLength": 1, "title": "Expression"},
+                    "logicalResourceId": {"type": "string", "title": "Portrait"}
+                },
+                "additionalProperties": true
+            }),
+            _ => object_schema(),
+        };
         definitions.push(definition(
             node_type,
             title,
             NodePhase::Runtime,
             category,
             passthrough_ports(),
-            object_schema(),
+            config_schema,
             NodeBehavior {
                 timeline_compatible,
                 ..NodeBehavior::NONE

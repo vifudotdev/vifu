@@ -3895,6 +3895,30 @@ async fn resolve_runtime_provider(
     })
 }
 
+pub(crate) async fn invoke_project_authoring_model(
+    state: &AppState,
+    project_slug: &str,
+    provider_key: &str,
+    model: &str,
+    request: &Value,
+) -> Result<Value, ApiError> {
+    let provider = resolve_runtime_provider(state, project_slug, provider_key).await?;
+    if provider.provider_type != "openai-compatible" {
+        return Err(ApiError::Invalid(format!(
+            "provider {provider_key} does not expose an OpenAI-compatible authoring model"
+        )));
+    }
+    vifu_core::providers::openai_chat_completion(
+        &provider.base_url,
+        provider.token.as_deref(),
+        model,
+        request,
+        &json!({}),
+    )
+    .await
+    .map_err(ApiError::Provider)
+}
+
 fn provider_adapters() -> Vec<ProviderAdapter> {
     vec![
         ProviderAdapter {

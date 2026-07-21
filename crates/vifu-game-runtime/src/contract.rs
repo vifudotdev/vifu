@@ -23,11 +23,15 @@ pub struct GameSourceV1 {
     #[serde(default)]
     pub agents: Vec<AgentReference>,
     #[serde(default)]
+    pub characters: Vec<GameCharacterV1>,
+    #[serde(default)]
     pub resources: Vec<ResourceReference>,
     #[serde(default)]
     pub presentation_resources: Vec<LogicalPresentationResource>,
     #[serde(default)]
-    pub locales: Vec<String>,
+    pub localization: GameLocalizationV1,
+    #[serde(default, rename = "locales", skip_serializing)]
+    pub legacy_locales: Vec<String>,
     #[serde(default)]
     pub views: BTreeMap<String, Value>,
 }
@@ -59,9 +63,11 @@ impl GameSourceV1 {
             outputs: object_schema(),
             variables: Vec::new(),
             agents: Vec::new(),
+            characters: Vec::new(),
             resources: Vec::new(),
             presentation_resources: Vec::new(),
-            locales: vec!["en".to_string()],
+            localization: GameLocalizationV1::default(),
+            legacy_locales: Vec::new(),
             views: BTreeMap::new(),
         }
     }
@@ -119,6 +125,8 @@ pub struct SourceEdge {
     pub target: PortReference,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub condition: Option<ConditionExpression>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub managed_by: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
@@ -149,6 +157,96 @@ pub struct AgentReference {
     pub capabilities: Vec<String>,
     #[serde(default = "empty_object")]
     pub execution_descriptor: Value,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GameCharacterV1 {
+    pub id: String,
+    pub name_message_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role_message_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub portrait_resource_id: Option<String>,
+    #[serde(default)]
+    pub player: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GameLocalizationV1 {
+    pub source_locale: String,
+    pub default_locale: String,
+    #[serde(default)]
+    pub target_locales: Vec<String>,
+    #[serde(default)]
+    pub source_messages: BTreeMap<String, String>,
+    #[serde(default)]
+    pub packs: BTreeMap<String, TranslationPackV1>,
+}
+
+impl Default for GameLocalizationV1 {
+    fn default() -> Self {
+        Self {
+            source_locale: "en".to_string(),
+            default_locale: "en".to_string(),
+            target_locales: Vec::new(),
+            source_messages: BTreeMap::new(),
+            packs: BTreeMap::new(),
+        }
+    }
+}
+
+impl GameLocalizationV1 {
+    pub fn supported_locales(&self) -> Vec<String> {
+        let mut locales = BTreeSet::from([self.source_locale.clone()]);
+        locales.extend(self.target_locales.iter().cloned());
+        locales.into_iter().collect()
+    }
+
+    pub fn message(&self, locale: &str, message_id: &str) -> Option<&str> {
+        if locale == self.source_locale {
+            return self.source_messages.get(message_id).map(String::as_str);
+        }
+        self.packs
+            .get(locale)
+            .and_then(|pack| pack.messages.get(message_id))
+            .map(String::as_str)
+            .or_else(|| self.source_messages.get(message_id).map(String::as_str))
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TranslationPackV1 {
+    pub source_hash: String,
+    pub status: TranslationPackStatus,
+    #[serde(default)]
+    pub messages: BTreeMap<String, String>,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TranslationPackStatus {
+    Draft,
+    Reviewed,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct StateMutationV1 {
+    pub key: String,
+    pub op: StateMutationOperation,
+    pub value: Value,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StateMutationOperation {
+    Set,
+    Increment,
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
@@ -186,9 +284,10 @@ pub struct GamePlanV1 {
     pub outputs: Value,
     pub variables: Vec<GameVariable>,
     pub agents: Vec<PinnedAgent>,
+    pub characters: Vec<GameCharacterV1>,
     pub resources: Vec<PinnedResource>,
     pub presentation_resources: Vec<LogicalPresentationResource>,
-    pub locales: Vec<String>,
+    pub localization: GameLocalizationV1,
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
@@ -261,6 +360,7 @@ pub struct GameManifestV1 {
     pub required_host_capabilities: Vec<String>,
     pub optional_host_capabilities: Vec<String>,
     pub locales: Vec<String>,
+    pub default_locale: String,
     pub compatibility: ClientCompatibility,
 }
 
@@ -350,6 +450,7 @@ pub struct GameSnapshotV1 {
     pub schema_version: u32,
     pub status: SessionStatus,
     pub revision: u64,
+    pub locale: String,
     pub current_nodes: Vec<u32>,
     #[serde(default)]
     pub join_arrivals: BTreeMap<u32, BTreeSet<u32>>,
@@ -375,7 +476,12 @@ pub struct GameSnapshotV1 {
 }
 
 impl GameSnapshotV1 {
-    pub fn initial(entry_node: u32, variables: &[GameVariable], random_seed: u64) -> Self {
+    pub fn initial(
+        entry_node: u32,
+        variables: &[GameVariable],
+        random_seed: u64,
+        locale: impl Into<String>,
+    ) -> Self {
         let mut state = serde_json::Map::new();
         for variable in variables {
             state.insert(variable.id.clone(), variable.initial_value.clone());
@@ -384,6 +490,7 @@ impl GameSnapshotV1 {
             schema_version: GAME_SCHEMA_VERSION,
             status: SessionStatus::WaitingInput,
             revision: 0,
+            locale: locale.into(),
             current_nodes: vec![entry_node],
             join_arrivals: BTreeMap::new(),
             state: Value::Object(state),
@@ -528,7 +635,7 @@ mod tests {
 
     #[test]
     fn snapshot_round_trips_as_camel_case_json() {
-        let snapshot = GameSnapshotV1::initial(3, &[], 42);
+        let snapshot = GameSnapshotV1::initial(3, &[], 42, "en");
         let encoded = serde_json::to_string(&snapshot).expect("serialize snapshot");
         assert!(encoded.contains("nextEventSequence"));
         let decoded: GameSnapshotV1 = serde_json::from_str(&encoded).expect("restore snapshot");

@@ -9,7 +9,7 @@ use sha2::{Digest, Sha256};
 use crate::canonical::canonical_json_bytes;
 use crate::contract::{
     ClientCompatibility, CompiledEdge, CompiledNode, GameManifestV1, GamePlanV1, GameSourceV1,
-    ManifestItem, PinnedAgent, PinnedResource,
+    ManifestItem, PinnedAgent, PinnedResource, TranslationPackStatus,
 };
 use crate::error::{GameRuntimeError, ValidationIssue, ValidationSeverity};
 use crate::registry::{NodePhase, NodeRegistry};
@@ -580,6 +580,74 @@ impl GameCompiler {
                 );
             }
         }
+        let mut character_ids = HashSet::new();
+        let mut player_character_count = 0;
+        for character in &source.characters {
+            if character.id.trim().is_empty() {
+                issues.push(
+                    ValidationIssue::error(
+                        "character_id_required",
+                        "every Character requires an ID",
+                    )
+                    .at_path("/characters"),
+                );
+            } else if !character_ids.insert(character.id.as_str()) {
+                issues.push(
+                    ValidationIssue::error(
+                        "duplicate_character_id",
+                        format!("Character ID `{}` is duplicated", character.id),
+                    )
+                    .at_path(format!("/characters/{}", character.id)),
+                );
+            }
+            if character.name_message_id.trim().is_empty() {
+                issues.push(
+                    ValidationIssue::error(
+                        "character_name_required",
+                        format!("Character `{}` requires a localized name", character.id),
+                    )
+                    .at_path(format!("/characters/{}/nameMessageId", character.id)),
+                );
+            }
+            if let Some(agent_id) = character.agent_id.as_deref() {
+                if !agent_ids.contains(agent_id) {
+                    issues.push(
+                        ValidationIssue::error(
+                            "character_agent_missing",
+                            format!(
+                                "Character `{}` references unknown Agent `{agent_id}`",
+                                character.id
+                            ),
+                        )
+                        .at_path(format!("/characters/{}/agentId", character.id)),
+                    );
+                }
+            }
+            if character.player {
+                player_character_count += 1;
+                if character.agent_id.is_some() {
+                    issues.push(
+                        ValidationIssue::error(
+                            "player_character_cannot_be_agent",
+                            format!(
+                                "player Character `{}` cannot reference an Agent Profile",
+                                character.id
+                            ),
+                        )
+                        .at_path(format!("/characters/{}/agentId", character.id)),
+                    );
+                }
+            }
+        }
+        if player_character_count > 1 {
+            issues.push(
+                ValidationIssue::error(
+                    "multiple_player_characters",
+                    "a Game can declare at most one player Character",
+                )
+                .at_path("/characters"),
+            );
+        }
         let mut resource_ids = HashSet::new();
         for resource in &source.resources {
             if !resource_ids.insert(resource.id.as_str()) {
@@ -668,24 +736,7 @@ impl GameCompiler {
                 );
             }
         }
-        let mut declared_locales = HashSet::new();
-        for locale in &source.locales {
-            if locale.trim().is_empty() {
-                issues.push(
-                    ValidationIssue::error("locale_invalid", "locale identifiers cannot be empty")
-                        .at_path("/locales"),
-                );
-            } else if !declared_locales.insert(locale.as_str()) {
-                issues.push(
-                    ValidationIssue::error(
-                        "duplicate_locale",
-                        format!("locale `{locale}` is declared more than once"),
-                    )
-                    .at_path("/locales"),
-                );
-            }
-        }
-        let mut subtitle_groups = HashMap::<String, (String, HashSet<String>)>::new();
+        let declared_locales = validate_localization(source, &mut issues);
         for node in source
             .graph
             .nodes
@@ -721,56 +772,12 @@ impl GameCompiler {
                     );
                 }
             }
-            if node.node_type == "subtitle" {
-                let locale = node
-                    .config
-                    .get("locale")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default();
-                if locale.is_empty() {
-                    issues.push(
-                        ValidationIssue::error(
-                            "subtitle_locale_required",
-                            "Subtitle nodes require a locale",
-                        )
-                        .for_node(&node.id)
-                        .at_path("/config/locale"),
-                    );
-                } else if !declared_locales.contains(locale) {
-                    issues.push(
-                        ValidationIssue::error(
-                            "subtitle_locale_undeclared",
-                            format!("Subtitle locale `{locale}` is not declared by the Game"),
-                        )
-                        .for_node(&node.id)
-                        .at_path("/config/locale"),
-                    );
-                }
-                if declared_locales.len() > 1 {
-                    let group = node
-                        .config
-                        .get("subtitleKey")
-                        .or_else(|| node.config.get("logicalResourceId"))
-                        .and_then(Value::as_str)
-                        .filter(|value| !value.trim().is_empty());
-                    if let Some(group) = group {
-                        subtitle_groups
-                            .entry(group.to_string())
-                            .or_insert_with(|| (node.id.clone(), HashSet::new()))
-                            .1
-                            .insert(locale.to_string());
-                    } else {
-                        issues.push(
-                            ValidationIssue::error(
-                                "subtitle_group_required",
-                                "multilingual Subtitle nodes require subtitleKey or logicalResourceId",
-                            )
-                            .for_node(&node.id)
-                            .at_path("/config/subtitleKey"),
-                        );
-                    }
-                }
-            }
+            validate_message_references(
+                &node.config,
+                &source.localization.source_messages,
+                &node.id,
+                &mut issues,
+            );
             if node.config.get("assetVersionId").is_some() {
                 issues.push(
                     ValidationIssue::error(
@@ -783,27 +790,25 @@ impl GameCompiler {
             }
         }
 
-        for (group, (node_id, locales)) in subtitle_groups {
-            for locale in &source.locales {
-                if !locales.contains(locale) {
+        for character in &source.characters {
+            for message_id in std::iter::once(character.name_message_id.as_str())
+                .chain(character.role_message_id.as_deref())
+            {
+                if !source.localization.source_messages.contains_key(message_id) {
                     issues.push(
                         ValidationIssue::error(
-                            "subtitle_locale_missing",
-                            format!("subtitle group `{group}` has no `{locale}` version"),
+                            "localized_message_missing",
+                            format!(
+                                "Character `{}` references missing message `{message_id}`",
+                                character.id
+                            ),
                         )
-                        .for_node(&node_id)
-                        .at_path("/config/locale"),
+                        .at_path(format!("/characters/{}", character.id)),
                     );
                 }
             }
         }
-
-        if source.locales.is_empty() {
-            issues.push(ValidationIssue::warning(
-                "locale_defaulted",
-                "no locale is declared; clients will use their own default",
-            ));
-        }
+        debug_assert!(!declared_locales.is_empty());
 
         issues
     }
@@ -912,11 +917,12 @@ impl GameCompiler {
             outputs: source.outputs.clone(),
             variables: sorted_by_id(&source.variables, |variable| &variable.id),
             agents,
+            characters: sorted_by_id(&source.characters, |character| &character.id),
             resources,
             presentation_resources: sorted_by_id(&source.presentation_resources, |resource| {
                 &resource.id
             }),
-            locales: sorted_strings(&source.locales),
+            localization: source.localization.clone(),
         };
         let manifest = self.build_manifest(source);
         let content_hash = content_hash(&(&plan, &manifest))?;
@@ -951,11 +957,18 @@ impl GameCompiler {
             })
             .collect();
         let characters = source
-            .agents
+            .characters
             .iter()
-            .map(|agent| ManifestItem {
-                id: agent.id.clone(),
-                name: agent.profile_id.clone(),
+            .map(|character| ManifestItem {
+                id: character.id.clone(),
+                name: source
+                    .localization
+                    .message(
+                        &source.localization.default_locale,
+                        &character.name_message_id,
+                    )
+                    .unwrap_or(&character.id)
+                    .to_string(),
             })
             .collect();
         let required_host_capabilities: BTreeSet<_> = source
@@ -986,7 +999,8 @@ impl GameCompiler {
             }),
             required_host_capabilities: required_host_capabilities.into_iter().collect(),
             optional_host_capabilities: optional_host_capabilities.into_iter().collect(),
-            locales: sorted_strings(&source.locales),
+            locales: source.localization.supported_locales(),
+            default_locale: source.localization.default_locale.clone(),
             compatibility: ClientCompatibility {
                 protocol: "vifu.game.v1".to_string(),
                 minimum_version: 1,
@@ -1001,11 +1015,185 @@ fn sorted_by_id<T: Clone>(items: &[T], id: impl Fn(&T) -> &str) -> Vec<T> {
     sorted
 }
 
-fn sorted_strings(items: &[String]) -> Vec<String> {
-    let mut sorted = items.to_vec();
-    sorted.sort();
-    sorted.dedup();
-    sorted
+pub fn localization_source_hash(messages: &BTreeMap<String, String>) -> String {
+    let bytes = canonical_json_bytes(messages)
+        .expect("a string localization map always serializes as canonical JSON");
+    format!("sha256:{:x}", Sha256::digest(bytes))
+}
+
+fn validate_localization(
+    source: &GameSourceV1,
+    issues: &mut Vec<ValidationIssue>,
+) -> HashSet<String> {
+    let localization = &source.localization;
+    let source_locale = localization.source_locale.trim();
+    let default_locale = localization.default_locale.trim();
+    if source_locale.is_empty() {
+        issues.push(
+            ValidationIssue::error("source_locale_required", "source locale is required")
+                .at_path("/localization/sourceLocale"),
+        );
+    }
+    if default_locale.is_empty() {
+        issues.push(
+            ValidationIssue::error("default_locale_required", "default locale is required")
+                .at_path("/localization/defaultLocale"),
+        );
+    }
+
+    let mut locales = HashSet::new();
+    if !source_locale.is_empty() {
+        locales.insert(source_locale.to_string());
+    }
+    for locale in &localization.target_locales {
+        let locale = locale.trim();
+        if locale.is_empty() {
+            issues.push(
+                ValidationIssue::error("locale_invalid", "locale identifiers cannot be empty")
+                    .at_path("/localization/targetLocales"),
+            );
+        } else if locale == source_locale || !locales.insert(locale.to_string()) {
+            issues.push(
+                ValidationIssue::error(
+                    "duplicate_locale",
+                    format!("locale `{locale}` is declared more than once"),
+                )
+                .at_path("/localization/targetLocales"),
+            );
+        }
+    }
+    if !default_locale.is_empty() && !locales.contains(default_locale) {
+        issues.push(
+            ValidationIssue::error(
+                "default_locale_unsupported",
+                format!("default locale `{default_locale}` is not a supported locale"),
+            )
+            .at_path("/localization/defaultLocale"),
+        );
+    }
+
+    for (message_id, message) in &localization.source_messages {
+        if message_id.trim().is_empty() {
+            issues.push(
+                ValidationIssue::error(
+                    "message_id_required",
+                    "localized messages require stable IDs",
+                )
+                .at_path("/localization/sourceMessages"),
+            );
+        }
+        if message.trim().is_empty() {
+            issues.push(
+                ValidationIssue::error(
+                    "source_message_empty",
+                    format!("source message `{message_id}` is empty"),
+                )
+                .at_path(format!("/localization/sourceMessages/{message_id}")),
+            );
+        }
+    }
+
+    let source_hash = localization_source_hash(&localization.source_messages);
+    for locale in &localization.target_locales {
+        let locale = locale.trim();
+        let Some(pack) = localization.packs.get(locale) else {
+            issues.push(
+                ValidationIssue::error(
+                    "translation_pack_missing",
+                    format!("locale `{locale}` has not been translated"),
+                )
+                .at_path(format!("/localization/packs/{locale}")),
+            );
+            continue;
+        };
+        if pack.source_hash != source_hash {
+            issues.push(
+                ValidationIssue::error(
+                    "translation_pack_stale",
+                    format!("locale `{locale}` is stale after source text changed"),
+                )
+                .at_path(format!("/localization/packs/{locale}/sourceHash")),
+            );
+        }
+        if pack.status != TranslationPackStatus::Reviewed {
+            issues.push(
+                ValidationIssue::error(
+                    "translation_pack_unreviewed",
+                    format!("locale `{locale}` must be reviewed before publishing"),
+                )
+                .at_path(format!("/localization/packs/{locale}/status")),
+            );
+        }
+        for message_id in localization.source_messages.keys() {
+            if pack
+                .messages
+                .get(message_id)
+                .is_none_or(|message| message.trim().is_empty())
+            {
+                issues.push(
+                    ValidationIssue::error(
+                        "translation_message_missing",
+                        format!("locale `{locale}` is missing message `{message_id}`"),
+                    )
+                    .at_path(format!(
+                        "/localization/packs/{locale}/messages/{message_id}"
+                    )),
+                );
+            }
+        }
+    }
+    for locale in localization.packs.keys() {
+        if !localization
+            .target_locales
+            .iter()
+            .any(|target| target == locale)
+        {
+            issues.push(
+                ValidationIssue::error(
+                    "translation_pack_undeclared",
+                    format!("translation pack `{locale}` is not a target locale"),
+                )
+                .at_path(format!("/localization/packs/{locale}")),
+            );
+        }
+    }
+    locales
+}
+
+fn validate_message_references(
+    value: &Value,
+    messages: &BTreeMap<String, String>,
+    node_id: &str,
+    issues: &mut Vec<ValidationIssue>,
+) {
+    match value {
+        Value::Object(object) => {
+            if object.len() == 1 {
+                if let Some(message_id) = object.get("$message").and_then(Value::as_str) {
+                    if !messages.contains_key(message_id) {
+                        issues.push(
+                            ValidationIssue::error(
+                                "localized_message_missing",
+                                format!("node references missing message `{message_id}`"),
+                            )
+                            .for_node(node_id)
+                            .at_path("/config"),
+                        );
+                    }
+                    return;
+                }
+            }
+            for child in object.values() {
+                validate_message_references(child, messages, node_id, issues);
+            }
+        }
+        Value::Array(values) => {
+            for child in values {
+                validate_message_references(child, messages, node_id, issues);
+            }
+        }
+        _ => {}
+    }
 }
 
 fn content_hash(value: &impl Serialize) -> Result<String, GameRuntimeError> {
@@ -1081,6 +1269,7 @@ fn default_command_schemas() -> BTreeMap<String, Value> {
         "game.start",
         "player.choice",
         "player.text",
+        "player.continue",
         "player.action",
         "host.ready",
         "host.signal",
@@ -1105,6 +1294,7 @@ fn default_event_schemas() -> BTreeMap<String, Value> {
         "dialogue.completed",
         "choice.presented",
         "choice.selected",
+        "player.input.requested",
         "state.changed",
         "host.action.requested",
         "host.action.completed",
@@ -1184,6 +1374,7 @@ mod tests {
                 port: input.to_string(),
             },
             condition: None,
+            managed_by: None,
         }
     }
 
@@ -1379,15 +1570,18 @@ mod tests {
     }
 
     #[test]
-    fn multilingual_subtitles_require_complete_locale_coverage() {
+    fn multilingual_games_require_reviewed_current_translation_packs() {
         let compiler = GameCompiler::default();
         let mut source = source();
-        source.locales = vec!["en".to_string(), "ja".to_string()];
+        source.localization.source_messages =
+            BTreeMap::from([("opening".to_string(), "Hello".to_string())]);
+        source.localization.target_locales = vec!["ja".to_string()];
+        source.localization.default_locale = "ja".to_string();
         source.graph.nodes.push(SourceNode {
             id: "subtitle-en".to_string(),
             node_type: "subtitle".to_string(),
             version: 1,
-            config: json!({"subtitleKey": "opening", "locale": "en", "text": "Hello"}),
+            config: json!({"text": {"$message": "opening"}}),
             parent_id: None,
             label: None,
             notes: None,
@@ -1398,7 +1592,7 @@ mod tests {
         ];
 
         assert!(compiler.validate(&source).iter().any(|issue| {
-            issue.code == "subtitle_locale_missing" && issue.message.contains("ja")
+            issue.code == "translation_pack_missing" && issue.message.contains("ja")
         }));
     }
 }

@@ -1,8 +1,8 @@
 use serde_json::{json, Value};
 use vifu_game_runtime::{
-    AgentReference, EffectResult, GameCommand, GameCompiler, GamePlanV1, GameRuntime,
-    GameSnapshotV1, GameSourceV1, GameVariable, LogicalPresentationResource, PortReference,
-    SessionStatus, SourceEdge, SourceNode,
+    AgentReference, EffectResult, GameCharacterV1, GameCommand, GameCompiler, GamePlanV1,
+    GameRuntime, GameSnapshotV1, GameSourceV1, GameVariable, LogicalPresentationResource,
+    PortReference, SessionStatus, SourceEdge, SourceNode,
 };
 
 fn node(id: &str, node_type: &str, config: Value) -> SourceNode {
@@ -29,6 +29,7 @@ fn edge(id: &str, source: &str, port: &str, target: &str) -> SourceEdge {
             port: "in".to_string(),
         },
         condition: None,
+        managed_by: None,
     }
 }
 
@@ -80,6 +81,28 @@ fn golden_source() -> GameSourceV1 {
             profile_version_id: Some("profile.kai.v2".to_string()),
             capabilities: vec!["dialogue".to_string()],
             execution_descriptor: json!({"selectionKey": "kai"}),
+        },
+    ];
+    source.localization.source_messages.extend([
+        ("character.mira.name".to_string(), "Mira".to_string()),
+        ("character.kai.name".to_string(), "Kai".to_string()),
+    ]);
+    source.characters = vec![
+        GameCharacterV1 {
+            id: "mira".to_string(),
+            name_message_id: "character.mira.name".to_string(),
+            role_message_id: None,
+            agent_id: Some("mira".to_string()),
+            portrait_resource_id: Some("character.mira.portrait".to_string()),
+            player: false,
+        },
+        GameCharacterV1 {
+            id: "kai".to_string(),
+            name_message_id: "character.kai.name".to_string(),
+            role_message_id: None,
+            agent_id: Some("kai".to_string()),
+            portrait_resource_id: None,
+            player: false,
         },
     ];
     source.presentation_resources = vec![
@@ -143,6 +166,7 @@ fn golden_source() -> GameSourceV1 {
                 "input": {"beat": "greeting"},
                 "allowedStateChanges": ["metMira"],
                 "fallback": {"dialogue": "The road is dangerous after sunset."},
+                "blocking": false,
                 "sequenceId": "opening",
                 "startMs": 1200,
                 "durationMs": 2500
@@ -153,7 +177,7 @@ fn golden_source() -> GameSourceV1 {
             "input",
             json!({"commandType": "player.text", "prompt": "What should Mira call you?", "sequenceId": "opening", "startMs": 4000, "durationMs": 1200}),
         ),
-        node("remember-mira", "state", json!({"key": "metMira", "value": true})),
+        node("remember-mira", "state", json!({"key": "metMira", "op": "set", "value": true})),
         node(
             "route-choice",
             "choice",
@@ -187,6 +211,7 @@ fn golden_source() -> GameSourceV1 {
                 "input": {"beat": "gate-warning"},
                 "allowedStateChanges": ["trust"],
                 "fallback": {"dialogue": "I can hold the gate, but not for long."},
+                "blocking": false,
                 "sequenceId": "forest",
                 "startMs": 2200,
                 "durationMs": 2600
@@ -195,7 +220,7 @@ fn golden_source() -> GameSourceV1 {
         node(
             "trust-kai",
             "relationship",
-            json!({"key": "trust", "value": 4}),
+            json!({"key": "trust", "op": "set", "value": 4}),
         ),
         node(
             "open-gate",
@@ -232,7 +257,7 @@ fn golden_source() -> GameSourceV1 {
         node(
             "village-dialogue",
             "dialogue",
-            json!({"speaker": "Mira", "text": "The lanterns will stay lit for you.", "sequenceId": "village", "startMs": 400, "durationMs": 2200}),
+            json!({"speaker": "Mira", "text": "The lanterns will stay lit for you.", "blocking": false, "sequenceId": "village", "startMs": 400, "durationMs": 2200}),
         ),
         node(
             "village-choice",
@@ -328,7 +353,13 @@ fn complete_agent(runtime: &mut GameRuntime, key: &str, dialogue: &str, state: V
                 output: Some(json!({
                     "dialogue": dialogue,
                     "emotion": "focused",
-                    "stateChanges": state
+                    "stateChanges": state.as_object().into_iter().flat_map(|changes| {
+                        changes.iter().map(|(key, value)| json!({
+                            "key": key,
+                            "op": "set",
+                            "value": value
+                        }))
+                    }).collect::<Vec<_>>()
                 })),
                 error: None,
             })
@@ -380,10 +411,10 @@ fn three_scene_drama_resumes_agents_input_host_actions_and_reaches_an_ending() {
     assert_eq!(named.snapshot.status, SessionStatus::WaitingInput);
     assert_eq!(named.snapshot.state["metMira"], json!(true));
     assert_eq!(named.snapshot.node_outputs["player-name"]["text"], "Ari");
-    assert_eq!(
-        named.events.last().map(|event| event.event_type.as_str()),
-        Some("choice.presented")
-    );
+    assert!(named
+        .events
+        .iter()
+        .any(|event| event.event_type == "choice.presented"));
 
     let forest = runtime
         .dispatch(command(

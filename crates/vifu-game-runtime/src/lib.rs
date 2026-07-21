@@ -7,7 +7,7 @@ mod registry;
 mod runtime;
 
 pub use canonical::{canonical_json, canonical_json_bytes, source_from_yaml, source_to_yaml};
-pub use compiler::{CompileOutput, GameCompiler};
+pub use compiler::{localization_source_hash, CompileOutput, GameCompiler};
 pub use condition::{evaluate_condition, ConditionExpression, ValueExpression};
 pub use contract::*;
 pub use error::{GameRuntimeError, ValidationIssue, ValidationSeverity};

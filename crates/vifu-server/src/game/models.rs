@@ -565,7 +565,7 @@ mod tests {
             is_preview,
             status: "waiting_input".to_string(),
             revision: 0,
-            snapshot: GameSnapshotV1::initial(0, &[], 7),
+            snapshot: GameSnapshotV1::initial(0, &[], 7, "en"),
             host: HostDescriptor {
                 engine: "test".to_string(),
                 adapter_version: None,
@@ -583,7 +583,7 @@ mod tests {
 
     #[test]
     fn public_advance_omits_internal_snapshot_and_effect_payloads() {
-        let mut snapshot = GameSnapshotV1::initial(0, &[], 7);
+        let mut snapshot = GameSnapshotV1::initial(0, &[], 7, "en");
         snapshot.state = json!({"privateMemory": "hidden"});
         snapshot.conversations.insert(
             "npc".to_string(),

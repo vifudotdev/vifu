@@ -1,12 +1,16 @@
-use std::collections::HashSet;
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::Json;
+use serde::Deserialize;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
-use vifu_game_runtime::{canonical_json_bytes, GameCommand, ValidationSeverity};
+use vifu_game_runtime::{
+    canonical_json_bytes, localization_source_hash, GameCommand, TranslationPackStatus,
+    TranslationPackV1, ValidationSeverity,
+};
 
 use crate::auth::require_admin;
 use crate::db as runtime_db;
@@ -19,6 +23,158 @@ use super::models::{
     PublishGamePresentation, RunGame, UpdateGameResource,
 };
 use super::service;
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TranslateGameMessages {
+    pub provider_key: String,
+    pub model: String,
+    pub source_locale: String,
+    pub target_locales: Vec<String>,
+    pub messages: BTreeMap<String, String>,
+}
+
+pub async fn translate_messages(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(slug): Path<String>,
+    Json(input): Json<TranslateGameMessages>,
+) -> Result<Json<Value>, ApiError> {
+    require_admin(&headers, &state.config.admin_key)?;
+    runtime_db::get_project_by_slug(&state.pool, &slug).await?;
+    let provider_key = required_authoring_value("provider", &input.provider_key, 128)?;
+    let model = required_authoring_value("model", &input.model, 256)?;
+    let source_locale = required_authoring_value("source locale", &input.source_locale, 32)?;
+    if input.messages.is_empty() || input.messages.len() > 500 {
+        return Err(ApiError::Invalid(
+            "translation requires between 1 and 500 messages".to_string(),
+        ));
+    }
+    if input
+        .messages
+        .iter()
+        .any(|(key, message)| key.trim().is_empty() || message.trim().is_empty())
+    {
+        return Err(ApiError::Invalid(
+            "translation message IDs and source text cannot be empty".to_string(),
+        ));
+    }
+    let source_characters: usize = input.messages.values().map(String::len).sum();
+    if source_characters > 100_000 {
+        return Err(ApiError::Invalid(
+            "translation source exceeds 100,000 characters".to_string(),
+        ));
+    }
+    let mut targets = BTreeSet::new();
+    for locale in &input.target_locales {
+        let locale = required_authoring_value("target locale", locale, 32)?;
+        if locale == source_locale || !targets.insert(locale.to_string()) {
+            return Err(ApiError::Invalid(
+                "target locales must be unique and different from the source locale".to_string(),
+            ));
+        }
+    }
+    if targets.is_empty() || targets.len() > 8 {
+        return Err(ApiError::Invalid(
+            "translation requires between 1 and 8 target locales".to_string(),
+        ));
+    }
+
+    let source_hash = localization_source_hash(&input.messages);
+    let mut packs = BTreeMap::new();
+    for locale in targets {
+        let request = translation_model_request(source_locale, &locale, &input.messages)?;
+        let response = crate::api::invoke_project_authoring_model(
+            &state,
+            &slug,
+            provider_key,
+            model,
+            &request,
+        )
+        .await?;
+        let translated = parse_translation_response(&response, &input.messages)?;
+        packs.insert(
+            locale,
+            TranslationPackV1 {
+                source_hash: source_hash.clone(),
+                status: TranslationPackStatus::Draft,
+                messages: translated,
+            },
+        );
+    }
+    Ok(Json(json!({"sourceHash": source_hash, "packs": packs})))
+}
+
+fn translation_model_request(
+    source_locale: &str,
+    target_locale: &str,
+    messages: &BTreeMap<String, String>,
+) -> Result<Value, ApiError> {
+    let input = serde_json::to_string(&json!({
+        "sourceLocale": source_locale,
+        "targetLocale": target_locale,
+        "messages": messages,
+    }))
+    .map_err(|_| ApiError::Internal)?;
+    Ok(json!({
+        "messages": [
+            {
+                "role": "system",
+                "content": "Translate interactive game dialogue accurately and naturally. Preserve character names, placeholders, punctuation intent, and every source message ID. Return valid json only: one object whose keys exactly match the source message IDs and whose values are translated strings."
+            },
+            {"role": "user", "content": format!("Translate this input and return json:\n{input}")}
+        ],
+        "response_format": {"type": "json_object"},
+        "stream": false
+    }))
+}
+
+fn required_authoring_value<'a>(
+    label: &str,
+    value: &'a str,
+    maximum: usize,
+) -> Result<&'a str, ApiError> {
+    let value = value.trim();
+    if value.is_empty() || value.len() > maximum {
+        return Err(ApiError::Invalid(format!(
+            "{label} must contain between 1 and {maximum} characters"
+        )));
+    }
+    Ok(value)
+}
+
+fn parse_translation_response(
+    response: &Value,
+    source: &BTreeMap<String, String>,
+) -> Result<BTreeMap<String, String>, ApiError> {
+    let content = response
+        .pointer("/choices/0/message/content")
+        .and_then(Value::as_str)
+        .ok_or_else(|| ApiError::Provider("translation model returned no content".to_string()))?;
+    let value: Value = serde_json::from_str(content)
+        .map_err(|_| ApiError::Provider("translation model returned invalid JSON".to_string()))?;
+    let object = value.as_object().ok_or_else(|| {
+        ApiError::Provider("translation model must return a JSON object".to_string())
+    })?;
+    if object.len() != source.len() || source.keys().any(|key| !object.contains_key(key)) {
+        return Err(ApiError::Provider(
+            "translation model changed or omitted message IDs".to_string(),
+        ));
+    }
+    object
+        .iter()
+        .map(|(key, value)| {
+            let message = value
+                .as_str()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| {
+                    ApiError::Provider(format!("translation `{key}` is empty or not text"))
+                })?;
+            Ok((key.clone(), message.to_string()))
+        })
+        .collect()
+}
 
 pub async fn list_resources(
     State(state): State<AppState>,
@@ -393,7 +549,8 @@ pub async fn get_session(
     require_admin(&headers, &state.config.admin_key)?;
     let project = runtime_db::get_project_by_slug(&state.pool, &slug).await?;
     let session = db::get_game_session(&state.pool, project.project.id, session_id).await?;
-    Ok(Json(json!({"session": session})))
+    let events = db::list_game_events_after(&state.pool, session.id, 0, 1_000).await?;
+    Ok(Json(json!({"session": session, "events": events})))
 }
 
 pub async fn publish_presentation(
@@ -542,7 +699,9 @@ mod tests {
         LogicalPresentationResource, PortReference, SourceEdge, SourceNode,
     };
 
-    use super::validate_presentation_bindings;
+    use super::{
+        parse_translation_response, translation_model_request, validate_presentation_bindings,
+    };
     use crate::error::ApiError;
 
     fn manifest_with_resource(resource_id: &str) -> vifu_game_runtime::GameManifestV1 {
@@ -567,6 +726,7 @@ mod tests {
                 port: "in".to_string(),
             },
             condition: None,
+            managed_by: None,
         });
         source
             .presentation_resources
@@ -639,5 +799,51 @@ mod tests {
             result,
             Err(ApiError::Invalid(message)) if message.contains("exactly the versions")
         ));
+    }
+
+    #[test]
+    fn accepts_translation_objects_only_when_message_ids_are_preserved() {
+        let source = BTreeMap::from([
+            ("opening.title".to_string(), "月行き最終列車".to_string()),
+            ("opening.line".to_string(), "列车到了。".to_string()),
+        ]);
+        let response = json!({
+            "choices": [{
+                "message": {
+                    "content": "{\"opening.title\":\"月行き最終列車\",\"opening.line\":\"列車が到着した。\"}"
+                }
+            }]
+        });
+
+        let translated = parse_translation_response(&response, &source).expect("valid translation");
+        assert_eq!(translated["opening.line"], "列車が到着した。");
+
+        let missing = json!({
+            "choices": [{"message": {"content": "{\"opening.title\":\"Last Train\"}"}}]
+        });
+        assert!(matches!(
+            parse_translation_response(&missing, &source),
+            Err(ApiError::Provider(message)) if message.contains("omitted")
+        ));
+    }
+
+    #[test]
+    fn translation_json_mode_is_explicit_in_the_prompt() {
+        let request = translation_model_request(
+            "en",
+            "ja",
+            &BTreeMap::from([("opening.title".to_string(), "Last Train".to_string())]),
+        )
+        .expect("translation request");
+        let prompt = request
+            .pointer("/messages/1/content")
+            .and_then(serde_json::Value::as_str)
+            .expect("user prompt");
+
+        assert!(prompt.contains("json"));
+        assert_eq!(
+            request.pointer("/response_format/type"),
+            Some(&json!("json_object"))
+        );
     }
 }

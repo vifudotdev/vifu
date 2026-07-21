@@ -23,6 +23,8 @@ pub enum ApiError {
     Validation(Vec<ValidationIssue>),
     #[error("model is required")]
     ModelRequired,
+    #[error("the requested locale is not supported by this game")]
+    LocaleNotSupported,
     #[error("the requested agent is not available to this project key")]
     AgentAccessDenied,
     #[error("the API key does not permit this endpoint")]
@@ -74,6 +76,7 @@ impl IntoResponse for ApiError {
             Self::Conflict(_) => (StatusCode::CONFLICT, "CONFLICT"),
             Self::Validation(_) => (StatusCode::UNPROCESSABLE_ENTITY, "VALIDATION_FAILED"),
             Self::ModelRequired => (StatusCode::BAD_REQUEST, "model_required"),
+            Self::LocaleNotSupported => (StatusCode::BAD_REQUEST, "locale_not_supported"),
             Self::AgentAccessDenied => (StatusCode::FORBIDDEN, "agent_access_denied"),
             Self::EndpointAccessDenied => (StatusCode::FORBIDDEN, "endpoint_access_denied"),
             Self::AgentGatewayCredentialRevoked => {
