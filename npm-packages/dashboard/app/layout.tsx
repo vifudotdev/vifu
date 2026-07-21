@@ -10,8 +10,8 @@ import type { Metadata } from "next";
 import type { ReactNode } from "react";
 
 export const metadata: Metadata = {
-  title: "Vifu Dashboard",
-  description: "Agent Endpoint Runtime console.",
+  title: "VifuDev",
+  description: "Open-source dashboard for the Vifu Runtime.",
 };
 
 export default function RootLayout({ children }: { children: ReactNode }) {

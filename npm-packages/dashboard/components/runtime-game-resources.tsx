@@ -438,7 +438,7 @@ function AssetDialog({ project, asset, onClose }: { project: RuntimeProject; ass
         target = created.asset;
       }
       const upload = new FormData();
-      upload.set("file", file);
+      upload.set("file", normalizedMediaFile(file, target.kind));
       upload.set("rightsStatus", String(form.get("rightsStatus") ?? "unreviewed"));
       upload.set("metadata", "{}");
       upload.set("provenance", JSON.stringify({ originalName: file.name }));
@@ -488,6 +488,14 @@ function mediaIcon(kind: string): LucideIcon {
   if (kind === "audio") return FileAudio;
   if (kind === "image") return FileImage;
   return FileText;
+}
+
+function normalizedMediaFile(file: File, kind: string): File {
+  if (file.type || kind !== "subtitle") return file;
+  return new File([file], file.name, {
+    type: file.name.toLowerCase().endsWith(".vtt") ? "text/vtt" : "application/x-subrip",
+    lastModified: file.lastModified,
+  });
 }
 
 function formatBytes(value: number): string {

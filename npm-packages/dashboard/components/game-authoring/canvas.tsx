@@ -257,6 +257,7 @@ function NodePalette({
         ...added.config,
         logicalResourceId: asset.assetKey,
         kind: asset.kind,
+        fit: "cover",
       },
     });
     store.getState().setSource(bindManagedPresentationAsset(store.getState().source, asset, version));

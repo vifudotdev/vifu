@@ -1,15 +1,23 @@
 import { describe, expect, test } from "vitest";
 import {
+  DEFAULT_SHORT_DRAMA_VIEWPORT,
+  addAgentCharacter,
+  addSourceEdge,
   canvasLayoutPositions,
   isShortDramaStoryDefinition,
+  nextShortDramaStart,
+  parseSubtitleCues,
   placeNodeOnTimeline,
+  presentationViewport,
+  reorderTimelineNodes,
   removeNodeFromSource,
   replaceSourceNode,
   setCanvasPosition,
+  setPresentationViewport,
   setShortDramaTrack,
   splitTimelineSourceNode,
 } from "./game-authoring";
-import type { GameSource, GameSourceNode } from "./runtime-types";
+import type { AgentProfile, GameSource, GameSourceNode } from "./runtime-types";
 
 function source(nodes: GameSourceNode[]): GameSource {
   return {
@@ -27,9 +35,16 @@ function source(nodes: GameSourceNode[]): GameSource {
     outputs: { type: "object" },
     variables: [],
     agents: [],
+    characters: [],
     resources: [],
     presentationResources: [],
-    locales: ["en"],
+    localization: {
+      sourceLocale: "en",
+      defaultLocale: "en",
+      targetLocales: [],
+      sourceMessages: {},
+      packs: {},
+    },
     views: {},
   };
 }
@@ -64,8 +79,54 @@ describe("shared GameSource authoring", () => {
     expect(drama.graph).toEqual(initial.graph);
     expect(drama.views).toMatchObject({
       canvas: { nodes: { scene: { x: 320, y: 180 } } },
+      presentation: { viewport: DEFAULT_SHORT_DRAMA_VIEWPORT },
       shortDrama: { trackByNode: { scene: "story" } },
     });
+    expect(presentationViewport(drama)).toEqual(DEFAULT_SHORT_DRAMA_VIEWPORT);
+  });
+
+  test("Short Drama preserves a format selected from either authoring view", () => {
+    const initial = source([
+      { id: "scene", type: "scene", version: 1, config: { durationMs: 2000 } },
+    ]);
+    const landscape = setPresentationViewport(initial, {
+      width: 1920,
+      height: 1080,
+      aspectRatio: "16:9",
+    });
+    const edited = setShortDramaTrack(landscape, "scene", "story");
+
+    expect(presentationViewport(edited)).toEqual({ width: 1920, height: 1080, aspectRatio: "16:9" });
+    expect(edited.views.shortDrama).toEqual({ trackByNode: { scene: "story" } });
+  });
+
+  test("adding an Agent to the cast does not create a story node", () => {
+    const initial = source([]);
+    const profile: AgentProfile = {
+      id: "profile-mizuki",
+      projectId: "project-last-train",
+      slug: "mizuki",
+      name: "Mizuki",
+      description: "Moon Kingdom heir",
+      activeVersionId: "version-2",
+      archivedAt: null,
+      createdAt: "2026-07-21T00:00:00Z",
+      updatedAt: "2026-07-21T00:00:00Z",
+    };
+
+    const edited = addAgentCharacter(initial, profile);
+
+    expect(edited.graph).toEqual(initial.graph);
+    expect(edited.agents).toEqual([expect.objectContaining({
+      id: "agent.mizuki",
+      profileId: profile.id,
+      profileVersionId: profile.activeVersionId,
+    })]);
+    expect(edited.characters).toEqual([expect.objectContaining({
+      agentId: "agent.mizuki",
+      player: false,
+    })]);
+    expect(addAgentCharacter(edited, profile)).toBe(edited);
   });
 
   test("legacy saved positions cannot overlap nodes that use fallback layout", () => {
@@ -113,6 +174,69 @@ describe("shared GameSource authoring", () => {
       durationMs: 4200,
     });
     expect(edited.views.shortDrama).toEqual({ trackByNode: { clip: "picture" } });
+    expect(edited.views.presentation).toMatchObject({ viewport: DEFAULT_SHORT_DRAMA_VIEWPORT });
+    expect(edited.graph.edges).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        source: { nodeId: "start", port: "next" },
+        target: { nodeId: "clip", port: "in" },
+        managedBy: "shortDrama",
+      }),
+    ]));
+  });
+
+  test("narrative tracks share one insertion cursor while media tracks remain parallel", () => {
+    let initial = source([
+      { id: "scene", type: "scene", version: 1, config: { sequenceId: "main", startMs: 0, durationMs: 5000 } },
+      { id: "music", type: "audio", version: 1, config: { sequenceId: "main", startMs: 0, durationMs: 30_000 } },
+      { id: "agent", type: "agent", version: 1, config: { sequenceId: "main", startMs: 5000, durationMs: 3000 } },
+    ]);
+    initial = setShortDramaTrack(initial, "scene", "story");
+    initial = setShortDramaTrack(initial, "music", "sound");
+    initial = setShortDramaTrack(initial, "agent", "cast");
+
+    expect(nextShortDramaStart(initial, "interaction")).toBe(8000);
+    expect(nextShortDramaStart(initial, "sound")).toBe(30_000);
+    expect(nextShortDramaStart(initial, "picture")).toBe(0);
+  });
+
+  test("Short Drama parses SRT and WebVTT cues for timeline preview", () => {
+    expect(parseSubtitleCues(`1\n00:00:01,250 --> 00:00:03,000\nFirst line\nSecond line\n\n2\n00:03.500 --> 00:05.000 align:center\nNext cue`)).toEqual([
+      { startMs: 1250, endMs: 3000, text: "First line\nSecond line" },
+      { startMs: 3500, endMs: 5000, text: "Next cue" },
+    ]);
+  });
+
+  test("Short Drama sequence edits maintain executable routes without replacing Canvas routes", () => {
+    let edited = source([
+      { id: "scene", type: "scene", version: 1, config: { sequenceId: "main", startMs: 0, durationMs: 1000 } },
+      { id: "dialogue", type: "dialogue", version: 1, config: { sequenceId: "main", startMs: 1000, durationMs: 1000 } },
+      { id: "advanced", type: "transform", version: 1, config: {} },
+    ]);
+    edited = placeNodeOnTimeline(edited, "scene", "story", 0);
+    edited = placeNodeOnTimeline(edited, "dialogue", "story", 1000);
+
+    expect(edited.graph.edges.filter((edge) => edge.managedBy === "shortDrama").map((edge) => [
+      edge.source.nodeId,
+      edge.target.nodeId,
+    ])).toEqual([
+      ["start", "scene"],
+      ["scene", "dialogue"],
+      ["dialogue", "short-drama-end"],
+    ]);
+
+    edited = addSourceEdge(edited, {
+      id: "canvas-scene-advanced",
+      source: { nodeId: "scene", port: "next" },
+      target: { nodeId: "advanced", port: "in" },
+    });
+    edited = reorderTimelineNodes(edited, "story", ["dialogue", "scene"]);
+
+    expect(edited.graph.edges).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: "canvas-scene-advanced", target: { nodeId: "advanced", port: "in" } }),
+    ]));
+    expect(edited.graph.edges.some((edge) => (
+      edge.managedBy === "shortDrama" && edge.source.nodeId === "scene" && edge.source.port === "next"
+    ))).toBe(false);
   });
 
   test("editing a Host Action declares its engine-neutral target", () => {

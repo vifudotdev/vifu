@@ -111,9 +111,9 @@ export function RuntimeConsole({
     <AppLayout
       sidebar={(
         <>
-          <Link className="console-brand" href="/project" aria-label="Vifu Dashboard">
+          <Link className="console-brand" href="/project" aria-label="VifuDev Dashboard">
             <Image src="/brand/vifu-icon-512.png" width={32} height={32} alt="" priority />
-            <span>Vifu</span>
+            <span>VifuDev</span>
           </Link>
           {selectedProject ? (
             <Navigation project={selectedProject} items={PROJECT_NAVIGATION} active={activeSection} capabilities={capabilities} />
@@ -234,14 +234,14 @@ function ProjectSectionView({
   }
   if (section === "short-drama") {
     if (!data.gameDraft) return <EmptyState>The game draft is unavailable.</EmptyState>;
-    return <RuntimeShortDrama project={project} draft={data.gameDraft} definitions={data.gameNodeDefinitions} profiles={data.runtime.profiles} resources={data.gameResources} assets={data.gameAssets} />;
+    return <RuntimeShortDrama project={project} draft={data.gameDraft} definitions={data.gameNodeDefinitions} profiles={data.runtime.profiles} resources={data.gameResources} assets={data.gameAssets} providers={data.projectProviders} />;
   }
   if (section === "resources") {
     if (!data.gameDraft) return <EmptyState>The game draft is unavailable.</EmptyState>;
     return <RuntimeGameResources project={project} draft={data.gameDraft} resources={data.gameResources} assets={data.gameAssets} />;
   }
   if (section === "preview") {
-    return <RuntimeGamePreview project={project} overview={data.gameOverview} qa={data.gameQa} recentSessions={data.gameSessions} />;
+    return <RuntimeGamePreview project={project} overview={data.gameOverview} qa={data.gameQa} recentSessions={data.gameSessions} draft={data.gameDraft} assets={data.gameAssets} />;
   }
   if (section === "analytics") return <RuntimeGameAnalytics analytics={data.gameAnalytics} />;
   if (section === "api") {

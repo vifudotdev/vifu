@@ -11,6 +11,23 @@ describe("runtime Game proxy policy", () => {
       "sessions",
       "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
     ])).toBe(true);
+    expect(isAllowedProjectGamePath([
+      "project",
+      "demo",
+      "game",
+      "localization",
+      "translate",
+    ])).toBe(true);
+    expect(isAllowedProjectGamePath([
+      "project",
+      "demo",
+      "game",
+      "assets",
+      "asset-id",
+      "versions",
+      "version-id",
+      "content",
+    ])).toBe(true);
   });
 
   test("rejects unregistered nested Game routes", () => {

@@ -1,8 +1,13 @@
-# Vifu
+# VifuDev
 
-Vifu is an open-source endpoint runtime for local AI agents. It provides stable
+![VifuDev](npm-packages/dashboard/public/brand/vifudev-lockup.svg)
+
+VifuDev is the open-source product for the Vifu endpoint runtime for local AI
+agents. It provides stable
 project endpoints with profiles, bindings, API keys, connection status, and
 traces, and connects agent providers through Vifu Agent Gateway.
+
+The runtime command and protocol remain `vifu`.
 
 The runtime, Agent Gateway protocol, PostgreSQL migrations, dashboard, and Docker
 deployment are all included in this repository under Apache-2.0.

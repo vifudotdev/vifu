@@ -7,16 +7,22 @@ import {
   ChevronRight,
   CircleStop,
   Hammer,
+  Languages,
+  Maximize2,
+  Minimize2,
   Play,
   RefreshCw,
   Send,
   TerminalSquare,
 } from "lucide-react";
-import { useState, type FormEvent } from "react";
+import { useEffect, useRef, useState, type CSSProperties, type FormEvent } from "react";
 import { runtimeBrowserRequest } from "../lib/runtime-browser-client";
+import { DEFAULT_GAME_VIEWPORT, presentationViewport } from "../lib/game-authoring";
 import type {
   GameAdvance,
+  GameAsset,
   GameBuild,
+  GameDraft,
   GameEvent,
   GameOverview,
   GameQa,
@@ -37,18 +43,80 @@ export function RuntimeGamePreview({
   overview,
   qa,
   recentSessions,
+  draft,
+  assets,
 }: {
   project: RuntimeProject;
   overview?: GameOverview;
   qa?: GameQa;
   recentSessions: GameSession[];
+  draft?: GameDraft;
+  assets: GameAsset[];
 }) {
   const [preview, setPreview] = useState<PreviewState | null>(null);
   const [pending, setPending] = useState<"start" | "command" | "build" | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const [build, setBuild] = useState<GameBuild | null>(null);
+  const [focused, setFocused] = useState(false);
+  const locales = draft ? [...new Set([draft.source.localization.sourceLocale, ...draft.source.localization.targetLocales])] : ["en"];
+  const [locale, setLocale] = useState(draft?.source.localization.defaultLocale ?? locales[0] ?? "en");
   const requiredCapabilities = qa?.requiredHostCapabilities ?? [];
   const previewSessions = recentSessions.filter((session) => session.preview);
+  const viewport = draft ? presentationViewport(draft.source) : DEFAULT_GAME_VIEWPORT;
+  const orientation = viewport.width === viewport.height
+    ? "square"
+    : viewport.width < viewport.height
+      ? "portrait"
+      : "landscape";
+  const playerStyle = {
+    "--game-preview-ratio": `${viewport.width} / ${viewport.height}`,
+    "--game-preview-ratio-value": viewport.width / viewport.height,
+  } as CSSProperties;
+
+  useEffect(() => {
+    if (!preview || preview.advance.snapshot.status !== "waiting_effect") return;
+    let cancelled = false;
+    let timer: number | undefined;
+
+    async function refreshEffect() {
+      if (!preview) return;
+      try {
+        const detail = await runtimeBrowserRequest<{ session: GameSession; events: GameEvent[] }>(
+          `project/${encodeURIComponent(project.slug)}/game/sessions/${preview.sessionId}`,
+        );
+        if (cancelled) return;
+        setPreview((current) => current && current.sessionId === preview.sessionId ? {
+          ...current,
+          advance: {
+            snapshot: detail.session.snapshot,
+            events: detail.events,
+            effects: [],
+          },
+          events: mergeEvents(current.events, detail.events),
+        } : current);
+        if (detail.session.snapshot.status === "waiting_effect") {
+          timer = window.setTimeout(refreshEffect, 500);
+        }
+      } catch (error) {
+        if (!cancelled) setMessage(errorMessage(error));
+      }
+    }
+
+    timer = window.setTimeout(refreshEffect, 250);
+    return () => {
+      cancelled = true;
+      if (timer !== undefined) window.clearTimeout(timer);
+    };
+  }, [preview?.advance.snapshot.status, preview?.sessionId, project.slug]);
+
+  useEffect(() => {
+    if (!focused) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setFocused(false);
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [focused]);
 
   async function start() {
     setPending("start");
@@ -63,7 +131,7 @@ export function RuntimeGamePreview({
           engine: "web",
           adapterVersion: "vifu-dashboard-v1",
           capabilities: requiredCapabilities,
-          locale: "en",
+          locale,
         },
         input: {},
       });
@@ -80,6 +148,7 @@ export function RuntimeGamePreview({
         },
         events: result.advance.events,
       });
+      setFocused(true);
     } catch (error) {
       setMessage(errorMessage(error));
     } finally {
@@ -139,7 +208,7 @@ export function RuntimeGamePreview({
   }
 
   return (
-    <div className="game-preview-page">
+    <div className={`game-preview-page ${focused ? "focused" : ""}`}>
       <section className="game-qa-summary">
         <div className={`qa-readiness ${qa?.ready ? "ready" : "blocked"}`}>
           {qa?.ready ? <CheckCircle2 aria-hidden="true" /> : <AlertTriangle aria-hidden="true" />}
@@ -154,16 +223,19 @@ export function RuntimeGamePreview({
         <button className="secondary-button compact" type="button" disabled={pending !== null || !qa?.ready} onClick={() => void runBuild()}>
           <Hammer aria-hidden="true" />{pending === "build" ? "Building..." : "Build draft"}
         </button>
+        <label className="preview-locale-select"><Languages aria-hidden="true" /><span className="sr-only">Preview language</span><select value={locale} onChange={(event) => setLocale(event.target.value)}>{locales.map((item) => <option value={item} key={item}>{localeName(item)}</option>)}</select></label>
       </section>
 
       {message ? <p className="inline-error game-preview-error" role="alert">{message}</p> : null}
       {build ? <p className="game-build-result"><CheckCircle2 aria-hidden="true" />Build {build.status} for draft {build.sourceRevision}</p> : null}
 
       <div className="game-preview-workspace">
-        <section className="reference-player">
-          <header><div><span>Reference host</span><strong>{preview ? statusLabel(preview.advance.snapshot.status) : "Not running"}</strong></div><button className="icon-button" type="button" disabled={pending !== null || !qa?.ready} onClick={() => void start()} title={preview ? "Restart preview" : "Start preview"} aria-label={preview ? "Restart preview" : "Start preview"}>{preview ? <RefreshCw aria-hidden="true" /> : <Play aria-hidden="true" />}</button></header>
+        <section className={`reference-player formatted ${orientation}`} style={playerStyle}>
+          <header><div><span>{focused ? project.name : "Reference host"}</span><strong>{preview ? statusLabel(preview.advance.snapshot.status) : "Not running"}</strong></div><nav className="reference-player-actions" aria-label="Preview controls"><button className="icon-button" type="button" disabled={pending !== null || !qa?.ready} onClick={() => void start()} title={preview ? "Restart preview" : "Start preview"} aria-label={preview ? "Restart preview" : "Start preview"}>{preview ? <RefreshCw aria-hidden="true" /> : <Play aria-hidden="true" />}</button>{preview ? <button className="icon-button" type="button" onClick={() => setFocused((value) => !value)} title={focused ? "Exit play mode" : "Enter play mode"} aria-label={focused ? "Exit play mode" : "Enter play mode"}>{focused ? <Minimize2 aria-hidden="true" /> : <Maximize2 aria-hidden="true" />}</button> : null}</nav></header>
           {preview ? (
-            <PlayerSurface preview={preview} pending={pending === "command"} onCommand={command} />
+            <div className="reference-player-canvas">
+              <PlayerSurface projectSlug={project.slug} draft={draft} assets={assets} preview={preview} pending={pending === "command"} onCommand={command} />
+            </div>
           ) : (
             <div className="reference-player-empty">
               <Play aria-hidden="true" />
@@ -205,41 +277,86 @@ export function RuntimeGamePreview({
   );
 }
 
-function PlayerSurface({ preview, pending, onCommand }: { preview: PreviewState; pending: boolean; onCommand: (type: string, data: unknown) => Promise<void> }) {
+function PlayerSurface({
+  projectSlug,
+  draft,
+  assets,
+  preview,
+  pending,
+  onCommand,
+}: {
+  projectSlug: string;
+  draft?: GameDraft;
+  assets: GameAsset[];
+  preview: PreviewState;
+  pending: boolean;
+  onCommand: (type: string, data: unknown) => Promise<void>;
+}) {
   const [text, setText] = useState("");
-  const latest = preview.events.at(-1);
-  const choice = [...preview.events].reverse().find((event) => event.type === "choice.presented");
+  const latest = latestPresentationEvent(preview.events);
+  const waiting = latestWaiting(preview.events);
+  const choice = waiting.commandType === "player.choice" ? [...preview.events].reverse().find((event) => event.type === "choice.presented") : undefined;
   const choices = choiceOptions(choice?.data);
+  const input = waiting.commandType && !["player.choice", "player.continue"].includes(waiting.commandType)
+    ? [...preview.events].reverse().find((event) => event.type === "player.input.requested")
+    : undefined;
   const snapshot = preview.advance.snapshot;
+  const stageMediaEvent = [...preview.events].reverse().find((event) => ["background.changed", "video.play"].includes(event.type));
+  const characterEvent = [...preview.events].reverse().find((event) => event.type === "character.visual.changed");
+  const audioEvents = [...preview.events].reverse().filter((event) => event.type === "audio.play");
+  const scoreEvent = audioEvents.find((event) => objectBoolean(event.data, "loop"));
+  const effectEvent = audioEvents.find((event) => !objectBoolean(event.data, "loop"));
+  const voiceEvent = [...preview.events].reverse().find((event) => event.type === "voice.play");
+  const stageMediaUrl = assetUrl(projectSlug, draft, assets, objectString(stageMediaEvent?.data, "logicalResourceId"));
+  const characterUrl = assetUrl(projectSlug, draft, assets, objectString(characterEvent?.data, "logicalResourceId"));
+  const scoreUrl = assetUrl(projectSlug, draft, assets, objectString(scoreEvent?.data, "logicalResourceId"));
+  const effectUrl = assetUrl(projectSlug, draft, assets, objectString(effectEvent?.data, "logicalResourceId"));
+  const voiceUrl = assetUrl(projectSlug, draft, assets, objectString(voiceEvent?.data, "logicalResourceId"));
+  const backgroundFit = objectString(stageMediaEvent?.data, "fit") === "contain" ? "contain" : "cover";
 
   function submitText(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const value = text.trim();
     if (!value) return;
     setText("");
-    void onCommand("player.text", { text: value });
+    void onCommand(waiting.commandType || "player.text", { text: value });
   }
 
   return (
     <div className="reference-player-surface">
+      <div className="reference-stage-media" aria-hidden="true">
+        {stageMediaUrl && stageMediaEvent?.type === "video.play" ? (
+          <RuntimeVideo event={stageMediaEvent} src={stageMediaUrl} fit={backgroundFit} />
+        ) : stageMediaUrl ? (
+          <img className="reference-stage-background" src={stageMediaUrl} alt="" style={{ objectFit: backgroundFit }} />
+        ) : <div className="reference-stage-fallback" />}
+        {characterUrl ? <img className="reference-stage-character" src={characterUrl} alt="" /> : null}
+        <div className="reference-stage-vignette" />
+      </div>
       <div className="reference-stage-copy">
         <span>{latest ? eventLabel(latest.type) : "Session started"}</span>
         <strong>{eventHeadline(latest)}</strong>
         <p>{eventDetail(latest)}</p>
       </div>
       {snapshot.status === "waiting_host" && snapshot.pendingHostAction ? (
-        <button className="player-host-action" type="button" disabled={pending} onClick={() => void onCommand("host.action.completed", { actionId: snapshot.pendingHostAction?.actionId })}>
-          Complete {snapshot.pendingHostAction.action} on {snapshot.pendingHostAction.target}
-        </button>
+        snapshot.pendingHostAction.action === "break_moon_control"
+          ? <BreakControlAction pending={pending} onComplete={() => onCommand("host.action.completed", { actionId: snapshot.pendingHostAction?.actionId })} />
+          : <button className="player-host-action" type="button" disabled={pending} onClick={() => void onCommand("host.action.completed", { actionId: snapshot.pendingHostAction?.actionId })}>Complete {snapshot.pendingHostAction.action}</button>
       ) : null}
-      {snapshot.status === "waiting_input" && choices.length > 0 ? (
+      {snapshot.status === "waiting_input" && waiting.commandType === "player.choice" ? (
         <div className="player-choice-list">
-          {choices.map((option) => <button type="button" disabled={pending} key={option.id} onClick={() => void onCommand("player.choice", { optionId: option.id })}>{option.label}<ChevronRight aria-hidden="true" /></button>)}
+          {choices.map((option) => <button type="button" disabled={pending || !option.available} key={option.id} title={!option.available ? option.lockedReason || "This path is locked" : undefined} onClick={() => void onCommand("player.choice", { optionId: option.id })}><span>{option.label}{!option.available && option.lockedReason ? <small>{option.lockedReason}</small> : null}</span><ChevronRight aria-hidden="true" /></button>)}
         </div>
       ) : null}
-      {snapshot.status === "waiting_input" && choices.length === 0 ? (
-        <form className="player-text-input" onSubmit={submitText}><input value={text} onChange={(event) => setText(event.target.value)} placeholder="Player response" aria-label="Player response" /><button className="icon-button" type="submit" disabled={pending || !text.trim()} aria-label="Send response"><Send aria-hidden="true" /></button></form>
+      {snapshot.status === "waiting_input" && waiting.commandType === "player.continue" ? <button type="button" className="player-continue-button" disabled={pending} onClick={() => void onCommand("player.continue", {})}>Continue<ChevronRight aria-hidden="true" /></button> : null}
+      {snapshot.status === "waiting_input" && waiting.commandType && !["player.choice", "player.continue"].includes(waiting.commandType) ? (
+        <form className="player-text-input" onSubmit={submitText}><label><span>{objectString(input?.data, "prompt") || "What do you say?"}</span><input value={text} onChange={(event) => setText(event.target.value)} placeholder="Your response" aria-label="Player response" /></label><button className="icon-button" type="submit" disabled={pending || !text.trim()} aria-label="Send response"><Send aria-hidden="true" /></button></form>
       ) : null}
+      {scoreUrl || effectUrl || voiceUrl ? <div className="reference-player-audio-stack">
+        {scoreUrl ? <audio className="reference-player-audio" key={scoreEvent?.id} src={scoreUrl} controls autoPlay loop /> : null}
+        {effectUrl ? <audio className="reference-player-audio" key={effectEvent?.id} src={effectUrl} controls autoPlay /> : null}
+        {voiceUrl ? <audio className="reference-player-audio" key={voiceEvent?.id} src={voiceUrl} controls autoPlay /> : null}
+      </div> : null}
       <details className="player-debug-state"><summary>Runtime state</summary><pre>{JSON.stringify(snapshot.state, null, 2)}</pre></details>
       <div className="player-event-strip">
         {preview.events.slice(-6).map((event) => <span key={event.id}><i />{event.type}</span>)}
@@ -248,7 +365,71 @@ function PlayerSurface({ preview, pending, onCommand }: { preview: PreviewState;
   );
 }
 
-function choiceOptions(value: unknown): Array<{ id: string; label: string }> {
+function RuntimeVideo({ event, src, fit }: { event: GameEvent; src: string; fit: "contain" | "cover" }) {
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const muted = objectBoolean(event.data, "muted");
+  const loop = objectBoolean(event.data, "loop");
+  const volume = objectNumber(event.data, "volume", 1);
+  const inMs = objectNumber(event.data, "inMs", 0);
+
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video) return;
+    video.volume = Math.max(0, Math.min(1, volume));
+    video.currentTime = Math.max(0, inMs) / 1000;
+    void video.play().catch(() => undefined);
+    return () => video.pause();
+  }, [event.id, inMs, src, volume]);
+
+  return (
+    <video
+      className="reference-stage-background"
+      ref={videoRef}
+      src={src}
+      style={{ objectFit: fit }}
+      autoPlay
+      loop={loop}
+      muted={muted}
+      playsInline
+      preload="auto"
+    />
+  );
+}
+
+function BreakControlAction({ pending, onComplete }: { pending: boolean; onComplete: () => Promise<void> }) {
+  const [progress, setProgress] = useState(0);
+  const timer = useRef<number | null>(null);
+  const started = useRef(0);
+
+  useEffect(() => () => stop(false), []);
+
+  function start() {
+    if (pending || timer.current !== null) return;
+    started.current = performance.now();
+    timer.current = window.setInterval(() => {
+      const next = Math.min(100, ((performance.now() - started.current) / 1200) * 100);
+      setProgress(next);
+      if (next >= 100) {
+        stop(false);
+        void onComplete();
+      }
+    }, 32);
+  }
+
+  function stop(reset = true) {
+    if (timer.current !== null) window.clearInterval(timer.current);
+    timer.current = null;
+    if (reset) setProgress(0);
+  }
+
+  return (
+    <button className="player-host-action break-control-action" type="button" disabled={pending} onPointerDown={start} onPointerUp={() => stop()} onPointerCancel={() => stop()} onPointerLeave={() => stop()} onKeyDown={(event) => { if (["Enter", " "].includes(event.key)) { event.preventDefault(); start(); } }} onKeyUp={(event) => { if (["Enter", " "].includes(event.key)) stop(); }}>
+      <i style={{ width: `${progress}%` }} /><span>Hold to break the moon&apos;s control</span>
+    </button>
+  );
+}
+
+function choiceOptions(value: unknown): Array<{ id: string; label: string; available: boolean; lockedReason: string }> {
   if (!value || typeof value !== "object") return [];
   const options = (value as { options?: unknown }).options;
   if (!Array.isArray(options)) return [];
@@ -257,20 +438,68 @@ function choiceOptions(value: unknown): Array<{ id: string; label: string }> {
     const id = String((option as { id?: unknown }).id ?? "");
     if (!id) return [];
     const label = String((option as { label?: unknown; text?: unknown }).label ?? (option as { text?: unknown }).text ?? id);
-    return [{ id, label }];
+    const available = (option as { available?: unknown }).available !== false;
+    const lockedReason = String((option as { lockedReason?: unknown }).lockedReason ?? "");
+    return [{ id, label, available, lockedReason }];
   });
+}
+
+function mergeEvents(current: GameEvent[], incoming: GameEvent[]): GameEvent[] {
+  const events = new Map(current.map((event) => [event.id, event]));
+  for (const event of incoming) events.set(event.id, event);
+  return [...events.values()].sort((left, right) => left.sequence - right.sequence);
+}
+
+function latestPresentationEvent(events: GameEvent[]): GameEvent | undefined {
+  const visible = new Set(["scene.entered", "dialogue.started", "agent.completed", "ending.reached", "choice.presented", "player.input.requested", "host.action.requested"]);
+  return [...events].reverse().find((event) => visible.has(event.type)) ?? events.at(-1);
+}
+
+function latestWaiting(events: GameEvent[]): { commandType: string; for: string } {
+  const event = [...events].reverse().find((item) => item.type === "game.session.waiting");
+  const data = objectValue(event?.data);
+  return { commandType: stringValue(data.commandType), for: stringValue(data.for) };
+}
+
+function assetUrl(projectSlug: string, draft: GameDraft | undefined, assets: GameAsset[], logicalResourceId: string): string | null {
+  if (!draft || !logicalResourceId) return null;
+  const presentation = objectValue(draft.source.views.presentation);
+  const binding = objectValue(objectValue(presentation.bindings)[logicalResourceId]);
+  const versionId = binding.kind === "managed-asset-version" && typeof binding.value === "string" ? binding.value : "";
+  if (!versionId) return null;
+  const asset = assets.find((item) => item.versions.some((version) => version.id === versionId));
+  if (!asset) return null;
+  return `/api/runtime/project/${encodeURIComponent(projectSlug)}/game/assets/${encodeURIComponent(asset.id)}/versions/${encodeURIComponent(versionId)}/content`;
+}
+
+function objectString(value: unknown, key: string): string {
+  return stringValue(objectValue(value)[key]);
+}
+
+function objectBoolean(value: unknown, key: string): boolean {
+  return objectValue(value)[key] === true;
+}
+
+function objectNumber(value: unknown, key: string, fallback: number): number {
+  const candidate = objectValue(value)[key];
+  return typeof candidate === "number" && Number.isFinite(candidate) ? candidate : fallback;
 }
 
 function eventHeadline(event?: GameEvent): string {
   if (!event) return "The game is ready.";
   const data = objectValue(event.data);
-  return stringValue(data.text) || stringValue(data.name) || stringValue(data.title) || eventLabel(event.type);
+  return stringValue(data.prompt) || stringValue(data.title) || stringValue(data.name) || stringValue(data.text) || eventLabel(event.type);
 }
 
 function eventDetail(event?: GameEvent): string {
   if (!event) return "Runtime events will appear here as the session advances.";
   const data = objectValue(event.data);
-  return stringValue(data.description) || stringValue(data.dialogue) || stringValue(data.message) || `Event ${event.sequence}`;
+  const options = Array.isArray(data.options) ? data.options.length : 0;
+  return stringValue(data.description)
+    || stringValue(data.dialogue)
+    || stringValue(data.message)
+    || stringValue(data.text)
+    || (options > 0 ? `Choose one of ${options} paths.` : `Event ${event.sequence}`);
 }
 
 function eventLabel(value: string): string {
@@ -287,6 +516,11 @@ function stringValue(value: unknown): string {
 
 function statusLabel(value: string): string {
   return value.replaceAll("_", " ").replace(/^./, (letter) => letter.toUpperCase());
+}
+
+function localeName(value: string): string {
+  const labels: Record<string, string> = { "zh-CN": "简体中文", ja: "日本語", en: "English", ko: "한국어", es: "Español", fr: "Français", de: "Deutsch" };
+  return labels[value] ?? value;
 }
 
 function formatTime(value: string): string {

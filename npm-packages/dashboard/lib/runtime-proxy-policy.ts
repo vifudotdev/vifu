@@ -15,7 +15,7 @@ export function isAllowedProjectGamePath(path: string[]): boolean {
       return path.length === 4
         || path.length === 5
         || (path.length === 6 && path[5] === "versions")
-        || (path.length === 8 && path[5] === "versions" && path[7] === "approve");
+        || (path.length === 8 && path[5] === "versions" && ["approve", "content"].includes(path[7] ?? ""));
     case "builds":
       return path.length === 4
         || path.length === 5
@@ -23,6 +23,8 @@ export function isAllowedProjectGamePath(path: string[]): boolean {
     case "presentations":
       return path.length === 4
         || (path.length === 6 && path[5] === "activate");
+    case "localization":
+      return path.length === 5 && path[4] === "translate";
     case "analytics":
     case "preview":
     case "publish":

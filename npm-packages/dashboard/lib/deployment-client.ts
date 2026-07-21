@@ -161,19 +161,23 @@ export class DeploymentClient {
   }
 
   async request<T>(path: string, init: RequestInit = {}, publicRequest = false): Promise<T> {
-    const headers = new Headers(init.headers);
-    headers.set("accept", headers.get("accept") ?? "application/json");
-    if (init.body && !headers.has("content-type")) headers.set("content-type", "application/json");
-    if (!publicRequest && this.credential) headers.set("authorization", `Bearer ${this.credential}`);
-    const response = await this.fetcher(appendApiPath(this.apiBaseUrl, path), {
-      ...init,
-      headers,
-      cache: init.cache ?? "no-store",
-    });
+    const response = await this.rawRequest(path, init, publicRequest);
     if (response.status === 204) return undefined as T;
     const payload = await response.json().catch(() => null) as T | { error?: unknown } | null;
     if (!response.ok) throw new VifuHttpError(response.status, readErrorMessage(payload), payload);
     return (payload ?? {}) as T;
+  }
+
+  async rawRequest(path: string, init: RequestInit = {}, publicRequest = false): Promise<Response> {
+    const headers = new Headers(init.headers);
+    headers.set("accept", headers.get("accept") ?? "application/json");
+    if (init.body && !headers.has("content-type")) headers.set("content-type", "application/json");
+    if (!publicRequest && this.credential) headers.set("authorization", `Bearer ${this.credential}`);
+    return this.fetcher(appendApiPath(this.apiBaseUrl, path), {
+      ...init,
+      headers,
+      cache: init.cache ?? "no-store",
+    });
   }
 }
 

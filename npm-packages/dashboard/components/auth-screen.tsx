@@ -25,17 +25,17 @@ export function AuthScreen({
 
   return (
     <main className="auth-shell">
-      <section className="auth-panel" aria-label={isSignup ? "Create your account" : "Sign in to Vifu"}>
-        <Link className="auth-brand" href="/" aria-label="Vifu Dashboard">
+      <section className="auth-panel" aria-label={isSignup ? "Create your account" : "Sign in to VifuDev"}>
+        <Link className="auth-brand" href="/" aria-label="VifuDev Dashboard">
           <Image src="/brand/vifu-icon-512.png" width={40} height={40} alt="" priority />
-          <span>Vifu</span>
+          <span>VifuDev</span>
         </Link>
 
         {unavailable ? (
           <div className="auth-form auth-message">
             <p className="auth-eyebrow">Service unavailable</p>
-            <h1>Cannot reach Vifu server</h1>
-            <p>Vifu could not load the sign-in settings.</p>
+            <h1>Cannot reach VifuDev Runtime</h1>
+            <p>VifuDev could not load the sign-in settings.</p>
             <div className="auth-notice">Check the server address and try again.</div>
           </div>
         ) : (

@@ -61,6 +61,21 @@ async function proxyRuntimeRequest(
     const headers = new Headers();
     const contentType = request.headers.get("content-type");
     if (contentType) headers.set("content-type", contentType);
+    if (isAssetContentPath(path)) {
+      const range = request.headers.get("range");
+      if (range) headers.set("range", range);
+      headers.set("accept", request.headers.get("accept") ?? "*/*");
+      const upstream = await authority.deployment.rawRequest(
+        `${runtimePath}${query}`,
+        { method, body, headers },
+      );
+      const responseHeaders = new Headers();
+      for (const name of ["accept-ranges", "cache-control", "content-length", "content-range", "content-type", "etag"]) {
+        const value = upstream.headers.get(name);
+        if (value) responseHeaders.set(name, value);
+      }
+      return new Response(upstream.body, { status: upstream.status, headers: responseHeaders });
+    }
     const response = await authority.deployment.request<unknown>(
       `${runtimePath}${query}`,
       { method, body, headers },
@@ -80,6 +95,15 @@ async function proxyRuntimeRequest(
       error instanceof Error ? error.message : "Runtime request failed.",
     );
   }
+}
+
+function isAssetContentPath(path: string[]): boolean {
+  return path.length === 8
+    && path[0] === "project"
+    && path[2] === "game"
+    && path[3] === "assets"
+    && path[5] === "versions"
+    && path[7] === "content";
 }
 
 async function readBody(request: Request): Promise<ArrayBuffer> {

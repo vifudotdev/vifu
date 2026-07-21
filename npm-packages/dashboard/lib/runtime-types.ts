@@ -118,6 +118,7 @@ export type GameSourceEdge = {
   source: GamePortReference;
   target: GamePortReference;
   condition?: Record<string, unknown> | null;
+  managedBy?: string | null;
 };
 
 export type GameAgentReference = {
@@ -126,6 +127,29 @@ export type GameAgentReference = {
   profileVersionId?: string | null;
   capabilities: string[];
   executionDescriptor: Record<string, unknown>;
+};
+
+export type GameCharacter = {
+  id: string;
+  nameMessageId: string;
+  roleMessageId?: string | null;
+  agentId?: string | null;
+  portraitResourceId?: string | null;
+  player: boolean;
+};
+
+export type GameTranslationPack = {
+  sourceHash: string;
+  status: "draft" | "reviewed";
+  messages: Record<string, string>;
+};
+
+export type GameLocalization = {
+  sourceLocale: string;
+  defaultLocale: string;
+  targetLocales: string[];
+  sourceMessages: Record<string, string>;
+  packs: Record<string, GameTranslationPack>;
 };
 
 export type GameResourceReference = {
@@ -156,9 +180,10 @@ export type GameSource = {
   outputs: Record<string, unknown>;
   variables: Array<{ id: string; initialValue: unknown; public: boolean }>;
   agents: GameAgentReference[];
+  characters: GameCharacter[];
   resources: GameResourceReference[];
   presentationResources: GamePresentationResource[];
-  locales: string[];
+  localization: GameLocalization;
   views: Record<string, unknown>;
 };
 
@@ -313,6 +338,7 @@ export type GameSnapshot = {
   schemaVersion: number;
   status: "running" | "waiting_input" | "waiting_effect" | "waiting_host" | "completed" | "failed" | "cancelled";
   revision: number;
+  locale: string;
   state: Record<string, unknown>;
   pendingHostAction?: {
     actionId: string;
