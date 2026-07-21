@@ -2,10 +2,15 @@
 
 ![VifuDev](npm-packages/dashboard/public/brand/vifudev-lockup.svg)
 
-VifuDev is the open-source product for the Vifu endpoint runtime for local AI
-agents. It provides stable
-project endpoints with profiles, bindings, API keys, connection status, and
-traces, and connects agent providers through Vifu Agent Gateway.
+VifuDev is an open-source runtime and visual backend creator for AI-native
+games. Build agent-powered game backends in Canvas, author interactive stories
+in Short Drama, connect agent providers through Vifu Agent Gateway, and publish
+stable project endpoints for web games and game engines.
+
+The runtime manages agents, profiles, versions, providers, API keys, durable
+game sessions, choices, state, tools, host actions, localization, logs, and
+traces. Canvas, Short Drama, Preview, and the published endpoint share the same
+project model, so the backend a creator tests is the backend the game runs.
 
 The runtime command and protocol remain `vifu`.
 
@@ -212,3 +217,17 @@ the private process in [SECURITY.md](SECURITY.md) for vulnerability reports.
 
 Vifu is licensed under [Apache-2.0](LICENSE). The license does not grant rights
 to the Vifu name or logos; see [TRADEMARKS.md](TRADEMARKS.md).
+
+## Built with Codex and GPT-5.6
+
+Build Week development followed a research-led, iterative workflow. GPT-5.6
+through Codex, research skills, and MCP-backed tools helped study target users,
+OpenClaw and other open-source runtimes, AI-native games, and papers; compare
+technical options; turn the PRD into a plan; and implement and verify each
+focused iteration.
+
+The human maintainer framed the research, judged the sources, synthesized the
+persona and PRD, made the Rust, provider, Gateway, Dashboard, and open-source
+tradeoffs, set acceptance criteria, and reviewed, redirected, or rejected each
+iteration. See the [Build Week development record](BUILD_WEEK.md) for the
+submitted commits, Codex session evidence, verification, and limitations.
