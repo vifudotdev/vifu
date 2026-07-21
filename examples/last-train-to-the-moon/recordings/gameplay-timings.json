@@ -1,0 +1,17 @@
+{
+  "durationSeconds": 74.216,
+  "beats": [
+    { "name": "voice-mizuki-impossible", "seconds": 0.878 },
+    { "name": "voice-shion-failed-doll", "seconds": 4.202 },
+    { "name": "voice-gakuto-truth", "seconds": 7.746 },
+    { "name": "voice-mizuki-question", "seconds": 16.4 },
+    { "name": "mizuki-agent-response", "seconds": 26.839 },
+    { "name": "voice-kohaku-message", "seconds": 27.769 },
+    { "name": "voice-shion-confession", "seconds": 37.836 },
+    { "name": "shion-agent-response", "seconds": 52.834 },
+    { "name": "voice-gakuto-confession", "seconds": 53.771 },
+    { "name": "voice-shion-command", "seconds": 62.483 },
+    { "name": "voice-mizuki-ending", "seconds": 67.756 },
+    { "name": "completed", "seconds": 73.453 }
+  ]
+}

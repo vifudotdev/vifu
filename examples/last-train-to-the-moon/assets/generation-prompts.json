@@ -1,0 +1,42 @@
+{
+  "imageModel": "gemini-3.1-flash-image",
+  "imageSize": "768x1344",
+  "notes": "Character variants preserve the approved base design and are generated as 9:16 cutouts on a removable flat magenta background.",
+  "characters": [
+    {
+      "output": "images/characters/mizuki-shocked-sword.png",
+      "reference": "images/characters/mizuki-base.png",
+      "beat": "Opening confrontation: shocked and furious, drawn katana aimed toward the player."
+    },
+    {
+      "output": "images/characters/mizuki-conflicted.png",
+      "reference": "images/characters/mizuki-base.png",
+      "beat": "Star archive: lowered sword, guarded posture, conflicted eyes and tears held back."
+    },
+    {
+      "output": "images/characters/mizuki-resolute.png",
+      "reference": "images/characters/mizuki-base.png",
+      "beat": "Moon gate finale: reaches toward the player and chooses to break the contract together."
+    },
+    {
+      "output": "images/characters/shion-reveal.png",
+      "reference": "images/characters/shion-base.png",
+      "beat": "Eclipse carriage confession: calm mask breaks into a cold, triumphant smile."
+    },
+    {
+      "output": "images/characters/shion-command.png",
+      "reference": "images/characters/shion-base.png",
+      "beat": "Final command: arm extended, moon-crown energy active, furious loss of control."
+    },
+    {
+      "output": "images/characters/gakuto-remorse.png",
+      "reference": "images/characters/gakuto-base.png",
+      "beat": "Confession: sword lowered, shoulders heavy, unable to hide his guilt."
+    },
+    {
+      "output": "images/characters/kohaku-truth.png",
+      "reference": "images/characters/kohaku-base.png",
+      "beat": "Hidden record: solemn expression while offering Yuma's final memory shard."
+    }
+  ]
+}
