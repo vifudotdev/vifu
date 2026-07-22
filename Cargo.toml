@@ -24,7 +24,7 @@ thiserror = "2"
 uniffi = { version = "0.30", features = ["build", "cli"] }
 bevy_app = { version = "0.19", default-features = false }
 bevy_ecs = { version = "0.19", default-features = false, features = ["std"] }
-jsonschema = { version = "0.37", default-features = false }
+jsonschema = { version = "0.48", default-features = false }
 petgraph = { version = "0.8", default-features = false, features = ["graphmap", "stable_graph", "std"] }
 schemars = { version = "1.2", features = ["derive"] }
 serde_json_canonicalizer = "0.3"
