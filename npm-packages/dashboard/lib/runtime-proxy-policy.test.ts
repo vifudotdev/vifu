@@ -28,6 +28,14 @@ describe("runtime Game proxy policy", () => {
       "version-id",
       "content",
     ])).toBe(true);
+    expect(isAllowedProjectGamePath([
+      "project",
+      "demo",
+      "game",
+      "releases",
+      "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "export",
+    ])).toBe(true);
   });
 
   test("rejects unregistered nested Game routes", () => {

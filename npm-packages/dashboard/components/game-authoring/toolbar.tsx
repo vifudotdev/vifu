@@ -16,6 +16,7 @@ import {
   X,
 } from "lucide-react";
 import { runtimeBrowserRequest } from "../../lib/runtime-browser-client";
+import { exportProjectArchive } from "../../lib/project-archive";
 import {
   DEFAULT_GAME_VIEWPORT,
   DEFAULT_SHORT_DRAMA_VIEWPORT,
@@ -54,7 +55,7 @@ export function GameAuthoringToolbar({ projectSlug, viewLabel }: { projectSlug: 
   const [formatWidth, setFormatWidth] = useState(DEFAULT_GAME_VIEWPORT.width);
   const [formatHeight, setFormatHeight] = useState(DEFAULT_GAME_VIEWPORT.height);
   const [formatError, setFormatError] = useState<string | null>(null);
-  const [actionStatus, setActionStatus] = useState<"idle" | "validating" | "publishing" | "reloading">("idle");
+  const [actionStatus, setActionStatus] = useState<"idle" | "validating" | "publishing" | "reloading" | "exporting">("idle");
   const [actionMessage, setActionMessage] = useState<string | null>(null);
 
   async function validate() {
@@ -146,7 +147,7 @@ export function GameAuthoringToolbar({ projectSlug, viewLabel }: { projectSlug: 
     }
   }
 
-  function downloadSource() {
+  function downloadSourceJson() {
     const blob = new Blob([JSON.stringify(source, null, 2)], { type: "application/json" });
     const url = URL.createObjectURL(blob);
     const anchor = document.createElement("a");
@@ -154,6 +155,19 @@ export function GameAuthoringToolbar({ projectSlug, viewLabel }: { projectSlug: 
     anchor.download = `${projectSlug}.vifu.json`;
     anchor.click();
     URL.revokeObjectURL(url);
+  }
+
+  async function exportProject() {
+    setActionStatus("exporting");
+    setActionMessage("Collecting project data...");
+    try {
+      await exportProjectArchive(projectSlug, store.getState().source, setActionMessage);
+      setActionMessage("Project exported as a portable .vf file.");
+    } catch (error) {
+      setActionMessage(error instanceof Error ? error.message : "Project export failed.");
+    } finally {
+      setActionStatus("idle");
+    }
   }
 
   function openFormat() {
@@ -211,7 +225,7 @@ export function GameAuthoringToolbar({ projectSlug, viewLabel }: { projectSlug: 
         <button type="button" className="editor-icon-action" onClick={openSource} title="Edit source JSON" aria-label="Edit source JSON">
           <Braces aria-hidden="true" />
         </button>
-        <button type="button" className="editor-icon-action" onClick={downloadSource} title="Export source" aria-label="Export source">
+        <button type="button" className="editor-icon-action" onClick={() => void exportProject()} disabled={actionStatus !== "idle" || syncStatus !== "saved"} title="Export project" aria-label="Export project">
           <Download aria-hidden="true" />
         </button>
         <button type="button" className="editor-text-action" onClick={() => void validate()} disabled={actionStatus !== "idle"}>
@@ -241,7 +255,7 @@ export function GameAuthoringToolbar({ projectSlug, viewLabel }: { projectSlug: 
           </header>
           <textarea value={sourceText} onChange={(event) => setSourceText(event.target.value)} spellCheck={false} aria-label="Game source JSON" />
           {sourceError ? <p className="inline-error" role="alert">{sourceError}</p> : null}
-          <footer><button type="button" className="secondary-button" onClick={() => sourceDialog.current?.close()}>Cancel</button><button type="button" className="primary-button" onClick={applySource}>Apply source</button></footer>
+          <footer><button type="button" className="secondary-button" onClick={downloadSourceJson}><Download aria-hidden="true" />Download JSON</button><span className="dialog-footer-spacer" /><button type="button" className="secondary-button" onClick={() => sourceDialog.current?.close()}>Cancel</button><button type="button" className="primary-button" onClick={applySource}>Apply source</button></footer>
         </div>
       </dialog>
 

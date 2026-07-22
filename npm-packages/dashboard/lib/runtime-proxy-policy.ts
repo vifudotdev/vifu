@@ -7,7 +7,7 @@ export function isAllowedProjectGamePath(path: string[]): boolean {
         || (path.length === 5 && ["export", "import"].includes(path[4] ?? ""));
     case "releases":
       return path.length === 4
-        || (path.length === 6 && path[5] === "activate");
+        || (path.length === 6 && ["activate", "export"].includes(path[5] ?? ""));
     case "resources":
     case "sessions":
       return path.length === 4 || path.length === 5;

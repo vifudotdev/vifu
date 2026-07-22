@@ -33,11 +33,11 @@ use crate::models::{
     slugify, validate_slug, AgentEndpoint, ApiKeyAgentScope, ApiKeyPermissions, ApiKeyRecord,
     Capabilities, CreateApiKey, CreateBinding, CreateCanvasEdge, CreateCanvasNode, CreateEndpoint,
     CreateProfile, CreateProfileVersion, CreateProject, CreateProjectProvider, CreatedApiKey,
-    CustomProvider, CustomProviderSecret, EndpointRoute, ImportProjectAgent,
-    ProfileCapabilityDraft, ProviderAdapter, ProviderAdapterField, ProviderConnection,
-    ProviderConnectionSecret, RegisterAgentGateway, SetProfileRollout, SyncProfileSource,
-    TestProfile, UpdateApiKey, UpdateBinding, UpdateCanvasNode, UpdateEndpoint, UpdateProfile,
-    UpdateProject, UpdateProjectProvider, UpsertProviderConnection,
+    CustomProvider, CustomProviderSecret, EndpointRoute, ImportProjectAgent, ImportProjectProfile,
+    ImportProjectProvider, ProfileCapabilityDraft, ProviderAdapter, ProviderAdapterField,
+    ProviderConnection, ProviderConnectionSecret, RegisterAgentGateway, SetProfileRollout,
+    SyncProfileSource, TestProfile, UpdateApiKey, UpdateBinding, UpdateCanvasNode, UpdateEndpoint,
+    UpdateProfile, UpdateProject, UpdateProjectProvider, UpsertProviderConnection,
 };
 use crate::openclaw_device;
 use crate::relay::RelayCallError;
@@ -461,6 +461,93 @@ pub async fn create_project_profile(
     let project = db::get_project_by_slug(&state.pool, &project_slug).await?;
     input.project_id = Some(project.project.id);
     create_profile(State(state), headers, Json(input)).await
+}
+
+pub async fn import_project_profile(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(project_slug): Path<String>,
+    Json(input): Json<ImportProjectProfile>,
+) -> Result<(StatusCode, Json<Value>), ApiError> {
+    admin(&state, &headers).await?;
+    let project = db::get_project_by_slug(&state.pool, &project_slug).await?;
+    let archive_id = required_text("archiveId", &input.archive_id, 128)?;
+    let active_version_id = required_text("activeVersionId", &input.active_version_id, 128)?;
+    if input.versions.is_empty() || input.versions.len() > 50 {
+        return Err(ApiError::Invalid(
+            "an imported profile requires between 1 and 50 versions".to_string(),
+        ));
+    }
+    let name = required_text("name", &input.name, 128)?;
+    let slug = profile_slug(input.slug.as_deref(), name)?;
+    let description = optional_text("description", input.description.as_deref(), 4096)?;
+    let mut archive_version_ids = HashSet::new();
+    for version in &input.versions {
+        let version_archive_id = required_text("version archiveId", &version.archive_id, 128)?;
+        if !archive_version_ids.insert(version_archive_id.to_string()) {
+            return Err(ApiError::Invalid(
+                "imported profile version archive IDs must be unique".to_string(),
+            ));
+        }
+        validate_profile_version_input(
+            &version.persona,
+            &version.runtime,
+            &version.presentation,
+            &version.source,
+            &version.capabilities,
+        )?;
+        optional_text("change summary", version.change_summary.as_deref(), 1024)?;
+    }
+    if !archive_version_ids.contains(active_version_id) {
+        return Err(ApiError::Invalid(
+            "activeVersionId must identify an imported profile version".to_string(),
+        ));
+    }
+
+    // Portable profile imports intentionally keep provider references unresolved.
+    // Credentials and provider connections are deployment-owned and never enter a .vf file.
+    let profile = db::create_profile(
+        &state.pool,
+        Uuid::new_v4(),
+        project.project.id,
+        &slug,
+        name,
+        description,
+    )
+    .await?;
+    let mut version_map = BTreeMap::new();
+    for version in input.versions {
+        let created = db::create_profile_version(
+            &state.pool,
+            profile.id,
+            db::NewProfileVersion {
+                persona: &version.persona,
+                runtime: &version.runtime,
+                presentation: &version.presentation,
+                source: &version.source,
+                capabilities: &version.capabilities,
+                change_summary: optional_text(
+                    "change summary",
+                    version.change_summary.as_deref(),
+                    1024,
+                )?,
+            },
+        )
+        .await?;
+        version_map.insert(version.archive_id, created.id);
+    }
+    let imported_active_id = *version_map
+        .get(active_version_id)
+        .ok_or(ApiError::Internal)?;
+    db::set_profile_rollout(&state.pool, profile.id, &[(imported_active_id, 10_000)]).await?;
+    Ok((
+        StatusCode::CREATED,
+        Json(json!({
+            "archiveId": archive_id,
+            "profile": db::get_profile(&state.pool, profile.id).await?,
+            "versionMap": version_map,
+        })),
+    ))
 }
 
 pub async fn get_project_profile(
@@ -1403,6 +1490,65 @@ pub async fn create_project_provider(
             "provider": provider,
             "message": message,
             "addedAgents": added_agents,
+        })),
+    ))
+}
+
+pub async fn import_project_provider(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(slug): Path<String>,
+    Json(input): Json<ImportProjectProvider>,
+) -> Result<(StatusCode, Json<Value>), ApiError> {
+    admin(&state, &headers).await?;
+    db::get_project_by_slug(&state.pool, &slug).await?;
+    let provider_key = required_identifier("provider key", &input.provider_key)?;
+    let provider_type = required_identifier("provider type", &input.provider_type)?;
+    let name = required_text("provider name", &input.name, 128)?;
+    let base_url = required_text("provider base URL", &input.base_url, 2048)?;
+    let adapter = provider_adapters()
+        .into_iter()
+        .find(|adapter| adapter.id == provider_type)
+        .ok_or_else(|| ApiError::Invalid(format!("unsupported provider type {provider_type}")))?;
+    let source = ProjectProviderSource {
+        kind: "registry".to_string(),
+        key: adapter.id.clone(),
+        name: adapter.name,
+        provider_type: adapter.id.clone(),
+        base_url: String::new(),
+        config: json!({}),
+    };
+    let prepared = prepare_project_provider(
+        &state,
+        provider_key,
+        name,
+        &source,
+        Some(base_url),
+        input.config,
+        json!({}),
+    )?;
+    let connection = db::upsert_provider_connection(
+        &state.pool,
+        &slug,
+        db::NewProviderConnection {
+            provider_key: &prepared.key,
+            source_kind: "registry",
+            source_key: &adapter.id,
+            name: &prepared.name,
+            provider_type: &prepared.provider_type,
+            base_url: &prepared.base_url,
+            config: &prepared.config,
+            encrypted_secret_json: &prepared.encrypted_secret_json,
+            secret_keys: &prepared.secret_keys,
+            display_secret: prepared.display_secret.as_deref(),
+            status: "needs_configuration",
+        },
+    )
+    .await?;
+    Ok((
+        StatusCode::CREATED,
+        Json(json!({
+            "provider": effective_provider_connection(&state, connection).await?
         })),
     ))
 }

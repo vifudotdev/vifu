@@ -13,7 +13,9 @@ import {
   Play,
   RefreshCw,
   Send,
+  Square,
   TerminalSquare,
+  Video,
 } from "lucide-react";
 import { useEffect, useRef, useState, type CSSProperties, type FormEvent } from "react";
 import { runtimeBrowserRequest } from "../lib/runtime-browser-client";
@@ -58,6 +60,12 @@ export function RuntimeGamePreview({
   const [message, setMessage] = useState<string | null>(null);
   const [build, setBuild] = useState<GameBuild | null>(null);
   const [focused, setFocused] = useState(false);
+  const [recording, setRecording] = useState(false);
+  const [recordingSeconds, setRecordingSeconds] = useState(0);
+  const recorder = useRef<MediaRecorder | null>(null);
+  const captureStream = useRef<MediaStream | null>(null);
+  const recordingChunks = useRef<Blob[]>([]);
+  const discardRecording = useRef(false);
   const locales = draft ? [...new Set([draft.source.localization.sourceLocale, ...draft.source.localization.targetLocales])] : ["en"];
   const [locale, setLocale] = useState(draft?.source.localization.defaultLocale ?? locales[0] ?? "en");
   const requiredCapabilities = qa?.requiredHostCapabilities ?? [];
@@ -117,6 +125,19 @@ export function RuntimeGamePreview({
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [focused]);
+
+  useEffect(() => {
+    if (!recording) return;
+    const startedAt = Date.now();
+    const timer = window.setInterval(() => setRecordingSeconds(Math.floor((Date.now() - startedAt) / 1000)), 1000);
+    return () => window.clearInterval(timer);
+  }, [recording]);
+
+  useEffect(() => () => {
+    discardRecording.current = true;
+    if (recorder.current?.state === "recording") recorder.current.stop();
+    captureStream.current?.getTracks().forEach((track) => track.stop());
+  }, []);
 
   async function start() {
     setPending("start");
@@ -207,6 +228,94 @@ export function RuntimeGamePreview({
     }
   }
 
+  async function startVideoExport() {
+    if (!preview || !navigator.mediaDevices?.getDisplayMedia || typeof MediaRecorder === "undefined") {
+      setMessage("This browser cannot export a playthrough video.");
+      return;
+    }
+    setMessage("Choose this browser tab and enable tab audio to export the playthrough.");
+    setFocused(true);
+    discardRecording.current = false;
+    await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+    try {
+      const stream = await navigator.mediaDevices.getDisplayMedia({
+        video: { displaySurface: "browser" },
+        audio: true,
+        preferCurrentTab: true,
+        selfBrowserSurface: "include",
+        surfaceSwitching: "exclude",
+      } as DisplayMediaStreamOptions);
+      if (discardRecording.current) {
+        stream.getTracks().forEach((track) => track.stop());
+        return;
+      }
+      captureStream.current = stream;
+      const surface = document.querySelector<HTMLElement>(".reference-player-surface");
+      const videoTrack = stream.getVideoTracks()[0];
+      const cropTarget = (window as Window & {
+        CropTarget?: { fromElement(element: Element): Promise<unknown> };
+      }).CropTarget;
+      const cropTrack = videoTrack as MediaStreamTrack & { cropTo?(target: unknown): Promise<void> };
+      if (surface && cropTarget && cropTrack.cropTo) {
+        try {
+          await cropTrack.cropTo(await cropTarget.fromElement(surface));
+        } catch {
+          // Element Capture is optional; full-tab capture remains a valid fallback.
+        }
+      }
+      const mimeType = supportedRecordingType();
+      const nextRecorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
+      recordingChunks.current = [];
+      nextRecorder.addEventListener("dataavailable", (event) => {
+        if (event.data.size > 0) recordingChunks.current.push(event.data);
+      });
+      nextRecorder.addEventListener("stop", () => finishVideoExport(nextRecorder.mimeType));
+      stream.getVideoTracks()[0]?.addEventListener("ended", () => {
+        if (nextRecorder.state === "recording") nextRecorder.stop();
+      });
+      recorder.current = nextRecorder;
+      nextRecorder.start(1000);
+      setRecordingSeconds(0);
+      setRecording(true);
+      setMessage(null);
+    } catch (error) {
+      captureStream.current?.getTracks().forEach((track) => track.stop());
+      captureStream.current = null;
+      if (discardRecording.current) return;
+      setFocused(false);
+      setMessage(error instanceof Error && error.name !== "NotAllowedError" ? error.message : "Video export was cancelled.");
+    }
+  }
+
+  function stopVideoExport() {
+    if (recorder.current?.state === "recording") recorder.current.stop();
+  }
+
+  function finishVideoExport(mimeType: string) {
+    captureStream.current?.getTracks().forEach((track) => track.stop());
+    const chunks = recordingChunks.current;
+    recorder.current = null;
+    captureStream.current = null;
+    recordingChunks.current = [];
+    if (discardRecording.current) return;
+    setRecording(false);
+    setRecordingSeconds(0);
+    setFocused(false);
+    if (chunks.length === 0) {
+      setMessage("The browser did not produce a video file.");
+      return;
+    }
+    const effectiveType = mimeType || chunks[0]?.type || "video/webm";
+    const extension = effectiveType.includes("mp4") ? "mp4" : "webm";
+    const url = URL.createObjectURL(new Blob(chunks, { type: effectiveType }));
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = `${project.slug}-playthrough.${extension}`;
+    anchor.click();
+    window.setTimeout(() => URL.revokeObjectURL(url), 0);
+    setMessage(`Playthrough exported as ${extension.toUpperCase()}.`);
+  }
+
   return (
     <div className={`game-preview-page ${focused ? "focused" : ""}`}>
       <section className="game-qa-summary">
@@ -231,7 +340,7 @@ export function RuntimeGamePreview({
 
       <div className="game-preview-workspace">
         <section className={`reference-player formatted ${orientation}`} style={playerStyle}>
-          <header><div><span>{focused ? project.name : "Reference host"}</span><strong>{preview ? statusLabel(preview.advance.snapshot.status) : "Not running"}</strong></div><nav className="reference-player-actions" aria-label="Preview controls"><button className="icon-button" type="button" disabled={pending !== null || !qa?.ready} onClick={() => void start()} title={preview ? "Restart preview" : "Start preview"} aria-label={preview ? "Restart preview" : "Start preview"}>{preview ? <RefreshCw aria-hidden="true" /> : <Play aria-hidden="true" />}</button>{preview ? <button className="icon-button" type="button" onClick={() => setFocused((value) => !value)} title={focused ? "Exit play mode" : "Enter play mode"} aria-label={focused ? "Exit play mode" : "Enter play mode"}>{focused ? <Minimize2 aria-hidden="true" /> : <Maximize2 aria-hidden="true" />}</button> : null}</nav></header>
+          <header><div><span>{focused ? project.name : "Reference host"}</span><strong>{recording ? `Recording ${formatDuration(recordingSeconds)}` : preview ? statusLabel(preview.advance.snapshot.status) : "Not running"}</strong></div><nav className="reference-player-actions" aria-label="Preview controls"><button className="icon-button" type="button" disabled={pending !== null || !qa?.ready || recording} onClick={() => void start()} title={preview ? "Restart preview" : "Start preview"} aria-label={preview ? "Restart preview" : "Start preview"}>{preview ? <RefreshCw aria-hidden="true" /> : <Play aria-hidden="true" />}</button>{preview ? <button className={`icon-button${recording ? " recording" : ""}`} type="button" onClick={recording ? stopVideoExport : () => void startVideoExport()} title={recording ? "Finish video export" : "Export playthrough video"} aria-label={recording ? "Finish video export" : "Export playthrough video"}>{recording ? <Square aria-hidden="true" /> : <Video aria-hidden="true" />}</button> : null}{preview ? <button className="icon-button" type="button" disabled={recording} onClick={() => setFocused((value) => !value)} title={focused ? "Exit play mode" : "Enter play mode"} aria-label={focused ? "Exit play mode" : "Enter play mode"}>{focused ? <Minimize2 aria-hidden="true" /> : <Maximize2 aria-hidden="true" />}</button> : null}</nav></header>
           {preview ? (
             <div className="reference-player-canvas">
               <PlayerSurface projectSlug={project.slug} draft={draft} assets={assets} preview={preview} pending={pending === "command"} onCommand={command} />
@@ -525,6 +634,21 @@ function localeName(value: string): string {
 
 function formatTime(value: string): string {
   return new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }).format(new Date(value));
+}
+
+function formatDuration(seconds: number): string {
+  const minutes = Math.floor(seconds / 60).toString().padStart(2, "0");
+  const remainder = (seconds % 60).toString().padStart(2, "0");
+  return `${minutes}:${remainder}`;
+}
+
+function supportedRecordingType(): string {
+  return [
+    "video/mp4;codecs=avc1.42E01E,mp4a.40.2",
+    "video/webm;codecs=vp9,opus",
+    "video/webm;codecs=vp8,opus",
+    "video/webm",
+  ].find((type) => MediaRecorder.isTypeSupported(type)) ?? "";
 }
 
 function errorMessage(error: unknown): string {

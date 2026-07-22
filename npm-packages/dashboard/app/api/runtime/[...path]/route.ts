@@ -17,6 +17,7 @@ const ALLOWED_ROOTS = new Set([
   "provider-catalog",
   "traces",
   "game",
+  "status",
 ]);
 const MAX_BODY_BYTES = 32 * 1024 * 1024;
 

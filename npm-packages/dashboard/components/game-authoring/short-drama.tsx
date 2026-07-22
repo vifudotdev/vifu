@@ -857,7 +857,7 @@ function DramaTimeline({ definitions, profiles }: { definitions: GameNodeDefinit
 
   return (
     <section className="drama-timeline">
-      <header><div><Scissors aria-hidden="true" /><strong>Timeline</strong><span>{timelineNodes.length} items</span></div><div><button type="button" title="Split selected" aria-label="Split selected" disabled={!selected || timelineDuration(selected) < 500} onClick={splitSelected}><Scissors aria-hidden="true" /></button><button type="button" title="Timeline settings" aria-label="Timeline settings"><Sparkles aria-hidden="true" /></button></div></header>
+      <header><div><Scissors aria-hidden="true" /><strong>Timeline</strong><span>{timelineNodes.length} items</span></div><div><button type="button" title="Split selected" aria-label="Split selected" disabled={!selected || timelineDuration(selected) < 500} onClick={splitSelected}><Scissors aria-hidden="true" /></button></div></header>
       <div className="timeline-scroll">
         <div className="timeline-ruler-row"><span className="timeline-track-label">Tracks</span><div className="timeline-ruler" style={{ width: timelineWidth }}>{timelineTicks(maxDuration).map((tick) => <span key={tick} style={{ left: (tick / 1000) * PIXELS_PER_SECOND }}>{formatTime(tick)}</span>)}</div></div>
         <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={onDragEnd}>

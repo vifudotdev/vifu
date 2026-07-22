@@ -158,9 +158,15 @@ bindings are versioned separately, so each host can map stable logical resource
 IDs to its own engine objects and assets.
 
 The Dashboard's **Publish & API** page provides Game-only keys, cURL examples,
-release activation, and host-binding export. See the [Game Runtime guide](docs/game-runtime.md)
-for draft Preview, pinned Agent and Tool effects, sessions, reconnect, and
-host-action contracts.
+release activation, immutable runtime-bundle export, and host-binding export.
+See the [Game Runtime guide](docs/game-runtime.md) for draft Preview, pinned
+Agent and Tool effects, sessions, reconnect, and host-action contracts.
+
+The editor can export the current design, Agent Profile snapshots, structured
+resources, and managed media as one portable `.vf` project file. Import creates
+a new editable project and leaves deployment credentials and runtime history in
+their original environment. See [Vifu Project Files](docs/project-files.md) for
+the format and security boundary.
 
 ## Architecture And Security
 

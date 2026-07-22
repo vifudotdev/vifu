@@ -9,7 +9,9 @@ use axum::Json;
 use futures_util::stream;
 use serde_json::{json, Value};
 use uuid::Uuid;
-use vifu_game_runtime::{GameCommand, ValidationSeverity};
+use vifu_game_runtime::{
+    GameCommand, GameReleaseBundleV1, ValidationSeverity, GAME_SCHEMA_VERSION,
+};
 
 use crate::auth::{bearer_token, hash_api_key, is_secret_match};
 use crate::db as runtime_db;
@@ -205,6 +207,25 @@ pub async fn activate_game_release(
     let project = runtime_db::get_project_by_slug(&state.pool, &slug).await?;
     let release = db::activate_game_release(&state.pool, project.project.id, release_id).await?;
     Ok(Json(json!({"release": release})))
+}
+
+pub async fn export_game_release(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((slug, release_id)): Path<(String, Uuid)>,
+) -> Result<Json<GameReleaseBundleV1>, ApiError> {
+    require_admin(&state, &headers)?;
+    let project = runtime_db::get_project_by_slug(&state.pool, &slug).await?;
+    let release = db::get_game_release(&state.pool, project.project.id, release_id).await?;
+    Ok(Json(GameReleaseBundleV1 {
+        schema_version: GAME_SCHEMA_VERSION,
+        release_id: release.id.to_string(),
+        project_slug: project.project.slug,
+        content_hash: release.content_hash,
+        plan: release.plan,
+        manifest: release.manifest,
+        backend_resources: release.backend_resources,
+    }))
 }
 
 pub async fn get_runtime_game(

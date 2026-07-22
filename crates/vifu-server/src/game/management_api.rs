@@ -187,6 +187,18 @@ pub async fn list_resources(
     Ok(Json(json!({"resources": resources})))
 }
 
+pub async fn get_resource(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((slug, resource_id)): Path<(String, Uuid)>,
+) -> Result<Json<Value>, ApiError> {
+    require_admin(&headers, &state.config.admin_key)?;
+    let project = runtime_db::get_project_by_slug(&state.pool, &slug).await?;
+    let resource =
+        db::get_game_resource_version(&state.pool, project.project.id, resource_id).await?;
+    Ok(Json(json!({"resource": resource})))
+}
+
 pub async fn create_resource(
     State(state): State<AppState>,
     headers: HeaderMap,

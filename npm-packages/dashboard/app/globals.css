@@ -397,6 +397,57 @@ svg {
   overflow-wrap: anywhere;
 }
 
+.project-import-divider {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-muted);
+  font-size: 10px;
+  text-transform: uppercase;
+}
+
+.project-import-divider::before,
+.project-import-divider::after {
+  height: 1px;
+  flex: 1;
+  background: var(--line);
+  content: "";
+}
+
+.project-import-button {
+  display: flex;
+  min-height: 34px;
+  width: 100%;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text);
+  font-weight: 600;
+}
+
+.project-import-button:hover:not(:disabled) {
+  background: var(--surface-muted);
+}
+
+.project-import-button svg {
+  width: 14px;
+  height: 14px;
+}
+
+.project-import-message {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.project-import-message.error {
+  color: var(--danger);
+}
+
 .console-nav {
   display: grid;
   gap: 6px;
@@ -5823,6 +5874,12 @@ button:disabled {
   color: #f6f7f9;
 }
 
+.reference-player > header .icon-button.recording {
+  border-color: #ef6a62;
+  background: #b42318;
+  color: #fff;
+}
+
 .reference-player-actions {
   display: inline-flex;
   align-items: center;
@@ -9250,6 +9307,10 @@ button:disabled {
   gap: 10px;
   border-top: 1px solid var(--line);
   padding: 9px 12px;
+}
+
+.dialog-footer-spacer {
+  flex: 1;
 }
 
 .editor-danger-action {

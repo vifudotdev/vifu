@@ -69,6 +69,8 @@ jobs:
         run: bun run check
         env:
           VIFU_PRIVATE_TERMS: ${{ secrets.PUBLIC_REPOSITORY_PRIVATE_TERMS }}
+      - name: Unit tests
+        run: bun run test
       - name: Standalone dashboard builds
         run: bun run build
 

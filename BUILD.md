@@ -149,14 +149,16 @@ CI; compilation and pure unit tests do not require a live database.
 
 ```bash
 bun run check
+bun run test
 bun run build
 bun run test:e2e
 ```
 
 `bun run check` enforces the one-Dashboard boundary, provider-neutral HTTP
-contracts, public-repository hygiene, and TypeScript correctness. Browser tests
-cover self-host login, first-admin bootstrap, open signup for additional users,
-sidebar session persistence, and signout.
+contracts, public-repository hygiene, and TypeScript correctness. Unit tests
+cover shared authoring behavior, archive integrity, proxy policy, protocol, and
+SDK contracts. Browser tests cover self-host login, first-admin bootstrap, open
+signup for additional users, sidebar session persistence, and signout.
 
 ## Clean Docker Verification
 

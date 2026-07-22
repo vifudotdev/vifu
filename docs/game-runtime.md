@@ -34,6 +34,24 @@ version's capability catalog. The matching provider must be configured for the
 Project. Provider credentials are resolved by Vifu Server at execution time and
 never enter the Game plan, manifest, events, or public session response.
 
+After starting a preview, the video action captures an interactive playthrough
+of the reference host. Select the current browser tab and include tab audio,
+play the intended route, then finish the capture to download MP4 when the
+browser supports it or WebM otherwise. This preserves real choices, Agent
+responses, and host actions; it is distinct from an offline timeline render.
+
+## Export Runtime Artifacts
+
+**Publish & API** can download the active immutable release as a
+`.vifu-game.json` bundle. It contains `GameReleaseBundleV1`: the compiled Game
+Plan, public manifest, and pinned backend resources. It does not contain
+provider credentials, editable Canvas metadata, or a required presentation.
+
+Use **Host bindings** separately when an engine needs to map logical resource
+IDs to native objects or local assets. The editable project, including its
+current design and managed media, moves between Vifu deployments as a `.vf`
+file described in [Vifu Project Files](project-files.md).
+
 ## Run A Release
 
 The convenience route creates a durable session and sends `game.start`:

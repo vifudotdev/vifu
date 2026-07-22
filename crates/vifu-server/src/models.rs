@@ -289,6 +289,17 @@ pub struct CreateProjectProvider {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ImportProjectProvider {
+    pub provider_key: String,
+    pub name: String,
+    pub provider_type: String,
+    pub base_url: String,
+    #[serde(default = "empty_object")]
+    pub config: Value,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct UpdateProjectProvider {
     pub name: Option<String>,
     pub base_url: Option<String>,
@@ -447,6 +458,34 @@ pub struct CreateProfileVersion {
     #[serde(default)]
     pub capabilities: Vec<ProfileCapabilityDraft>,
     pub change_summary: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ImportProfileVersion {
+    pub archive_id: String,
+    #[serde(default = "empty_object")]
+    pub persona: Value,
+    #[serde(default = "empty_object")]
+    pub runtime: Value,
+    #[serde(default = "empty_object")]
+    pub presentation: Value,
+    #[serde(default = "empty_object")]
+    pub source: Value,
+    #[serde(default)]
+    pub capabilities: Vec<ProfileCapabilityDraft>,
+    pub change_summary: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ImportProjectProfile {
+    pub archive_id: String,
+    pub slug: Option<String>,
+    pub name: String,
+    pub description: Option<String>,
+    pub active_version_id: String,
+    pub versions: Vec<ImportProfileVersion>,
 }
 
 #[derive(Debug, Clone, Serialize, FromRow)]

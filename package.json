@@ -12,6 +12,7 @@
     "check:public": "node scripts/check-public-repo.mjs",
     "typecheck": "bun run --cwd npm-packages/dashboard typecheck",
     "build": "bun run --cwd npm-packages/dashboard build",
+    "test": "vitest run",
     "test:e2e": "playwright test"
   },
   "devDependencies": {

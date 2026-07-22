@@ -140,12 +140,17 @@ pub fn app(state: AppState) -> Router {
             post(game::api::activate_game_release),
         )
         .route(
+            "/v1/project/{slug}/game/releases/{release_id}/export",
+            get(game::api::export_game_release),
+        )
+        .route(
             "/v1/project/{slug}/game/resources",
             get(game::management_api::list_resources).post(game::management_api::create_resource),
         )
         .route(
             "/v1/project/{slug}/game/resources/{resource_id}",
-            patch(game::management_api::update_resource)
+            get(game::management_api::get_resource)
+                .patch(game::management_api::update_resource)
                 .delete(game::management_api::delete_resource),
         )
         .route(
@@ -252,6 +257,10 @@ pub fn app(state: AppState) -> Router {
             get(api::list_project_providers).post(api::create_project_provider),
         )
         .route(
+            "/v1/project/{slug}/providers/import",
+            post(api::import_project_provider),
+        )
+        .route(
             "/v1/project/{slug}/providers/{provider_key}",
             patch(api::update_project_provider).delete(api::delete_project_provider),
         )
@@ -284,6 +293,10 @@ pub fn app(state: AppState) -> Router {
         .route(
             "/v1/project/{slug}/profiles",
             get(api::list_project_profiles).post(api::create_project_profile),
+        )
+        .route(
+            "/v1/project/{slug}/profiles/import",
+            post(api::import_project_profile),
         )
         .route(
             "/v1/project/{slug}/profiles/{id}",
@@ -534,6 +547,17 @@ mod tests {
             Request::get("/v1/project/test/providers")
                 .body(Body::empty())
                 .unwrap(),
+            Request::post("/v1/project/test/providers/import")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{
+                        "providerKey":"demo-openai",
+                        "name":"Demo provider",
+                        "providerType":"openai-compatible",
+                        "baseUrl":"http://127.0.0.1:9999/v1"
+                    }"#,
+                ))
+                .unwrap(),
             Request::get("/v1/project/test/agent-candidates")
                 .body(Body::empty())
                 .unwrap(),
@@ -550,6 +574,17 @@ mod tests {
             .header("content-type", "application/json")
             .body(Body::from("{}"))
             .unwrap(),
+            Request::post("/v1/project/test/profiles/import")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{
+                        "archiveId":"profile-1",
+                        "name":"Guide",
+                        "activeVersionId":"version-1",
+                        "versions":[{"archiveId":"version-1"}]
+                    }"#,
+                ))
+                .unwrap(),
         ];
 
         for request in requests {

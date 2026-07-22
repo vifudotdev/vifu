@@ -337,6 +337,7 @@ function GameRuntimeIntegration({
           <div className="game-runtime-contracts">
             <ContractLink method="GET" label="Manifest" path={`${gameBaseUrl}/manifest`} />
             <ContractLink method="GET" label="Presentation" path={`${gameBaseUrl}/presentation`} />
+            <ExportGameReleaseButton projectSlug={project.slug} release={activeRelease} />
             <ExportHostBindingsButton projectSlug={project.slug} resources={logicalResources} />
           </div>
         </>
@@ -425,6 +426,46 @@ function ExportHostBindingsButton({ projectSlug, resources }: { projectSlug: str
   }
 
   return <button className="secondary-button compact" type="button" onClick={exportBindings}><Download aria-hidden="true" />Host bindings</button>;
+}
+
+function ExportGameReleaseButton({ projectSlug, release }: { projectSlug: string; release: GameRelease }) {
+  const [pending, setPending] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function exportRelease() {
+    setPending(true);
+    setError(null);
+    try {
+      const bundle = await runtimeRequest<Record<string, unknown>>(
+        `project/${encodeURIComponent(projectSlug)}/game/releases/${release.id}/export`,
+        "GET",
+      );
+      const url = URL.createObjectURL(new Blob([JSON.stringify(bundle, null, 2)], {
+        type: "application/vnd.vifu.game-release+json",
+      }));
+      const anchor = window.document.createElement("a");
+      anchor.href = url;
+      anchor.download = `${projectSlug}-r${release.releaseNumber}.vifu-game.json`;
+      anchor.click();
+      window.setTimeout(() => URL.revokeObjectURL(url), 0);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Release export failed.");
+    } finally {
+      setPending(false);
+    }
+  }
+
+  return (
+    <button
+      className="secondary-button compact"
+      type="button"
+      disabled={pending}
+      title={error ?? "Export immutable runtime bundle"}
+      onClick={() => void exportRelease()}
+    >
+      <Download aria-hidden="true" />{pending ? "Exporting" : error ? "Retry export" : "Runtime bundle"}
+    </button>
+  );
 }
 
 function ApiSetupEmpty({ projectSlug }: { projectSlug: string }) {
@@ -1095,11 +1136,11 @@ function formatDate(value: string): string {
   }).format(date);
 }
 
-async function runtimeRequest<T>(path: string, method: string, body: unknown): Promise<T> {
+async function runtimeRequest<T>(path: string, method: string, body?: unknown): Promise<T> {
   const response = await fetch(`/api/runtime/${path}`, {
     method,
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(body),
+    headers: body === undefined ? undefined : { "content-type": "application/json" },
+    body: body === undefined ? undefined : JSON.stringify(body),
   });
   const payload = await response.json().catch(() => null) as T | { error?: { message?: unknown } } | null;
   if (!response.ok) {
