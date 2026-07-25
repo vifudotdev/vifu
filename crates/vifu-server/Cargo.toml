@@ -2,10 +2,13 @@
 name = "vifu-server"
 version = "0.1.0"
 edition.workspace = true
+authors.workspace = true
 license.workspace = true
-description = "Open-source Agent Endpoint Runtime for Vifu."
+description = "HTTP, WebSocket, and PostgreSQL server implementation for Vifu."
 repository.workspace = true
 homepage.workspace = true
+documentation = "https://docs.rs/vifu-server"
+readme = "README.md"
 rust-version.workspace = true
 
 [dependencies]
@@ -27,7 +30,7 @@ tower-http = { version = "0.6.8", features = ["catch-panic", "cors", "limit", "r
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 uuid = { version = "1", features = ["serde", "v4"] }
-vifu-core = { path = "../vifu-core" }
+vifu-core = { version = "0.1.0", path = "../vifu-core", default-features = false }
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }

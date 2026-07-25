@@ -1,21 +1,33 @@
 # Embed The Runtime
 
-`vifu-game-runtime` supplies headless runtime primitives for applications that
-want to own their behavior while sharing the same command, event, effect, state,
-and snapshot model.
+The `vifu` crate is both the public Rust SDK and the source of the `vifu`
+binary. Embedded applications select only the features they need.
+
+For a minimal headless runtime:
+
+```toml
+[dependencies]
+vifu = { version = "0.1", default-features = false, features = ["runtime"] }
+```
+
+| Feature | Adds |
+| --- | --- |
+| `runtime` | Portable command, state, event, effect, and snapshot runtime |
+| `gateway` | Agent Provider discovery and the multiplexed Agent Gateway client |
+| `server` | HTTP, WebSocket, and PostgreSQL Vifu Server |
+| `full` | Runtime, Gateway, and Server library APIs |
+| `binary` | The complete `vifu` executable; enabled by default |
+| `local-whisper` | Optional local Whisper provider support |
+
+The lower-level `vifu-runtime` package supplies the headless execution kernel.
+Application code should normally import it through `vifu::runtime`.
 
 ## Add A Plugin
 
 Register normal Bevy systems on `RuntimeSchedule`:
 
 ```rust
-use bevy_app::{App, Plugin};
-use bevy_ecs::prelude::*;
-use serde_json::json;
-use vifu_game_runtime::{
-    EffectRequestQueue, RuntimeCommandQueue, RuntimeEventQueue, RuntimeSchedule,
-    RuntimeState,
-};
+use vifu::runtime::prelude::*;
 
 pub struct MyRuntimePlugin;
 
@@ -42,8 +54,7 @@ fn handle_commands(
 ## Run Headlessly
 
 ```rust
-use serde_json::json;
-use vifu_game_runtime::{HeadlessRuntime, RuntimeCommand};
+use vifu::runtime::prelude::{json, HeadlessRuntime, RuntimeCommand};
 
 let mut runtime = HeadlessRuntime::new();
 runtime.app_mut().add_plugins(MyRuntimePlugin);

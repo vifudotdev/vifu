@@ -85,8 +85,8 @@ export function RuntimeConsole({
     <AppLayout
       sidebar={(
         <>
-          <Link className="console-brand" href="/project" aria-label="VifuDev Console">
-            <Image className="console-brand-lockup" src="/brand/vifudev-lockup.svg" width={107} height={32} alt="VifuDev" priority />
+          <Link className="console-brand" href="/project" aria-label="Vifu Console">
+            <Image className="console-brand-lockup" src="/brand/vifu-lockup.png" width={80} height={32} alt="Vifu" priority />
             <Image className="console-brand-mark" src="/brand/vifu-icon-512.png" width={32} height={32} alt="" priority />
           </Link>
           {selectedProject ? (

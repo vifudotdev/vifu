@@ -168,7 +168,7 @@ svg {
 
 .console-brand-lockup {
   display: block;
-  width: 107px;
+  width: 80px;
   height: 32px;
   object-fit: contain;
   object-position: left center;
@@ -4187,7 +4187,7 @@ button:disabled {
 
 .auth-brand img {
   display: block;
-  width: 133px;
+  width: 100px;
   height: 40px;
   object-fit: contain;
   object-position: left center;

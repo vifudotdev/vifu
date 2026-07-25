@@ -2,7 +2,7 @@ export declare const VIFU_RUNTIME_CAPABILITY = "game-runtime";
 export declare const VIFU_PROTOCOL_VERSION = "vifu.runtime.2026-07-15";
 export declare const VIFU_SDK_VERSION = "0.1.0-alpha.9";
 
-export declare const VIFU_RUNTIME_SOURCE = "vifu-game-runtime";
+export declare const VIFU_RUNTIME_SOURCE = "vifu-runtime";
 export declare const VIFU_HOST_SOURCE = "vifu-host";
 export declare const VIFU_WEB_HOST_SOURCE = "vifu-web-host";
 export declare const VIFU_IOS_HOST_SOURCE = "vifu-ios-host";

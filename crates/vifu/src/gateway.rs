@@ -5,10 +5,11 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::watch;
 use uuid::Uuid;
 
-use crate::config::{AgentProviderConfig, Config};
-use crate::openclaw::{self, ProbeStatus};
-use crate::relay;
-use crate::session::{self, SessionStatus, SessionSummary};
+pub use vifu_core::{config, openclaw, protocol, relay, session};
+
+use config::{AgentProviderConfig, Config};
+use openclaw::ProbeStatus;
+use session::{SessionStatus, SessionSummary};
 
 const PROVIDER_RETRY_DELAY: Duration = Duration::from_secs(10);
 

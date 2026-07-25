@@ -3374,6 +3374,7 @@ dependencies = [
  "tracing-subscriber",
  "uuid",
  "vifu-core",
+ "vifu-runtime",
  "vifu-server",
 ]
 
@@ -3394,16 +3395,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "vifu-game-runtime"
-version = "0.1.0"
-dependencies = [
- "bevy_app",
- "bevy_ecs",
- "serde",
- "serde_json",
-]
-
-[[package]]
 name = "vifu-mobile-ffi"
 version = "0.1.0"
 dependencies = [
@@ -3411,6 +3402,16 @@ dependencies = [
  "tokio",
  "uniffi",
  "vifu-core",
+]
+
+[[package]]
+name = "vifu-runtime"
+version = "0.1.0"
+dependencies = [
+ "bevy_app",
+ "bevy_ecs",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

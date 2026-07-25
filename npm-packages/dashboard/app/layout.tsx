@@ -10,7 +10,7 @@ import type { Metadata } from "next";
 import type { ReactNode } from "react";
 
 export const metadata: Metadata = {
-  title: "VifuDev Console",
+  title: "Vifu Console",
   description: "Open-source operations Console for the Vifu runtime.",
 };
 

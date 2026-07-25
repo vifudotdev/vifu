@@ -1,13 +1,17 @@
 [package]
-name = "vifu-game-runtime"
+name = "vifu-runtime"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
-description = "Composable Bevy headless runtime primitives for Vifu."
+description = "Small, stateful, embeddable Agent Runtime primitives for Vifu."
 repository.workspace = true
 homepage.workspace = true
 rust-version.workspace = true
+documentation = "https://docs.rs/vifu-runtime"
+readme = "README.md"
+keywords = ["agents", "runtime", "bevy", "embedded", "stateful"]
+categories = ["game-development", "development-tools"]
 
 [dependencies]
 bevy_app.workspace = true

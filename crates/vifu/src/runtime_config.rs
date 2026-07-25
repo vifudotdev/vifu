@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::agent_gateway::GatewayRuntimeOptions;
+use crate::gateway::GatewayRuntimeOptions;
 
 const CONFIG_FILE_NAME: &str = "config.json";
 const CONFIG_VERSION: u32 = 1;

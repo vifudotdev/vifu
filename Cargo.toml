@@ -1,6 +1,6 @@
 [workspace]
 members = [
-  "crates/vifu-game-runtime",
+  "crates/vifu-runtime",
   "crates/vifu-core",
   "crates/vifu-mobile-ffi",
   "crates/vifu",

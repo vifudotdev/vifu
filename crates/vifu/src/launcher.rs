@@ -1,8 +1,8 @@
 use tokio::sync::watch;
 use tracing_subscriber::EnvFilter;
 
-use crate::agent_gateway;
 use crate::cli::{help_text, Command, Options};
+use crate::gateway;
 use crate::runtime_config::LoadedRuntimeConfig;
 
 pub async fn execute(options: Options) -> Result<(), String> {
@@ -53,7 +53,7 @@ async fn status(config: LoadedRuntimeConfig) -> Result<(), String> {
     );
     if config.config.gateway.is_some() {
         let gateway = config.gateway_options()?.load_config()?;
-        agent_gateway::status(&gateway).await?;
+        gateway::status(&gateway).await?;
     }
     Ok(())
 }
@@ -63,7 +63,7 @@ async fn doctor(config: LoadedRuntimeConfig) -> Result<(), String> {
     println!("Configuration: {}", config.path.display());
     if config.config.gateway.is_some() {
         let gateway = config.gateway_options()?.load_config()?;
-        agent_gateway::doctor(&gateway).await?;
+        gateway::doctor(&gateway).await?;
     } else {
         println!("Agent Gateway: not configured");
     }
@@ -72,12 +72,12 @@ async fn doctor(config: LoadedRuntimeConfig) -> Result<(), String> {
 
 fn gateway_logout(config: LoadedRuntimeConfig) -> Result<(), String> {
     let gateway = config.gateway_options()?.load_config()?;
-    agent_gateway::logout(&gateway)
+    gateway::logout(&gateway)
 }
 
 fn gateway_reset(config: LoadedRuntimeConfig) -> Result<(), String> {
     let gateway = config.gateway_options()?.load_config()?;
-    agent_gateway::reset(&gateway)
+    gateway::reset(&gateway)
 }
 
 fn role_status(enabled: bool) -> &'static str {
@@ -97,7 +97,7 @@ async fn run_combined(config: LoadedRuntimeConfig) -> Result<(), String> {
         server_config,
         wait_for_shutdown(shutdown_rx.clone()),
     ));
-    let mut gateway = tokio::spawn(agent_gateway::run(gateway_options, shutdown_rx));
+    let mut gateway = tokio::spawn(gateway::run(gateway_options, shutdown_rx));
     let outcome = tokio::select! {
         () = shutdown_signal() => CombinedRuntimeOutcome::Shutdown,
         result = &mut server => CombinedRuntimeOutcome::Server(result),
@@ -156,7 +156,7 @@ async fn run_server_only(_config: LoadedRuntimeConfig) -> Result<(), String> {
 async fn run_gateway_only(config: LoadedRuntimeConfig) -> Result<(), String> {
     let gateway_options = config.gateway_options()?;
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
-    let mut gateway = tokio::spawn(agent_gateway::run(gateway_options, shutdown_rx));
+    let mut gateway = tokio::spawn(gateway::run(gateway_options, shutdown_rx));
     let outcome = tokio::select! {
         () = shutdown_signal() => SingleRuntimeOutcome::Shutdown,
         result = &mut gateway => SingleRuntimeOutcome::Role(result),
