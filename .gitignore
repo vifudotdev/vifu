@@ -2,6 +2,8 @@ target/
 node_modules/
 packages/*/dist/
 packages/*/release.bun.lock
+/packages/runtime/src/*.js
+/packages/runtime/src/*.d.ts
 .next/
 .next-e2e/
 test-results/

@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
-description = "Provider-neutral graph compiler and deterministic game runtime for Vifu."
+description = "Composable Bevy headless runtime primitives for Vifu."
 repository.workspace = true
 homepage.workspace = true
 rust-version.workspace = true
@@ -12,15 +12,5 @@ rust-version.workspace = true
 [dependencies]
 bevy_app.workspace = true
 bevy_ecs.workspace = true
-jsonschema.workspace = true
-petgraph.workspace = true
-schemars.workspace = true
 serde.workspace = true
-serde-saphyr.workspace = true
 serde_json.workspace = true
-serde_json_canonicalizer.workspace = true
-sha2.workspace = true
-thiserror.workspace = true
-
-[dev-dependencies]
-pretty_assertions = "1"

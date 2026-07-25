@@ -1,6 +1,0 @@
-{
-  "version": 1,
-  "gateway": {
-    "serverUrl": "http://backend:6790"
-  }
-}

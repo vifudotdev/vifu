@@ -3,10 +3,10 @@ pub mod auth;
 pub mod config;
 pub mod db;
 pub mod error;
-pub mod game;
 pub mod models;
 mod openclaw_device;
 pub mod relay;
+pub mod runtime_extensions;
 pub mod websocket;
 
 use std::future::Future;
@@ -15,7 +15,7 @@ use std::sync::Arc;
 use axum::extract::DefaultBodyLimit;
 use axum::http::header::{AUTHORIZATION, CONTENT_TYPE};
 use axum::http::{HeaderName, Method};
-use axum::routing::{delete, get, patch, post, put};
+use axum::routing::{get, patch, post, put};
 use axum::Router;
 use config::Config;
 use error::ApiError;
@@ -56,7 +56,6 @@ where
     let listener = TcpListener::bind(addr)
         .await
         .map_err(|error| format!("could not bind {addr}: {error}"))?;
-    game::spawn_effect_worker(state.clone());
     info!(%addr, "vifu server listening");
     axum::serve(listener, app(state))
         .with_graceful_shutdown(shutdown)
@@ -104,151 +103,28 @@ pub fn app(state: AppState) -> Router {
                 .patch(api::update_project)
                 .delete(api::delete_project),
         )
-        .route("/v1/projects/{slug}/canvas", get(api::get_project_canvas))
-        .route("/v1/project/{slug}/canvas", get(api::get_project_canvas))
-        .route("/v1/project/{slug}/game", get(game::api::get_game_overview))
         .route(
-            "/v1/project/{slug}/game/source",
-            get(game::api::get_game_source).put(game::api::put_game_source),
+            "/v1/runtime-extensions",
+            get(runtime_extensions::list_runtime_extensions),
         )
         .route(
-            "/v1/project/{slug}/game/source/import",
-            post(game::api::import_game_source),
+            "/v1/runtime-extensions/{extension_id}/projects/{project_id}/invoke",
+            post(runtime_extensions::invoke_project_profile_for_extension),
         )
         .route(
-            "/v1/project/{slug}/game/source/export",
-            get(game::api::export_game_source),
+            "/v1/project/{slug}/extensions/runtime",
+            get(runtime_extensions::get_project_runtime_extension)
+                .put(runtime_extensions::set_project_runtime_extension)
+                .delete(runtime_extensions::delete_project_runtime_extension),
         )
         .route(
-            "/v1/project/{slug}/game/validate",
-            post(game::api::validate_game),
+            "/v1/project/{slug}/runtime-channels",
+            get(runtime_extensions::list_project_runtime_channels)
+                .post(runtime_extensions::create_project_runtime_channel),
         )
         .route(
-            "/v1/project/{slug}/game/localization/translate",
-            post(game::management_api::translate_messages),
-        )
-        .route(
-            "/v1/project/{slug}/game/publish",
-            post(game::api::publish_game),
-        )
-        .route(
-            "/v1/project/{slug}/game/releases",
-            get(game::api::list_game_releases),
-        )
-        .route(
-            "/v1/project/{slug}/game/releases/{release_id}/activate",
-            post(game::api::activate_game_release),
-        )
-        .route(
-            "/v1/project/{slug}/game/releases/{release_id}/export",
-            get(game::api::export_game_release),
-        )
-        .route(
-            "/v1/project/{slug}/game/resources",
-            get(game::management_api::list_resources).post(game::management_api::create_resource),
-        )
-        .route(
-            "/v1/project/{slug}/game/resources/{resource_id}",
-            get(game::management_api::get_resource)
-                .patch(game::management_api::update_resource)
-                .delete(game::management_api::delete_resource),
-        )
-        .route(
-            "/v1/project/{slug}/game/assets",
-            get(game::management_api::list_assets).post(game::management_api::create_asset),
-        )
-        .route(
-            "/v1/project/{slug}/game/assets/{asset_id}",
-            delete(game::management_api::delete_asset),
-        )
-        .route(
-            "/v1/project/{slug}/game/assets/{asset_id}/versions",
-            get(game::assets::list_asset_versions).post(game::assets::upload_asset_version),
-        )
-        .route(
-            "/v1/project/{slug}/game/assets/{asset_id}/versions/{version_id}/approve",
-            post(game::assets::approve_asset_version),
-        )
-        .route(
-            "/v1/project/{slug}/game/assets/{asset_id}/versions/{version_id}/content",
-            get(game::assets::serve_authoring_asset),
-        )
-        .route(
-            "/v1/project/{slug}/game/builds",
-            post(game::management_api::create_build),
-        )
-        .route(
-            "/v1/project/{slug}/game/builds/{build_id}",
-            get(game::management_api::get_build),
-        )
-        .route(
-            "/v1/project/{slug}/game/builds/{build_id}/cancel",
-            post(game::management_api::cancel_build),
-        )
-        .route(
-            "/v1/project/{slug}/game/preview",
-            post(game::management_api::preview_game),
-        )
-        .route(
-            "/v1/project/{slug}/game/qa",
-            get(game::management_api::game_qa),
-        )
-        .route(
-            "/v1/project/{slug}/game/analytics",
-            get(game::management_api::game_analytics),
-        )
-        .route(
-            "/v1/project/{slug}/game/sessions",
-            get(game::management_api::list_sessions),
-        )
-        .route(
-            "/v1/project/{slug}/game/sessions/{session_id}",
-            get(game::management_api::get_session),
-        )
-        .route(
-            "/v1/project/{slug}/game/presentations",
-            get(game::management_api::list_presentations)
-                .post(game::management_api::publish_presentation),
-        )
-        .route(
-            "/v1/project/{slug}/game/presentations/{presentation_id}/activate",
-            post(game::management_api::activate_presentation),
-        )
-        .route(
-            "/v1/game/node-definitions",
-            get(game::api::list_node_definitions),
-        )
-        .route(
-            "/v1/projects/{slug}/canvas/nodes",
-            post(api::create_canvas_node),
-        )
-        .route(
-            "/v1/project/{slug}/canvas/nodes",
-            post(api::create_canvas_node),
-        )
-        .route(
-            "/v1/projects/{slug}/canvas/nodes/{id}",
-            axum::routing::patch(api::update_canvas_node).delete(api::delete_canvas_node),
-        )
-        .route(
-            "/v1/project/{slug}/canvas/nodes/{id}",
-            axum::routing::patch(api::update_canvas_node).delete(api::delete_canvas_node),
-        )
-        .route(
-            "/v1/projects/{slug}/canvas/edges",
-            post(api::create_canvas_edge),
-        )
-        .route(
-            "/v1/project/{slug}/canvas/edges",
-            post(api::create_canvas_edge),
-        )
-        .route(
-            "/v1/projects/{slug}/canvas/edges/{id}",
-            delete(api::delete_canvas_edge),
-        )
-        .route(
-            "/v1/project/{slug}/canvas/edges/{id}",
-            delete(api::delete_canvas_edge),
+            "/v1/project/{slug}/runtime-channels/{channel_id}",
+            axum::routing::delete(runtime_extensions::delete_project_runtime_channel),
         )
         .route("/v1/provider-adapters", get(api::list_provider_adapters))
         .route("/v1/provider-catalog", get(api::list_provider_catalog))
@@ -356,36 +232,6 @@ pub fn app(state: AppState) -> Router {
             "/{project_slug}/v1/chat/completions",
             post(api::create_project_chat_completion),
         )
-        .route("/{project_slug}/v1/game", get(game::api::get_runtime_game))
-        .route(
-            "/{project_slug}/v1/game/manifest",
-            get(game::api::get_runtime_manifest),
-        )
-        .route(
-            "/{project_slug}/v1/game/presentation",
-            get(game::api::get_runtime_presentation),
-        )
-        .route(
-            "/{project_slug}/v1/game/assets/{version_id}",
-            get(game::assets::serve_runtime_asset),
-        )
-        .route(
-            "/{project_slug}/v1/game/sessions",
-            post(game::api::create_runtime_session),
-        )
-        .route(
-            "/{project_slug}/v1/game/sessions/{session_id}",
-            get(game::api::get_runtime_session),
-        )
-        .route(
-            "/{project_slug}/v1/game/sessions/{session_id}/commands",
-            post(game::api::submit_runtime_command),
-        )
-        .route(
-            "/{project_slug}/v1/game/sessions/{session_id}/events",
-            get(game::api::stream_runtime_events),
-        )
-        .route("/{project_slug}/v1/game/run", post(game::api::run_game))
         .route("/{project_slug}/v1/agents", get(api::list_project_agents))
         .route(
             "/{project_slug}/v1/audio/speech",
@@ -398,6 +244,15 @@ pub fn app(state: AppState) -> Router {
         .route(
             "/{project_slug}/v1/realtime/sessions",
             post(api::create_realtime_session),
+        )
+        .route(
+            "/{project_slug}/v1/rpc",
+            get(runtime_extensions::connect_project_runtime)
+                .post(runtime_extensions::invoke_project_runtime),
+        )
+        .route(
+            "/{project_slug}/v1/runtime/launch",
+            post(runtime_extensions::create_runtime_launch_session),
         )
         .route("/{project_slug}/v1/realtime", get(api::connect_realtime))
         .route("/v1/models", get(api::list_openai_models))

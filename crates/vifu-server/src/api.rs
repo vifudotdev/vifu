@@ -24,20 +24,17 @@ use crate::auth::{
     hash_api_key, is_secret_match,
 };
 use crate::config::DeploymentMode;
-use crate::db::{
-    self, CanvasNodePatch, EndpointPatch, NewCanvasEdge, NewCanvasNode, NewEndpoint, NewProject,
-    ProfilePatch, ProjectPatch,
-};
+use crate::db::{self, EndpointPatch, NewEndpoint, NewProject, ProfilePatch, ProjectPatch};
 use crate::error::ApiError;
 use crate::models::{
     slugify, validate_slug, AgentEndpoint, ApiKeyAgentScope, ApiKeyPermissions, ApiKeyRecord,
-    Capabilities, CreateApiKey, CreateBinding, CreateCanvasEdge, CreateCanvasNode, CreateEndpoint,
-    CreateProfile, CreateProfileVersion, CreateProject, CreateProjectProvider, CreatedApiKey,
-    CustomProvider, CustomProviderSecret, EndpointRoute, ImportProjectAgent, ImportProjectProfile,
-    ImportProjectProvider, ProfileCapabilityDraft, ProviderAdapter, ProviderAdapterField,
-    ProviderConnection, ProviderConnectionSecret, RegisterAgentGateway, SetProfileRollout,
-    SyncProfileSource, TestProfile, UpdateApiKey, UpdateBinding, UpdateCanvasNode, UpdateEndpoint,
-    UpdateProfile, UpdateProject, UpdateProjectProvider, UpsertProviderConnection,
+    Capabilities, CreateApiKey, CreateBinding, CreateEndpoint, CreateProfile, CreateProfileVersion,
+    CreateProject, CreateProjectProvider, CreatedApiKey, CustomProvider, CustomProviderSecret,
+    EndpointRoute, ImportProjectAgent, ImportProjectProfile, ImportProjectProvider,
+    ProfileCapabilityDraft, ProviderAdapter, ProviderAdapterField, ProviderConnection,
+    ProviderConnectionSecret, RegisterAgentGateway, SetProfileRollout, SyncProfileSource,
+    TestProfile, UpdateApiKey, UpdateBinding, UpdateEndpoint, UpdateProfile, UpdateProject,
+    UpdateProjectProvider, UpsertProviderConnection,
 };
 use crate::openclaw_device;
 use crate::relay::RelayCallError;
@@ -177,149 +174,6 @@ pub async fn delete_project(
 ) -> Result<StatusCode, ApiError> {
     admin(&state, &headers).await?;
     db::delete_project(&state.pool, id).await?;
-    Ok(StatusCode::NO_CONTENT)
-}
-
-pub async fn get_project_canvas(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Path(slug): Path<String>,
-) -> Result<Json<Value>, ApiError> {
-    admin(&state, &headers).await?;
-    Ok(Json(json!({
-        "canvas": db::get_project_canvas(&state.pool, &slug).await?
-    })))
-}
-
-pub async fn create_canvas_node(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Path(slug): Path<String>,
-    Json(input): Json<CreateCanvasNode>,
-) -> Result<(StatusCode, Json<Value>), ApiError> {
-    admin(&state, &headers).await?;
-    let kind = required_identifier("node kind", &input.kind)?;
-    validate_json_object("position", &input.position, 16 * 1024)?;
-    validate_json_object("config", &input.config, 64 * 1024)?;
-    validate_json_object("inputs", &input.inputs, 64 * 1024)?;
-    validate_json_object("outputs", &input.outputs, 64 * 1024)?;
-    let gateway_id = input
-        .gateway_id
-        .as_deref()
-        .map(|value| required_identifier("agent gateway id", value))
-        .transpose()?;
-    let resource_id = input
-        .resource_id
-        .as_deref()
-        .map(|value| required_identifier("resource id", value))
-        .transpose()?;
-    let node = db::create_canvas_node(
-        &state.pool,
-        &slug,
-        NewCanvasNode {
-            kind,
-            position: &input.position,
-            profile_id: input.profile_id,
-            binding_id: input.binding_id,
-            gateway_id,
-            resource_id,
-            config: &input.config,
-            inputs: &input.inputs,
-            outputs: &input.outputs,
-            exposed: input.exposed.unwrap_or(true),
-        },
-    )
-    .await?;
-    Ok((StatusCode::CREATED, Json(json!({ "node": node }))))
-}
-
-pub async fn update_canvas_node(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Path((slug, id)): Path<(String, Uuid)>,
-    Json(input): Json<UpdateCanvasNode>,
-) -> Result<Json<Value>, ApiError> {
-    admin(&state, &headers).await?;
-    if let Some(position) = &input.position {
-        validate_json_object("position", position, 16 * 1024)?;
-    }
-    if let Some(config) = &input.config {
-        validate_json_object("config", config, 64 * 1024)?;
-    }
-    if let Some(inputs) = &input.inputs {
-        validate_json_object("inputs", inputs, 64 * 1024)?;
-    }
-    if let Some(outputs) = &input.outputs {
-        validate_json_object("outputs", outputs, 64 * 1024)?;
-    }
-    let node = db::update_canvas_node(
-        &state.pool,
-        &slug,
-        id,
-        CanvasNodePatch {
-            position: input.position.as_ref(),
-            config: input.config.as_ref(),
-            inputs: input.inputs.as_ref(),
-            outputs: input.outputs.as_ref(),
-            exposed: input.exposed,
-        },
-    )
-    .await?;
-    Ok(Json(json!({ "node": node })))
-}
-
-pub async fn delete_canvas_node(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Path((slug, id)): Path<(String, Uuid)>,
-) -> Result<StatusCode, ApiError> {
-    admin(&state, &headers).await?;
-    db::delete_canvas_node(&state.pool, &slug, id).await?;
-    Ok(StatusCode::NO_CONTENT)
-}
-
-pub async fn create_canvas_edge(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Path(slug): Path<String>,
-    Json(input): Json<CreateCanvasEdge>,
-) -> Result<(StatusCode, Json<Value>), ApiError> {
-    admin(&state, &headers).await?;
-    let kind = required_identifier("edge kind", &input.kind)?;
-    validate_json_object("config", &input.config, 64 * 1024)?;
-    let source_handle = input
-        .source_handle
-        .as_deref()
-        .map(|value| required_identifier("source handle", value))
-        .transpose()?;
-    let target_handle = input
-        .target_handle
-        .as_deref()
-        .map(|value| required_identifier("target handle", value))
-        .transpose()?;
-    let edge = db::create_canvas_edge(
-        &state.pool,
-        &slug,
-        NewCanvasEdge {
-            source_node_id: input.source_node_id,
-            source_handle,
-            target_node_id: input.target_node_id,
-            target_handle,
-            kind,
-            config: &input.config,
-        },
-    )
-    .await?;
-    Ok((StatusCode::CREATED, Json(json!({ "edge": edge }))))
-}
-
-pub async fn delete_canvas_edge(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Path((slug, id)): Path<(String, Uuid)>,
-) -> Result<StatusCode, ApiError> {
-    admin(&state, &headers).await?;
-    db::delete_canvas_edge(&state.pool, &slug, id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -505,7 +359,7 @@ pub async fn import_project_profile(
     }
 
     // Portable profile imports intentionally keep provider references unresolved.
-    // Credentials and provider connections are deployment-owned and never enter a .vf file.
+    // Credentials and provider connections are deployment-owned and are never copied with projects.
     let profile = db::create_profile(
         &state.pool,
         Uuid::new_v4(),
@@ -3171,6 +3025,135 @@ async fn create_profile_chat_completion(
     }
 }
 
+pub(crate) async fn invoke_runtime_extension_profile(
+    state: &AppState,
+    project: &crate::models::ProjectWithBindings,
+    input: &vifu_core::runtime_extension::RuntimeProfileInvocation,
+    request_id: Uuid,
+) -> Result<Value, ApiError> {
+    let capability = required_identifier("capability", &input.capability)?;
+    if !matches!(capability, "chat" | "tool") {
+        return Err(ApiError::Invalid(
+            "runtime extensions may invoke chat or tool capabilities".to_string(),
+        ));
+    }
+    let operation_id = required_identifier("operation ID", &input.operation_id)?;
+    let route = db::resolve_profile_route(
+        &state.pool,
+        project.project.id,
+        &input.profile_id.to_string(),
+        capability,
+        Some(operation_id),
+        Some(input.profile_version_id),
+    )
+    .await?;
+    let timeout = profile_timeout(&route.runtime, state.config.request_timeout);
+    match capability {
+        "chat" => {
+            let request = runtime_agent_request(&route.profile_slug, input.input.clone());
+            invoke_profile_chat(
+                state,
+                &project.project.slug,
+                &route,
+                request_id,
+                request,
+                timeout,
+            )
+            .await
+            .map(normalize_runtime_agent_output)
+        }
+        "tool" => {
+            let tool = input
+                .tool
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| ApiError::Invalid("tool is required".to_string()))?;
+            if route.provider_type != "openclaw" {
+                return Err(ApiError::Invalid(format!(
+                    "provider type {} does not support direct Tool invocation",
+                    route.provider_type
+                )));
+            }
+            if !runtime_profile_tool_is_available(&route.capability_config, tool) {
+                return Err(ApiError::Invalid(format!(
+                    "Tool {tool} is not available in the selected Profile version"
+                )));
+            }
+            let agent_id = route.resource_id.as_deref().ok_or_else(|| {
+                ApiError::Invalid("OpenClaw Tool capability is missing an Agent ID".to_string())
+            })?;
+            let mut client = connect_openclaw_management_client(
+                state,
+                &project.project.slug,
+                &route.provider_key,
+            )
+            .await?;
+            let invocation = client
+                .invoke_tool(agent_id, tool, input.input.clone(), &request_id.to_string())
+                .await;
+            let close = client.close().await;
+            match (invocation, close) {
+                (Ok(output), Ok(())) => Ok(output),
+                (Err(error), _) | (Ok(_), Err(error)) => Err(ApiError::Provider(error)),
+            }
+        }
+        _ => unreachable!("capability was validated"),
+    }
+}
+
+fn runtime_agent_request(model: &str, input: Value) -> Value {
+    if input.get("messages").and_then(Value::as_array).is_some() {
+        let mut request = input;
+        if let Some(object) = request.as_object_mut() {
+            object.insert("model".to_string(), Value::String(model.to_string()));
+            object.insert("stream".to_string(), Value::Bool(false));
+        }
+        return request;
+    }
+    let content = input
+        .as_str()
+        .map(str::to_string)
+        .unwrap_or_else(|| serde_json::to_string(&input).unwrap_or_else(|_| "null".to_string()));
+    json!({
+        "model": model,
+        "stream": false,
+        "messages": [{"role": "user", "content": content}]
+    })
+}
+
+fn normalize_runtime_agent_output(response: Value) -> Value {
+    if response.get("dialogue").is_some() || response.get("stateChanges").is_some() {
+        return response;
+    }
+    let Some(content) = response
+        .get("choices")
+        .and_then(Value::as_array)
+        .and_then(|choices| choices.first())
+        .and_then(|choice| choice.get("message"))
+        .and_then(|message| message.get("content"))
+        .and_then(Value::as_str)
+    else {
+        return response;
+    };
+    serde_json::from_str::<Value>(content)
+        .ok()
+        .filter(Value::is_object)
+        .unwrap_or_else(|| json!({"dialogue": content}))
+}
+
+fn runtime_profile_tool_is_available(config: &Value, tool: &str) -> bool {
+    config
+        .get("tools")
+        .and_then(Value::as_array)
+        .is_some_and(|tools| {
+            tools.iter().any(|candidate| {
+                candidate.as_str() == Some(tool)
+                    || candidate.get("name").and_then(Value::as_str) == Some(tool)
+            })
+        })
+}
+
 async fn invoke_profile_chat(
     state: &AppState,
     project_slug: &str,
@@ -3241,281 +3224,6 @@ async fn invoke_profile_chat(
             "provider type {provider} does not support chat"
         ))),
     }
-}
-
-pub(crate) struct GameProviderEffect<'a> {
-    pub project_id: Uuid,
-    pub project_slug: &'a str,
-    pub profile_id: Uuid,
-    pub profile_version_id: Uuid,
-    pub request_id: Uuid,
-    pub effect_id: &'a str,
-    pub descriptor: &'a Value,
-    pub input: Value,
-    pub trace_context: Option<crate::game::models::GameEffectTrace>,
-}
-
-pub(crate) async fn invoke_game_agent(
-    state: &AppState,
-    effect: GameProviderEffect<'_>,
-) -> Result<Value, ApiError> {
-    let GameProviderEffect {
-        project_id,
-        project_slug,
-        profile_id,
-        profile_version_id,
-        request_id,
-        effect_id,
-        descriptor: _,
-        input,
-        trace_context,
-    } = effect;
-    let route = db::resolve_profile_route(
-        &state.pool,
-        project_id,
-        &profile_id.to_string(),
-        "chat",
-        Some(effect_id),
-        Some(profile_version_id),
-    )
-    .await?;
-    let request = game_agent_request(&route.profile_slug, input);
-    let span_id = if let Some(context) = trace_context {
-        match db::create_trace_span(
-            &state.pool,
-            db::NewTraceSpan {
-                trace_id: context.trace_id,
-                parent_span_id: Some(context.parent_span_id),
-                name: "game.agent.effect",
-                kind: "provider",
-                provider_key: Some(&route.provider_key),
-                capability_kind: Some("chat"),
-                input_summary: Some(&json!({"effectId": effect_id})),
-                attributes: &json!({
-                    "profileId": route.profile_id,
-                    "profileVersionId": route.profile_version_id,
-                    "nodeEffectId": effect_id
-                }),
-            },
-        )
-        .await
-        {
-            Ok(span_id) => Some(span_id),
-            Err(error) => {
-                warn!(%error, %effect_id, "could not create game Agent effect span");
-                None
-            }
-        }
-    } else {
-        None
-    };
-    let timeout = profile_timeout(&route.runtime, state.config.request_timeout);
-    let started_at = Instant::now();
-    match invoke_profile_chat(state, project_slug, &route, request_id, request, timeout).await {
-        Ok(response) => {
-            let output = normalize_game_agent_output(response);
-            if let Some(span_id) = span_id {
-                if let Err(error) = db::complete_trace_span(
-                    &state.pool,
-                    span_id,
-                    "completed",
-                    db::elapsed_millis(started_at),
-                    Some(&json!({"effectId": effect_id})),
-                    None,
-                )
-                .await
-                {
-                    warn!(%error, %effect_id, "could not complete game Agent effect span");
-                }
-            }
-            Ok(output)
-        }
-        Err(error) => {
-            let message = error.to_string();
-            if let Some(span_id) = span_id {
-                if let Err(trace_error) = db::complete_trace_span(
-                    &state.pool,
-                    span_id,
-                    "failed",
-                    db::elapsed_millis(started_at),
-                    None,
-                    Some(&message),
-                )
-                .await
-                {
-                    warn!(error = %trace_error, %effect_id, "could not fail game Agent effect span");
-                }
-            }
-            Err(error)
-        }
-    }
-}
-
-pub(crate) async fn invoke_game_tool(
-    state: &AppState,
-    effect: GameProviderEffect<'_>,
-) -> Result<Value, ApiError> {
-    let GameProviderEffect {
-        project_id,
-        project_slug,
-        profile_id,
-        profile_version_id,
-        request_id,
-        effect_id,
-        descriptor,
-        input,
-        trace_context,
-    } = effect;
-    let tool = descriptor
-        .get("tool")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| ApiError::Invalid("Tool effect is missing a tool name".to_string()))?;
-    let route = db::resolve_profile_route(
-        &state.pool,
-        project_id,
-        &profile_id.to_string(),
-        "tool",
-        Some(effect_id),
-        Some(profile_version_id),
-    )
-    .await?;
-    if route.provider_type != "openclaw" {
-        return Err(ApiError::Invalid(format!(
-            "provider type {} does not support direct Tool invocation",
-            route.provider_type
-        )));
-    }
-    if !crate::game::service::profile_tool_is_available(&route.capability_config, tool) {
-        return Err(ApiError::Invalid(format!(
-            "Tool {tool} is not available in the published Profile version"
-        )));
-    }
-    let agent_id = route.resource_id.as_deref().ok_or_else(|| {
-        ApiError::Invalid("OpenClaw Tool capability is missing its Agent ID".to_string())
-    })?;
-    let span_id = if let Some(context) = trace_context {
-        match db::create_trace_span(
-            &state.pool,
-            db::NewTraceSpan {
-                trace_id: context.trace_id,
-                parent_span_id: Some(context.parent_span_id),
-                name: "game.tool.effect",
-                kind: "provider",
-                provider_key: Some(&route.provider_key),
-                capability_kind: Some("tool"),
-                input_summary: Some(&json!({"effectId": effect_id, "tool": tool})),
-                attributes: &json!({
-                    "profileId": route.profile_id,
-                    "profileVersionId": route.profile_version_id,
-                    "nodeEffectId": effect_id,
-                    "tool": tool
-                }),
-            },
-        )
-        .await
-        {
-            Ok(span_id) => Some(span_id),
-            Err(error) => {
-                warn!(%error, %effect_id, "could not create game Tool effect span");
-                None
-            }
-        }
-    } else {
-        None
-    };
-    let started_at = Instant::now();
-    let result = async {
-        let mut client =
-            connect_openclaw_management_client(state, project_slug, &route.provider_key).await?;
-        let invocation = client
-            .invoke_tool(agent_id, tool, input, &request_id.to_string())
-            .await;
-        let close = client.close().await;
-        match (invocation, close) {
-            (Ok(output), Ok(())) => Ok(output),
-            (Err(error), _) | (Ok(_), Err(error)) => Err(ApiError::Provider(error)),
-        }
-    }
-    .await;
-    match result {
-        Ok(output) => {
-            if let Some(span_id) = span_id {
-                if let Err(error) = db::complete_trace_span(
-                    &state.pool,
-                    span_id,
-                    "completed",
-                    db::elapsed_millis(started_at),
-                    Some(&json!({"effectId": effect_id})),
-                    None,
-                )
-                .await
-                {
-                    warn!(%error, %effect_id, "could not complete game Tool effect span");
-                }
-            }
-            Ok(output)
-        }
-        Err(error) => {
-            let message = error.to_string();
-            if let Some(span_id) = span_id {
-                if let Err(trace_error) = db::complete_trace_span(
-                    &state.pool,
-                    span_id,
-                    "failed",
-                    db::elapsed_millis(started_at),
-                    None,
-                    Some(&message),
-                )
-                .await
-                {
-                    warn!(error = %trace_error, %effect_id, "could not fail game Tool effect span");
-                }
-            }
-            Err(error)
-        }
-    }
-}
-
-fn game_agent_request(model: &str, input: Value) -> Value {
-    if input.get("messages").and_then(Value::as_array).is_some() {
-        let mut request = input;
-        if let Some(object) = request.as_object_mut() {
-            object.insert("model".to_string(), Value::String(model.to_string()));
-            object.insert("stream".to_string(), Value::Bool(false));
-        }
-        return request;
-    }
-    let content = input
-        .as_str()
-        .map(str::to_string)
-        .unwrap_or_else(|| serde_json::to_string(&input).unwrap_or_else(|_| "null".to_string()));
-    json!({
-        "model": model,
-        "stream": false,
-        "messages": [{"role": "user", "content": content}]
-    })
-}
-
-fn normalize_game_agent_output(response: Value) -> Value {
-    if response.get("dialogue").is_some() || response.get("stateChanges").is_some() {
-        return response;
-    }
-    let Some(content) = response
-        .get("choices")
-        .and_then(Value::as_array)
-        .and_then(|choices| choices.first())
-        .and_then(|choice| choice.get("message"))
-        .and_then(|message| message.get("content"))
-        .and_then(Value::as_str)
-    else {
-        return response;
-    };
-    serde_json::from_str::<Value>(content)
-        .ok()
-        .filter(Value::is_object)
-        .unwrap_or_else(|| json!({"dialogue": content}))
 }
 
 fn profile_gateway_id(route: &crate::models::ProfileRoute) -> Option<String> {
@@ -4039,30 +3747,6 @@ async fn resolve_runtime_provider(
         token: provider_token(&secrets)?,
         config,
     })
-}
-
-pub(crate) async fn invoke_project_authoring_model(
-    state: &AppState,
-    project_slug: &str,
-    provider_key: &str,
-    model: &str,
-    request: &Value,
-) -> Result<Value, ApiError> {
-    let provider = resolve_runtime_provider(state, project_slug, provider_key).await?;
-    if provider.provider_type != "openai-compatible" {
-        return Err(ApiError::Invalid(format!(
-            "provider {provider_key} does not expose an OpenAI-compatible authoring model"
-        )));
-    }
-    vifu_core::providers::openai_chat_completion(
-        &provider.base_url,
-        provider.token.as_deref(),
-        model,
-        request,
-        &json!({}),
-    )
-    .await
-    .map_err(ApiError::Provider)
 }
 
 fn provider_adapters() -> Vec<ProviderAdapter> {

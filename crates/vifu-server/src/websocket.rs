@@ -319,8 +319,8 @@ mod tests {
     use crate::config::Config;
     use crate::db::{self, NewProject};
     use crate::models::{
-        ApiKeyAgentScope, ApiKeyPermissions, EndpointPermission, GamePermission,
-        ProfileCapabilityDraft, ResourcePermission,
+        ApiKeyAgentScope, ApiKeyPermissions, EndpointPermission, ProfileCapabilityDraft,
+        ResourcePermission,
     };
     use crate::{app, state};
 
@@ -567,9 +567,9 @@ mod tests {
                     speech: EndpointPermission::None,
                     transcriptions: EndpointPermission::None,
                     realtime: EndpointPermission::None,
+                    runtime: EndpointPermission::None,
                     agents: ResourcePermission::Read,
                     project: ResourcePermission::Read,
-                    game: GamePermission::None,
                 },
                 key_prefix: "denied-test",
                 key_hash: &denied_key_hash,
@@ -660,38 +660,6 @@ mod tests {
         complete_invocation(&mut socket, &selected_invoke, "Hi from selected key").await;
         assert_eq!(selected_task.await.unwrap().status(), StatusCode::OK);
 
-        let canvas = db::get_project_canvas(&state.pool, &seeded.project_slug)
-            .await
-            .unwrap();
-        let selected_node = canvas
-            .nodes
-            .iter()
-            .find(|node| node.binding_id == Some(seeded.binding_id))
-            .expect("selected binding canvas node");
-        db::update_canvas_node(
-            &state.pool,
-            &seeded.project_slug,
-            selected_node.id,
-            db::CanvasNodePatch {
-                position: None,
-                config: None,
-                inputs: None,
-                outputs: None,
-                exposed: Some(false),
-            },
-        )
-        .await
-        .unwrap();
-        let hidden_agent = app(state.clone())
-            .oneshot(chat_completion_request(
-                &seeded.project_slug,
-                Some(&seeded.endpoint_slug),
-                raw_api_key,
-            ))
-            .await
-            .unwrap();
-        assert_api_error(hidden_agent, StatusCode::FORBIDDEN, "agent_access_denied").await;
-
         let revocation = app(state.clone())
             .oneshot(
                 Request::post(format!("/v1/agent-gateways/{}/revoke", seeded.gateway_id))
@@ -768,7 +736,6 @@ mod tests {
         profile_id: Uuid,
         project_id: Uuid,
         project_slug: String,
-        binding_id: Uuid,
         gateway_id: String,
     }
 
@@ -906,7 +873,6 @@ mod tests {
         db::attach_project_binding(pool, project_id, other_binding_id)
             .await
             .unwrap();
-        db::get_project_canvas(pool, &project_slug).await.unwrap();
         let key_hash = hash_api_key(raw_api_key, &config.api_key_pepper);
         db::create_api_key(
             pool,
@@ -929,7 +895,6 @@ mod tests {
             profile_id,
             project_id,
             project_slug,
-            binding_id,
             gateway_id: gateway_id.to_string(),
         }
     }

@@ -1,7 +1,6 @@
 import { NextResponse } from "next/server";
 import { AuthorityError, resolveAuthority } from "../../../../lib/authority";
 import { VifuHttpError } from "../../../../lib/deployment-client";
-import { isAllowedProjectGamePath } from "../../../../lib/runtime-proxy-policy";
 
 const ALLOWED_ROOTS = new Set([
   "chat",
@@ -15,11 +14,11 @@ const ALLOWED_ROOTS = new Set([
   "project",
   "provider-adapters",
   "provider-catalog",
+  "runtime-extensions",
   "traces",
-  "game",
   "status",
 ]);
-const MAX_BODY_BYTES = 32 * 1024 * 1024;
+const MAX_BODY_BYTES = 1024 * 1024;
 
 type RuntimeRouteContext = {
   params: Promise<{ path: string[] }>;
@@ -62,21 +61,6 @@ async function proxyRuntimeRequest(
     const headers = new Headers();
     const contentType = request.headers.get("content-type");
     if (contentType) headers.set("content-type", contentType);
-    if (isAssetContentPath(path)) {
-      const range = request.headers.get("range");
-      if (range) headers.set("range", range);
-      headers.set("accept", request.headers.get("accept") ?? "*/*");
-      const upstream = await authority.deployment.rawRequest(
-        `${runtimePath}${query}`,
-        { method, body, headers },
-      );
-      const responseHeaders = new Headers();
-      for (const name of ["accept-ranges", "cache-control", "content-length", "content-range", "content-type", "etag"]) {
-        const value = upstream.headers.get(name);
-        if (value) responseHeaders.set(name, value);
-      }
-      return new Response(upstream.body, { status: upstream.status, headers: responseHeaders });
-    }
     const response = await authority.deployment.request<unknown>(
       `${runtimePath}${query}`,
       { method, body, headers },
@@ -84,7 +68,7 @@ async function proxyRuntimeRequest(
     return response === undefined
       ? new Response(null, { status: 204 })
       : NextResponse.json(response, {
-        status: method === "POST" && !["commands", "completions", "test", "discover-agents", "restore", "revoke"].includes(path.at(-1) ?? "") ? 201 : 200,
+        status: method === "POST" && !["commands", "completions", "rpc", "test", "discover-agents", "restore", "revoke"].includes(path.at(-1) ?? "") ? 201 : 200,
       });
   } catch (error) {
     if (error instanceof AuthorityError || error instanceof VifuHttpError) {
@@ -96,15 +80,6 @@ async function proxyRuntimeRequest(
       error instanceof Error ? error.message : "Runtime request failed.",
     );
   }
-}
-
-function isAssetContentPath(path: string[]): boolean {
-  return path.length === 8
-    && path[0] === "project"
-    && path[2] === "game"
-    && path[3] === "assets"
-    && path[5] === "versions"
-    && path[7] === "content";
 }
 
 async function readBody(request: Request): Promise<ArrayBuffer> {
@@ -120,7 +95,7 @@ async function readBody(request: Request): Promise<ArrayBuffer> {
 function isAllowedPath(path: string[]): boolean {
   if (path.length < 1 || path.length > 8) return false;
   if (!path.every((segment) => /^[A-Za-z0-9._:-]{1,128}$/.test(segment))) return false;
-  if (isProjectScopedRuntimePath(path)) return true;
+  if (isProjectScopedEndpointPath(path)) return true;
   if (!ALLOWED_ROOTS.has(path[0] ?? "")) return false;
   if (path[0] === "chat") return path.length === 2 && path[1] === "completions";
   if (path[0] === "models") return path.length === 1;
@@ -128,14 +103,6 @@ function isAllowedPath(path: string[]): boolean {
   if (path[0] === "provider-catalog") return path.length === 1;
   if (path[0] === "project") {
     if (path.length < 3) return false;
-    if (path[2] === "game") {
-      return isAllowedProjectGamePath(path);
-    }
-    if (path[2] === "canvas") {
-      if (path.length === 3) return true;
-      if (path.length === 4) return path[3] === "nodes" || path[3] === "edges";
-      return (path[3] === "nodes" || path[3] === "edges") && Boolean(path[4]);
-    }
     if (path[2] === "providers") {
       return path.length === 3
         || path.length === 4
@@ -156,41 +123,34 @@ function isAllowedPath(path: string[]): boolean {
         && path[4] === "versions"
         && (path[6] === "activate" || path[6] === "archive");
     }
+    if (path[2] === "extensions") {
+      return path.length === 4 && path[3] === "runtime";
+    }
     return false;
-  }
-  if (path[0] === "game") return path.length === 2 && path[1] === "node-definitions";
-  if (path[0] === "projects" && path.length >= 3) {
-    if (path[2] !== "canvas") return false;
-    if (path.length === 3) return true;
-    if (path.length === 4) return path[3] === "nodes" || path[3] === "edges";
-    return (path[3] === "nodes" || path[3] === "edges") && Boolean(path[4]);
   }
   if (path.length === 2 && path[0] === "traces") return false;
   return true;
 }
 
 function runtimeApiPath(path: string[]): string {
-  if (isProjectScopedRuntimePath(path)) {
+  if (isProjectScopedEndpointPath(path)) {
     return `/${path.map(encodeURIComponent).join("/")}`;
   }
   return `/v1/${path.map(encodeURIComponent).join("/")}`;
 }
 
-function isProjectScopedRuntimePath(path: string[]): boolean {
+function isProjectScopedEndpointPath(path: string[]): boolean {
   if (path[1] !== "v1") return false;
   if (path.length === 3) return path[2] === "models";
   if (path.length === 4 && path[2] === "chat") return path[3] === "completions";
-  if (path[2] !== "game") return false;
-  if (path.length === 3) return true;
-  if (path.length === 4) {
-    return ["manifest", "presentation", "sessions", "run"].includes(path[3] ?? "");
+  if (path.length === 4 && path[2] === "audio") {
+    return path[3] === "speech" || path[3] === "transcriptions";
   }
-  if (path.length === 5) {
-    return path[3] === "assets" || path[3] === "sessions";
+  if (path.length === 4 && path[2] === "realtime") {
+    return path[3] === "sessions";
   }
-  return path.length === 6
-    && path[3] === "sessions"
-    && ["commands", "events"].includes(path[5] ?? "");
+  if (path.length === 3 && path[2] === "rpc") return true;
+  return path.length === 3 && path[2] === "agents";
 }
 
 function errorResponse(status: number, code: string, message: string): Response {

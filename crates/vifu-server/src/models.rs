@@ -12,11 +12,10 @@ pub struct Capabilities {
     pub endpoints: bool,
     pub bindings: bool,
     pub api_keys: bool,
-    pub canvas: bool,
     pub agent_gateways: bool,
     pub provider_connections: bool,
     pub traces: bool,
-    pub game_runtime: bool,
+    pub runtime_extensions: bool,
 }
 
 impl Capabilities {
@@ -27,11 +26,10 @@ impl Capabilities {
             endpoints: true,
             bindings: true,
             api_keys: true,
-            canvas: true,
             agent_gateways: true,
             provider_connections: true,
             traces: true,
-            game_runtime: true,
+            runtime_extensions: true,
         }
     }
 }
@@ -78,44 +76,53 @@ pub struct ProjectWithBindings {
 
 #[derive(Debug, Clone, Serialize, FromRow)]
 #[serde(rename_all = "camelCase")]
-pub struct ProjectCanvasNode {
-    pub id: Uuid,
+pub struct ProjectRuntimeExtension {
     pub project_id: Uuid,
-    pub kind: String,
-    pub position: Value,
-    pub profile_id: Option<Uuid>,
-    pub binding_id: Option<Uuid>,
-    pub gateway_id: Option<String>,
-    pub resource_id: Option<String>,
-    pub config: Value,
-    pub inputs: Value,
-    pub outputs: Value,
-    pub exposed: bool,
+    pub extension_id: String,
+    pub enabled: bool,
+    pub active_release_ref: Option<String>,
+    pub metadata: Value,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SetProjectRuntimeExtension {
+    pub extension_id: String,
+    pub enabled: Option<bool>,
+    pub active_release_ref: Option<String>,
+    #[serde(default = "empty_object")]
+    pub metadata: Value,
 }
 
 #[derive(Debug, Clone, Serialize, FromRow)]
 #[serde(rename_all = "camelCase")]
-pub struct ProjectCanvasEdge {
+pub struct ProjectRuntimeChannel {
     pub id: Uuid,
     pub project_id: Uuid,
-    pub source_node_id: Uuid,
-    pub source_handle: Option<String>,
-    pub target_node_id: Uuid,
-    pub target_handle: Option<String>,
-    pub kind: String,
-    pub config: Value,
+    pub name: String,
+    pub public_id: Uuid,
+    pub launch_key_prefix: String,
+    pub allowed_origins: Vec<String>,
+    pub enabled: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ProjectCanvas {
-    pub project: ProjectWithBindings,
-    pub nodes: Vec<ProjectCanvasNode>,
-    pub edges: Vec<ProjectCanvasEdge>,
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CreateProjectRuntimeChannel {
+    pub name: String,
+    #[serde(default)]
+    pub allowed_origins: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CreateRuntimeLaunchSession {
+    pub channel_id: Uuid,
+    pub launch_key: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -313,47 +320,6 @@ pub struct ImportProjectAgent {
     pub gateway_id: String,
     pub agent_id: String,
     pub provider_key: String,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CreateCanvasNode {
-    pub kind: String,
-    #[serde(default = "empty_object")]
-    pub position: Value,
-    pub profile_id: Option<Uuid>,
-    pub binding_id: Option<Uuid>,
-    pub gateway_id: Option<String>,
-    pub resource_id: Option<String>,
-    #[serde(default = "empty_object")]
-    pub config: Value,
-    #[serde(default = "empty_object")]
-    pub inputs: Value,
-    #[serde(default = "empty_object")]
-    pub outputs: Value,
-    pub exposed: Option<bool>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct UpdateCanvasNode {
-    pub position: Option<Value>,
-    pub config: Option<Value>,
-    pub inputs: Option<Value>,
-    pub outputs: Option<Value>,
-    pub exposed: Option<bool>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CreateCanvasEdge {
-    pub source_node_id: Uuid,
-    pub source_handle: Option<String>,
-    pub target_node_id: Uuid,
-    pub target_handle: Option<String>,
-    pub kind: String,
-    #[serde(default = "empty_object")]
-    pub config: Value,
 }
 
 #[derive(Debug, Clone, Serialize, FromRow)]
@@ -644,13 +610,6 @@ pub enum ResourcePermission {
     Write,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum GamePermission {
-    None,
-    Execute,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ApiKeyPermissions {
@@ -658,9 +617,9 @@ pub struct ApiKeyPermissions {
     pub speech: EndpointPermission,
     pub transcriptions: EndpointPermission,
     pub realtime: EndpointPermission,
+    pub runtime: EndpointPermission,
     pub agents: ResourcePermission,
     pub project: ResourcePermission,
-    pub game: GamePermission,
 }
 
 impl Default for ApiKeyPermissions {
@@ -670,9 +629,9 @@ impl Default for ApiKeyPermissions {
             speech: EndpointPermission::None,
             transcriptions: EndpointPermission::None,
             realtime: EndpointPermission::None,
+            runtime: EndpointPermission::None,
             agents: ResourcePermission::None,
             project: ResourcePermission::None,
-            game: GamePermission::None,
         }
     }
 }
@@ -694,8 +653,8 @@ impl ApiKeyPermissions {
         self.realtime == EndpointPermission::Access
     }
 
-    pub fn game_allowed(&self) -> bool {
-        self.game == GamePermission::Execute
+    pub fn runtime_allowed(&self) -> bool {
+        self.runtime == EndpointPermission::Access
     }
 }
 

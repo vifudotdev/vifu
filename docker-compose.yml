@@ -1,5 +1,24 @@
 name: vifu
 
+configs:
+  server_runtime_config:
+    content: |
+      {
+        "version": 1,
+        "server": {
+          "listen": "0.0.0.0:6790",
+          "databaseUrlFile": "/run/vifu/secrets/database_url"
+        }
+      }
+  gateway_runtime_config:
+    content: |
+      {
+        "version": 1,
+        "gateway": {
+          "serverUrl": "http://backend:6790"
+        }
+      }
+
 services:
   secrets:
     image: postgres:17-bookworm
@@ -53,7 +72,7 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:-vifu}
       POSTGRES_PASSWORD_FILE: /run/vifu/secrets/postgres_password
     ports:
-      - "${VIFU_BIND_HOST:-127.0.0.1}:${POSTGRES_PORT:-5432}:5432"
+      - "${POSTGRES_BIND_HOST:-127.0.0.1}:${POSTGRES_PORT:-5432}:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - vifu_secrets:/run/vifu/secrets:ro
@@ -84,7 +103,10 @@ services:
     volumes:
       - vifu_secrets:/run/vifu/secrets:ro
       - vifu_runtime_state:/home/vifu/.vifu
-      - ./config/docker/server.json:/home/vifu/.vifu/config.json:ro
+    configs:
+      - source: server_runtime_config
+        target: /home/vifu/.vifu/config.json
+        mode: 0444
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "--fail", "--silent", "http://127.0.0.1:6790/health"]
@@ -116,7 +138,7 @@ services:
       VIFU_AUTH_OIDC_BOOTSTRAP_EMAIL: ${VIFU_AUTH_OIDC_BOOTSTRAP_EMAIL:-}
       DATABASE_URL_FILE: /run/vifu/secrets/database_url
       VIFU_API_BASE_URL: http://backend:6790
-      NEXT_PUBLIC_VIFU_API_BASE_URL: http://localhost:${VIFU_SERVER_PORT:-6790}
+      NEXT_PUBLIC_VIFU_API_BASE_URL: ${NEXT_PUBLIC_VIFU_API_BASE_URL:-http://localhost:6790}
       VIFU_ADMIN_KEY_FILE: /run/vifu/secrets/admin_key
       HOSTNAME: 0.0.0.0
       PORT: 6791
@@ -142,7 +164,10 @@ services:
     volumes:
       - vifu_secrets:/run/vifu/secrets:ro
       - vifu_runtime_state:/home/vifu/.vifu
-      - ./config/docker/gateway.json:/home/vifu/.vifu/config.json:ro
+    configs:
+      - source: gateway_runtime_config
+        target: /home/vifu/.vifu/config.json
+        mode: 0444
     extra_hosts:
       - "host.docker.internal:host-gateway"
     restart: unless-stopped

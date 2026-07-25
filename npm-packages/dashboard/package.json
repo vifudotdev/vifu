@@ -10,12 +10,8 @@
     "typecheck": "next typegen && tsc --noEmit"
   },
   "dependencies": {
-    "@dnd-kit/core": "^6.3.1",
-    "@dnd-kit/sortable": "^10.0.0",
-    "@dnd-kit/utilities": "^3.2.2",
     "@fontsource/ibm-plex-mono": "^5.2.7",
     "@fontsource/ibm-plex-sans": "^5.2.7",
-    "@xyflow/react": "^12.3.6",
     "bcryptjs": "^3.0.3",
     "lucide-react": "^0.468.0",
     "next": "^16.0.0",
@@ -23,9 +19,7 @@
     "react": "^19.2.0",
     "react-dom": "^19.2.0",
     "react-resizable-panels": "^4.12.2",
-    "react-window": "^2.2.7",
-    "zundo": "^2.3.0",
-    "zustand": "^5.0.14"
+    "react-window": "^2.2.7"
   },
   "devDependencies": {
     "@types/node": "^22.13.0",

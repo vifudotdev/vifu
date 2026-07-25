@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use serde::Serialize;
+use vifu_core::runtime_extension::RuntimeExtensionDefinition;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
@@ -26,6 +27,7 @@ pub struct Config {
     pub queue_capacity: usize,
     pub provider_home_dir: PathBuf,
     pub provider_registry_file: Option<PathBuf>,
+    pub runtime_extensions: Vec<RuntimeExtensionDefinition>,
 }
 
 impl Config {
@@ -47,6 +49,23 @@ impl Config {
             return Err("server database URL must not be empty".to_string());
         }
         self.database_url = database_url.to_string();
+        Ok(())
+    }
+
+    pub fn apply_runtime_extensions(
+        &mut self,
+        runtime_extensions: Vec<RuntimeExtensionDefinition>,
+    ) -> Result<(), String> {
+        let mut ids = std::collections::HashSet::new();
+        for extension in &runtime_extensions {
+            if !ids.insert(extension.manifest.id.as_str()) {
+                return Err(format!(
+                    "runtime extension {} is configured more than once",
+                    extension.manifest.id
+                ));
+            }
+        }
+        self.runtime_extensions = runtime_extensions;
         Ok(())
     }
 
@@ -123,6 +142,7 @@ impl Config {
             )? as usize,
             provider_home_dir,
             provider_registry_file,
+            runtime_extensions: Vec::new(),
         })
     }
 }

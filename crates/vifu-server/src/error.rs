@@ -1,9 +1,8 @@
-use axum::http::{header::CONTENT_RANGE, HeaderValue, StatusCode};
+use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde_json::json;
 use thiserror::Error;
-use vifu_game_runtime::ValidationIssue;
 
 #[derive(Debug, Error)]
 pub enum ApiError {
@@ -15,16 +14,10 @@ pub enum ApiError {
     Invalid(String),
     #[error("resource not found")]
     NotFound,
-    #[error("byte range is not satisfiable for a {0}-byte resource")]
-    RangeNotSatisfiable(u64),
     #[error("{0}")]
     Conflict(String),
-    #[error("game source failed validation")]
-    Validation(Vec<ValidationIssue>),
     #[error("model is required")]
     ModelRequired,
-    #[error("the requested locale is not supported by this game")]
-    LocaleNotSupported,
     #[error("the requested agent is not available to this project key")]
     AgentAccessDenied,
     #[error("the API key does not permit this endpoint")]
@@ -37,6 +30,10 @@ pub enum ApiError {
     Backpressure,
     #[error("agent request timed out")]
     Timeout,
+    #[error("the project runtime has not been published")]
+    RuntimeNotPublished,
+    #[error("the project runtime is temporarily unavailable")]
+    RuntimeExtensionUnavailable,
     #[error("{0}")]
     AgentGateway(String),
     #[error("{0}")]
@@ -51,32 +48,13 @@ pub enum ApiError {
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        if let Self::RangeNotSatisfiable(size) = &self {
-            let mut response = (
-                StatusCode::RANGE_NOT_SATISFIABLE,
-                Json(json!({
-                    "error": {
-                        "code": "RANGE_NOT_SATISFIABLE",
-                        "message": format!("byte range is not satisfiable for a {size}-byte resource")
-                    }
-                })),
-            )
-                .into_response();
-            if let Ok(value) = HeaderValue::from_str(&format!("bytes */{size}")) {
-                response.headers_mut().insert(CONTENT_RANGE, value);
-            }
-            return response;
-        }
         let (status, code) = match &self {
             Self::Unauthorized => (StatusCode::UNAUTHORIZED, "UNAUTHORIZED"),
             Self::Forbidden => (StatusCode::FORBIDDEN, "FORBIDDEN"),
             Self::Invalid(_) => (StatusCode::BAD_REQUEST, "INVALID_REQUEST"),
             Self::NotFound => (StatusCode::NOT_FOUND, "NOT_FOUND"),
-            Self::RangeNotSatisfiable(_) => unreachable!("range errors return above"),
             Self::Conflict(_) => (StatusCode::CONFLICT, "CONFLICT"),
-            Self::Validation(_) => (StatusCode::UNPROCESSABLE_ENTITY, "VALIDATION_FAILED"),
             Self::ModelRequired => (StatusCode::BAD_REQUEST, "model_required"),
-            Self::LocaleNotSupported => (StatusCode::BAD_REQUEST, "locale_not_supported"),
             Self::AgentAccessDenied => (StatusCode::FORBIDDEN, "agent_access_denied"),
             Self::EndpointAccessDenied => (StatusCode::FORBIDDEN, "endpoint_access_denied"),
             Self::AgentGatewayCredentialRevoked => {
@@ -87,6 +65,11 @@ impl IntoResponse for ApiError {
             }
             Self::Backpressure => (StatusCode::TOO_MANY_REQUESTS, "BACKPRESSURE"),
             Self::Timeout => (StatusCode::GATEWAY_TIMEOUT, "REQUEST_TIMEOUT"),
+            Self::RuntimeNotPublished => (StatusCode::CONFLICT, "project_runtime_not_published"),
+            Self::RuntimeExtensionUnavailable => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "runtime_extension_unavailable",
+            ),
             Self::AgentGateway(_) => (StatusCode::BAD_GATEWAY, "AGENT_GATEWAY_ERROR"),
             Self::Provider(_) => (StatusCode::BAD_GATEWAY, "PROVIDER_ERROR"),
             Self::Database(_) | Self::Migration(_) | Self::Internal => {
@@ -98,10 +81,7 @@ impl IntoResponse for ApiError {
         } else {
             self.to_string()
         };
-        let mut error = json!({ "code": code, "message": message });
-        if let Self::Validation(issues) = &self {
-            error["issues"] = json!(issues);
-        }
+        let error = json!({ "code": code, "message": message });
         (status, Json(json!({ "error": error }))).into_response()
     }
 }

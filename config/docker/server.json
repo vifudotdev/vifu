@@ -1,7 +1,0 @@
-{
-  "version": 1,
-  "server": {
-    "listen": "0.0.0.0:6790",
-    "databaseUrlFile": "/run/vifu/secrets/database_url"
-  }
-}

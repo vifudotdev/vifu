@@ -5,4 +5,5 @@ pub mod openclaw_rpc;
 pub mod protocol;
 pub mod providers;
 pub mod relay;
+pub mod runtime_extension;
 pub mod session;

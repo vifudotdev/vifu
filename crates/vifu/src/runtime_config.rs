@@ -30,6 +30,19 @@ pub struct ServerRuntimeConfig {
     pub listen: Option<String>,
     pub database_url: Option<String>,
     pub database_url_file: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub runtime_extensions: Vec<RuntimeExtensionConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct RuntimeExtensionConfig {
+    pub manifest: PathBuf,
+    pub base_url: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential_file: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -75,6 +88,7 @@ impl LoadedRuntimeConfig {
             config.apply_listen_override(addr)?;
         }
         config.apply_database_url(server.database_url()?)?;
+        config.apply_runtime_extensions(server.runtime_extensions(&self.path)?)?;
         Ok(config)
     }
 }
@@ -108,6 +122,7 @@ impl RuntimeConfig {
                 listen: Some("127.0.0.1:6790".to_string()),
                 database_url: Some(DEFAULT_LOCAL_DATABASE_URL.to_string()),
                 database_url_file: None,
+                runtime_extensions: Vec::new(),
             }),
             gateway: cfg!(feature = "gateway").then(|| GatewayRuntimeConfig {
                 server_url: Some(vifu_core::config::DEFAULT_SERVER_URL.to_string()),
@@ -199,6 +214,76 @@ impl ServerRuntimeConfig {
         }
         Err("server configuration must set databaseUrl or databaseUrlFile".to_string())
     }
+
+    #[cfg(feature = "server")]
+    fn runtime_extensions(
+        &self,
+        config_path: &Path,
+    ) -> Result<Vec<vifu_core::runtime_extension::RuntimeExtensionDefinition>, String> {
+        let base_dir = config_path.parent().unwrap_or_else(|| Path::new("."));
+        self.runtime_extensions
+            .iter()
+            .map(|extension| {
+                let manifest_path = if extension.manifest.is_absolute() {
+                    extension.manifest.clone()
+                } else {
+                    base_dir.join(&extension.manifest)
+                };
+                let raw = std::fs::read_to_string(&manifest_path).map_err(|error| {
+                    format!(
+                        "runtime extension manifest {} could not be read: {error}",
+                        manifest_path.display()
+                    )
+                })?;
+                let manifest = serde_json::from_str(&raw).map_err(|error| {
+                    format!(
+                        "runtime extension manifest {} is invalid: {error}",
+                        manifest_path.display()
+                    )
+                })?;
+                vifu_core::runtime_extension::RuntimeExtensionDefinition::new(
+                    manifest,
+                    extension.base_url.clone(),
+                    extension.credential(base_dir)?,
+                )
+            })
+            .collect()
+    }
+}
+
+impl RuntimeExtensionConfig {
+    fn credential(&self, base_dir: &Path) -> Result<String, String> {
+        match (&self.credential, &self.credential_file) {
+            (Some(credential), None) => Ok(credential.clone()),
+            (None, Some(path)) => {
+                let path = if path.is_absolute() {
+                    path.clone()
+                } else {
+                    base_dir.join(path)
+                };
+                let credential = std::fs::read_to_string(&path).map_err(|error| {
+                    format!(
+                        "runtime extension credentialFile {} could not be read: {error}",
+                        path.display()
+                    )
+                })?;
+                let credential = credential.trim().to_string();
+                if credential.is_empty() {
+                    return Err(format!(
+                        "runtime extension credentialFile {} is empty",
+                        path.display()
+                    ));
+                }
+                Ok(credential)
+            }
+            (Some(_), Some(_)) => {
+                Err("runtime extension can set credential or credentialFile, not both".to_string())
+            }
+            (None, None) => {
+                Err("runtime extension must set credential or credentialFile".to_string())
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -284,6 +369,40 @@ mod tests {
         );
 
         std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn loads_runtime_extension_credential_from_a_file() {
+        let directory =
+            std::env::temp_dir().join(format!("vifu-runtime-config-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let credential_file = directory.join("content_runtime_key");
+        std::fs::write(&credential_file, "content-runtime-extension-key\n").unwrap();
+        let raw = format!(
+            r#"{{"version":1,"server":{{"databaseUrl":"postgres://vifu@127.0.0.1:5432/vifu","runtimeExtensions":[{{"manifest":"runtime-extension.json","baseUrl":"http://content-runtime:6792","credentialFile":"{}"}}]}}}}"#,
+            credential_file.display()
+        );
+
+        let config = RuntimeConfig::parse(&directory.join("config.json"), &raw).unwrap();
+        let extension = &config.server.unwrap().runtime_extensions[0];
+        assert_eq!(
+            extension.credential(&directory).unwrap(),
+            "content-runtime-extension-key"
+        );
+
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn rejects_ambiguous_runtime_extension_credentials() {
+        let raw = r#"{"version":1,"server":{"databaseUrl":"postgres://vifu@127.0.0.1:5432/vifu","runtimeExtensions":[{"manifest":"runtime-extension.json","baseUrl":"http://content-runtime:6792","credential":"inline-key-with-safe-length","credentialFile":"extension_key"}]}}"#;
+        let config = RuntimeConfig::parse(Path::new("/tmp/config.json"), raw).unwrap();
+        let extension = &config.server.unwrap().runtime_extensions[0];
+
+        assert!(extension
+            .credential(Path::new("/tmp"))
+            .unwrap_err()
+            .contains("credential or credentialFile"));
     }
 
     #[test]

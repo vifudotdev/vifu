@@ -246,7 +246,7 @@ function AddAgentDialog({
           inputSchema: {},
           outputSchema: {},
         }],
-        changeSummary: "Created in VifuDev",
+        changeSummary: "Created in Vifu",
       });
       router.refresh();
       dialogRef.current?.close();

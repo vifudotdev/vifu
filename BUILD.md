@@ -156,9 +156,9 @@ bun run test:e2e
 
 `bun run check` enforces the one-Dashboard boundary, provider-neutral HTTP
 contracts, public-repository hygiene, and TypeScript correctness. Unit tests
-cover shared authoring behavior, archive integrity, proxy policy, protocol, and
-SDK contracts. Browser tests cover self-host login, first-admin bootstrap, open
-signup for additional users, sidebar session persistence, and signout.
+cover Console data contracts, proxy policy, protocol, and SDK contracts.
+Browser tests cover self-host login, first-admin bootstrap, open signup for
+additional users, sidebar session persistence, and signout.
 
 ## Clean Docker Verification
 
@@ -179,9 +179,9 @@ sh scripts/run-self-hosted-e2e.sh
 ```
 
 It creates ten endpoints, invokes them concurrently over one Agent Gateway
-WebSocket, verifies Project Key scopes, Canvas exposure, and traces, restarts
-the services, verifies PostgreSQL persistence and session resume, then removes
-its test resources.
+WebSocket, verifies Project Key scopes and traces, restarts the services,
+verifies PostgreSQL persistence and session resume, then removes its test
+resources.
 
 By default the test starts a protocol-compatible fixture. Release verification
 can target an already-running OpenClaw Gateway instead. If that Gateway requires

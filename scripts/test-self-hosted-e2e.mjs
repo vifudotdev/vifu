@@ -323,32 +323,6 @@ async function setup() {
     "Project key did not list all project models",
   );
 
-  if (secondaryBinding && secondaryEndpoint) {
-    const { canvas } = await request(`/v1/project/${project.slug}/canvas`);
-    const secondaryNode = canvas.nodes?.find((node) => node.bindingId === secondaryBinding.id);
-    assert(secondaryNode, "The second agent was not represented on the project canvas");
-    await request(`/v1/project/${project.slug}/canvas/nodes/${secondaryNode.id}`, {
-      method: "PATCH",
-      body: { exposed: false },
-    });
-    const hiddenModels = await request(`/${project.slug}/v1/models`, {}, projectKey.key);
-    assert(hiddenModels.data?.length === endpoints.length, "A hidden canvas agent remained exposed as a model");
-    const hiddenAgent = await rawRequest(
-      `/${project.slug}/v1/chat/completions`,
-      { method: "POST", body: chatCompletionBody(secondaryEndpoint, "hidden agent probe") },
-      projectKey.key,
-    );
-    const hiddenAgentPayload = await hiddenAgent.json();
-    assert(
-      hiddenAgent.status === 403 && hiddenAgentPayload?.error?.code === "agent_access_denied",
-      "A hidden canvas agent remained callable",
-    );
-    await request(`/v1/project/${project.slug}/canvas/nodes/${secondaryNode.id}`, {
-      method: "PATCH",
-      body: { exposed: true },
-    });
-  }
-
   const missingModel = await rawRequest(
     `/${project.slug}/v1/chat/completions`,
     { method: "POST", body: { messages: [{ role: "user", content: "Hello" }] } },

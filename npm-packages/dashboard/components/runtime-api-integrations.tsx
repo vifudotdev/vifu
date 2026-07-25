@@ -8,12 +8,8 @@ import {
   BookOpen,
   Check,
   Copy,
-  Download,
-  Gamepad2,
-  History,
   KeyRound,
   Pencil,
-  Play,
   Plus,
   Search,
   Terminal,
@@ -24,15 +20,12 @@ import type {
   ApiKeyAgentScope,
   ApiKeyPermissions,
   ApiKeyRecord,
-  GameOverview,
-  GameRelease,
   RuntimeProject,
 } from "../lib/runtime-types";
 import { DeleteApiKeyButton, RevokeApiKeyButton } from "./runtime-actions";
 
 type CodeTab = "curl" | "javascript" | "openai";
 type ApiKeyFilter = "active" | "revoked";
-type GameCodeTab = "run" | "session" | "events";
 
 const CODE_TABS: Array<{ id: CodeTab; label: string }> = [
   { id: "curl", label: "cURL" },
@@ -44,15 +37,11 @@ export function ApiIntegrationsView({
   project,
   keys,
   profiles,
-  gameOverview,
-  gameReleases,
   browserApiBaseUrl,
 }: {
   project: RuntimeProject;
   keys: ApiKeyRecord[];
   profiles: AgentProfile[];
-  gameOverview?: GameOverview;
-  gameReleases: GameRelease[];
   browserApiBaseUrl: string;
 }) {
   const agentOptions = profiles
@@ -85,15 +74,6 @@ export function ApiIntegrationsView({
           <CopyButton value={projectBaseUrl} label="Copy project endpoint" />
         </div>
       </section>
-
-      <GameRuntimeIntegration
-        project={project}
-        overview={gameOverview}
-        releases={gameReleases}
-        keys={scopedKeys}
-        agentOptions={agentOptions}
-        projectBaseUrl={projectBaseUrl}
-      />
 
       {selectedProfile ? (
         <div className="api-integration-grid">
@@ -272,208 +252,12 @@ function IntegrationSectionHeading({
   );
 }
 
-function GameRuntimeIntegration({
-  project,
-  overview,
-  releases,
-  keys,
-  agentOptions,
-  projectBaseUrl,
-}: {
-  project: RuntimeProject;
-  overview?: GameOverview;
-  releases: GameRelease[];
-  keys: ApiKeyRecord[];
-  agentOptions: ApiKeyAgentOption[];
-  projectBaseUrl: string;
-}) {
-  const [codeTab, setCodeTab] = useState<GameCodeTab>("run");
-  const gameBaseUrl = `${projectBaseUrl}/game`;
-  const activeRelease = releases.find((release) => release.id === overview?.activeRelease?.id);
-  const logicalResources = gameLogicalResources(activeRelease?.manifest);
-  const code = buildGameRuntimeExample(codeTab, gameBaseUrl);
-  const enabledKeys = keys.filter((key) => !key.revokedAt && key.permissions.game === "execute").length;
-
-  return (
-    <section className="api-integration-section game-runtime-integration">
-      <IntegrationSectionHeading
-        title="Game Runtime"
-        description={activeRelease ? `Release ${activeRelease.releaseNumber} is live` : "Publish a Game release to activate this endpoint."}
-        action={(
-          <CreateApiKeyDialog
-            project={project}
-            agentOptions={agentOptions}
-            exampleModel={agentOptions[0]?.slug ?? "agent-slug-or-id"}
-            projectBaseUrl={projectBaseUrl}
-            gameBaseUrl={gameBaseUrl}
-            variant="game"
-          />
-        )}
-      />
-      <div className="game-runtime-endpoint">
-        <span><Gamepad2 aria-hidden="true" />Game URL</span>
-        <code>{gameBaseUrl}</code>
-        <CopyButton value={gameBaseUrl} label="Copy Game URL" />
-      </div>
-      {activeRelease ? (
-        <>
-          <div className="game-runtime-meta">
-            <span>R{activeRelease.releaseNumber}</span>
-            <code>{activeRelease.contentHash.slice(0, 22)}...</code>
-            <span>{enabledKeys} game key{enabledKeys === 1 ? "" : "s"}</span>
-            <span>{logicalResources.length} logical resource{logicalResources.length === 1 ? "" : "s"}</span>
-          </div>
-          <div className="game-runtime-docs">
-            <div className="api-code-tabs" role="tablist" aria-label="Game Runtime example">
-              {(["run", "session", "events"] as const).map((tab) => (
-                <button key={tab} type="button" role="tab" aria-selected={codeTab === tab} className={codeTab === tab ? "active" : ""} onClick={() => setCodeTab(tab)}>
-                  {tab === "run" ? "Run" : tab === "session" ? "Session" : "SSE events"}
-                </button>
-              ))}
-            </div>
-            <div className="game-runtime-code-heading"><span>{gameCodeDescription(codeTab)}</span><CopyButton value={code} label="Copy Game Runtime example" /></div>
-            <pre className="api-code-surface"><code>{code}</code></pre>
-          </div>
-          <div className="game-runtime-contracts">
-            <ContractLink method="GET" label="Manifest" path={`${gameBaseUrl}/manifest`} />
-            <ContractLink method="GET" label="Presentation" path={`${gameBaseUrl}/presentation`} />
-            <ExportGameReleaseButton projectSlug={project.slug} release={activeRelease} />
-            <ExportHostBindingsButton projectSlug={project.slug} resources={logicalResources} />
-          </div>
-        </>
-      ) : (
-        <div className="game-runtime-empty">
-          <Play aria-hidden="true" />
-          <div><strong>No active Game release</strong><span>Validate and publish the shared draft from Canvas or Short Drama.</span></div>
-          <Link className="secondary-button" href={`/project/${project.slug}/canvas`}>Open Canvas<ArrowRight aria-hidden="true" /></Link>
-        </div>
-      )}
-      {releases.length > 0 ? (
-        <div className="game-release-history">
-          <header><History aria-hidden="true" /><strong>Release history</strong></header>
-          {releases.map((release) => {
-            const active = release.id === overview?.activeRelease?.id;
-            return (
-              <article key={release.id}>
-                <span className={active ? "active" : ""}><i />R{release.releaseNumber}</span>
-                <div><strong>{release.changeSummary || "Game release"}</strong><code>{release.contentHash.slice(0, 18)}...</code></div>
-                <time>{formatDate(release.createdAt)}</time>
-                {active ? <small>Active</small> : <ActivateGameReleaseButton projectSlug={project.slug} release={release} />}
-              </article>
-            );
-          })}
-        </div>
-      ) : null}
-    </section>
-  );
-}
-
-function ContractLink({ method, label, path }: { method: string; label: string; path: string }) {
-  return (
-    <div>
-      <span>{method}</span>
-      <strong>{label}</strong>
-      <code>{path}</code>
-      <CopyButton value={path} label={`Copy ${label} URL`} />
-    </div>
-  );
-}
-
-function ActivateGameReleaseButton({ projectSlug, release }: { projectSlug: string; release: GameRelease }) {
-  const router = useRouter();
-  const [pending, setPending] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  async function activate() {
-    setPending(true);
-    setError(null);
-    try {
-      await runtimeRequest(`project/${encodeURIComponent(projectSlug)}/game/releases/${release.id}/activate`, "POST", {});
-      router.refresh();
-    } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "Release activation failed.");
-    } finally {
-      setPending(false);
-    }
-  }
-
-  return (
-    <div className="game-release-activation">
-      <button className="secondary-button compact" type="button" disabled={pending} onClick={() => void activate()}>
-        {pending ? "Activating" : error ? "Retry" : "Activate"}
-      </button>
-      {error ? <span role="alert" title={error}>Activation failed</span> : null}
-    </div>
-  );
-}
-
-function ExportHostBindingsButton({ projectSlug, resources }: { projectSlug: string; resources: Array<{ id: string; kind: string }> }) {
-  function exportBindings() {
-    const document = {
-      schemaVersion: 1,
-      engine: "custom",
-      bindings: Object.fromEntries(resources.map((resource) => [resource.id, {
-        kind: "native-id",
-        value: resource.id,
-      }])),
-    };
-    const url = URL.createObjectURL(new Blob([JSON.stringify(document, null, 2)], { type: "application/json" }));
-    const anchor = window.document.createElement("a");
-    anchor.href = url;
-    anchor.download = `${projectSlug}.host-bindings.json`;
-    anchor.click();
-    URL.revokeObjectURL(url);
-  }
-
-  return <button className="secondary-button compact" type="button" onClick={exportBindings}><Download aria-hidden="true" />Host bindings</button>;
-}
-
-function ExportGameReleaseButton({ projectSlug, release }: { projectSlug: string; release: GameRelease }) {
-  const [pending, setPending] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  async function exportRelease() {
-    setPending(true);
-    setError(null);
-    try {
-      const bundle = await runtimeRequest<Record<string, unknown>>(
-        `project/${encodeURIComponent(projectSlug)}/game/releases/${release.id}/export`,
-        "GET",
-      );
-      const url = URL.createObjectURL(new Blob([JSON.stringify(bundle, null, 2)], {
-        type: "application/vnd.vifu.game-release+json",
-      }));
-      const anchor = window.document.createElement("a");
-      anchor.href = url;
-      anchor.download = `${projectSlug}-r${release.releaseNumber}.vifu-game.json`;
-      anchor.click();
-      window.setTimeout(() => URL.revokeObjectURL(url), 0);
-    } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "Release export failed.");
-    } finally {
-      setPending(false);
-    }
-  }
-
-  return (
-    <button
-      className="secondary-button compact"
-      type="button"
-      disabled={pending}
-      title={error ?? "Export immutable runtime bundle"}
-      onClick={() => void exportRelease()}
-    >
-      <Download aria-hidden="true" />{pending ? "Exporting" : error ? "Retry export" : "Runtime bundle"}
-    </button>
-  );
-}
-
 function ApiSetupEmpty({ projectSlug }: { projectSlug: string }) {
   return (
     <section className="api-integration-section api-setup-empty">
       <Terminal aria-hidden="true" />
       <div><strong>Add an agent to start</strong><span>Agents added to the project become models on this endpoint.</span></div>
-      <Link className="secondary-button" href={`/project/${projectSlug}/canvas`}>Open Canvas<ArrowRight aria-hidden="true" /></Link>
+      <Link className="secondary-button" href={`/project/${projectSlug}/agents`}>Open Agents<ArrowRight aria-hidden="true" /></Link>
     </section>
   );
 }
@@ -553,30 +337,22 @@ function CreateApiKeyDialog({
   agentOptions,
   exampleModel,
   projectBaseUrl,
-  gameBaseUrl,
-  variant = "project",
 }: {
   project: RuntimeProject;
   agentOptions: ApiKeyAgentOption[];
   exampleModel: string;
   projectBaseUrl: string;
-  gameBaseUrl?: string;
-  variant?: "project" | "game";
 }) {
   const router = useRouter();
   const dialogRef = useRef<HTMLDialogElement>(null);
   const [name, setName] = useState("");
   const [scopeMode, setScopeMode] = useState<ApiKeyAgentScope["mode"]>("all");
   const [selectedProfileIds, setSelectedProfileIds] = useState<string[]>([]);
-  const [permissions, setPermissions] = useState<ApiKeyPermissions>(() => defaultApiKeyPermissions(variant));
+  const [permissions, setPermissions] = useState<ApiKeyPermissions>(defaultApiKeyPermissions);
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [createdKey, setCreatedKey] = useState<string | null>(null);
-  const readyCurl = createdKey
-    ? variant === "game" && gameBaseUrl
-      ? buildGameRuntimeExample("run", gameBaseUrl, createdKey)
-      : buildCurlExample(projectBaseUrl, exampleModel, createdKey)
-    : "";
+  const readyCurl = createdKey ? buildCurlExample(projectBaseUrl, exampleModel, createdKey) : "";
 
   async function createKey(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -585,7 +361,7 @@ function CreateApiKeyDialog({
     try {
       const payload = await runtimeRequest<{ apiKey?: { key?: string } }>("api-keys", "POST", {
         projectId: project.id,
-        name: name.trim() || readableDefaultKeyName(variant),
+        name: name.trim() || readableDefaultKeyName(),
         agentScope: agentScopePayload(scopeMode, selectedProfileIds),
         permissions,
       });
@@ -602,7 +378,7 @@ function CreateApiKeyDialog({
 
   function open() {
     reset();
-    setName(readableDefaultKeyName(variant));
+    setName(readableDefaultKeyName());
     dialogRef.current?.showModal();
   }
 
@@ -610,7 +386,7 @@ function CreateApiKeyDialog({
     setName("");
     setScopeMode("all");
     setSelectedProfileIds([]);
-    setPermissions(defaultApiKeyPermissions(variant));
+    setPermissions(defaultApiKeyPermissions());
     setCreatedKey(null);
     setError(null);
   }
@@ -618,7 +394,7 @@ function CreateApiKeyDialog({
   return (
     <>
       <button className="primary-button" type="button" onClick={open}>
-        <Plus aria-hidden="true" />{variant === "game" ? "Create game key" : "Create key"}
+        <Plus aria-hidden="true" />Create key
       </button>
       <dialog className="api-key-dialog" ref={dialogRef} onClose={reset}>
         <div className="api-dialog-shell api-key-dialog-shell">
@@ -655,26 +431,22 @@ function CreateApiKeyDialog({
                 </label>
 
                 <div className="api-key-scope-note">
-                  <strong>{variant === "game" ? "Game key" : "Project key"}</strong>
-                  <span>{variant === "game"
-                    ? `Runs the published Game for ${project.name}. Agent calls inside the release use its pinned Profiles.`
-                    : <>Each request must provide a <code>model</code> that resolves to an agent in <b>{project.name}</b>.</>}</span>
+                  <strong>Project key</strong>
+                  <span>Each request must provide a <code>model</code> that resolves to an agent in <b>{project.name}</b>.</span>
                 </div>
-                {variant === "project" ? (
-                  <ApiKeyAgentScopeFields
-                    mode={scopeMode}
-                    selectedProfileIds={selectedProfileIds}
-                    options={agentOptions}
-                    onModeChange={setScopeMode}
-                    onSelectedProfileIdsChange={setSelectedProfileIds}
-                  />
-                ) : null}
+                <ApiKeyAgentScopeFields
+                  mode={scopeMode}
+                  selectedProfileIds={selectedProfileIds}
+                  options={agentOptions}
+                  onModeChange={setScopeMode}
+                  onSelectedProfileIdsChange={setSelectedProfileIds}
+                />
                 <ApiKeyPermissionsFields permissions={permissions} onChange={setPermissions} />
                 {error ? <span className="action-message error" role="alert">{error}</span> : null}
               </div>
               <div className="api-dialog-actions">
                 <button className="secondary-button" type="button" onClick={() => dialogRef.current?.close()}>Cancel</button>
-                <button className="primary-button" type="submit" disabled={pending || !name.trim() || (variant === "project" && scopeMode === "selected" && selectedProfileIds.length === 0)}>
+                <button className="primary-button" type="submit" disabled={pending || !name.trim() || (scopeMode === "selected" && selectedProfileIds.length === 0)}>
                   <KeyRound aria-hidden="true" />{pending ? "Creating" : "Create key"}
                 </button>
               </div>
@@ -893,6 +665,15 @@ function ApiKeyPermissionsFields({
         onChange={(realtime) => onChange({ ...permissions, realtime })}
       />
       <ApiKeyPermissionRow
+        label="Project Runtime"
+        value={permissions.runtime}
+        options={[
+          { value: "none", label: "No access" },
+          { value: "access", label: "Access" },
+        ]}
+        onChange={(runtime) => onChange({ ...permissions, runtime })}
+      />
+      <ApiKeyPermissionRow
         label="Agents"
         value={permissions.agents}
         options={[
@@ -911,15 +692,6 @@ function ApiKeyPermissionsFields({
           { value: "write", label: "Write" },
         ]}
         onChange={(project) => onChange({ ...permissions, project })}
-      />
-      <ApiKeyPermissionRow
-        label="Game Runtime"
-        value={permissions.game}
-        options={[
-          { value: "none", label: "No access" },
-          { value: "execute", label: "Execute" },
-        ]}
-        onChange={(game) => onChange({ ...permissions, game })}
       />
     </fieldset>
   );
@@ -1012,58 +784,6 @@ function buildCurlExample(baseUrl: string, model: string, apiKey?: string): stri
   ].join("\n");
 }
 
-function buildGameRuntimeExample(tab: GameCodeTab, gameBaseUrl: string, apiKey?: string): string {
-  const authHeader = apiKey
-    ? shellQuote(`Authorization: Bearer ${apiKey}`)
-    : '"Authorization: Bearer $VIFU_API_KEY"';
-  if (tab === "events") {
-    return [
-      `curl --no-buffer ${shellQuote(`${gameBaseUrl}/sessions/$VIFU_GAME_SESSION_ID/events`)} \\`,
-      `  --header ${authHeader} \\`,
-      `  --header ${shellQuote("Accept: text/event-stream")} \\`,
-      '  --header "Last-Event-ID: 0"',
-    ].join("\n");
-  }
-  if (tab === "session") {
-    return [
-      `curl ${shellQuote(`${gameBaseUrl}/sessions`)} \\`,
-      "  --request POST \\",
-      `  --header ${authHeader} \\`,
-      `  --header ${shellQuote("Content-Type: application/json")} \\`,
-      `  --data ${shellQuote(JSON.stringify({
-        host: { engine: "my-game", capabilities: [] },
-      }))}`,
-    ].join("\n");
-  }
-  return [
-    `curl ${shellQuote(`${gameBaseUrl}/run`)} \\`,
-    "  --request POST \\",
-    `  --header ${authHeader} \\`,
-    `  --header ${shellQuote("Content-Type: application/json")} \\`,
-    `  --data ${shellQuote(JSON.stringify({
-      host: { engine: "my-game", capabilities: [] },
-      input: {},
-    }))}`,
-  ].join("\n");
-}
-
-function gameCodeDescription(tab: GameCodeTab): string {
-  if (tab === "session") return "Create a durable session pinned to the active release.";
-  if (tab === "events") return "Replay CloudEvents and continue from the last received sequence.";
-  return "Start and advance a durable session in one request.";
-}
-
-function gameLogicalResources(manifest: Record<string, unknown> | undefined): Array<{ id: string; kind: string }> {
-  const resources = manifest?.logicalResources;
-  if (!Array.isArray(resources)) return [];
-  return resources.flatMap((resource) => {
-    if (!resource || typeof resource !== "object") return [];
-    const id = (resource as { id?: unknown }).id;
-    const kind = (resource as { kind?: unknown }).kind;
-    return typeof id === "string" && typeof kind === "string" ? [{ id, kind }] : [];
-  });
-}
-
 function projectApiBaseUrl(project: RuntimeProject, browserApiBaseUrl: string): string {
   const url = new URL(browserApiBaseUrl);
   const basePath = url.pathname.replace(/\/+$/, "");
@@ -1076,13 +796,13 @@ function shellQuote(value: string): string {
   return `'${value.replaceAll("'", "'\\''")}'`;
 }
 
-function readableDefaultKeyName(variant: "project" | "game" = "project"): string {
+function readableDefaultKeyName(): string {
   const date = new Intl.DateTimeFormat("en-US", {
     month: "short",
     day: "numeric",
     year: "numeric",
   }).format(new Date());
-  return `${variant === "game" ? "Game" : "Project"} key - ${date}`;
+  return `Project key - ${date}`;
 }
 
 function agentScopePayload(mode: ApiKeyAgentScope["mode"], profileIds: string[]): ApiKeyAgentScope {
@@ -1093,15 +813,15 @@ function selectedScopeProfileIds(scope: ApiKeyAgentScope): string[] {
   return scope.mode === "selected" ? scope.profileIds : [];
 }
 
-function defaultApiKeyPermissions(variant: "project" | "game" = "project"): ApiKeyPermissions {
+function defaultApiKeyPermissions(): ApiKeyPermissions {
   return {
-    chatCompletions: variant === "project" ? "access" : "none",
+    chatCompletions: "access",
     speech: "none",
     transcriptions: "none",
     realtime: "none",
+    runtime: "none",
     agents: "none",
     project: "none",
-    game: variant === "game" ? "execute" : "none",
   };
 }
 
@@ -1111,9 +831,9 @@ function formatPermissions(permissions: ApiKeyPermissions): string {
   if (permissions.speech === "access") enabled.push("Speech");
   if (permissions.transcriptions === "access") enabled.push("Transcriptions");
   if (permissions.realtime === "access") enabled.push("Realtime");
+  if (permissions.runtime === "access") enabled.push("Project runtime");
   if (permissions.agents !== "none") enabled.push(`Agents ${permissions.agents}`);
   if (permissions.project !== "none") enabled.push(`Project ${permissions.project}`);
-  if (permissions.game === "execute") enabled.push("Game runtime");
   return enabled.length > 0 ? enabled.join(", ") : "No access";
 }
 

@@ -8,16 +8,6 @@ import type {
   ApiKeyRecord,
   AvailableAgent,
   EndpointTrace,
-  GameDraft,
-  GameAnalytics,
-  GameAsset,
-  GameNodeDefinition,
-  GameOverview,
-  GameQa,
-  GameRelease,
-  GameResource,
-  GameSession,
-  ProjectCanvas,
   ProjectAgentCandidate,
   ProviderCatalog,
   ProviderAdapter,
@@ -63,46 +53,6 @@ export class DeploymentClient {
 
   async projects(): Promise<RuntimeProject[]> {
     return (await this.request<{ projects: RuntimeProject[] }>("/v1/projects")).projects ?? [];
-  }
-
-  async projectCanvas(slug: string): Promise<ProjectCanvas> {
-    return (await this.request<{ canvas: ProjectCanvas }>(`/v1/project/${encodeURIComponent(slug)}/canvas`)).canvas;
-  }
-
-  async gameOverview(slug: string): Promise<GameOverview> {
-    return (await this.request<{ game: GameOverview }>(`/v1/project/${encodeURIComponent(slug)}/game`)).game;
-  }
-
-  async gameDraft(slug: string): Promise<GameDraft> {
-    return (await this.request<{ draft: GameDraft }>(`/v1/project/${encodeURIComponent(slug)}/game/source`)).draft;
-  }
-
-  async gameNodeDefinitions(): Promise<GameNodeDefinition[]> {
-    return (await this.request<{ nodeDefinitions: GameNodeDefinition[] }>("/v1/game/node-definitions")).nodeDefinitions ?? [];
-  }
-
-  async gameReleases(slug: string): Promise<GameRelease[]> {
-    return (await this.request<{ releases: GameRelease[] }>(`/v1/project/${encodeURIComponent(slug)}/game/releases`)).releases ?? [];
-  }
-
-  async gameResources(slug: string): Promise<GameResource[]> {
-    return (await this.request<{ resources: GameResource[] }>(`/v1/project/${encodeURIComponent(slug)}/game/resources`)).resources ?? [];
-  }
-
-  async gameAssets(slug: string): Promise<GameAsset[]> {
-    return (await this.request<{ assets: GameAsset[] }>(`/v1/project/${encodeURIComponent(slug)}/game/assets`)).assets ?? [];
-  }
-
-  async gameQa(slug: string): Promise<GameQa> {
-    return (await this.request<{ qa: GameQa }>(`/v1/project/${encodeURIComponent(slug)}/game/qa`)).qa;
-  }
-
-  async gameAnalytics(slug: string): Promise<GameAnalytics> {
-    return (await this.request<{ analytics: GameAnalytics }>(`/v1/project/${encodeURIComponent(slug)}/game/analytics`)).analytics;
-  }
-
-  async gameSessions(slug: string): Promise<GameSession[]> {
-    return (await this.request<{ sessions: GameSession[] }>(`/v1/project/${encodeURIComponent(slug)}/game/sessions`)).sessions ?? [];
   }
 
   async profiles(): Promise<AgentProfile[]> {

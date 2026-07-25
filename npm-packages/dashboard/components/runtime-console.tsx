@@ -2,19 +2,14 @@ import Image from "next/image";
 import Link from "next/link";
 import type { LucideIcon } from "lucide-react";
 import {
-  BarChart3,
   Bot,
-  Boxes,
   ChevronDown,
-  Clapperboard,
-  FlaskConical,
   KeyRound,
   LayoutDashboard,
   LogOut,
   Plug,
   ScrollText,
   Settings,
-  Workflow,
 } from "lucide-react";
 import type { DashboardData } from "../lib/dashboard-data";
 import { authRequired } from "../lib/auth-providers";
@@ -35,24 +30,14 @@ import {
   DeleteResourceButton,
   ProjectCreateForm,
 } from "./runtime-actions";
-import { RuntimeGameCanvas } from "./game-authoring/canvas";
-import { RuntimeShortDrama } from "./game-authoring/short-drama";
 import { RuntimeAgentsView } from "./runtime-agents";
-import { RuntimeGameAnalytics } from "./runtime-game-analytics";
-import { RuntimeGamePreview } from "./runtime-game-preview";
-import { RuntimeGameResources } from "./runtime-game-resources";
 import { RuntimeProvidersView } from "./runtime-providers";
 
 export type DashboardSection =
   | "overview"
-  | "canvas"
-  | "short-drama"
   | "agents"
-  | "resources"
   | "providers"
-  | "preview"
   | "api"
-  | "analytics"
   | "logs"
   | "settings";
 
@@ -65,28 +50,18 @@ type NavigationItem = {
 
 const PROJECT_NAVIGATION: NavigationItem[] = [
   { id: "overview", label: "Overview", icon: LayoutDashboard },
-  { id: "canvas", label: "Canvas", icon: Workflow, capability: "gameRuntime" },
-  { id: "short-drama", label: "Short Drama", icon: Clapperboard, capability: "gameRuntime" },
   { id: "agents", label: "Agents", icon: Bot, capability: "profiles" },
-  { id: "resources", label: "Resources", icon: Boxes, capability: "gameRuntime" },
   { id: "providers", label: "Providers", icon: Plug, capability: "providerConnections" },
-  { id: "preview", label: "Preview & QA", icon: FlaskConical, capability: "gameRuntime" },
-  { id: "api", label: "Publish & API", icon: KeyRound, capability: "apiKeys" },
-  { id: "analytics", label: "Analytics", icon: BarChart3, capability: "gameRuntime" },
+  { id: "api", label: "API", icon: KeyRound, capability: "apiKeys" },
   { id: "logs", label: "Logs", icon: ScrollText, capability: "traces" },
   { id: "settings", label: "Settings", icon: Settings },
 ];
 
 const SECTION_TITLES: Record<DashboardSection, string> = {
   overview: "Overview",
-  canvas: "Canvas",
-  "short-drama": "Short Drama",
   agents: "Agents",
-  resources: "Resources",
   providers: "Providers",
-  preview: "Preview & QA",
   api: "API Integrations",
-  analytics: "Analytics",
   logs: "Logs",
   settings: "Settings",
 };
@@ -106,14 +81,13 @@ export function RuntimeConsole({
   const activeSection = isSectionAvailable(section, capabilities) ? section : "overview";
   const selectedProject = selectProject(data.runtime.projects, projectSlug);
   const title = SECTION_TITLES[activeSection];
-  const editorWorkspace = activeSection === "canvas" || activeSection === "short-drama";
   return (
     <AppLayout
       sidebar={(
         <>
-          <Link className="console-brand" href="/project" aria-label="VifuDev Dashboard">
-            <Image src="/brand/vifu-icon-512.png" width={32} height={32} alt="" priority />
-            <span>VifuDev</span>
+          <Link className="console-brand" href="/project" aria-label="VifuDev Console">
+            <Image className="console-brand-lockup" src="/brand/vifudev-lockup.svg" width={107} height={32} alt="VifuDev" priority />
+            <Image className="console-brand-mark" src="/brand/vifu-icon-512.png" width={32} height={32} alt="" priority />
           </Link>
           {selectedProject ? (
             <Navigation project={selectedProject} items={PROJECT_NAVIGATION} active={activeSection} capabilities={capabilities} />
@@ -143,7 +117,7 @@ export function RuntimeConsole({
     >
       {selectedProject ? (
         <>
-          {!editorWorkspace ? <header className="page-header project-page-header"><h1>{title}</h1></header> : null}
+          <header className="page-header project-page-header"><h1>{title}</h1></header>
           <div className={`console-content ${activeSection}-content`}>
             <ProjectSectionView
               section={activeSection}
@@ -219,39 +193,12 @@ function ProjectSectionView({
       />
     );
   }
-  if (section === "canvas") {
-    if (!data.gameDraft) return <EmptyState>The game draft is unavailable.</EmptyState>;
-    return (
-      <RuntimeGameCanvas
-        project={project}
-        draft={data.gameDraft}
-        definitions={data.gameNodeDefinitions}
-        profiles={data.runtime.profiles}
-        resources={data.gameResources}
-        assets={data.gameAssets}
-      />
-    );
-  }
-  if (section === "short-drama") {
-    if (!data.gameDraft) return <EmptyState>The game draft is unavailable.</EmptyState>;
-    return <RuntimeShortDrama project={project} draft={data.gameDraft} definitions={data.gameNodeDefinitions} profiles={data.runtime.profiles} resources={data.gameResources} assets={data.gameAssets} providers={data.projectProviders} />;
-  }
-  if (section === "resources") {
-    if (!data.gameDraft) return <EmptyState>The game draft is unavailable.</EmptyState>;
-    return <RuntimeGameResources project={project} draft={data.gameDraft} resources={data.gameResources} assets={data.gameAssets} />;
-  }
-  if (section === "preview") {
-    return <RuntimeGamePreview project={project} overview={data.gameOverview} qa={data.gameQa} recentSessions={data.gameSessions} draft={data.gameDraft} assets={data.gameAssets} />;
-  }
-  if (section === "analytics") return <RuntimeGameAnalytics analytics={data.gameAnalytics} />;
   if (section === "api") {
     return (
       <ApiIntegrationsView
         project={project}
         keys={data.runtime.apiKeys}
         profiles={data.runtime.profiles}
-        gameOverview={data.gameOverview}
-        gameReleases={data.gameReleases}
         browserApiBaseUrl={browserApiBaseUrl}
       />
     );
