@@ -4,11 +4,11 @@
 
 ## Embed Vifu
 
-Select only the capabilities your application needs:
+Runtime support is included by default:
 
 ```toml
 [dependencies]
-vifu = { version = "0.1", default-features = false, features = ["runtime"] }
+vifu = "0.1"
 ```
 
 ```rust
@@ -28,12 +28,15 @@ Available features:
 
 | Feature | Capability |
 | --- | --- |
-| `runtime` | Portable command, state, event, effect, and snapshot runtime |
+| `runtime` | Portable command, state, event, effect, and snapshot runtime; included by default |
 | `gateway` | Provider discovery and multiplexed Agent Gateway client |
 | `server` | HTTP, WebSocket, and PostgreSQL Vifu Server |
 | `full` | Runtime, Gateway, and Server library APIs |
 | `binary` | Complete `vifu` executable; enabled by default |
 | `local-whisper` | Optional local Whisper provider support |
+
+Advanced builds can disable default features and select only the capabilities
+they use.
 
 ## Install the binary
 

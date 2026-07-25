@@ -1,9 +1,9 @@
 # vifu-runtime
 
 `vifu-runtime` is the small, stateful execution kernel at the center of Vifu.
-Most applications should depend on the `vifu` crate and enable its `runtime`
-feature. This lower-level crate remains available for hosts that only need the
-kernel implementation.
+Most applications should depend on the `vifu` crate, which includes Runtime
+support by default. This lower-level crate remains available for hosts that only
+need the kernel implementation.
 
 The crate uses Bevy App and ECS primitives without the renderer, windowing
 stack, database, HTTP server, or Vifu Console.
@@ -12,7 +12,7 @@ stack, database, HTTP server, or Vifu Console.
 
 ```toml
 [dependencies]
-vifu = { version = "0.1", default-features = false, features = ["runtime"] }
+vifu = "0.1"
 ```
 
 ## Embed a runtime

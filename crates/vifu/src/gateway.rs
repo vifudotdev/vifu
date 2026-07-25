@@ -5,7 +5,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::watch;
 use uuid::Uuid;
 
-pub use vifu_core::{config, openclaw, protocol, relay, session};
+pub use vifu_gateway::{config, openclaw, protocol, relay, session};
 
 use config::{AgentProviderConfig, Config};
 use openclaw::ProbeStatus;
@@ -82,7 +82,7 @@ pub async fn run(
                 );
             }
             agents.extend(discovered);
-            runtime_providers.push(vifu_core::relay::OpenClawRuntimeProvider {
+            runtime_providers.push(vifu_gateway::relay::OpenClawRuntimeProvider {
                 id: provider.id,
                 endpoint: report.endpoint,
                 token: provider.token,

@@ -8,6 +8,7 @@ description = "Vifu runtime UniFFI megazord for iOS and Android clients."
 repository.workspace = true
 homepage.workspace = true
 rust-version.workspace = true
+publish = false
 
 [lib]
 crate-type = ["staticlib", "cdylib"]
@@ -17,7 +18,7 @@ name = "vifu_mobile_ffi"
 thiserror.workspace = true
 tokio = { version = "1", features = ["rt"] }
 uniffi.workspace = true
-vifu-core = { path = "../vifu-core" }
+vifu-gateway = { path = "../vifu-gateway" }
 
 [[bin]]
 name = "uniffi-bindgen"

@@ -12,7 +12,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use tracing::warn;
 use uuid::Uuid;
-use vifu_core::runtime_extension::{
+use vifu_gateway::runtime_extension::{
     RuntimeExtensionDefinition, RuntimeExtensionManifest, RuntimeProfileInvocation,
     MAX_RUNTIME_RPC_BYTES,
 };
@@ -485,7 +485,7 @@ pub async fn connect_project_runtime(
 
 async fn bridge_runtime_socket(
     downstream: WebSocket,
-    upstream: vifu_core::runtime_extension::RuntimeExtensionWebSocket,
+    upstream: vifu_gateway::runtime_extension::RuntimeExtensionWebSocket,
     manifest: RuntimeExtensionManifest,
 ) {
     let (mut downstream_tx, mut downstream_rx) = downstream.split();
@@ -707,7 +707,7 @@ fn validate_rpc_request(request: &Value) -> Result<(Value, &str), Value> {
             "The JSON-RPC method is required.",
         ));
     };
-    if vifu_core::protocol::validate_identifier("runtime RPC method", method).is_err() {
+    if vifu_gateway::protocol::validate_identifier("runtime RPC method", method).is_err() {
         return Err(rpc_error(
             id,
             -32600,

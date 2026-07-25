@@ -1,6 +1,6 @@
 //! UniFFI facade for embedding the Vifu gateway runtime in native clients.
 
-use vifu_core::{config, openclaw, relay};
+use vifu_gateway::{config, openclaw, relay};
 
 #[derive(Debug, Clone, uniffi::Record)]
 pub struct VifuRuntimeConfig {

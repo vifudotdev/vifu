@@ -30,7 +30,7 @@ tower-http = { version = "0.6.8", features = ["catch-panic", "cors", "limit", "r
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 uuid = { version = "1", features = ["serde", "v4"] }
-vifu-core = { version = "0.1.0", path = "../vifu-core", default-features = false }
+vifu-gateway = { version = "0.1.0", path = "../vifu-gateway", default-features = false }
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }

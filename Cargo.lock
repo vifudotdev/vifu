@@ -3373,13 +3373,13 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
- "vifu-core",
+ "vifu-gateway",
  "vifu-runtime",
  "vifu-server",
 ]
 
 [[package]]
-name = "vifu-core"
+name = "vifu-gateway"
 version = "0.1.0"
 dependencies = [
  "futures-util",
@@ -3401,7 +3401,7 @@ dependencies = [
  "thiserror",
  "tokio",
  "uniffi",
- "vifu-core",
+ "vifu-gateway",
 ]
 
 [[package]]
@@ -3437,7 +3437,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
- "vifu-core",
+ "vifu-gateway",
 ]
 
 [[package]]

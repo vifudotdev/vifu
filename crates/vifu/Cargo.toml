@@ -23,13 +23,13 @@ path = "src/main.rs"
 required-features = ["binary"]
 
 [features]
-default = ["binary"]
+default = ["runtime", "binary"]
 runtime = ["dep:vifu-runtime"]
 gateway = [
   "dep:serde_json",
   "dep:tokio",
   "dep:uuid",
-  "dep:vifu-core",
+  "dep:vifu-gateway",
 ]
 server = [
   "dep:tokio",
@@ -42,7 +42,7 @@ binary = [
   "dep:tracing",
   "dep:tracing-subscriber",
 ]
-local-whisper = ["gateway", "vifu-core/local-whisper"]
+local-whisper = ["gateway", "vifu-gateway/local-whisper"]
 
 [dependencies]
 serde = { workspace = true, features = ["derive"], optional = true }
@@ -51,6 +51,6 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "syn
 tracing = { version = "0.1", optional = true }
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"], optional = true }
 uuid = { version = "1", features = ["serde", "v4"], optional = true }
-vifu-core = { version = "0.1.0", path = "../vifu-core", optional = true, default-features = false }
+vifu-gateway = { version = "0.1.0", path = "../vifu-gateway", optional = true, default-features = false }
 vifu-runtime = { version = "0.1.0", path = "../vifu-runtime", optional = true }
 vifu-server = { version = "0.1.0", path = "../vifu-server", optional = true }

@@ -1,13 +1,13 @@
 # Embed The Runtime
 
 The `vifu` crate is both the public Rust SDK and the source of the `vifu`
-binary. Embedded applications select only the features they need.
+binary. Runtime support is included by default.
 
-For a minimal headless runtime:
+Add Vifu to an application:
 
 ```toml
 [dependencies]
-vifu = { version = "0.1", default-features = false, features = ["runtime"] }
+vifu = "0.1"
 ```
 
 | Feature | Adds |
@@ -21,6 +21,9 @@ vifu = { version = "0.1", default-features = false, features = ["runtime"] }
 
 The lower-level `vifu-runtime` package supplies the headless execution kernel.
 Application code should normally import it through `vifu::runtime`.
+
+Advanced builds with strict dependency-size requirements can disable default
+features and select only the capabilities they use.
 
 ## Add A Plugin
 

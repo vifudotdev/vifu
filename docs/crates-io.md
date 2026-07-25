@@ -9,14 +9,14 @@ The public Rust entry point is the `vifu` crate. It provides both:
 ## Feature Contract
 
 ```toml
-# Small embedded runtime
-vifu = { version = "0.1", default-features = false, features = ["runtime"] }
+# Default SDK with Runtime, Gateway, and Server support
+vifu = "0.1"
 
-# Runtime plus Agent Gateway
+# Advanced: Runtime plus Agent Gateway without the default binary feature
 vifu = { version = "0.1", default-features = false, features = ["runtime", "gateway"] }
 
-# Complete library surface
-vifu = { version = "0.1", default-features = false, features = ["full"] }
+# Advanced: smallest Runtime-only dependency graph
+vifu = { version = "0.1", default-features = false, features = ["runtime"] }
 ```
 
 The default `binary` feature enables `full` and builds the executable:
@@ -26,8 +26,9 @@ cargo install vifu
 ```
 
 Cargo cannot choose different default features based on whether `vifu` is
-installed as a binary or added as a dependency. Embedded applications therefore
-disable default features explicitly to keep their dependency graph small.
+installed as a binary or added as a dependency. The default favors a direct
+first experience; advanced embedded builds can disable default features when
+dependency size matters.
 
 ## Package Layout
 
@@ -37,7 +38,7 @@ tested and optimized independently:
 | Package | Role |
 | --- | --- |
 | `vifu-runtime` | Portable Bevy execution kernel |
-| `vifu-core` | Provider, protocol, relay, and session implementation |
+| `vifu-gateway` | Provider, protocol, relay, and session implementation |
 | `vifu-server` | HTTP, WebSocket, and PostgreSQL server implementation |
 | `vifu` | Stable public facade, feature selection, and binary |
 
@@ -50,7 +51,7 @@ Publish one version from a clean, tagged commit in dependency order:
 
 ```bash
 cargo publish -p vifu-runtime
-cargo publish -p vifu-core
+cargo publish -p vifu-gateway
 cargo publish -p vifu-server
 cargo publish -p vifu
 ```

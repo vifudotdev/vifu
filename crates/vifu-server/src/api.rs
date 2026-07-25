@@ -16,8 +16,10 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use tracing::warn;
 use uuid::Uuid;
-use vifu_core::config::{AgentProviderAuthDefinition, AgentProviderDefinition, AgentProvidersFile};
-use vifu_core::protocol::validate_identifier;
+use vifu_gateway::config::{
+    AgentProviderAuthDefinition, AgentProviderDefinition, AgentProvidersFile,
+};
+use vifu_gateway::protocol::validate_identifier;
 
 use crate::auth::{
     bearer_token, decrypt_secret_json, encrypt_secret_json, hash_agent_gateway_credential,
@@ -709,7 +711,7 @@ pub async fn test_project_profile(
         && route.source.get("managed").and_then(Value::as_bool) != Some(false)
         && profile.active_version_id != Some(route.profile_version_id)
     {
-        vifu_core::providers::apply_persona_to_chat_request(&mut request, &route.persona)
+        vifu_gateway::providers::apply_persona_to_chat_request(&mut request, &route.persona)
             .map_err(ApiError::Invalid)?;
         Some("persona-overlay")
     } else {
@@ -1845,7 +1847,7 @@ pub async fn create_project_speech(
     )
     .await?;
     let started_at = Instant::now();
-    let result = vifu_core::providers::elevenlabs_speech(
+    let result = vifu_gateway::providers::elevenlabs_speech(
         &provider.base_url,
         provider.token.as_deref(),
         voice_id,
@@ -2251,8 +2253,8 @@ async fn transcribe_profile_audio(
             let model = route.resource_id.as_deref().ok_or_else(|| {
                 ApiError::Invalid("transcription capability is missing a model file".to_string())
             })?;
-            let home_dir = vifu_core::config::default_home_dir().map_err(ApiError::Invalid)?;
-            let model_path = vifu_core::providers::resolve_local_model_path(&home_dir, model)
+            let home_dir = vifu_gateway::config::default_home_dir().map_err(ApiError::Invalid)?;
+            let model_path = vifu_gateway::providers::resolve_local_model_path(&home_dir, model)
                 .map_err(ApiError::Invalid)?;
             if !model_path.is_file() {
                 return Err(ApiError::Invalid(format!(
@@ -2262,7 +2264,7 @@ async fn transcribe_profile_audio(
             }
             let language = language.map(str::to_string);
             let text = tokio::task::spawn_blocking(move || {
-                vifu_core::providers::local_whisper_transcription(
+                vifu_gateway::providers::local_whisper_transcription(
                     &model_path,
                     &audio,
                     language.as_deref(),
@@ -2281,7 +2283,7 @@ async fn transcribe_profile_audio(
                     "transcription capability is missing a provider model".to_string(),
                 )
             })?;
-            vifu_core::providers::openai_audio_transcription(
+            vifu_gateway::providers::openai_audio_transcription(
                 &provider.base_url,
                 provider.token.as_deref(),
                 model,
@@ -3028,7 +3030,7 @@ async fn create_profile_chat_completion(
 pub(crate) async fn invoke_runtime_extension_profile(
     state: &AppState,
     project: &crate::models::ProjectWithBindings,
-    input: &vifu_core::runtime_extension::RuntimeProfileInvocation,
+    input: &vifu_gateway::runtime_extension::RuntimeProfileInvocation,
     request_id: Uuid,
 ) -> Result<Value, ApiError> {
     let capability = required_identifier("capability", &input.capability)?;
@@ -3165,8 +3167,11 @@ async fn invoke_profile_chat(
     match route.provider_type.as_str() {
         "openclaw" => {
             if route.source.get("managed").and_then(Value::as_bool) == Some(false) {
-                vifu_core::providers::apply_persona_to_chat_request(&mut request, &route.persona)
-                    .map_err(ApiError::Invalid)?;
+                vifu_gateway::providers::apply_persona_to_chat_request(
+                    &mut request,
+                    &route.persona,
+                )
+                .map_err(ApiError::Invalid)?;
             }
             let gateway_id = profile_gateway_id(route).ok_or_else(|| {
                 ApiError::Invalid("OpenClaw capability is missing gatewayId".to_string())
@@ -3210,7 +3215,7 @@ async fn invoke_profile_chat(
             let model = route.resource_id.as_deref().ok_or_else(|| {
                 ApiError::Invalid("chat capability is missing a provider model".to_string())
             })?;
-            vifu_core::providers::openai_chat_completion(
+            vifu_gateway::providers::openai_chat_completion(
                 &provider.base_url,
                 provider.token.as_deref(),
                 model,
@@ -3528,17 +3533,17 @@ async fn connect_openclaw_management_client(
     state: &AppState,
     project_slug: &str,
     provider_key: &str,
-) -> Result<vifu_core::openclaw_rpc::OpenClawGatewayClient, ApiError> {
+) -> Result<vifu_gateway::openclaw_rpc::OpenClawGatewayClient, ApiError> {
     let provider = resolve_openclaw_provider(state, project_slug, provider_key).await?;
     let endpoint =
-        vifu_core::openclaw::parse_endpoint(&provider.base_url).map_err(ApiError::Invalid)?;
+        vifu_gateway::openclaw::parse_endpoint(&provider.base_url).map_err(ApiError::Invalid)?;
     let identity = openclaw_device::load_or_create(
         &state.config.provider_home_dir,
         project_slug,
         provider_key,
     )
     .map_err(ApiError::Provider)?;
-    vifu_core::openclaw_rpc::OpenClawGatewayClient::connect(
+    vifu_gateway::openclaw_rpc::OpenClawGatewayClient::connect(
         &endpoint,
         provider.token.as_deref(),
         Some(&identity),
@@ -3548,7 +3553,7 @@ async fn connect_openclaw_management_client(
 }
 
 async fn read_openclaw_persona_files(
-    client: &mut vifu_core::openclaw_rpc::OpenClawGatewayClient,
+    client: &mut vifu_gateway::openclaw_rpc::OpenClawGatewayClient,
     agent_id: &str,
 ) -> Result<BTreeMap<String, String>, ApiError> {
     let files = client
@@ -3872,11 +3877,11 @@ async fn custom_provider(state: &AppState, provider_key: &str) -> Result<CustomP
 }
 
 fn read_provider_registry(path: &FsPath) -> Result<AgentProvidersFile, ApiError> {
-    vifu_core::config::read_provider_registry_file(path).map_err(ApiError::Invalid)
+    vifu_gateway::config::read_provider_registry_file(path).map_err(ApiError::Invalid)
 }
 
 fn write_provider_registry(path: &FsPath, file: &AgentProvidersFile) -> Result<(), ApiError> {
-    vifu_core::config::write_provider_registry_file(path, file).map_err(ApiError::Invalid)
+    vifu_gateway::config::write_provider_registry_file(path, file).map_err(ApiError::Invalid)
 }
 
 fn save_file_provider_connection(
@@ -3890,7 +3895,7 @@ fn save_file_provider_connection(
     let name = optional_text("provider name", input.name.as_deref(), 128)?.map(str::to_string);
     let base_url = required_text("provider base URL", &input.base_url, 2048)?.to_string();
     if provider_type == "openclaw" {
-        vifu_core::openclaw::parse_endpoint(&base_url).map_err(ApiError::Invalid)?;
+        vifu_gateway::openclaw::parse_endpoint(&base_url).map_err(ApiError::Invalid)?;
     }
     validate_json_object("config", &input.config, 64 * 1024)?;
 
@@ -4236,7 +4241,7 @@ async fn custom_provider_secrets(state: &AppState, key: &str) -> Result<Value, A
             .into_iter()
             .find(|provider| provider.key == key)
             .ok_or(ApiError::NotFound)?;
-        let token = vifu_core::config::resolve_provider_token(&definition.key, &definition.auth)
+        let token = vifu_gateway::config::resolve_provider_token(&definition.key, &definition.auth)
             .map_err(ApiError::Invalid)?;
         return Ok(token.map_or_else(|| json!({}), |token| json!({ "token": token })));
     }
@@ -4331,23 +4336,25 @@ async fn probe_runtime_provider(
 ) -> (&'static str, Option<String>) {
     match provider_type {
         "openclaw" => {
-            let report = vifu_core::openclaw::probe(base_url).await;
+            let report = vifu_gateway::openclaw::probe(base_url).await;
             match report.status {
-                vifu_core::openclaw::ProbeStatus::Online => ("online", None),
-                vifu_core::openclaw::ProbeStatus::Offline(message) => ("offline", Some(message)),
-                vifu_core::openclaw::ProbeStatus::Unsupported(message) => {
+                vifu_gateway::openclaw::ProbeStatus::Online => ("online", None),
+                vifu_gateway::openclaw::ProbeStatus::Offline(message) => ("offline", Some(message)),
+                vifu_gateway::openclaw::ProbeStatus::Unsupported(message) => {
                     ("unsupported", Some(message))
                 }
             }
         }
         "openai-compatible" => {
-            probe_result(vifu_core::providers::probe_openai_compatible(base_url, token).await)
+            probe_result(vifu_gateway::providers::probe_openai_compatible(base_url, token).await)
         }
-        "elevenlabs" => probe_result(vifu_core::providers::probe_elevenlabs(base_url, token).await),
+        "elevenlabs" => {
+            probe_result(vifu_gateway::providers::probe_elevenlabs(base_url, token).await)
+        }
         "local-whisper" => {
             let model = config.get("model").and_then(Value::as_str).unwrap_or("");
-            let result = vifu_core::config::default_home_dir()
-                .and_then(|home| vifu_core::providers::resolve_local_model_path(&home, model))
+            let result = vifu_gateway::config::default_home_dir()
+                .and_then(|home| vifu_gateway::providers::resolve_local_model_path(&home, model))
                 .and_then(|path| {
                     if path.is_file() {
                         Ok(())
@@ -4384,7 +4391,7 @@ fn prepare_provider_connection(
         .to_string();
     let base_url = required_text("provider base URL", source.base_url, 2048)?.to_string();
     if provider_type == "openclaw" {
-        vifu_core::openclaw::parse_endpoint(&base_url).map_err(ApiError::Invalid)?;
+        vifu_gateway::openclaw::parse_endpoint(&base_url).map_err(ApiError::Invalid)?;
     }
     validate_json_object("config", &source.config, 64 * 1024)?;
     validate_json_object("secrets", &source.secrets, 64 * 1024)?;
@@ -4508,7 +4515,7 @@ fn decrypted_custom_provider_secrets(
 
 fn provider_token(secrets: &Value) -> Result<Option<String>, ApiError> {
     let auth = provider_auth_from_secrets(&AgentProviderAuthDefinition::default(), secrets)?;
-    vifu_core::config::resolve_provider_token("provider", &auth).map_err(ApiError::Invalid)
+    vifu_gateway::config::resolve_provider_token("provider", &auth).map_err(ApiError::Invalid)
 }
 
 fn mask_secret(value: &str) -> String {

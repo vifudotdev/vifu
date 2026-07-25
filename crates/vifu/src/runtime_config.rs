@@ -53,8 +53,8 @@ pub struct GatewayRuntimeConfig {
 
 impl LoadedRuntimeConfig {
     pub fn load() -> Result<Self, String> {
-        let home_dir = vifu_core::config::default_home_dir()?;
-        vifu_core::config::ensure_provider_registry_file(&home_dir)?;
+        let home_dir = vifu_gateway::config::default_home_dir()?;
+        vifu_gateway::config::ensure_provider_registry_file(&home_dir)?;
         let path = home_dir.join(CONFIG_FILE_NAME);
         let config = RuntimeConfig::load_or_create(&path)?;
         Ok(Self { path, config })
@@ -70,7 +70,7 @@ impl LoadedRuntimeConfig {
         let server_url = gateway
             .server_url
             .clone()
-            .unwrap_or_else(|| vifu_core::config::DEFAULT_SERVER_URL.to_string());
+            .unwrap_or_else(|| vifu_gateway::config::DEFAULT_SERVER_URL.to_string());
         Ok(GatewayRuntimeOptions { server_url })
     }
 
@@ -125,7 +125,7 @@ impl RuntimeConfig {
                 runtime_extensions: Vec::new(),
             }),
             gateway: cfg!(feature = "gateway").then(|| GatewayRuntimeConfig {
-                server_url: Some(vifu_core::config::DEFAULT_SERVER_URL.to_string()),
+                server_url: Some(vifu_gateway::config::DEFAULT_SERVER_URL.to_string()),
             }),
         };
         if config.server.is_none() && config.gateway.is_none() {
@@ -137,7 +137,7 @@ impl RuntimeConfig {
     fn write(&self, path: &Path) -> Result<(), String> {
         let json = serde_json::to_string_pretty(self)
             .map_err(|error| format!("Vifu runtime configuration could not be encoded: {error}"))?;
-        vifu_core::config::write_private_file(path, &format!("{json}\n"))
+        vifu_gateway::config::write_private_file(path, &format!("{json}\n"))
     }
 
     fn parse(path: &Path, raw: &str) -> Result<Self, String> {
@@ -219,7 +219,7 @@ impl ServerRuntimeConfig {
     fn runtime_extensions(
         &self,
         config_path: &Path,
-    ) -> Result<Vec<vifu_core::runtime_extension::RuntimeExtensionDefinition>, String> {
+    ) -> Result<Vec<vifu_gateway::runtime_extension::RuntimeExtensionDefinition>, String> {
         let base_dir = config_path.parent().unwrap_or_else(|| Path::new("."));
         self.runtime_extensions
             .iter()
@@ -241,7 +241,7 @@ impl ServerRuntimeConfig {
                         manifest_path.display()
                     )
                 })?;
-                vifu_core::runtime_extension::RuntimeExtensionDefinition::new(
+                vifu_gateway::runtime_extension::RuntimeExtensionDefinition::new(
                     manifest,
                     extension.base_url.clone(),
                     extension.credential(base_dir)?,

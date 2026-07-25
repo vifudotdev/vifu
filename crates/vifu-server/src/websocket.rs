@@ -9,8 +9,8 @@ use serde_json::json;
 use tokio::time::{Instant, MissedTickBehavior};
 use tracing::{info, warn};
 use uuid::Uuid;
-use vifu_core::gateway_frame;
-use vifu_core::protocol::{self, AgentGatewayCommand};
+use vifu_gateway::gateway_frame;
+use vifu_gateway::protocol::{self, AgentGatewayCommand};
 
 use crate::auth::{bearer_token, hash_agent_gateway_credential};
 use crate::db;
@@ -186,7 +186,7 @@ async fn run_socket(
 async fn reconcile_project_agents(
     state: &AppState,
     gateway_id: &str,
-    agents: &[vifu_core::protocol::AgentDescriptor],
+    agents: &[vifu_gateway::protocol::AgentDescriptor],
 ) -> Result<(), crate::error::ApiError> {
     for agent in agents {
         let Some(provider_key) = agent
@@ -306,10 +306,10 @@ mod tests {
     use tokio_tungstenite::tungstenite::Message;
     use tower::ServiceExt;
     use uuid::Uuid;
-    use vifu_core::gateway_frame::{
+    use vifu_gateway::gateway_frame::{
         self, GatewayFrame, RequestFrame, RequestFrameType, ResponseFrame, ResponseFrameType,
     };
-    use vifu_core::protocol::{
+    use vifu_gateway::protocol::{
         AgentGatewayCommand, AGENT_GATEWAY_HELLO_METHOD, AGENT_GATEWAY_HELLO_REQUEST_ID,
         AGENT_GATEWAY_INVOKE_METHOD, VERSION,
     };

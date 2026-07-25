@@ -12,16 +12,16 @@ define their behavior by composing plugins with the headless runtime.
 ## Embed Vifu
 
 The `vifu` crate is the public Rust SDK and also produces the `vifu` binary.
-Select only the library features an embedded product needs:
+Runtime support is included by default:
 
 ```toml
 [dependencies]
-vifu = { version = "0.1", default-features = false, features = ["runtime"] }
+vifu = "0.1"
 ```
 
-Add `gateway` to connect Agent Providers, `server` to embed the HTTP and
-PostgreSQL service, or `full` for all library APIs. The default `binary` feature
-builds the complete Vifu Server and Agent Gateway executable.
+Advanced builds can disable default features to select only `runtime`,
+`gateway`, or `server`. The default build also produces the complete Vifu Server
+and Agent Gateway executable.
 
 See [Embed the runtime](docs/runtime-embedding.md) and the
 [crates.io release contract](docs/crates-io.md).
@@ -122,7 +122,7 @@ Application-specific behavior stays in application plugins. See
 ```text
 crates/
   vifu/               Single executable and Agent Gateway
-  vifu-core/          Provider and protocol building blocks
+  vifu-gateway/       Provider and protocol building blocks
   vifu-runtime/       Embeddable Bevy runtime primitives
   vifu-server/        HTTP API, relay, traces, and PostgreSQL
 npm-packages/

@@ -309,7 +309,7 @@ mod tests {
     #[test]
     fn reads_agent_gateway_bootstrap_token_from_file() {
         let _guard = env_lock().lock().unwrap();
-        let dir = unique_directory("vifu-core-config-test");
+        let dir = unique_directory("vifu-gateway-config-test");
         fs::create_dir_all(&dir).unwrap();
         let token_path = dir.join("agent_gateway_bootstrap_token");
         fs::write(&token_path, "agent-gateway-token-from-file\n").unwrap();
@@ -338,7 +338,7 @@ mod tests {
     fn loads_no_agent_providers_by_default() {
         let _guard = env_lock().lock().unwrap();
         let previous_token_file = std::env::var_os("VIFU_AGENT_GATEWAY_BOOTSTRAP_TOKEN_FILE");
-        let dir = unique_directory("vifu-core-no-providers");
+        let dir = unique_directory("vifu-gateway-no-providers");
         std::env::remove_var("VIFU_AGENT_GATEWAY_BOOTSTRAP_TOKEN_FILE");
 
         let config =
@@ -357,7 +357,7 @@ mod tests {
     fn loads_openclaw_provider_from_generic_file() {
         let _guard = env_lock().lock().unwrap();
         let previous_token_file = std::env::var_os("VIFU_AGENT_GATEWAY_BOOTSTRAP_TOKEN_FILE");
-        let dir = unique_directory("vifu-core-provider-file");
+        let dir = unique_directory("vifu-gateway-provider-file");
         fs::create_dir_all(&dir).unwrap();
         let providers_file = dir.join("providers.json");
         fs::write(
@@ -387,7 +387,7 @@ mod tests {
     fn rejects_unknown_provider_auth_fields() {
         let _guard = env_lock().lock().unwrap();
         let previous_token_file = std::env::var_os("VIFU_AGENT_GATEWAY_BOOTSTRAP_TOKEN_FILE");
-        let dir = unique_directory("vifu-core-provider-auth");
+        let dir = unique_directory("vifu-gateway-provider-auth");
         fs::create_dir_all(&dir).unwrap();
         let providers_file = dir.join("providers.json");
         fs::write(
@@ -410,7 +410,7 @@ mod tests {
 
     #[test]
     fn writes_and_reloads_multiple_provider_definitions() {
-        let dir = unique_directory("vifu-core-provider-write");
+        let dir = unique_directory("vifu-gateway-provider-write");
         let path = dir.join("providers.json");
         let providers = AgentProvidersFile {
             providers: vec![
