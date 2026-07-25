@@ -7,6 +7,7 @@ const authEmail = process.env.VIFU_E2E_AUTH_EMAIL || "admin@self-hosted.example"
 const authPassword = process.env.VIFU_E2E_AUTH_PASSWORD || "correct horse battery staple";
 const statePath = process.env.VIFU_E2E_STATE_PATH || "/tmp/vifu-self-hosted-e2e.json";
 const openClawMockUrl = process.env.VIFU_E2E_OPENCLAW_MOCK_URL?.replace(/\/+$/, "") || null;
+const expectTimeout = process.env.VIFU_E2E_EXPECT_TIMEOUT === "1";
 const command = process.argv[2] || "setup";
 let runtimeCredential = adminKey;
 
@@ -121,25 +122,26 @@ async function setup() {
   assert(agent?.id, "The Agent Gateway did not report an agent");
   const secondaryAgent = agentGateway.agents?.find((item) => item.id && item.id !== agent.id) ?? null;
   const projectAgentIds = secondaryAgent ? [agent.id, secondaryAgent.id] : [agent.id];
+  const providerKey = agent.metadata?.providerKey;
+  assert(providerKey, "The Agent Gateway did not identify the source provider");
+  const providerCatalog = await request("/v1/provider-catalog");
+  assert(
+    providerCatalog.custom?.some((provider) => provider.providerKey === providerKey),
+    "The Agent Gateway provider is missing from the provider catalog",
+  );
 
-  const project = (await request("/v1/projects", {
-    method: "POST",
-    body: {
-      name: `E2E Project ${suffix}`,
-      slug: `e2e-project-${suffix}`,
-      gatewayId: agentGateway.gatewayId,
-      agentIds: projectAgentIds,
-    },
-  })).project;
-  const scopeTargetProject = (await request("/v1/projects", {
-    method: "POST",
-    body: {
-      name: `E2E Scope Target ${suffix}`,
-      slug: `e2e-scope-target-${suffix}`,
-      gatewayId: agentGateway.gatewayId,
-      agentIds: [agent.id],
-    },
-  })).project;
+  const project = await createProjectWithProvider({
+    name: `E2E Project ${suffix}`,
+    slug: `e2e-project-${suffix}`,
+    providerKey,
+    minimumAgents: projectAgentIds.length,
+  });
+  const scopeTargetProject = await createProjectWithProvider({
+    name: `E2E Scope Target ${suffix}`,
+    slug: `e2e-scope-target-${suffix}`,
+    providerKey,
+    minimumAgents: 1,
+  });
   const bindings = (await request("/v1/bindings")).bindings ?? [];
   const binding = bindings.find((item) => project.bindingIds.includes(item.id) && item.agentId === agent.id);
   assert(binding, "Project creation did not create a binding for the selected agent");
@@ -194,18 +196,18 @@ async function setup() {
     method: "PATCH",
     body: {
       name: "E2E edited key",
-      agentScope: { mode: "selected", bindingIds: [binding.id] },
-      permissions: {
+      agentScope: { mode: "selected", profileIds: [profile.id] },
+      permissions: apiKeyPermissions({
         chatCompletions: "access",
         agents: "read",
         project: "write",
-      },
+      }),
     },
   })).apiKey;
   assert(selectedScopeUpdate.name === "E2E edited key", "API key name update was not persisted");
   assert(
     selectedScopeUpdate.agentScope?.mode === "selected"
-      && selectedScopeUpdate.agentScope.bindingIds?.[0] === binding.id,
+      && selectedScopeUpdate.agentScope.profileIds?.[0] === profile.id,
     "Selected agent scope was not persisted",
   );
   assert(
@@ -216,8 +218,8 @@ async function setup() {
   );
   const selectedModels = await request(`/${project.slug}/v1/models`, {}, editableKey.key);
   assert(
-    selectedModels.data?.length === endpoints.length,
-    "Selected agent scope returned models from another binding",
+    selectedModels.data?.length === 1 && selectedModels.data[0]?.id === profile.slug,
+    "Selected agent scope returned a model from another profile",
   );
   if (secondaryEndpoint) {
     const selectedDenied = await rawRequest(
@@ -250,11 +252,11 @@ async function setup() {
     method: "POST",
     body: {
       ...projectKeyBody(project.id, "E2E endpoint permission probe"),
-      permissions: {
+      permissions: apiKeyPermissions({
         chatCompletions: "none",
         agents: "read",
         project: "read",
-      },
+      }),
     },
   })).apiKey;
   assert(
@@ -282,11 +284,11 @@ async function setup() {
   const endpointPermissionUpdate = (await request(`/v1/api-keys/${endpointDeniedKey.id}`, {
     method: "PATCH",
     body: {
-      permissions: {
+      permissions: apiKeyPermissions({
         chatCompletions: "access",
         agents: "none",
         project: "none",
-      },
+      }),
     },
   })).apiKey;
   assert(
@@ -318,8 +320,11 @@ async function setup() {
   assert(!keysAfterDelete.some((key) => key.id === disposableKey.id), "A deleted API key record remained visible");
 
   const visibleModels = await request(`/${project.slug}/v1/models`, {}, projectKey.key);
+  const visibleModelIds = new Set(visibleModels.data?.map((model) => model.id) ?? []);
+  const expectedModelIds = [profile.slug, secondaryProfile?.slug].filter(Boolean);
   assert(
-    visibleModels.data?.length === allEndpoints.length,
+    visibleModelIds.size === expectedModelIds.length
+      && expectedModelIds.every((modelId) => visibleModelIds.has(modelId)),
     "Project key did not list all project models",
   );
 
@@ -345,30 +350,26 @@ async function setup() {
     "Project key targeting an outside model did not return agent_access_denied",
   );
 
-  const calls = await Promise.all(endpoints.map(async (endpoint, index) => {
+  const calls = await Promise.all(Array.from({ length: 10 }, async (_, index) => {
     const message = `parallel call ${index + 1}`;
     const result = await request(
       `/${project.slug}/v1/chat/completions`,
-      { method: "POST", body: chatCompletionBody(endpoint, message) },
+      { method: "POST", body: chatCompletionBody(profile, message) },
       projectKey.key,
     );
-    assert(result.model === endpoint.slug, `Endpoint ${index + 1} returned the wrong model`);
+    assert(result.model === profile.slug, `Concurrent call ${index + 1} returned the wrong model`);
     assert(
       completionContent(result).includes(message),
-      `Endpoint ${index + 1} returned the wrong reply`,
+      `Concurrent call ${index + 1} returned the wrong reply`,
     );
     return result;
   }));
 
   let canceledRequest = false;
-  if (openClawMockUrl) {
-    await request(`/v1/endpoints/${endpoints[0].id}`, {
-      method: "PATCH",
-      body: { requestTimeoutMs: 500 },
-    });
+  if (openClawMockUrl && expectTimeout) {
     const timeoutResponse = await rawRequest(
       `/${project.slug}/v1/chat/completions`,
-      { method: "POST", body: chatCompletionBody(endpoints[0], "delay:2000") },
+      { method: "POST", body: chatCompletionBody(profile, "delay:2000") },
       projectKey.key,
     );
     assert(timeoutResponse.status === 504, `Expected timeout status 504, got ${timeoutResponse.status}`);
@@ -384,10 +385,10 @@ async function setup() {
   const completed = traces.filter((trace) => requestIds.has(trace.requestId) && trace.status === "completed");
   assert(completed.length === 10, `Expected 10 completed traces, found ${completed.length}`);
   assert(
-    completed.every((trace) => trace.projectId === project.id && trace.endpointId),
-    "Project invocation traces lost their project or endpoint attribution",
+    completed.every((trace) => trace.projectId === project.id && trace.profileId === profile.id),
+    "Project invocation traces lost their project or profile attribution",
   );
-  if (openClawMockUrl) {
+  if (openClawMockUrl && expectTimeout) {
     assert(traces.some((trace) => trace.status === "timed_out"), "Timed-out trace was not persisted");
   }
 
@@ -454,11 +455,9 @@ async function verify() {
 async function cleanup() {
   const state = JSON.parse(await readFile(statePath, "utf8"));
   runtimeCredential = adminKey;
+  await Promise.all(state.endpointIds.map((id) => request(`/v1/endpoints/${id}`, { method: "DELETE" })));
   await request(`/v1/projects/${state.projectId}`, { method: "DELETE" });
   await request(`/v1/projects/${state.scopeTargetProjectId}`, { method: "DELETE" });
-  await Promise.all(state.endpointIds.map((id) => request(`/v1/endpoints/${id}`, { method: "DELETE" })));
-  await Promise.all(state.bindingIds.map((id) => request(`/v1/bindings/${id}`, { method: "DELETE" })));
-  await Promise.all(state.profileIds.map((id) => request(`/v1/profiles/${id}`, { method: "DELETE" })));
   await fetch(`${dashboardBaseUrl}/auth/logout`, {
     method: "POST",
     headers: {
@@ -470,11 +469,35 @@ async function cleanup() {
   console.log(JSON.stringify({ status: "ok", cleanedEndpoints: state.endpointIds.length }));
 }
 
+async function createProjectWithProvider({ name, slug, providerKey, minimumAgents }) {
+  const created = (await request("/v1/projects", {
+    method: "POST",
+    body: { name, slug },
+  })).project;
+  const provider = await request(`/v1/project/${slug}/providers`, {
+    method: "POST",
+    body: {
+      source: { kind: "custom", key: providerKey },
+    },
+  });
+  assert(
+    provider.addedAgents >= minimumAgents,
+    `Provider setup added ${provider.addedAgents ?? 0} agents; expected at least ${minimumAgents}`,
+  );
+  return (await request(`/v1/projects/${created.id}`)).project;
+}
+
 async function request(path, init = {}, credential = runtimeCredential) {
   const response = await rawRequest(path, init, credential);
-  const payload = await response.json().catch(() => null);
+  const responseBody = await response.text();
+  let payload = null;
+  try {
+    payload = responseBody ? JSON.parse(responseBody) : null;
+  } catch {
+    // Keep the raw body below so non-JSON proxy and framework errors remain actionable.
+  }
   if (!response.ok) {
-    const message = payload?.error?.message || `HTTP ${response.status}`;
+    const message = payload?.error?.message || responseBody || `HTTP ${response.status}`;
     throw new Error(`${init.method || "GET"} ${path}: ${message}`);
   }
   return payload ?? {};
@@ -502,11 +525,20 @@ function projectKeyBody(projectId, name) {
     projectId,
     name,
     agentScope: { mode: "all" },
-    permissions: {
-      chatCompletions: "access",
-      agents: "none",
-      project: "none",
-    },
+    permissions: apiKeyPermissions(),
+  };
+}
+
+function apiKeyPermissions(overrides = {}) {
+  return {
+    chatCompletions: "access",
+    speech: "none",
+    transcriptions: "none",
+    realtime: "none",
+    runtime: "none",
+    agents: "none",
+    project: "none",
+    ...overrides,
   };
 }
 

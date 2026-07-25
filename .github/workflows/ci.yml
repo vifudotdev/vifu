@@ -6,10 +6,22 @@ on:
     branches:
       - main
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_INCREMENTAL: "0"
+  CARGO_TERM_COLOR: always
+
 jobs:
   rust:
     name: Rust
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     env:
       VIFU_TEST_DATABASE_REQUIRED: "1"
     services:
@@ -28,36 +40,54 @@ jobs:
           --health-retries 20
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.95.0
         with:
           components: clippy,rustfmt
+      - uses: Swatinem/rust-cache@v2
       - name: Secret scan
         run: >-
           docker run --rm -v "$GITHUB_WORKSPACE:/repo" -w /repo
           zricethezav/gitleaks:v8.18.4
           detect --source=/repo --no-git --redact --no-banner
       - name: Format
-        run: cargo fmt --check
+        run: cargo fmt --all --check
       - name: Test
-        run: cargo test
+        run: cargo test --workspace --locked
       - name: Clippy
-        run: cargo clippy --all-targets -- -D warnings
-      - name: Build
-        run: cargo build
-      - name: Inspect public crate contents
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Public facade feature matrix
         run: |
-          cargo package -p vifu --allow-dirty --no-verify --list
-          cargo package -p vifu-server --allow-dirty --no-verify --list
-      - name: Check
-        run: cargo check
+          cargo check --locked -p vifu
+          cargo check --locked -p vifu --no-default-features --features runtime
+          cargo check --locked -p vifu --no-default-features --features gateway
+          cargo check --locked -p vifu --no-default-features --features server
+          cargo check --locked -p vifu --no-default-features --features full
       - name: Public repository hygiene
         run: node scripts/check-public-repo.mjs
         env:
           VIFU_PRIVATE_TERMS: ${{ secrets.PUBLIC_REPOSITORY_PRIVATE_TERMS }}
 
-  dashboard:
-    name: Dashboard
+  rust-packages:
+    name: Rust package artifacts
     runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.95.0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: package-artifacts
+      - name: Verify publishable crates
+        run: |
+          cargo package --locked -p vifu-runtime
+          cargo package --locked -p vifu-gateway
+          cargo package --locked -p vifu-server
+          cargo package --locked -p vifu
+
+  dashboard:
+    name: Dashboard and JavaScript packages
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2
@@ -71,15 +101,20 @@ jobs:
           VIFU_PRIVATE_TERMS: ${{ secrets.PUBLIC_REPOSITORY_PRIVATE_TERMS }}
       - name: Unit tests
         run: bun run test
-      - name: Standalone dashboard builds
+      - name: Production builds
         run: bun run build
+      - name: Inspect public package artifacts
+        run: |
+          npm pack --dry-run --json ./packages/protocol
+          npm pack --dry-run --json ./packages/runtime
+          npm pack --dry-run --json ./packages/sdk
 
   self-hosted-docker:
     name: Clean self-hosted Docker smoke
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: 1.3.9
