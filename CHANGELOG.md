@@ -2,7 +2,13 @@
 
 All notable changes to Vifu are documented here.
 
-## Unreleased
+## 0.1.1 - 2026-07-26
+
+- Exposed provider and runtime-extension APIs through the public
+  `vifu::gateway` module.
+- Added crates.io, docs.rs, CI, and Discord links to the repository overview.
+
+## 0.1.0 - 2026-07-26
 
 - Added `vifu-server`, a PostgreSQL-backed Agent Endpoint Runtime with Profile,
   Binding, Endpoint, API key, connection, invocation, and trace APIs.

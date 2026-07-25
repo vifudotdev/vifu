@@ -2,6 +2,12 @@
 
 ![Vifu](npm-packages/dashboard/public/brand/vifu-lockup.png)
 
+[![Crates.io](https://img.shields.io/crates/v/vifu.svg)](https://crates.io/crates/vifu)
+[![Downloads](https://img.shields.io/crates/d/vifu.svg)](https://crates.io/crates/vifu)
+[![Docs](https://docs.rs/vifu/badge.svg)](https://docs.rs/vifu)
+[![CI](https://github.com/vifudotdev/vifu/actions/workflows/ci.yml/badge.svg)](https://github.com/vifudotdev/vifu/actions/workflows/ci.yml)
+[![Discord](https://img.shields.io/badge/Discord-Join-5865F2?logo=discord&logoColor=white)](https://discord.com/invite/VdqqFwJbNE)
+
 Vifu is a small, fast, stateful, and portable Agent Runtime. Embed it into an
 application to connect, control, coordinate, and monitor local or remote Agents.
 
