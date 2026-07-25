@@ -5,10 +5,9 @@
 Vifu is a small, fast, stateful, and portable Agent Runtime. Embed it into an
 application to connect, control, coordinate, and monitor local or remote Agents.
 
-The Apache-2.0 repository includes the cross-platform Rust runtime, Agent
-Gateway, durable state, stable application APIs, traces, and a small operations
-Console. Applications define their behavior by composing plugins with the
-headless runtime.
+Vifu includes the cross-platform Rust runtime, Agent Gateway, durable state,
+stable application APIs, traces, and a small operations Console. Applications
+define their behavior by composing plugins with the headless runtime.
 
 ## Embed Vifu
 
