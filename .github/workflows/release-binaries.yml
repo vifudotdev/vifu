@@ -61,7 +61,10 @@ jobs:
           cp README.md "dist/$asset/README.md"
           cp config/runtime.example.json "dist/$asset/config/runtime.example.json"
           tar -C dist -czf "dist/$asset.tar.gz" "$asset"
-          shasum -a 256 "dist/$asset.tar.gz" > "dist/$asset.tar.gz.sha256"
+          (
+            cd dist
+            shasum -a 256 "$asset.tar.gz" > "$asset.tar.gz.sha256"
+          )
       - name: Package Windows binary
         if: matrix.archive == 'zip'
         shell: pwsh
@@ -73,11 +76,20 @@ jobs:
           Copy-Item README.md "dist/$asset/README.md"
           Copy-Item config/runtime.example.json "dist/$asset/config/runtime.example.json"
           Compress-Archive -Path "dist/$asset" -DestinationPath "dist/$asset.zip"
-          (Get-FileHash "dist/$asset.zip" -Algorithm SHA256).Hash.ToLower() + "  $asset.zip" | Out-File -Encoding ascii "dist/$asset.zip.sha256"
+          $hash = (Get-FileHash "dist/$asset.zip" -Algorithm SHA256).Hash.ToLower()
+          [IO.File]::WriteAllText(
+            "dist/$asset.zip.sha256",
+            "$hash  ${asset}.zip`n",
+            [Text.UTF8Encoding]::new($false)
+          )
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.target }}
-          path: dist/*
+          path: |
+            dist/*.tar.gz
+            dist/*.tar.gz.sha256
+            dist/*.zip
+            dist/*.zip.sha256
           if-no-files-found: error
 
   publish:
@@ -96,7 +108,11 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: >-
-          gh release create "$GITHUB_REF_NAME" dist/*
+          gh release create "$GITHUB_REF_NAME"
+          dist/*.tar.gz
+          dist/*.tar.gz.sha256
+          dist/*.zip
+          dist/*.zip.sha256
           --repo "$GITHUB_REPOSITORY"
           --verify-tag
           --generate-notes
