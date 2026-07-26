@@ -1,15 +1,30 @@
-pub mod agent_gateway;
+//! The public Rust SDK for embedding and operating Vifu.
+
+#[cfg(feature = "binary")]
 pub mod cli;
-pub mod runtime;
+#[cfg(feature = "gateway")]
+pub mod gateway;
+#[cfg(feature = "binary")]
+mod launcher;
+#[cfg(feature = "binary")]
 pub mod runtime_config;
 
-pub use vifu_core::{config, openclaw, protocol, relay, session};
+#[cfg(feature = "server")]
+pub use vifu_server as server;
 
+#[cfg(feature = "runtime")]
+pub mod runtime {
+    //! Portable, headless runtime primitives.
+
+    pub use vifu_runtime::*;
+}
+
+#[cfg(feature = "binary")]
 pub async fn run<I, S>(args: I) -> Result<(), String>
 where
     I: IntoIterator<Item = S>,
     S: Into<String>,
 {
     let options = cli::Options::parse(args)?;
-    runtime::execute(options).await
+    launcher::execute(options).await
 }

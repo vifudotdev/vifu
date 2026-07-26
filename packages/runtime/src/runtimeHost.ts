@@ -17,7 +17,7 @@ export interface JsonRpcResponse {
 export type JsonRpcMessage = JsonRpcRequest | JsonRpcResponse;
 
 export interface RuntimeEnvelope<T = unknown> {
-  source: "vifu-host" | "vifu-game-runtime" | string;
+  source: "vifu-host" | "vifu-runtime" | string;
   message: T;
 }
 
@@ -68,7 +68,7 @@ export interface RuntimeHost {
 
 export function createRuntimeHost(options: RuntimeHostOptions): RuntimeHost {
   const hostSource = options.hostSource || "vifu-host";
-  const runtimeSource = options.runtimeSource || "vifu-game-runtime";
+  const runtimeSource = options.runtimeSource || "vifu-runtime";
   const targetOrigin = options.targetOrigin || "*";
   const frame = options.frame || (options.iframe ? createIframeRuntimeFrame(options.iframe) : null);
   const debugEvents: CloudEvent[] = [];

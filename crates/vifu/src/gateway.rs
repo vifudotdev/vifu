@@ -5,10 +5,14 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::watch;
 use uuid::Uuid;
 
-use crate::config::{AgentProviderConfig, Config};
-use crate::openclaw::{self, ProbeStatus};
-use crate::relay;
-use crate::session::{self, SessionStatus, SessionSummary};
+pub use vifu_gateway::{
+    config, gateway_frame, openclaw, openclaw_rpc, protocol, providers, relay, runtime_extension,
+    session,
+};
+
+use config::{AgentProviderConfig, Config};
+use openclaw::ProbeStatus;
+use session::{SessionStatus, SessionSummary};
 
 const PROVIDER_RETRY_DELAY: Duration = Duration::from_secs(10);
 
@@ -81,7 +85,7 @@ pub async fn run(
                 );
             }
             agents.extend(discovered);
-            runtime_providers.push(vifu_core::relay::OpenClawRuntimeProvider {
+            runtime_providers.push(vifu_gateway::relay::OpenClawRuntimeProvider {
                 id: provider.id,
                 endpoint: report.endpoint,
                 token: provider.token,

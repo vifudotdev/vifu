@@ -1629,7 +1629,7 @@ pub async fn ensure_discovered_binding(
         display_name
     };
     let provider_key =
-        if vifu_core::protocol::validate_identifier("provider key", provider_key).is_ok() {
+        if vifu_gateway::protocol::validate_identifier("provider key", provider_key).is_ok() {
             provider_key
         } else {
             "openclaw"

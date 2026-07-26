@@ -1,27 +1,56 @@
 [package]
 name = "vifu"
-version = "0.1.0"
+version = "0.1.2"
 edition.workspace = true
+authors.workspace = true
 license.workspace = true
-description = "Connect local AI agents to Vifu."
+description = "Small, stateful, portable Agent Runtime, Gateway, and Server."
 repository.workspace = true
 homepage.workspace = true
-readme = "../../README.md"
-keywords = ["ai", "cli", "openclaw", "local-first"]
-categories = ["command-line-utilities"]
+documentation = "https://docs.rs/vifu"
+readme = "README.md"
+keywords = ["agents", "runtime", "gateway", "embedded", "bevy"]
+categories = ["development-tools", "game-development", "command-line-utilities"]
 rust-version.workspace = true
 
+[lib]
+name = "vifu"
+path = "src/lib.rs"
+
+[[bin]]
+name = "vifu"
+path = "src/main.rs"
+required-features = ["binary"]
+
 [features]
-default = ["server", "gateway"]
-server = ["dep:vifu-server"]
-gateway = []
+default = ["runtime", "binary"]
+runtime = ["dep:vifu-runtime"]
+gateway = [
+  "dep:serde_json",
+  "dep:tokio",
+  "dep:uuid",
+  "dep:vifu-gateway",
+]
+server = [
+  "dep:tokio",
+  "dep:vifu-server",
+]
+full = ["runtime", "gateway", "server"]
+binary = [
+  "full",
+  "dep:serde",
+  "dep:tracing",
+  "dep:tracing-subscriber",
+]
+local-whisper = ["gateway", "vifu-gateway/local-whisper"]
 
 [dependencies]
-serde = { workspace = true, features = ["derive"] }
-serde_json = { workspace = true }
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "sync", "time"] }
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
-uuid = { version = "1", features = ["serde", "v4"] }
-vifu-core = { path = "../vifu-core" }
-vifu-server = { path = "../vifu-server", optional = true }
+serde = { workspace = true, features = ["derive"], optional = true }
+serde_json = { workspace = true, optional = true }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "sync", "time"], optional = true }
+tracing = { version = "0.1", optional = true }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"], optional = true }
+uuid = { version = "1", features = ["serde", "v4"], optional = true }
+vifu-gateway = { version = "0.1.0", path = "../vifu-gateway", optional = true, default-features = false }
+vifu-runtime = { version = "0.1.0", path = "../vifu-runtime", optional = true }
+vifu-server = { version = "0.1.0", path = "../vifu-server", optional = true }

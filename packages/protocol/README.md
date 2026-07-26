@@ -15,6 +15,6 @@ are intentionally kept outside this gateway frame package.
 ## Contract Testing
 
 The JSON files in `fixtures/gateway-frame/` are the shared protocol contract for
-TypeScript and Rust. Both `@vifu/protocol` tests and `vifu-core` tests parse the
+TypeScript and Rust. Both `@vifu/protocol` tests and `vifu-gateway` tests parse the
 same fixture directory, so adding or changing a gateway frame fixture must keep
 both language implementations compatible.

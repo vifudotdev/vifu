@@ -6,7 +6,7 @@ iOS and Android clients.
 
 Current component:
 
-- `vifu-core`
+- `vifu-gateway`
 
 Build examples:
 

@@ -1,17 +1,19 @@
 [package]
-name = "vifu-core"
+name = "vifu-gateway"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
-description = "Shared Rust protocol and runtime primitives for Vifu."
+description = "Provider discovery, relay, protocol, and session support for Vifu Agent Gateway."
 repository.workspace = true
 homepage.workspace = true
+documentation = "https://docs.rs/vifu-gateway"
+readme = "README.md"
 rust-version.workspace = true
 
 [lib]
 crate-type = ["lib"]
-name = "vifu_core"
+name = "vifu_gateway"
 
 [dependencies]
 futures-util = "0.3"
@@ -26,5 +28,5 @@ uuid = { version = "1", features = ["serde", "v4"] }
 whisper-rs = { version = "0.16", optional = true }
 
 [features]
-default = ["local-whisper"]
+default = []
 local-whisper = ["dep:hound", "dep:whisper-rs"]

@@ -11,7 +11,7 @@ use ring::signature::{Ed25519KeyPair, KeyPair};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
-use vifu_core::openclaw_rpc::OpenClawDeviceSigner;
+use vifu_gateway::openclaw_rpc::OpenClawDeviceSigner;
 
 const MAX_IDENTITY_FILE_BYTES: u64 = 64 * 1024;
 static IDENTITY_IO_LOCK: Mutex<()> = Mutex::new(());
@@ -213,7 +213,7 @@ mod tests {
     use ring::signature::{UnparsedPublicKey, ED25519};
     use serde_json::Value;
     use uuid::Uuid;
-    use vifu_core::openclaw_rpc::OpenClawDeviceSigner;
+    use vifu_gateway::openclaw_rpc::OpenClawDeviceSigner;
 
     use super::{identity_path, load_or_create};
 

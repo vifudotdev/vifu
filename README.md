@@ -1,14 +1,36 @@
-# VifuDev
+# Vifu
 
-![VifuDev](npm-packages/dashboard/public/brand/vifudev-lockup.svg)
+![Vifu](npm-packages/dashboard/public/brand/vifu-lockup.png)
 
-VifuDev is the Apache-2.0 runtime product for interactive applications that use
-local or remote agents. It provides the Vifu cross-platform Rust runtime, stable
-project endpoints, provider connections, API keys, traces, and a small
-operations Console.
+[![Crates.io](https://img.shields.io/crates/v/vifu.svg)](https://crates.io/crates/vifu)
+[![Downloads](https://img.shields.io/crates/d/vifu.svg)](https://crates.io/crates/vifu)
+[![Docs](https://docs.rs/vifu/badge.svg)](https://docs.rs/vifu)
+[![CI](https://github.com/vifudotdev/vifu/actions/workflows/ci.yml/badge.svg)](https://github.com/vifudotdev/vifu/actions/workflows/ci.yml)
+[![Discord](https://img.shields.io/badge/Discord-Join-5865F2?logo=discord&logoColor=white)](https://discord.com/invite/VdqqFwJbNE)
 
-Applications define their behavior by composing Bevy plugins with the headless
-runtime.
+Vifu is a small, fast, stateful, and portable Agent Runtime. Embed it into an
+application to connect, control, coordinate, and monitor local or remote Agents.
+
+Vifu includes the cross-platform Rust runtime, Agent Gateway, durable state,
+stable application APIs, traces, and a small operations Console. Applications
+define their behavior by composing plugins with the headless runtime.
+
+## Embed Vifu
+
+The `vifu` crate is the public Rust SDK and also produces the `vifu` binary.
+Runtime support is included by default:
+
+```toml
+[dependencies]
+vifu = "0.1"
+```
+
+Advanced builds can disable default features to select only `runtime`,
+`gateway`, or `server`. The default build also produces the complete Vifu Server
+and Agent Gateway executable.
+
+See [Embed the runtime](docs/runtime-embedding.md) and the
+[crates.io release contract](docs/crates-io.md).
 
 ## Run With Docker
 
@@ -27,7 +49,7 @@ volume with:
 docker compose down
 ```
 
-See [Self-hosting VifuDev](docs/self-hosting.md) for configuration and upgrades.
+See [Self-hosting Vifu](docs/self-hosting.md) for configuration and upgrades.
 
 ## Run From Source
 
@@ -88,7 +110,8 @@ traces remain in PostgreSQL.
 
 ## Headless Runtime
 
-`crates/vifu-game-runtime` is a small Bevy-based runtime library. It supplies:
+`crates/vifu-runtime` is the Bevy-based execution kernel behind the public
+`vifu` crate. It supplies:
 
 - a deterministic runtime schedule;
 - command and effect-result queues;
@@ -105,8 +128,8 @@ Application-specific behavior stays in application plugins. See
 ```text
 crates/
   vifu/               Single executable and Agent Gateway
-  vifu-core/          Provider and protocol building blocks
-  vifu-game-runtime/  Bevy headless runtime primitives
+  vifu-gateway/       Provider and protocol building blocks
+  vifu-runtime/       Embeddable Bevy runtime primitives
   vifu-server/        HTTP API, relay, traces, and PostgreSQL
 npm-packages/
   dashboard/          Lightweight operations Console
@@ -116,14 +139,15 @@ providers/            Provider integration guides
 ## Documentation
 
 - [Install from source](docs/install.md)
-- [Self-host VifuDev](docs/self-hosting.md)
+- [Self-host Vifu](docs/self-hosting.md)
 - [Embed the runtime](docs/runtime-embedding.md)
+- [crates.io release contract](docs/crates-io.md)
 - [Provider integrations](providers/README.md)
 - [Build and test](BUILD.md)
 
 Read [CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request. Report
 security issues through the private process in [SECURITY.md](SECURITY.md).
 
-VifuDev is licensed under [Apache-2.0](LICENSE). The license does not grant
-rights to the Vifu or VifuDev names and logos; see
+Vifu is licensed under [Apache-2.0](LICENSE). The license does not grant rights
+to the Vifu name and logos; see
 [TRADEMARKS.md](TRADEMARKS.md).

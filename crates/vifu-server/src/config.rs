@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use serde::Serialize;
-use vifu_core::runtime_extension::RuntimeExtensionDefinition;
+use vifu_gateway::runtime_extension::RuntimeExtensionDefinition;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
@@ -100,9 +100,9 @@ impl Config {
             deployment_mode,
             "vifu-local-provider-secret-key",
         )?;
-        let provider_home_dir = vifu_core::config::default_home_dir()?;
+        let provider_home_dir = vifu_gateway::config::default_home_dir()?;
         let provider_registry_file =
-            vifu_core::config::discover_provider_registry_file(&provider_home_dir);
+            vifu_gateway::config::discover_provider_registry_file(&provider_home_dir);
 
         Ok(Self {
             addr,

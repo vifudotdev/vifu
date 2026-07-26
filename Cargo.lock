@@ -3420,7 +3420,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "vifu"
-version = "0.1.0"
+version = "0.1.2"
 dependencies = [
  "serde",
  "serde_json",
@@ -3428,12 +3428,13 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
- "vifu-core",
+ "vifu-gateway",
+ "vifu-runtime",
  "vifu-server",
 ]
 
 [[package]]
-name = "vifu-core"
+name = "vifu-gateway"
 version = "0.1.0"
 dependencies = [
  "futures-util",
@@ -3449,23 +3450,23 @@ dependencies = [
 ]
 
 [[package]]
-name = "vifu-game-runtime"
-version = "0.1.0"
-dependencies = [
- "bevy_app",
- "bevy_ecs",
- "serde",
- "serde_json",
-]
-
-[[package]]
 name = "vifu-mobile-ffi"
 version = "0.1.0"
 dependencies = [
  "thiserror",
  "tokio",
  "uniffi",
- "vifu-core",
+ "vifu-gateway",
+]
+
+[[package]]
+name = "vifu-runtime"
+version = "0.1.0"
+dependencies = [
+ "bevy_app",
+ "bevy_ecs",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -3491,7 +3492,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
- "vifu-core",
+ "vifu-gateway",
 ]
 
 [[package]]
