@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::fmt::Write;
 
 use chrono::{DateTime, Utc};
 use serde_json::{json, Value};
@@ -1412,7 +1413,12 @@ fn profile_version_content_hash(input: &NewProfileVersion<'_>) -> Result<String,
         "capabilities": input.capabilities,
     });
     let encoded = serde_json::to_vec(&payload).map_err(|_| ApiError::Internal)?;
-    Ok(format!("{:x}", Sha256::digest(encoded)))
+    let digest = Sha256::digest(encoded);
+    let mut hash = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        write!(&mut hash, "{byte:02x}").map_err(|_| ApiError::Internal)?;
+    }
+    Ok(hash)
 }
 
 pub async fn resolve_profile_route(
@@ -2907,13 +2913,39 @@ pub fn timestamp() -> chrono::DateTime<Utc> {
 
 #[cfg(test)]
 mod tests {
-    use super::delete_statement;
+    use serde_json::json;
+
+    use super::{delete_statement, profile_version_content_hash, NewProfileVersion};
 
     #[test]
     fn project_resources_use_the_scoped_delete_statement() {
         assert_eq!(
             delete_statement("projects").expect("projects must be deletable"),
             "DELETE FROM projects WHERE id = $1"
+        );
+    }
+
+    #[test]
+    fn profile_version_hash_is_stable_lowercase_hex() {
+        let empty = json!({});
+        let input = NewProfileVersion {
+            persona: &empty,
+            runtime: &empty,
+            presentation: &empty,
+            source: &empty,
+            capabilities: &[],
+            change_summary: None,
+        };
+
+        let hash =
+            profile_version_content_hash(&input).expect("profile version hashing must succeed");
+
+        assert_eq!(hash.len(), 64);
+        assert!(hash.bytes().all(|byte| byte.is_ascii_hexdigit()));
+        assert_eq!(hash, hash.to_ascii_lowercase());
+        assert_eq!(
+            hash,
+            profile_version_content_hash(&input).expect("hashing must be deterministic")
         );
     }
 }
