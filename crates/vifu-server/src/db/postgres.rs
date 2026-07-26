@@ -8,6 +8,7 @@ use sqlx::types::Json;
 use sqlx::{FromRow, PgPool, Postgres, QueryBuilder};
 use uuid::Uuid;
 
+use super::types::*;
 use crate::error::{map_database_error, ApiError};
 use crate::models::{
     slugify, validate_slug, AgentBinding, AgentEndpoint, AgentGatewayCredential,
@@ -185,16 +186,6 @@ pub async fn delete_project_runtime_extension(
     Ok(())
 }
 
-pub struct NewProjectRuntimeChannel<'a> {
-    pub id: Uuid,
-    pub project_id: Uuid,
-    pub name: &'a str,
-    pub public_id: Uuid,
-    pub launch_key_prefix: &'a str,
-    pub launch_key_hash: &'a [u8],
-    pub allowed_origins: &'a [String],
-}
-
 pub async fn create_project_runtime_channel(
     pool: &PgPool,
     input: NewProjectRuntimeChannel<'_>,
@@ -350,15 +341,6 @@ pub async fn create_project(
     })
 }
 
-pub struct NewProject<'a> {
-    pub id: Uuid,
-    pub slug: &'a str,
-    pub name: &'a str,
-    pub description: Option<&'a str>,
-    pub gateway_id: &'a str,
-    pub binding_ids: &'a [Uuid],
-}
-
 pub async fn update_project(
     pool: &PgPool,
     id: Uuid,
@@ -418,32 +400,8 @@ pub async fn update_project(
     })
 }
 
-pub struct ProjectPatch<'a> {
-    pub slug: Option<&'a str>,
-    pub name: Option<&'a str>,
-    pub description_changed: bool,
-    pub description: Option<&'a str>,
-    pub gateway_id: Option<&'a str>,
-    pub enabled: Option<bool>,
-    pub binding_ids: Option<&'a [Uuid]>,
-}
-
 pub async fn delete_project(pool: &PgPool, id: Uuid) -> Result<(), ApiError> {
     delete_by_id(pool, "projects", id).await
-}
-
-pub struct NewProviderConnection<'a> {
-    pub provider_key: &'a str,
-    pub source_kind: &'a str,
-    pub source_key: &'a str,
-    pub name: &'a str,
-    pub provider_type: &'a str,
-    pub base_url: &'a str,
-    pub config: &'a Value,
-    pub encrypted_secret_json: &'a str,
-    pub secret_keys: &'a [String],
-    pub display_secret: Option<&'a str>,
-    pub status: &'a str,
 }
 
 pub async fn list_provider_connections(
@@ -1046,13 +1004,6 @@ pub async fn update_profile(
     .ok_or(ApiError::NotFound)
 }
 
-pub struct ProfilePatch<'a> {
-    pub slug: Option<&'a str>,
-    pub name: Option<&'a str>,
-    pub description_changed: bool,
-    pub description: Option<&'a str>,
-}
-
 pub async fn delete_profile(pool: &PgPool, id: Uuid) -> Result<(), ApiError> {
     let result = sqlx::query(
         "UPDATE agent_profiles
@@ -1111,15 +1062,6 @@ pub async fn archive_project_profile(
 
     transaction.commit().await?;
     Ok(())
-}
-
-pub struct NewProfileVersion<'a> {
-    pub persona: &'a Value,
-    pub runtime: &'a Value,
-    pub presentation: &'a Value,
-    pub source: &'a Value,
-    pub capabilities: &'a [ProfileCapabilityDraft],
-    pub change_summary: Option<&'a str>,
 }
 
 pub async fn create_profile_version(
@@ -1982,16 +1924,6 @@ pub async fn create_endpoint(
     .map_err(map_database_error)
 }
 
-pub struct NewEndpoint<'a> {
-    pub id: Uuid,
-    pub slug: &'a str,
-    pub name: &'a str,
-    pub profile_id: Uuid,
-    pub binding_id: Uuid,
-    pub enabled: bool,
-    pub request_timeout_ms: i32,
-}
-
 pub async fn update_endpoint(
     pool: &PgPool,
     id: Uuid,
@@ -2026,15 +1958,6 @@ pub async fn update_endpoint(
     .await
     .map_err(map_database_error)?
     .ok_or(ApiError::NotFound)
-}
-
-pub struct EndpointPatch<'a> {
-    pub slug: Option<&'a str>,
-    pub name: Option<&'a str>,
-    pub profile_id: Option<Uuid>,
-    pub binding_id: Option<Uuid>,
-    pub enabled: Option<bool>,
-    pub request_timeout_ms: Option<i32>,
 }
 
 pub async fn delete_endpoint(pool: &PgPool, id: Uuid) -> Result<(), ApiError> {
@@ -2081,16 +2004,6 @@ pub async fn list_api_keys(pool: &PgPool) -> Result<Vec<ApiKeyRecord>, ApiError>
     .fetch_all(pool)
     .await?;
     rows.into_iter().map(ApiKeyRecord::try_from).collect()
-}
-
-pub struct NewApiKey<'a> {
-    pub id: Uuid,
-    pub project_id: Uuid,
-    pub name: &'a str,
-    pub agent_scope: &'a ApiKeyAgentScope,
-    pub permissions: &'a ApiKeyPermissions,
-    pub key_prefix: &'a str,
-    pub key_hash: &'a [u8],
 }
 
 pub async fn create_api_key(pool: &PgPool, input: NewApiKey<'_>) -> Result<ApiKeyRecord, ApiError> {
@@ -2141,13 +2054,6 @@ pub async fn get_api_key(pool: &PgPool, id: Uuid) -> Result<ApiKeyRecord, ApiErr
     .await?
     .ok_or(ApiError::NotFound)?;
     ApiKeyRecord::try_from(row)
-}
-
-pub struct ApiKeyPatch<'a> {
-    pub project_id: Option<Uuid>,
-    pub name: Option<&'a str>,
-    pub agent_scope: Option<&'a ApiKeyAgentScope>,
-    pub permissions: Option<&'a ApiKeyPermissions>,
 }
 
 pub async fn update_api_key(
@@ -2465,12 +2371,6 @@ pub async fn resolve_project_model_route(
     .ok_or(ApiError::NotFound)
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AgentGatewayRegistration {
-    Registered,
-    Existing,
-}
-
 #[derive(Debug, FromRow)]
 struct AgentGatewayCredentialSecret {
     credential_hash: Vec<u8>,
@@ -2702,20 +2602,6 @@ pub async fn list_available_agents(pool: &PgPool) -> Result<Vec<AvailableAgent>,
     Ok(agents)
 }
 
-pub struct NewTrace<'a> {
-    pub request_id: Uuid,
-    pub endpoint_id: Option<Uuid>,
-    pub project_id: Option<Uuid>,
-    pub gateway_session_id: Option<Uuid>,
-    pub profile_id: Option<Uuid>,
-    pub profile_version_id: Option<Uuid>,
-    pub operation: &'a str,
-    pub provider_key: Option<&'a str>,
-    pub capability_kind: Option<&'a str>,
-    pub selection_key: Option<&'a str>,
-    pub request: &'a Value,
-}
-
 pub async fn create_trace(pool: &PgPool, trace: NewTrace<'_>) -> Result<Uuid, ApiError> {
     let trace_id = Uuid::new_v4();
     sqlx::query(
@@ -2741,17 +2627,6 @@ pub async fn create_trace(pool: &PgPool, trace: NewTrace<'_>) -> Result<Uuid, Ap
     .await
     .map_err(map_database_error)?;
     Ok(trace_id)
-}
-
-pub struct NewTraceSpan<'a> {
-    pub trace_id: Uuid,
-    pub parent_span_id: Option<Uuid>,
-    pub name: &'a str,
-    pub kind: &'a str,
-    pub provider_key: Option<&'a str>,
-    pub capability_kind: Option<&'a str>,
-    pub input_summary: Option<&'a Value>,
-    pub attributes: &'a Value,
 }
 
 pub async fn create_trace_span(pool: &PgPool, span: NewTraceSpan<'_>) -> Result<Uuid, ApiError> {
@@ -2853,7 +2728,7 @@ pub async fn list_traces(
             .push_bind(project_id);
     }
     query
-        .push(" ORDER BY created_at DESC LIMIT ")
+        .push(" ORDER BY trace.created_at DESC LIMIT ")
         .push_bind(limit);
     query
         .build_query_as::<EndpointTrace>()
@@ -2900,15 +2775,6 @@ fn delete_statement(table: &str) -> Result<&'static str, ApiError> {
         _ => return Err(ApiError::Internal),
     };
     Ok(statement)
-}
-
-pub fn elapsed_millis(started_at: std::time::Instant) -> i64 {
-    let millis = started_at.elapsed().as_millis();
-    i64::try_from(millis).unwrap_or(i64::MAX)
-}
-
-pub fn timestamp() -> chrono::DateTime<Utc> {
-    Utc::now()
 }
 
 #[cfg(test)]

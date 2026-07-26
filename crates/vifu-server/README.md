@@ -1,7 +1,7 @@
 # vifu-server
 
-HTTP, WebSocket, PostgreSQL, relay, and trace implementation used by the public
-[`vifu`](https://crates.io/crates/vifu) crate.
+HTTP, WebSocket, SQLite, PostgreSQL, relay, and trace implementation used by the
+public [`vifu`](https://crates.io/crates/vifu) crate.
 
 Applications should normally depend on `vifu` and use `vifu::server`. This
 package is published separately because crates.io must resolve every dependency

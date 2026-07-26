@@ -14,7 +14,7 @@ vifu = "0.1"
 | --- | --- |
 | `runtime` | Portable command, state, event, effect, and snapshot runtime |
 | `gateway` | Agent Provider discovery and the multiplexed Agent Gateway client |
-| `server` | HTTP, WebSocket, and PostgreSQL Vifu Server |
+| `server` | HTTP, WebSocket, SQLite, and PostgreSQL Vifu Server |
 | `full` | Runtime, Gateway, and Server library APIs |
 | `binary` | The complete `vifu` executable; enabled by default |
 | `local-whisper` | Optional local Whisper provider support |

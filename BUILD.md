@@ -21,47 +21,18 @@ Source development uses loopback defaults. Docker self-hosting uses the root
 
 ## Source Development
 
-For local development, run PostgreSQL, the Vifu runtime, and the Dashboard in
-separate terminals. Install Dashboard dependencies once:
-
 ```bash
-bun install --frozen-lockfile
-```
-
-Then start each service directly:
-
-```bash
-# Terminal 1: PostgreSQL
-docker compose -f docker-compose.yml -f docker-compose.local.yml up -d postgres
-```
-
-```bash
-# Terminal 2: Vifu Server and Agent Gateway
 cd crates/vifu
 cargo run
 ```
 
-```bash
-# Terminal 3: Dashboard
-cd npm-packages/dashboard
-bun dev
-```
-
-Open `http://localhost:6791`. The runtime and Dashboard stop with `Ctrl-C`;
-the local PostgreSQL container keeps its data. Stop it when needed:
-
-```bash
-docker compose -f docker-compose.yml -f docker-compose.local.yml down
-```
-
-The local Compose override uses its own `vifu-local` PostgreSQL volume and
-trust authentication on the loopback-only development port. The server listens
-on `http://127.0.0.1:6790`.
-
 The first `cargo run` creates `~/.vifu/config.json` and
-`~/.vifu/providers.json`. Its generated configuration starts both roles on
-loopback. To run a Gateway-only process on a machine that already has a Server,
-replace the generated runtime configuration with a gateway-only configuration:
+`~/.vifu/providers.json`, starts both roles on loopback, and creates
+`~/.vifu/vifu.sqlite` for durable local state. The server listens on
+`http://127.0.0.1:6790`.
+
+To run a Gateway-only process on a machine that already has a Server, replace
+the generated runtime configuration with a gateway-only configuration:
 
 ```bash
 mkdir -p ~/.vifu
@@ -129,8 +100,9 @@ the Server role, Agent Gateway role, or both:
 cargo build --release --locked -p vifu
 ```
 
-It is written to `target/release/vifu`. PostgreSQL and the Dashboard are still
-required for the complete local console.
+It is written to `target/release/vifu`. The binary uses embedded SQLite unless
+its runtime configuration provides an explicit PostgreSQL or SQLite database
+URL.
 
 ```bash
 cargo fmt --all -- --check
@@ -139,11 +111,11 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo build --workspace
 ```
 
-Database migrations are embedded in the Vifu Server role and run at startup. Dashboard
-authentication is implemented in the Dashboard server, which also initializes
-and upgrades the auth tables it uses. SQLx uses runtime-checked queries. The
-database integration test runs when PostgreSQL is available and is mandatory in
-CI; compilation and pure unit tests do not require a live database.
+SQLite and PostgreSQL migrations are embedded in the Vifu Server role and run
+at startup. Dashboard authentication is implemented in the Dashboard server,
+which also initializes and upgrades its PostgreSQL auth tables. SQLx uses
+runtime-checked queries. SQLite lifecycle and restart tests always run;
+PostgreSQL integration is mandatory in CI.
 
 ## Dashboard
 

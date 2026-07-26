@@ -30,7 +30,7 @@ Available features:
 | --- | --- |
 | `runtime` | Portable command, state, event, effect, and snapshot runtime; included by default |
 | `gateway` | Provider discovery and multiplexed Agent Gateway client |
-| `server` | HTTP, WebSocket, and PostgreSQL Vifu Server |
+| `server` | HTTP, WebSocket, SQLite, and PostgreSQL Vifu Server |
 | `full` | Runtime, Gateway, and Server library APIs |
 | `binary` | Complete `vifu` executable; enabled by default |
 | `local-whisper` | Optional local Whisper provider support |
@@ -46,7 +46,8 @@ vifu
 ```
 
 The default binary runs Vifu Server and Agent Gateway according to the local
-Vifu configuration. Local Whisper support is opt-in:
+Vifu configuration and stores local state in `~/.vifu/vifu.sqlite`. Local
+Whisper support is opt-in:
 
 ```bash
 cargo install vifu --features local-whisper

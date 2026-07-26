@@ -3,19 +3,6 @@
 ## Requirements
 
 - Rust from `rust-toolchain.toml`
-- Bun 1.3.9
-- Docker with Compose
-
-## Start PostgreSQL
-
-From the repository root:
-
-```bash
-docker compose -f docker-compose.yml -f docker-compose.local.yml up -d postgres
-```
-
-The local Compose override exposes PostgreSQL on `127.0.0.1:5432` and keeps its
-data in the same named volume used by the self-hosted stack.
 
 ## Run Vifu
 
@@ -26,16 +13,16 @@ cargo run
 
 The first run creates `~/.vifu/config.json` and
 `~/.vifu/providers.json`. With the default configuration, one process runs the
-Server and Agent Gateway roles.
+Server and Agent Gateway roles and stores state in `~/.vifu/vifu.sqlite`.
 
 ## Run The Console
 
-In another terminal:
+The complete Console stack uses Docker Compose and PostgreSQL. From the
+repository root:
 
 ```bash
-cd npm-packages/dashboard
-bun install --frozen-lockfile
-bun dev
+cp .env.example .env
+docker compose up -d
 ```
 
 Open `http://localhost:6791`.
@@ -45,8 +32,9 @@ and traces. It reads runtime authority on the server side.
 
 ## Stop
 
-Stop the Rust and Next.js processes with `Ctrl-C`. Stop PostgreSQL with:
+Stop a source process with `Ctrl-C`. Stop the Console stack while preserving
+its PostgreSQL volume with:
 
 ```bash
-docker compose -f docker-compose.yml -f docker-compose.local.yml down
+docker compose down
 ```

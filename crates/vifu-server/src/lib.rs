@@ -20,7 +20,6 @@ use axum::Router;
 use config::Config;
 use error::ApiError;
 use relay::RelayHub;
-use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
 use tokio::net::TcpListener;
 use tower_http::catch_panic::CatchPanicLayer;
@@ -33,18 +32,15 @@ use tracing::info;
 #[derive(Clone)]
 pub struct AppState {
     pub config: Arc<Config>,
-    pub pool: PgPool,
+    pub pool: db::Storage,
     pub relay: RelayHub,
 }
 
 pub async fn connect(config: Config) -> Result<AppState, ApiError> {
-    let pool = PgPoolOptions::new()
-        .max_connections(config.database_max_connections)
-        .connect(&config.database_url)
-        .await?;
+    let pool = db::connect(&config.database_url, config.database_max_connections).await?;
     db::migrate(&pool).await?;
     db::mark_agent_gateway_sessions_disconnected(&pool).await?;
-    Ok(state(config, pool))
+    Ok(state_with_storage(config, pool))
 }
 
 pub async fn serve<F>(config: Config, shutdown: F) -> Result<(), String>
@@ -64,6 +60,10 @@ where
 }
 
 pub fn state(config: Config, pool: PgPool) -> AppState {
+    state_with_storage(config, db::Storage::postgres(pool))
+}
+
+pub fn state_with_storage(config: Config, pool: db::Storage) -> AppState {
     let queue_capacity = config.queue_capacity;
     AppState {
         config: Arc::new(config),

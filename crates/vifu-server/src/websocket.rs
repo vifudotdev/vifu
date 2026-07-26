@@ -298,8 +298,6 @@ mod tests {
     use axum::http::{Request, StatusCode};
     use futures_util::{SinkExt, StreamExt};
     use serde_json::{json, Value};
-    use sqlx::postgres::PgPoolOptions;
-    use sqlx::PgPool;
     use tokio::net::TcpListener;
     use tokio_tungstenite::connect_async;
     use tokio_tungstenite::tungstenite::client::IntoClientRequest;
@@ -322,7 +320,7 @@ mod tests {
         ApiKeyAgentScope, ApiKeyPermissions, EndpointPermission, ProfileCapabilityDraft,
         ResourcePermission,
     };
-    use crate::{app, state};
+    use crate::{app, state_with_storage};
 
     #[test]
     fn server_transport_codec_round_trips_gateway_frames() {
@@ -414,7 +412,7 @@ mod tests {
         let admin_key = config.admin_key.clone();
         let gateway_credential =
             "vifu_gw_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-        let state = state(config, pool);
+        let state = state_with_storage(config, pool);
         let registration = app(state.clone())
             .oneshot(
                 Request::post("/v1/agent-gateways/register")
@@ -701,13 +699,13 @@ mod tests {
         server.abort();
     }
 
-    async fn maybe_test_pool() -> Option<PgPool> {
-        let config = Config::from_env().unwrap();
-        let pool = match PgPoolOptions::new()
-            .max_connections(5)
-            .connect(&config.database_url)
-            .await
-        {
+    async fn maybe_test_pool() -> Option<db::Storage> {
+        let database_url = if std::env::var("VIFU_TEST_DATABASE_REQUIRED").as_deref() == Ok("1") {
+            "postgres://vifu@127.0.0.1:5432/vifu"
+        } else {
+            "sqlite::memory:"
+        };
+        let pool = match db::connect(database_url, 5).await {
             Ok(pool) => pool,
             Err(error) => {
                 if std::env::var("VIFU_TEST_DATABASE_REQUIRED").as_deref() == Ok("1") {
@@ -739,7 +737,11 @@ mod tests {
         gateway_id: String,
     }
 
-    async fn seed_endpoint(pool: &PgPool, raw_api_key: &str, gateway_id: &str) -> SeededProject {
+    async fn seed_endpoint(
+        pool: &db::Storage,
+        raw_api_key: &str,
+        gateway_id: &str,
+    ) -> SeededProject {
         let config = Config::from_env().unwrap();
         let profile_id = Uuid::new_v4();
         let binding_id = Uuid::new_v4();

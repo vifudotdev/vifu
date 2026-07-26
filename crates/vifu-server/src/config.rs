@@ -103,11 +103,15 @@ impl Config {
         let provider_home_dir = vifu_gateway::config::default_home_dir()?;
         let provider_registry_file =
             vifu_gateway::config::discover_provider_registry_file(&provider_home_dir);
+        let database_url = format!(
+            "sqlite://{}",
+            provider_home_dir.join("vifu.sqlite").display()
+        );
 
         Ok(Self {
             addr,
             deployment_mode,
-            database_url: "postgres://vifu@127.0.0.1:5432/vifu".to_string(),
+            database_url,
             database_max_connections: parse_u64(
                 &mut lookup,
                 "VIFU_DATABASE_MAX_CONNECTIONS",
@@ -251,10 +255,11 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
-    fn defaults_to_local_postgres_and_loopback() {
+    fn defaults_to_local_sqlite_and_loopback() {
         let config = Config::from_lookup(|_| None).unwrap();
         assert_eq!(config.addr.to_string(), "127.0.0.1:6790");
-        assert!(config.database_url.contains("127.0.0.1:5432"));
+        assert!(config.database_url.starts_with("sqlite://"));
+        assert!(config.database_url.ends_with("/.vifu/vifu.sqlite"));
         assert_eq!(config.deployment_mode, DeploymentMode::Local);
         assert_ne!(config.admin_key, config.agent_gateway_bootstrap_token);
         assert_ne!(config.admin_key, config.api_key_pepper);
@@ -275,7 +280,8 @@ mod tests {
         })
         .unwrap();
 
-        assert_eq!(config.database_url, "postgres://vifu@127.0.0.1:5432/vifu");
+        assert!(config.database_url.starts_with("sqlite://"));
+        assert!(config.database_url.ends_with("/.vifu/vifu.sqlite"));
     }
 
     #[test]

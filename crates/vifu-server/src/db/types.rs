@@ -1,0 +1,140 @@
+use chrono::{DateTime, Utc};
+use serde_json::Value;
+use uuid::Uuid;
+
+use crate::models::{ApiKeyAgentScope, ApiKeyPermissions, ProfileCapabilityDraft};
+
+pub struct NewProjectRuntimeChannel<'a> {
+    pub id: Uuid,
+    pub project_id: Uuid,
+    pub name: &'a str,
+    pub public_id: Uuid,
+    pub launch_key_prefix: &'a str,
+    pub launch_key_hash: &'a [u8],
+    pub allowed_origins: &'a [String],
+}
+
+pub struct NewProject<'a> {
+    pub id: Uuid,
+    pub slug: &'a str,
+    pub name: &'a str,
+    pub description: Option<&'a str>,
+    pub gateway_id: &'a str,
+    pub binding_ids: &'a [Uuid],
+}
+
+pub struct ProjectPatch<'a> {
+    pub slug: Option<&'a str>,
+    pub name: Option<&'a str>,
+    pub description_changed: bool,
+    pub description: Option<&'a str>,
+    pub gateway_id: Option<&'a str>,
+    pub enabled: Option<bool>,
+    pub binding_ids: Option<&'a [Uuid]>,
+}
+
+pub struct NewProviderConnection<'a> {
+    pub provider_key: &'a str,
+    pub source_kind: &'a str,
+    pub source_key: &'a str,
+    pub name: &'a str,
+    pub provider_type: &'a str,
+    pub base_url: &'a str,
+    pub config: &'a Value,
+    pub encrypted_secret_json: &'a str,
+    pub secret_keys: &'a [String],
+    pub display_secret: Option<&'a str>,
+    pub status: &'a str,
+}
+
+pub struct ProfilePatch<'a> {
+    pub slug: Option<&'a str>,
+    pub name: Option<&'a str>,
+    pub description_changed: bool,
+    pub description: Option<&'a str>,
+}
+
+pub struct NewProfileVersion<'a> {
+    pub persona: &'a Value,
+    pub runtime: &'a Value,
+    pub presentation: &'a Value,
+    pub source: &'a Value,
+    pub capabilities: &'a [ProfileCapabilityDraft],
+    pub change_summary: Option<&'a str>,
+}
+
+pub struct NewEndpoint<'a> {
+    pub id: Uuid,
+    pub slug: &'a str,
+    pub name: &'a str,
+    pub profile_id: Uuid,
+    pub binding_id: Uuid,
+    pub enabled: bool,
+    pub request_timeout_ms: i32,
+}
+
+pub struct EndpointPatch<'a> {
+    pub slug: Option<&'a str>,
+    pub name: Option<&'a str>,
+    pub profile_id: Option<Uuid>,
+    pub binding_id: Option<Uuid>,
+    pub enabled: Option<bool>,
+    pub request_timeout_ms: Option<i32>,
+}
+
+pub struct NewApiKey<'a> {
+    pub id: Uuid,
+    pub project_id: Uuid,
+    pub name: &'a str,
+    pub agent_scope: &'a ApiKeyAgentScope,
+    pub permissions: &'a ApiKeyPermissions,
+    pub key_prefix: &'a str,
+    pub key_hash: &'a [u8],
+}
+
+pub struct ApiKeyPatch<'a> {
+    pub project_id: Option<Uuid>,
+    pub name: Option<&'a str>,
+    pub agent_scope: Option<&'a ApiKeyAgentScope>,
+    pub permissions: Option<&'a ApiKeyPermissions>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentGatewayRegistration {
+    Registered,
+    Existing,
+}
+
+pub struct NewTrace<'a> {
+    pub request_id: Uuid,
+    pub endpoint_id: Option<Uuid>,
+    pub project_id: Option<Uuid>,
+    pub gateway_session_id: Option<Uuid>,
+    pub profile_id: Option<Uuid>,
+    pub profile_version_id: Option<Uuid>,
+    pub operation: &'a str,
+    pub provider_key: Option<&'a str>,
+    pub capability_kind: Option<&'a str>,
+    pub selection_key: Option<&'a str>,
+    pub request: &'a Value,
+}
+
+pub struct NewTraceSpan<'a> {
+    pub trace_id: Uuid,
+    pub parent_span_id: Option<Uuid>,
+    pub name: &'a str,
+    pub kind: &'a str,
+    pub provider_key: Option<&'a str>,
+    pub capability_kind: Option<&'a str>,
+    pub input_summary: Option<&'a Value>,
+    pub attributes: &'a Value,
+}
+
+pub fn elapsed_millis(started_at: std::time::Instant) -> i64 {
+    let millis = started_at.elapsed().as_millis();
+    i64::try_from(millis).unwrap_or(i64::MAX)
+}
+
+pub fn timestamp() -> DateTime<Utc> {
+    Utc::now()
+}

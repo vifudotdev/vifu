@@ -39,7 +39,7 @@ tested and optimized independently:
 | --- | --- |
 | `vifu-runtime` | Portable Bevy execution kernel |
 | `vifu-gateway` | Provider, protocol, relay, and session implementation |
-| `vifu-server` | HTTP, WebSocket, and PostgreSQL server implementation |
+| `vifu-server` | HTTP, WebSocket, SQLite, and PostgreSQL server implementation |
 | `vifu` | Stable public facade, feature selection, and binary |
 
 Users should depend on `vifu`. The implementation packages are published only

@@ -18,6 +18,7 @@ COPY crates/vifu/Cargo.toml crates/vifu/Cargo.toml
 COPY crates/vifu-server/Cargo.toml crates/vifu-server/Cargo.toml
 COPY crates/vifu-server/build.rs crates/vifu-server/build.rs
 COPY crates/vifu-server/migrations crates/vifu-server/migrations
+COPY crates/vifu-server/migrations-sqlite crates/vifu-server/migrations-sqlite
 COPY crates ./crates
 RUN --mount=type=cache,id=vifu-cargo-registry,target=/usr/local/cargo/registry \
     --mount=type=cache,id=vifu-cargo-git,target=/usr/local/cargo/git \

@@ -6,7 +6,7 @@ use crate::gateway::GatewayRuntimeOptions;
 
 const CONFIG_FILE_NAME: &str = "config.json";
 const CONFIG_VERSION: u32 = 1;
-const DEFAULT_LOCAL_DATABASE_URL: &str = "postgres://vifu@127.0.0.1:5432/vifu";
+const DEFAULT_LOCAL_DATABASE_FILE: &str = "vifu.sqlite";
 
 #[derive(Debug, Clone)]
 pub struct LoadedRuntimeConfig {
@@ -27,8 +27,11 @@ pub struct RuntimeConfig {
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct ServerRuntimeConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub listen: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub database_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub database_url_file: Option<PathBuf>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub runtime_extensions: Vec<RuntimeExtensionConfig>,
@@ -48,6 +51,7 @@ pub struct RuntimeExtensionConfig {
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct GatewayRuntimeConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub server_url: Option<String>,
 }
 
@@ -87,7 +91,7 @@ impl LoadedRuntimeConfig {
                 .map_err(|error| format!("server listen address {listen:?} is invalid: {error}"))?;
             config.apply_listen_override(addr)?;
         }
-        config.apply_database_url(server.database_url()?)?;
+        config.apply_database_url(server.database_url(&self.path)?)?;
         config.apply_runtime_extensions(server.runtime_extensions(&self.path)?)?;
         Ok(config)
     }
@@ -96,13 +100,7 @@ impl LoadedRuntimeConfig {
 impl RuntimeConfig {
     fn load_or_create(path: &Path) -> Result<Self, String> {
         match std::fs::read_to_string(path) {
-            Ok(raw) => {
-                let mut config = Self::parse(path, &raw)?;
-                if config.add_missing_local_database_url() {
-                    config.write(path)?;
-                }
-                Ok(config)
-            }
+            Ok(raw) => Self::parse(path, &raw),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 let config = Self::local_defaults()?;
                 config.write(path)?;
@@ -120,7 +118,7 @@ impl RuntimeConfig {
             version: CONFIG_VERSION,
             server: cfg!(feature = "server").then(|| ServerRuntimeConfig {
                 listen: Some("127.0.0.1:6790".to_string()),
-                database_url: Some(DEFAULT_LOCAL_DATABASE_URL.to_string()),
+                database_url: None,
                 database_url_file: None,
                 runtime_extensions: Vec::new(),
             }),
@@ -164,17 +162,6 @@ impl RuntimeConfig {
         }
         Ok(config)
     }
-
-    fn add_missing_local_database_url(&mut self) -> bool {
-        let Some(server) = self.server.as_mut() else {
-            return false;
-        };
-        if server.database_url.is_some() || server.database_url_file.is_some() {
-            return false;
-        }
-        server.database_url = Some(DEFAULT_LOCAL_DATABASE_URL.to_string());
-        true
-    }
 }
 
 impl ServerRuntimeConfig {
@@ -187,7 +174,7 @@ impl ServerRuntimeConfig {
         Ok(())
     }
 
-    fn database_url(&self) -> Result<String, String> {
+    fn database_url(&self, config_path: &Path) -> Result<String, String> {
         self.validate()?;
         if let Some(database_url) = self.database_url.as_deref() {
             let database_url = database_url.trim();
@@ -212,7 +199,11 @@ impl ServerRuntimeConfig {
             }
             return Ok(database_url.to_string());
         }
-        Err("server configuration must set databaseUrl or databaseUrlFile".to_string())
+        let base_dir = config_path.parent().unwrap_or_else(|| Path::new("."));
+        Ok(format!(
+            "sqlite://{}",
+            base_dir.join(DEFAULT_LOCAL_DATABASE_FILE).display()
+        ))
     }
 
     #[cfg(feature = "server")]
@@ -290,7 +281,7 @@ impl RuntimeExtensionConfig {
 mod tests {
     use std::path::Path;
 
-    use super::{RuntimeConfig, DEFAULT_LOCAL_DATABASE_URL};
+    use super::{RuntimeConfig, DEFAULT_LOCAL_DATABASE_FILE};
 
     #[test]
     fn accepts_combined_runtime_configuration() {
@@ -364,7 +355,11 @@ mod tests {
 
         let config = RuntimeConfig::parse(Path::new("/tmp/config.json"), &raw).unwrap();
         assert_eq!(
-            config.server.unwrap().database_url().unwrap(),
+            config
+                .server
+                .unwrap()
+                .database_url(Path::new("/tmp/config.json"))
+                .unwrap(),
             "postgres://vifu@postgres:5432/vifu"
         );
 
@@ -419,7 +414,7 @@ mod tests {
     }
 
     #[test]
-    fn adds_a_database_url_to_existing_server_configuration() {
+    fn uses_the_embedded_database_for_existing_server_configuration() {
         let directory =
             std::env::temp_dir().join(format!("vifu-runtime-config-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&directory).unwrap();
@@ -432,10 +427,13 @@ mod tests {
 
         let config = RuntimeConfig::load_or_create(&path).unwrap();
         assert_eq!(
-            config.server.unwrap().database_url().unwrap(),
-            DEFAULT_LOCAL_DATABASE_URL
+            config.server.unwrap().database_url(&path).unwrap(),
+            format!(
+                "sqlite://{}",
+                directory.join(DEFAULT_LOCAL_DATABASE_FILE).display()
+            )
         );
-        assert!(std::fs::read_to_string(&path)
+        assert!(!std::fs::read_to_string(&path)
             .unwrap()
             .contains("databaseUrl"));
 

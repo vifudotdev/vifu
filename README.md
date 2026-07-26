@@ -53,36 +53,24 @@ See [Self-hosting Vifu](docs/self-hosting.md) for configuration and upgrades.
 
 ## Run From Source
 
-Start PostgreSQL:
-
-```bash
-docker compose -f docker-compose.yml -f docker-compose.local.yml up -d postgres
-```
-
-Run the Rust binary:
-
 ```bash
 cd crates/vifu
 cargo run
 ```
 
-Run the Console in another terminal:
-
-```bash
-cd npm-packages/dashboard
-bun install --frozen-lockfile
-bun dev
-```
-
 On first run, `vifu` creates its local configuration under `~/.vifu/`. The
-default configuration runs Server and Agent Gateway roles together. The same
-binary can run either role separately when a deployment needs independent
-processes.
+default configuration runs Server and Agent Gateway roles together and stores
+durable state in `~/.vifu/vifu.sqlite`. The API listens on
+`http://127.0.0.1:6790`.
+
+The same binary can run either role separately when a deployment needs
+independent processes. Use Docker Compose when you also need the operations
+Console and PostgreSQL-backed self-hosting.
 
 ## Architecture
 
 ```text
-Application -> Vifu Server -> PostgreSQL
+Application -> Vifu Server -> SQLite or PostgreSQL
                      |
                      +-> Vifu Gateway A -> provider agents
                      +-> Vifu Gateway B -> provider agents
@@ -106,7 +94,8 @@ Content-Type: application/json
 
 A Vifu Gateway connects provider resources to the Server over one authenticated,
 multiplexed WebSocket. Projects, profiles, API keys, provider settings, and
-traces remain in PostgreSQL.
+traces use embedded SQLite locally and PostgreSQL in the Docker self-hosted
+stack.
 
 ## Headless Runtime
 
@@ -130,7 +119,7 @@ crates/
   vifu/               Single executable and Agent Gateway
   vifu-gateway/       Provider and protocol building blocks
   vifu-runtime/       Embeddable Bevy runtime primitives
-  vifu-server/        HTTP API, relay, traces, and PostgreSQL
+  vifu-server/        HTTP API, relay, traces, and durable storage
 npm-packages/
   dashboard/          Lightweight operations Console
 providers/            Provider integration guides
