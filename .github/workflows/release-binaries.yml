@@ -7,11 +7,12 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   build:
     name: ${{ matrix.target }}
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -24,7 +25,7 @@ jobs:
             target: aarch64-unknown-linux-gnu
             binary: vifu
             archive: tar
-          - os: macos-13
+          - os: macos-15-intel
             target: x86_64-apple-darwin
             binary: vifu
             archive: tar
@@ -39,9 +40,14 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@1.95.0
         with:
           targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
       - name: Build runtime
         run: cargo build --release --locked -p vifu --target ${{ matrix.target }}
       - name: Package Unix binary
@@ -55,7 +61,10 @@ jobs:
           cp README.md "dist/$asset/README.md"
           cp config/runtime.example.json "dist/$asset/config/runtime.example.json"
           tar -C dist -czf "dist/$asset.tar.gz" "$asset"
-          shasum -a 256 "dist/$asset.tar.gz" > "dist/$asset.tar.gz.sha256"
+          (
+            cd dist
+            shasum -a 256 "$asset.tar.gz" > "$asset.tar.gz.sha256"
+          )
       - name: Package Windows binary
         if: matrix.archive == 'zip'
         shell: pwsh
@@ -67,17 +76,29 @@ jobs:
           Copy-Item README.md "dist/$asset/README.md"
           Copy-Item config/runtime.example.json "dist/$asset/config/runtime.example.json"
           Compress-Archive -Path "dist/$asset" -DestinationPath "dist/$asset.zip"
-          (Get-FileHash "dist/$asset.zip" -Algorithm SHA256).Hash.ToLower() + "  $asset.zip" | Out-File -Encoding ascii "dist/$asset.zip.sha256"
+          $hash = (Get-FileHash "dist/$asset.zip" -Algorithm SHA256).Hash.ToLower()
+          [IO.File]::WriteAllText(
+            "dist/$asset.zip.sha256",
+            "$hash  ${asset}.zip`n",
+            [Text.UTF8Encoding]::new($false)
+          )
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.target }}
-          path: dist/*
+          path: |
+            dist/*.tar.gz
+            dist/*.tar.gz.sha256
+            dist/*.zip
+            dist/*.zip.sha256
           if-no-files-found: error
 
   publish:
     if: startsWith(github.ref, 'refs/tags/')
     needs: build
     runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
     steps:
       - uses: actions/download-artifact@v4
         with:
@@ -86,4 +107,12 @@ jobs:
       - name: Publish release assets
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" dist/* --verify-tag --generate-notes
+        run: >-
+          gh release create "$GITHUB_REF_NAME"
+          dist/*.tar.gz
+          dist/*.tar.gz.sha256
+          dist/*.zip
+          dist/*.zip.sha256
+          --repo "$GITHUB_REPOSITORY"
+          --verify-tag
+          --generate-notes
