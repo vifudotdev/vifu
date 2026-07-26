@@ -5,27 +5,6 @@ test("session remains valid across sidebar navigation on the bind address", asyn
   const password = process.env.VIFU_SELF_HOSTED_E2E_AUTH_PASSWORD ?? "correct horse battery staple";
   const keyName = `Playwright project key ${Date.now()}`;
 
-  await page.goto("/signup");
-  if (await page.getByRole("heading", { level: 1, name: "Create your account" }).isVisible().catch(() => false)) {
-    await page.getByLabel("Display name").fill("Self-hosted Admin");
-    await page.getByLabel("Email").fill(email);
-    await page.getByLabel("Password").fill(password);
-    const signupResponsePromise = page.waitForResponse((response) =>
-      response.request().method() === "POST" && response.url().endsWith("/api/auth/local/signup")
-    );
-    await page.getByRole("button", { name: "Create account" }).click();
-    const signupResponse = await signupResponsePromise;
-    expect(signupResponse.status()).toBe(303);
-    const signupLocation = signupResponse.headers()["location"] ?? "";
-    if (!signupLocation.includes("auth_error")) {
-      await expect(page).toHaveURL(/\/project(?:\/[^/]+(?:\/overview)?)?$/);
-      await page.request.post("/auth/logout", {
-        headers: { origin: new URL(page.url()).origin },
-        maxRedirects: 0,
-      });
-    }
-  }
-
   await page.goto("/login");
   await page.getByLabel("Email").fill(email);
   await page.getByLabel("Password").fill(password);
@@ -44,8 +23,9 @@ test("session remains valid across sidebar navigation on the bind address", asyn
   expect(session?.domain).toBe(new URL(page.url()).hostname);
   await expect(page).toHaveURL(/\/project\/[^/]+(?:\/overview)?$/);
 
-  await page.getByRole("link", { name: "Canvas", exact: true }).click();
-  await expect(page).toHaveURL(/\/project\/[^/]+\/canvas$/);
+  await page.getByRole("link", { name: "Agents", exact: true }).click();
+  await expect(page).toHaveURL(/\/project\/[^/]+\/agents$/);
+  await expect(page.getByRole("heading", { level: 1, name: "Agents" })).toBeVisible();
   const projectSwitcher = page.locator(".project-switcher");
   const projectSearch = projectSwitcher.getByLabel("Search projects");
   if (!await projectSearch.isVisible()) {
@@ -59,14 +39,13 @@ test("session remains valid across sidebar navigation on the bind address", asyn
   await expect(projectLinks.first()).toBeVisible();
   expect(await projectLinks.count()).toBeGreaterThanOrEqual(2);
   await projectLinks.nth(1).click();
-  await expect(page).toHaveURL(/\/project\/[^/]+\/canvas$/);
+  await expect(page).toHaveURL(/\/project\/[^/]+\/agents$/);
 
   for (const [label, path, heading] of [
     ["Overview", "overview", "Overview"],
     ["Agents", "agents", "Agents"],
     ["Providers", "providers", "Providers"],
-    ["Preview & QA", "preview", "Preview & QA"],
-    ["Publish & API", "api", "API Integrations"],
+    ["API", "api", "API Integrations"],
     ["Logs", "logs", "Logs"],
     ["Settings", "settings", "Settings"],
   ] as const) {
@@ -75,7 +54,7 @@ test("session remains valid across sidebar navigation on the bind address", asyn
     await expect(page.getByRole("heading", { level: 1, name: heading })).toBeVisible();
   }
 
-  await page.getByRole("link", { name: "Publish & API", exact: true }).click();
+  await page.getByRole("link", { name: "API", exact: true }).click();
   await page.getByRole("button", { name: "Create key" }).click();
   const keyDialog = page.getByRole("dialog");
   await expect(keyDialog.getByRole("heading", { name: "Create API key" })).toBeVisible();

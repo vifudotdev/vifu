@@ -154,6 +154,11 @@ on_failure() {
 trap on_failure EXIT INT TERM
 
 if [ "$use_existing_openclaw" != "1" ]; then
+  openclaw_mock_host="127.0.0.1"
+  if [ "$managed_stack" = "1" ]; then
+    openclaw_mock_host="0.0.0.0"
+  fi
+  OPENCLAW_MOCK_HOST="$openclaw_mock_host" \
   OPENCLAW_MOCK_PORT="$openclaw_port" \
   OPENCLAW_MOCK_TOKEN="$openclaw_provider_token" \
   node scripts/mock-openclaw.mjs >"$mock_log" 2>&1 &
@@ -173,6 +178,7 @@ done
 
 gateway_root="$state_dir/gateway-home"
 gateway_home="$gateway_root/.vifu"
+backend_home="$state_dir/backend-home/.vifu"
 mkdir -p "$gateway_home"
 chmod 0777 "$gateway_home"
 provider_url="http://127.0.0.1:$openclaw_port"
@@ -196,10 +202,19 @@ fi
   printf '%s\n' '  ]'
   printf '%s\n' '}'
 } > "$gateway_home/providers.json"
+chmod 0644 "$gateway_home/providers.json"
+
+if [ "$managed_stack" = "1" ]; then
+  mkdir -p "$backend_home"
+  chmod 0777 "$backend_home"
+  cp "$gateway_home/providers.json" "$backend_home/providers.json"
+  chmod 0644 "$backend_home/providers.json"
+fi
 
 if [ "$managed_stack" != "1" ]; then
   printf '{\n  "version": 1,\n  "gateway": { "serverUrl": "%s" }\n}\n' \
     "$(json_escape "${VIFU_E2E_API_URL:-http://127.0.0.1:6790}")" > "$gateway_home/config.json"
+  chmod 0644 "$gateway_home/config.json"
 fi
 
 if [ "$managed_stack" = "1" ]; then
@@ -207,8 +222,10 @@ if [ "$managed_stack" = "1" ]; then
   cat > "$compose_override" <<EOF
 services:
   backend:
+    environment:
+      VIFU_REQUEST_TIMEOUT_MS: "500"
     volumes:
-      - $gateway_home:/home/vifu/.vifu
+      - $backend_home:/home/vifu/.vifu
   agent-gateway:
     volumes:
       - $gateway_home:/home/vifu/.vifu
@@ -233,8 +250,11 @@ until agent_gateway_ready; do
 done
 
 if [ "$use_existing_openclaw" = "1" ]; then
-  VIFU_E2E_STATE_PATH="$state_path" node scripts/test-self-hosted-e2e.mjs setup
+  VIFU_E2E_EXPECT_TIMEOUT="$managed_stack" \
+  VIFU_E2E_STATE_PATH="$state_path" \
+  node scripts/test-self-hosted-e2e.mjs setup
 else
+  VIFU_E2E_EXPECT_TIMEOUT="$managed_stack" \
   VIFU_E2E_OPENCLAW_MOCK_URL="http://127.0.0.1:$openclaw_port" \
   VIFU_E2E_STATE_PATH="$state_path" \
   node scripts/test-self-hosted-e2e.mjs setup

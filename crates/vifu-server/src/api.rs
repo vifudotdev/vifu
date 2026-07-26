@@ -2692,7 +2692,7 @@ async fn invoke_realtime_response(
             persist_trace(
                 state,
                 request_id,
-                "failed",
+                api_error_trace_status(&error),
                 started_at,
                 None,
                 Some(&message),
@@ -3016,7 +3016,7 @@ async fn create_profile_chat_completion(
             persist_trace(
                 state,
                 request_id,
-                "failed",
+                api_error_trace_status(&error),
                 started_at,
                 None,
                 Some(&message),
@@ -4807,6 +4807,15 @@ fn relay_error_status(error: &RelayCallError) -> &'static str {
     }
 }
 
+fn api_error_trace_status(error: &ApiError) -> &'static str {
+    match error {
+        ApiError::AgentGatewayUnavailable => "unavailable",
+        ApiError::Backpressure => "rejected",
+        ApiError::Timeout => "timed_out",
+        _ => "failed",
+    }
+}
+
 fn relay_error_message(error: &RelayCallError) -> String {
     match error {
         RelayCallError::AgentGatewayUnavailable => "agent gateway is not available".to_string(),
@@ -4837,14 +4846,29 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        merge_json_objects, patch_text, profile_slug, project_slug, validate_profile_version_input,
-        validate_timeout,
+        api_error_trace_status, merge_json_objects, patch_text, profile_slug, project_slug,
+        validate_profile_version_input, validate_timeout,
     };
+    use crate::error::ApiError;
     use crate::models::ProfileCapabilityDraft;
 
     #[test]
     fn derives_profile_slugs() {
         assert_eq!(profile_slug(None, "Town Guide").unwrap(), "town-guide");
+    }
+
+    #[test]
+    fn preserves_transport_failure_statuses_for_profile_traces() {
+        assert_eq!(api_error_trace_status(&ApiError::Timeout), "timed_out");
+        assert_eq!(
+            api_error_trace_status(&ApiError::AgentGatewayUnavailable),
+            "unavailable"
+        );
+        assert_eq!(api_error_trace_status(&ApiError::Backpressure), "rejected");
+        assert_eq!(
+            api_error_trace_status(&ApiError::Invalid("invalid".to_string())),
+            "failed"
+        );
     }
 
     #[test]

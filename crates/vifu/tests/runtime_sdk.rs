@@ -12,3 +12,10 @@ fn public_sdk_exposes_the_embeddable_runtime() {
 
     assert_eq!(advance.snapshot.revision, 1);
 }
+
+#[cfg(feature = "gateway")]
+#[test]
+fn public_sdk_exposes_gateway_provider_and_extension_contracts() {
+    let _: Option<vifu::gateway::config::AgentProviderDefinition> = None;
+    let _: Option<vifu::gateway::runtime_extension::RuntimeExtensionDefinition> = None;
+}
