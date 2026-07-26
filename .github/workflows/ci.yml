@@ -46,9 +46,15 @@ jobs:
         with:
           components: clippy,rustfmt
       - uses: Swatinem/rust-cache@v2
+      - name: Export tracked source for secret scan
+        run: |
+          mkdir -p "$RUNNER_TEMP/vifu-source"
+          git archive HEAD | tar -x -C "$RUNNER_TEMP/vifu-source"
       - name: Secret scan
         run: >-
-          docker run --rm -v "$GITHUB_WORKSPACE:/repo" -w /repo
+          docker run --rm
+          -v "$RUNNER_TEMP/vifu-source:/repo:ro"
+          -w /repo
           zricethezav/gitleaks:v8.18.4
           detect --source=/repo --no-git --redact --no-banner
       - name: Format
