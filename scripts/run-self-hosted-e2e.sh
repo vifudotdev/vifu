@@ -154,6 +154,11 @@ on_failure() {
 trap on_failure EXIT INT TERM
 
 if [ "$use_existing_openclaw" != "1" ]; then
+  openclaw_mock_host="127.0.0.1"
+  if [ "$managed_stack" = "1" ]; then
+    openclaw_mock_host="0.0.0.0"
+  fi
+  OPENCLAW_MOCK_HOST="$openclaw_mock_host" \
   OPENCLAW_MOCK_PORT="$openclaw_port" \
   OPENCLAW_MOCK_TOKEN="$openclaw_provider_token" \
   node scripts/mock-openclaw.mjs >"$mock_log" 2>&1 &
