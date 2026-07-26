@@ -40,13 +40,21 @@ jobs:
           --health-retries 20
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@1.95.0
         with:
           components: clippy,rustfmt
       - uses: Swatinem/rust-cache@v2
+      - name: Export tracked source for secret scan
+        run: |
+          mkdir -p "$RUNNER_TEMP/vifu-source"
+          git archive HEAD | tar -x -C "$RUNNER_TEMP/vifu-source"
       - name: Secret scan
         run: >-
-          docker run --rm -v "$GITHUB_WORKSPACE:/repo" -w /repo
+          docker run --rm
+          -v "$RUNNER_TEMP/vifu-source:/repo:ro"
+          -w /repo
           zricethezav/gitleaks:v8.18.4
           detect --source=/repo --no-git --redact --no-banner
       - name: Format
@@ -73,6 +81,8 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@1.95.0
       - uses: Swatinem/rust-cache@v2
         with:
@@ -90,6 +100,8 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: 1.3.9
@@ -115,6 +127,8 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: 1.3.9
