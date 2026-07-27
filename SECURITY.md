@@ -15,11 +15,19 @@ private endpoint URLs, database contents, or sensitive logs.
 
 - The browser Dashboard is an untrusted client. Every authorization decision is
   enforced by the Dashboard server or runtime that owns the resource.
-- Self-hosted passwords are hashed with bcrypt. Opaque web session tokens are
-  stored only as SHA-256 hashes with expiry and revocation timestamps.
-- A self-hosted Dashboard uses `VIFU_ADMIN_KEY` only on the server side for
-  runtime administration, recovery, and automation. The key must never enter
-  `NEXT_PUBLIC_*`, HTML, browser logs, screenshots, or client bundles.
+- A self-hosted Dashboard verifies the deployment Admin Key, then stores a
+  short-lived signed session in an HttpOnly, SameSite cookie. The session is
+  stateless, contains no Admin Key, and is invalidated when the key rotates.
+- A deployment may also trust signed Access Tokens from an
+  external authority configured with an exact issuer, audience, and signing
+  key. The runtime converts either credential into an identity, then applies
+  the same deployment read/write checks.
+- Dashboard management requests send `Authorization: Vifu <credential>`.
+  Admin Keys and Access Tokens are authenticated on every HTTP request.
+  `/v1/admin/verify` validates the presented credential only; it does not create
+  a runtime login session.
+- Keep `VIFU_ADMIN_KEY` out of `NEXT_PUBLIC_*`, HTML, browser logs,
+  screenshots, client bundles, and source control.
 - Project API keys authorize one project and use the OpenAI-compatible `model`
   field to select an exposed agent. A key can follow all current and future
   exposed agents or an explicit binding allowlist. `vifu-server` stores a
@@ -33,10 +41,10 @@ private endpoint URLs, database contents, or sensitive logs.
   limits request and response sizes, and does not open a local public listener.
   Provider credentials remain in the operator-controlled provider
   configuration and are not copied into the Agent Gateway session file.
-- PostgreSQL is the durable source of runtime metadata. Restrict database
-  network access, encrypt backups, and manage retention outside the Dashboard.
+- SQLite or PostgreSQL stores runtime metadata. Restrict database access,
+  encrypt backups, and manage retention outside the Dashboard.
 - Vifu is designed for local and self-hosted deployments, with Dashboard
-  identities and runtime state managed by the operator's deployment.
+  authority and runtime state managed by the operator's deployment.
 
 ## Self-hosting
 
@@ -44,8 +52,8 @@ The included Compose ports bind to `127.0.0.1` by default. Before exposing Vifu
 beyond a trusted host or private network:
 
 - terminate TLS at a maintained reverse proxy;
-- disable built-in signup unless actively adding local users, and add OIDC or
-  an access proxy when centralized identity is required;
+- add an access proxy or private-network policy when centralized identity is
+  required;
 - keep PostgreSQL unreachable from public networks;
 - replace every sample authority value with an independent random secret;
 - set request and connection limits appropriate for the deployment;

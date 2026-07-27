@@ -112,10 +112,13 @@ cargo build --workspace
 ```
 
 SQLite and PostgreSQL migrations are embedded in the Vifu Server role and run
-at startup. Dashboard authentication is implemented in the Dashboard server,
-which also initializes and upgrades its PostgreSQL auth tables. SQLx uses
-runtime-checked queries. SQLite lifecycle and restart tests always run;
-PostgreSQL integration is mandatory in CI.
+at startup. The Dashboard authenticates against the runtime Admin Key and keeps
+only a signed, HttpOnly browser session; it has no user or session database.
+Deployments may instead configure a trusted external authority. Its Access
+Tokens and the Admin Key use the same `Vifu` authorization interface,
+then enter the same identity and deployment-operation checks.
+SQLx uses runtime-checked queries. SQLite lifecycle and restart tests always
+run; PostgreSQL integration is mandatory in CI.
 
 ## Dashboard
 
@@ -129,8 +132,8 @@ bun run test:e2e
 `bun run check` enforces the one-Dashboard boundary, provider-neutral HTTP
 contracts, public-repository hygiene, and TypeScript correctness. Unit tests
 cover Console data contracts, proxy policy, protocol, and SDK contracts.
-Browser tests cover self-host login, first-admin bootstrap, open signup for
-additional users, sidebar session persistence, and signout.
+Browser tests cover Admin Key validation, sidebar session persistence across
+service restarts, key non-disclosure, and signout.
 
 ## Clean Docker Verification
 

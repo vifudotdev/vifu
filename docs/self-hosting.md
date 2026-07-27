@@ -11,6 +11,12 @@ docker compose up -d
 
 Open `http://localhost:6791`.
 
+Read the generated Admin Key and enter it in the Console:
+
+```bash
+docker compose exec backend cat /run/vifu/secrets/admin_key
+```
+
 The Compose project starts:
 
 - PostgreSQL;
@@ -48,4 +54,4 @@ Console or `~/.vifu/providers.json`.
 The default Compose ports bind to loopback. Put a TLS reverse proxy in front of
 the Server and Console before exposing them to another machine or the public
 Internet. Keep the runtime admin credential on the Console server; browser code
-must use project API keys instead.
+for applications must use project API keys instead.

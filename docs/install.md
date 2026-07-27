@@ -27,6 +27,12 @@ docker compose up -d
 
 Open `http://localhost:6791`.
 
+Read the generated Admin Key and enter it in the Console:
+
+```bash
+docker compose exec backend cat /run/vifu/secrets/admin_key
+```
+
 The Console manages projects, providers, agents, API keys, connection status,
 and traces. It reads runtime authority on the server side.
 

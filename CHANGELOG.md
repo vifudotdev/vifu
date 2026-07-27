@@ -2,6 +2,13 @@
 
 All notable changes to Vifu are documented here.
 
+## Unreleased
+
+- Added embedded SQLite as the default local runtime store while retaining
+  PostgreSQL for the complete Compose stack.
+- Replaced Dashboard accounts and identity providers with deployment Admin Key
+  access and a signed, stateless HttpOnly browser session.
+
 ## 0.1.1 - 2026-07-26
 
 - Exposed provider and runtime-extension APIs through the public

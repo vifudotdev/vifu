@@ -40,7 +40,12 @@ docker compose up -d
 ```
 
 Open `http://localhost:6791`. The stack starts PostgreSQL, Vifu Server, Vifu
-Agent Gateway, and the operations Console.
+Agent Gateway, and the operations Console. Read the generated Admin Key, then
+enter it in the Console:
+
+```bash
+docker compose exec backend cat /run/vifu/secrets/admin_key
+```
 
 Use the same command to restart the stack. Stop it while preserving the database
 volume with:
