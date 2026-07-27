@@ -16,6 +16,7 @@ pub struct NewProjectRuntimeChannel<'a> {
 
 pub struct NewProject<'a> {
     pub id: Uuid,
+    pub owner_user_id: Option<&'a str>,
     pub slug: &'a str,
     pub name: &'a str,
     pub description: Option<&'a str>,

@@ -22,21 +22,21 @@ use vifu_gateway::config::{
 use vifu_gateway::protocol::validate_identifier;
 
 use crate::auth::{
-    bearer_token, decrypt_secret_json, encrypt_secret_json, hash_agent_gateway_credential,
-    hash_api_key, is_secret_match,
+    bearer_token, decrypt_secret_json, deployment_credential, encrypt_secret_json,
+    hash_agent_gateway_credential, hash_api_key, is_secret_match, Identity, Operation,
 };
 use crate::config::DeploymentMode;
 use crate::db::{self, EndpointPatch, NewEndpoint, NewProject, ProfilePatch, ProjectPatch};
 use crate::error::ApiError;
 use crate::models::{
     slugify, validate_slug, AgentEndpoint, ApiKeyAgentScope, ApiKeyPermissions, ApiKeyRecord,
-    Capabilities, CreateApiKey, CreateBinding, CreateEndpoint, CreateProfile, CreateProfileVersion,
-    CreateProject, CreateProjectProvider, CreatedApiKey, CustomProvider, CustomProviderSecret,
-    EndpointRoute, ImportProjectAgent, ImportProjectProfile, ImportProjectProvider,
-    ProfileCapabilityDraft, ProviderAdapter, ProviderAdapterField, ProviderConnection,
-    ProviderConnectionSecret, RegisterAgentGateway, SetProfileRollout, SyncProfileSource,
-    TestProfile, UpdateApiKey, UpdateBinding, UpdateEndpoint, UpdateProfile, UpdateProject,
-    UpdateProjectProvider, UpsertProviderConnection,
+    AssignProjectOwner, Capabilities, CreateApiKey, CreateBinding, CreateEndpoint, CreateProfile,
+    CreateProfileVersion, CreateProject, CreateProjectProvider, CreatedApiKey, CustomProvider,
+    CustomProviderSecret, EndpointRoute, ImportProjectAgent, ImportProjectProfile,
+    ImportProjectProvider, ProfileCapabilityDraft, ProjectOwnership, ProviderAdapter,
+    ProviderAdapterField, ProviderConnection, ProviderConnectionSecret, RegisterAgentGateway,
+    SetProfileRollout, SyncProfileSource, TestProfile, UpdateApiKey, UpdateBinding, UpdateEndpoint,
+    UpdateProfile, UpdateProject, UpdateProjectProvider, UpsertProviderConnection,
 };
 use crate::openclaw_device;
 use crate::relay::RelayCallError;
@@ -82,14 +82,73 @@ pub async fn status(State(state): State<AppState>) -> Result<Json<impl Serialize
     }))
 }
 
+pub async fn exchange_deployment_credential(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<impl Serialize>, ApiError> {
+    let access_token = bearer_token(&headers).ok_or(ApiError::Unauthorized)?;
+    Ok(Json(state.auth.exchange_access_token(access_token).await?))
+}
+
+pub async fn verify_admin(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<impl Serialize>, ApiError> {
+    deployment_admin(&state, &headers, Operation::DeploymentRead).await?;
+    Ok(Json(json!({
+        "valid": true,
+    })))
+}
+
+pub async fn list_project_ownership(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    deployment_admin(&state, &headers, Operation::DeploymentRead).await?;
+    let projects = db::list_projects(&state.pool)
+        .await?
+        .into_iter()
+        .map(|project| ProjectOwnership {
+            project_id: project.project.id,
+            slug: project.project.slug,
+            name: project.project.name,
+            owner_user_id: project.project.owner_user_id,
+        })
+        .collect::<Vec<_>>();
+    Ok(Json(json!({ "projects": projects })))
+}
+
+pub async fn assign_project_owner(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(project_id): Path<Uuid>,
+    Json(input): Json<AssignProjectOwner>,
+) -> Result<Json<Value>, ApiError> {
+    deployment_admin(&state, &headers, Operation::DeploymentWrite).await?;
+    let owner_user_id = required_text("ownerUserId", &input.owner_user_id, 512)?;
+    let project = db::set_project_owner_user_id(&state.pool, project_id, owner_user_id).await?;
+    Ok(Json(json!({
+        "project": ProjectOwnership {
+            project_id: project.project.id,
+            slug: project.project.slug,
+            name: project.project.name,
+            owner_user_id: project.project.owner_user_id,
+        }
+    })))
+}
+
 pub async fn list_projects(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<Value>, ApiError> {
-    admin(&state, &headers).await?;
-    Ok(Json(
-        json!({ "projects": db::list_projects(&state.pool).await? }),
-    ))
+    let identity = deployment_identity(&state, &headers, Operation::ProjectRead).await?;
+    let projects = match identity {
+        Identity::DeploymentAdmin => db::list_projects(&state.pool).await?,
+        Identity::ActingUser { subject, .. } => {
+            db::list_projects_for_owner_user_id(&state.pool, &subject).await?
+        }
+    };
+    Ok(Json(json!({ "projects": projects })))
 }
 
 pub async fn create_project(
@@ -97,7 +156,11 @@ pub async fn create_project(
     headers: HeaderMap,
     Json(input): Json<CreateProject>,
 ) -> Result<(StatusCode, Json<Value>), ApiError> {
-    admin(&state, &headers).await?;
+    let identity = deployment_identity(&state, &headers, Operation::ProjectWrite).await?;
+    let owner_user_id = match &identity {
+        Identity::DeploymentAdmin => None,
+        Identity::ActingUser { subject, .. } => Some(subject.as_str()),
+    };
     let name = required_text("name", &input.name, 128)?;
     let slug = project_slug(input.slug.as_deref(), name)?;
     let description = optional_text("description", input.description.as_deref(), 4096)?;
@@ -106,6 +169,7 @@ pub async fn create_project(
         &state.pool,
         NewProject {
             id: Uuid::new_v4(),
+            owner_user_id,
             slug: &slug,
             name,
             description,
@@ -122,10 +186,16 @@ pub async fn get_project(
     headers: HeaderMap,
     Path(id): Path<Uuid>,
 ) -> Result<Json<Value>, ApiError> {
-    admin(&state, &headers).await?;
-    Ok(Json(
-        json!({ "project": db::get_project(&state.pool, id).await? }),
-    ))
+    let project = db::get_project(&state.pool, id).await?;
+    state
+        .auth
+        .authorize_project(
+            &headers,
+            Operation::ProjectRead,
+            project.project.owner_user_id.as_deref(),
+        )
+        .await?;
+    Ok(Json(json!({ "project": project })))
 }
 
 pub async fn update_project(
@@ -134,7 +204,15 @@ pub async fn update_project(
     Path(id): Path<Uuid>,
     Json(input): Json<UpdateProject>,
 ) -> Result<Json<Value>, ApiError> {
-    admin(&state, &headers).await?;
+    let current = db::get_project(&state.pool, id).await?;
+    state
+        .auth
+        .authorize_project(
+            &headers,
+            Operation::ProjectWrite,
+            current.project.owner_user_id.as_deref(),
+        )
+        .await?;
     let slug = input
         .slug
         .as_deref()
@@ -174,7 +252,15 @@ pub async fn delete_project(
     headers: HeaderMap,
     Path(id): Path<Uuid>,
 ) -> Result<StatusCode, ApiError> {
-    admin(&state, &headers).await?;
+    let project = db::get_project(&state.pool, id).await?;
+    state
+        .auth
+        .authorize_project(
+            &headers,
+            Operation::ProjectWrite,
+            project.project.owner_user_id.as_deref(),
+        )
+        .await?;
     db::delete_project(&state.pool, id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -183,7 +269,7 @@ pub async fn list_profiles(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<Value>, ApiError> {
-    admin(&state, &headers).await?;
+    deployment_admin(&state, &headers, Operation::DeploymentRead).await?;
     Ok(Json(
         json!({ "profiles": db::list_profiles(&state.pool).await? }),
     ))
@@ -194,7 +280,14 @@ pub async fn create_profile(
     headers: HeaderMap,
     Json(input): Json<CreateProfile>,
 ) -> Result<(StatusCode, Json<Value>), ApiError> {
-    admin(&state, &headers).await?;
+    deployment_admin(&state, &headers, Operation::DeploymentWrite).await?;
+    create_profile_record(&state, input).await
+}
+
+async fn create_profile_record(
+    state: &AppState,
+    input: CreateProfile,
+) -> Result<(StatusCode, Json<Value>), ApiError> {
     let project_id = input
         .project_id
         .ok_or_else(|| ApiError::Invalid("projectId is required".to_string()))?;
@@ -209,7 +302,7 @@ pub async fn create_profile(
         &input.source,
         &input.capabilities,
     )?;
-    validate_project_profile_providers(&state, project_id, &input.source, &input.capabilities)
+    validate_project_profile_providers(state, project_id, &input.source, &input.capabilities)
         .await?;
     let profile = db::create_profile(
         &state.pool,
@@ -237,7 +330,7 @@ pub async fn create_profile(
     Ok((
         StatusCode::CREATED,
         Json(
-            json!({ "profile": profile, "version": profile_version_payload(&state, version).await? }),
+            json!({ "profile": profile, "version": profile_version_payload(state, version).await? }),
         ),
     ))
 }
@@ -247,7 +340,7 @@ pub async fn get_profile(
     headers: HeaderMap,
     Path(id): Path<Uuid>,
 ) -> Result<Json<Value>, ApiError> {
-    admin(&state, &headers).await?;
+    deployment_admin(&state, &headers, Operation::DeploymentRead).await?;
     Ok(Json(
         json!({ "profile": db::get_profile(&state.pool, id).await? }),
     ))
@@ -259,7 +352,7 @@ pub async fn update_profile(
     Path(id): Path<Uuid>,
     Json(input): Json<UpdateProfile>,
 ) -> Result<Json<Value>, ApiError> {
-    admin(&state, &headers).await?;
+    deployment_admin(&state, &headers, Operation::DeploymentWrite).await?;
     let slug = input
         .slug
         .as_deref()
@@ -291,7 +384,7 @@ pub async fn delete_profile(
     headers: HeaderMap,
     Path(id): Path<Uuid>,
 ) -> Result<StatusCode, ApiError> {
-    admin(&state, &headers).await?;
+    deployment_admin(&state, &headers, Operation::DeploymentWrite).await?;
     db::delete_profile(&state.pool, id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -301,8 +394,8 @@ pub async fn list_project_profiles(
     headers: HeaderMap,
     Path(project_slug): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
-    admin(&state, &headers).await?;
-    let project = db::get_project_by_slug(&state.pool, &project_slug).await?;
+    let project =
+        authorized_project_by_slug(&state, &headers, &project_slug, ProjectAccess::Read).await?;
     Ok(Json(json!({
         "profiles": db::list_project_profiles(&state.pool, project.project.id).await?
     })))
@@ -314,9 +407,10 @@ pub async fn create_project_profile(
     Path(project_slug): Path<String>,
     Json(mut input): Json<CreateProfile>,
 ) -> Result<(StatusCode, Json<Value>), ApiError> {
-    let project = db::get_project_by_slug(&state.pool, &project_slug).await?;
+    let project =
+        authorized_project_by_slug(&state, &headers, &project_slug, ProjectAccess::Write).await?;
     input.project_id = Some(project.project.id);
-    create_profile(State(state), headers, Json(input)).await
+    create_profile_record(&state, input).await
 }
 
 pub async fn import_project_profile(
@@ -325,8 +419,8 @@ pub async fn import_project_profile(
     Path(project_slug): Path<String>,
     Json(input): Json<ImportProjectProfile>,
 ) -> Result<(StatusCode, Json<Value>), ApiError> {
-    admin(&state, &headers).await?;
-    let project = db::get_project_by_slug(&state.pool, &project_slug).await?;
+    let project =
+        authorized_project_by_slug(&state, &headers, &project_slug, ProjectAccess::Write).await?;
     let archive_id = required_text("archiveId", &input.archive_id, 128)?;
     let active_version_id = required_text("activeVersionId", &input.active_version_id, 128)?;
     if input.versions.is_empty() || input.versions.len() > 50 {
@@ -411,8 +505,8 @@ pub async fn get_project_profile(
     headers: HeaderMap,
     Path((project_slug, profile_id)): Path<(String, Uuid)>,
 ) -> Result<Json<Value>, ApiError> {
-    admin(&state, &headers).await?;
-    let project = db::get_project_by_slug(&state.pool, &project_slug).await?;
+    let project =
+        authorized_project_by_slug(&state, &headers, &project_slug, ProjectAccess::Read).await?;
     let profile = db::get_project_profile(&state.pool, project.project.id, profile_id).await?;
     Ok(Json(profile_detail_payload(&state, profile).await?))
 }
@@ -423,8 +517,8 @@ pub async fn update_project_profile(
     Path((project_slug, profile_id)): Path<(String, Uuid)>,
     Json(input): Json<UpdateProfile>,
 ) -> Result<Json<Value>, ApiError> {
-    admin(&state, &headers).await?;
-    let project = db::get_project_by_slug(&state.pool, &project_slug).await?;
+    let project =
+        authorized_project_by_slug(&state, &headers, &project_slug, ProjectAccess::Write).await?;
     db::get_project_profile(&state.pool, project.project.id, profile_id).await?;
     let slug = input
         .slug
@@ -457,8 +551,8 @@ pub async fn archive_project_profile(
     headers: HeaderMap,
     Path((project_slug, profile_id)): Path<(String, Uuid)>,
 ) -> Result<StatusCode, ApiError> {
-    admin(&state, &headers).await?;
-    let project = db::get_project_by_slug(&state.pool, &project_slug).await?;
+    let project =
+        authorized_project_by_slug(&state, &headers, &project_slug, ProjectAccess::Write).await?;
     db::archive_project_profile(&state.pool, project.project.id, profile_id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -469,8 +563,8 @@ pub async fn create_project_profile_version(
     Path((project_slug, profile_id)): Path<(String, Uuid)>,
     Json(input): Json<CreateProfileVersion>,
 ) -> Result<(StatusCode, Json<Value>), ApiError> {
-    admin(&state, &headers).await?;
-    let project = db::get_project_by_slug(&state.pool, &project_slug).await?;
+    let project =
+        authorized_project_by_slug(&state, &headers, &project_slug, ProjectAccess::Write).await?;
     db::get_project_profile(&state.pool, project.project.id, profile_id).await?;
     validate_profile_version_input(
         &input.persona,
@@ -511,8 +605,8 @@ pub async fn sync_project_profile_source(
     Path((project_slug, profile_id)): Path<(String, Uuid)>,
     Json(input): Json<SyncProfileSource>,
 ) -> Result<(StatusCode, Json<Value>), ApiError> {
-    admin(&state, &headers).await?;
-    let project = db::get_project_by_slug(&state.pool, &project_slug).await?;
+    let project =
+        authorized_project_by_slug(&state, &headers, &project_slug, ProjectAccess::Write).await?;
     let profile = db::get_project_profile(&state.pool, project.project.id, profile_id).await?;
     let active_version_id = profile.active_version_id.ok_or_else(|| {
         ApiError::Conflict("profile does not have an active version to sync".to_string())
@@ -620,8 +714,8 @@ pub async fn activate_project_profile_version(
     headers: HeaderMap,
     Path((project_slug, profile_id, version_id)): Path<(String, Uuid, Uuid)>,
 ) -> Result<Json<Value>, ApiError> {
-    admin(&state, &headers).await?;
-    let project = db::get_project_by_slug(&state.pool, &project_slug).await?;
+    let project =
+        authorized_project_by_slug(&state, &headers, &project_slug, ProjectAccess::Write).await?;
     db::get_project_profile(&state.pool, project.project.id, profile_id).await?;
     sync_managed_profile_version(&state, &project_slug, profile_id, version_id).await?;
     let rollout = db::set_profile_rollout(&state.pool, profile_id, &[(version_id, 10_000)]).await?;
@@ -637,8 +731,8 @@ pub async fn set_project_profile_rollout(
     Path((project_slug, profile_id)): Path<(String, Uuid)>,
     Json(input): Json<SetProfileRollout>,
 ) -> Result<Json<Value>, ApiError> {
-    admin(&state, &headers).await?;
-    let project = db::get_project_by_slug(&state.pool, &project_slug).await?;
+    let project =
+        authorized_project_by_slug(&state, &headers, &project_slug, ProjectAccess::Write).await?;
     db::get_project_profile(&state.pool, project.project.id, profile_id).await?;
     let allocations = input
         .allocations
@@ -660,8 +754,8 @@ pub async fn archive_project_profile_version(
     headers: HeaderMap,
     Path((project_slug, profile_id, version_id)): Path<(String, Uuid, Uuid)>,
 ) -> Result<Json<Value>, ApiError> {
-    admin(&state, &headers).await?;
-    let project = db::get_project_by_slug(&state.pool, &project_slug).await?;
+    let project =
+        authorized_project_by_slug(&state, &headers, &project_slug, ProjectAccess::Write).await?;
     db::get_project_profile(&state.pool, project.project.id, profile_id).await?;
     let version = db::archive_profile_version(&state.pool, profile_id, version_id).await?;
     Ok(Json(profile_version_payload(&state, version).await?))
@@ -673,8 +767,8 @@ pub async fn test_project_profile(
     Path((project_slug, profile_id)): Path<(String, Uuid)>,
     Json(input): Json<TestProfile>,
 ) -> Result<Json<Value>, ApiError> {
-    admin(&state, &headers).await?;
-    let project = db::get_project_by_slug(&state.pool, &project_slug).await?;
+    let project =
+        authorized_project_by_slug(&state, &headers, &project_slug, ProjectAccess::Write).await?;
     let profile = db::get_project_profile(&state.pool, project.project.id, profile_id).await?;
     if input.capability != "chat" {
         return Err(ApiError::Invalid(
@@ -862,7 +956,7 @@ pub async fn list_bindings(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<Value>, ApiError> {
-    admin(&state, &headers).await?;
+    deployment_admin(&state, &headers, Operation::DeploymentRead).await?;
     Ok(Json(
         json!({ "bindings": db::list_bindings(&state.pool).await? }),
     ))
@@ -873,7 +967,14 @@ pub async fn create_binding(
     headers: HeaderMap,
     Json(input): Json<CreateBinding>,
 ) -> Result<(StatusCode, Json<Value>), ApiError> {
-    admin(&state, &headers).await?;
+    deployment_admin(&state, &headers, Operation::DeploymentWrite).await?;
+    create_binding_record(&state, input).await
+}
+
+async fn create_binding_record(
+    state: &AppState,
+    input: CreateBinding,
+) -> Result<(StatusCode, Json<Value>), ApiError> {
     let provider = required_identifier("provider", &input.provider)?;
     if provider != "openclaw" {
         return Err(ApiError::Invalid(
@@ -901,7 +1002,7 @@ pub async fn get_binding(
     headers: HeaderMap,
     Path(id): Path<Uuid>,
 ) -> Result<Json<Value>, ApiError> {
-    admin(&state, &headers).await?;
+    deployment_admin(&state, &headers, Operation::DeploymentRead).await?;
     Ok(Json(
         json!({ "binding": db::get_binding(&state.pool, id).await? }),
     ))
@@ -913,7 +1014,15 @@ pub async fn update_binding(
     Path(id): Path<Uuid>,
     Json(input): Json<UpdateBinding>,
 ) -> Result<Json<Value>, ApiError> {
-    admin(&state, &headers).await?;
+    deployment_admin(&state, &headers, Operation::DeploymentWrite).await?;
+    update_binding_record(&state, id, input).await
+}
+
+async fn update_binding_record(
+    state: &AppState,
+    id: Uuid,
+    input: UpdateBinding,
+) -> Result<Json<Value>, ApiError> {
     let gateway_id = input
         .gateway_id
         .as_deref()
@@ -937,7 +1046,7 @@ pub async fn delete_binding(
     headers: HeaderMap,
     Path(id): Path<Uuid>,
 ) -> Result<StatusCode, ApiError> {
-    admin(&state, &headers).await?;
+    deployment_admin(&state, &headers, Operation::DeploymentWrite).await?;
     db::delete_binding(&state.pool, id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -946,7 +1055,7 @@ pub async fn list_endpoints(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<Value>, ApiError> {
-    admin(&state, &headers).await?;
+    deployment_admin(&state, &headers, Operation::DeploymentRead).await?;
     Ok(Json(
         json!({ "endpoints": db::list_endpoints(&state.pool).await? }),
     ))
@@ -957,7 +1066,14 @@ pub async fn create_endpoint(
     headers: HeaderMap,
     Json(input): Json<CreateEndpoint>,
 ) -> Result<(StatusCode, Json<Value>), ApiError> {
-    admin(&state, &headers).await?;
+    deployment_admin(&state, &headers, Operation::DeploymentWrite).await?;
+    create_endpoint_record(&state, input).await
+}
+
+async fn create_endpoint_record(
+    state: &AppState,
+    input: CreateEndpoint,
+) -> Result<(StatusCode, Json<Value>), ApiError> {
     let name = required_text("name", &input.name, 128)?;
     let slug = profile_slug(input.slug.as_deref(), name)?;
     let request_timeout_ms = validate_timeout(input.request_timeout_ms.unwrap_or(30_000))?;
@@ -982,7 +1098,7 @@ pub async fn get_endpoint(
     headers: HeaderMap,
     Path(id): Path<Uuid>,
 ) -> Result<Json<Value>, ApiError> {
-    admin(&state, &headers).await?;
+    deployment_admin(&state, &headers, Operation::DeploymentRead).await?;
     Ok(Json(
         json!({ "endpoint": db::get_endpoint(&state.pool, id).await? }),
     ))
@@ -994,7 +1110,15 @@ pub async fn update_endpoint(
     Path(id): Path<Uuid>,
     Json(input): Json<UpdateEndpoint>,
 ) -> Result<Json<Value>, ApiError> {
-    admin(&state, &headers).await?;
+    deployment_admin(&state, &headers, Operation::DeploymentWrite).await?;
+    update_endpoint_record(&state, id, input).await
+}
+
+async fn update_endpoint_record(
+    state: &AppState,
+    id: Uuid,
+    input: UpdateEndpoint,
+) -> Result<Json<Value>, ApiError> {
     let slug = input
         .slug
         .as_deref()
@@ -1027,7 +1151,7 @@ pub async fn delete_endpoint(
     headers: HeaderMap,
     Path(id): Path<Uuid>,
 ) -> Result<StatusCode, ApiError> {
-    admin(&state, &headers).await?;
+    deployment_admin(&state, &headers, Operation::DeploymentWrite).await?;
     db::delete_endpoint(&state.pool, id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -1036,7 +1160,7 @@ pub async fn list_api_keys(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<Value>, ApiError> {
-    admin(&state, &headers).await?;
+    deployment_admin(&state, &headers, Operation::DeploymentRead).await?;
     Ok(Json(
         json!({ "apiKeys": db::list_api_keys(&state.pool).await? }),
     ))
@@ -1047,7 +1171,14 @@ pub async fn create_api_key(
     headers: HeaderMap,
     Json(input): Json<CreateApiKey>,
 ) -> Result<(StatusCode, Json<Value>), ApiError> {
-    admin(&state, &headers).await?;
+    deployment_admin(&state, &headers, Operation::DeploymentWrite).await?;
+    create_api_key_record(&state, input).await
+}
+
+async fn create_api_key_record(
+    state: &AppState,
+    input: CreateApiKey,
+) -> Result<(StatusCode, Json<Value>), ApiError> {
     db::get_project(&state.pool, input.project_id).await?;
     let agent_scope = normalize_api_key_agent_scope(input.agent_scope)?;
     let name = input
@@ -1057,7 +1188,7 @@ pub async fn create_api_key(
         .transpose()?
         .unwrap_or("Project key");
     let created = issue_api_key(
-        &state,
+        state,
         input.project_id,
         name,
         &agent_scope,
@@ -1102,8 +1233,20 @@ pub async fn update_api_key(
     Path(id): Path<Uuid>,
     Json(input): Json<UpdateApiKey>,
 ) -> Result<Json<Value>, ApiError> {
-    admin(&state, &headers).await?;
+    deployment_admin(&state, &headers, Operation::DeploymentWrite).await?;
+    update_api_key_record(&state, id, input, None).await
+}
+
+async fn update_api_key_record(
+    state: &AppState,
+    id: Uuid,
+    input: UpdateApiKey,
+    required_project_id: Option<Uuid>,
+) -> Result<Json<Value>, ApiError> {
     let current = db::get_api_key(&state.pool, id).await?;
+    if required_project_id.is_some_and(|project_id| current.project_id != project_id) {
+        return Err(ApiError::NotFound);
+    }
     if current.revoked_at.is_some() {
         return Err(ApiError::Conflict(
             "revoked API keys cannot be edited".to_string(),
@@ -1119,6 +1262,11 @@ pub async fn update_api_key(
         ));
     }
     if let Some(project_id) = input.project_id {
+        if required_project_id.is_some_and(|required| project_id != required) {
+            return Err(ApiError::Invalid(
+                "an API key cannot be moved through a project-scoped route".to_string(),
+            ));
+        }
         db::get_project(&state.pool, project_id).await?;
     }
     let project_changed = input
@@ -1157,7 +1305,7 @@ pub async fn revoke_api_key(
     headers: HeaderMap,
     Path(id): Path<Uuid>,
 ) -> Result<Json<Value>, ApiError> {
-    admin(&state, &headers).await?;
+    deployment_admin(&state, &headers, Operation::DeploymentWrite).await?;
     Ok(Json(
         json!({ "apiKey": db::revoke_api_key(&state.pool, id).await? }),
     ))
@@ -1168,7 +1316,7 @@ pub async fn delete_api_key(
     headers: HeaderMap,
     Path(id): Path<Uuid>,
 ) -> Result<StatusCode, ApiError> {
-    admin(&state, &headers).await?;
+    deployment_admin(&state, &headers, Operation::DeploymentWrite).await?;
     db::delete_api_key(&state.pool, id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -1177,7 +1325,7 @@ pub async fn list_agent_gateways(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<Value>, ApiError> {
-    admin(&state, &headers).await?;
+    deployment_admin(&state, &headers, Operation::DeploymentRead).await?;
     Ok(Json(json!({
         "agentGateways": db::list_agent_gateway_sessions(&state.pool).await?
     })))
@@ -1220,7 +1368,7 @@ pub async fn revoke_agent_gateway(
     headers: HeaderMap,
     Path(gateway_id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
-    admin(&state, &headers).await?;
+    deployment_admin(&state, &headers, Operation::DeploymentWrite).await?;
     let gateway_id = required_identifier("agent gateway id", &gateway_id)?;
     let credential = db::revoke_agent_gateway_credential(&state.pool, gateway_id).await?;
     state
@@ -1234,7 +1382,7 @@ pub async fn list_available_agents(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<Value>, ApiError> {
-    admin(&state, &headers).await?;
+    deployment_admin(&state, &headers, Operation::DeploymentRead).await?;
     Ok(Json(json!({
         "agents": db::list_available_agents(&state.pool).await?
     })))
@@ -1244,7 +1392,7 @@ pub async fn list_provider_adapters(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<Value>, ApiError> {
-    admin(&state, &headers).await?;
+    deployment_read(&state, &headers).await?;
     Ok(Json(json!({ "providerAdapters": provider_adapters() })))
 }
 
@@ -1252,7 +1400,7 @@ pub async fn list_provider_catalog(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<Value>, ApiError> {
-    admin(&state, &headers).await?;
+    deployment_admin(&state, &headers, Operation::DeploymentRead).await?;
     let custom = if let Some(path) = active_provider_registry_file(&state) {
         read_provider_registry(&path)?
             .providers
@@ -1267,13 +1415,33 @@ pub async fn list_provider_catalog(
     ))
 }
 
+pub async fn list_project_provider_catalog(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(slug): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    authorized_project_by_slug(&state, &headers, &slug, ProjectAccess::Read).await?;
+    Ok(Json(json!({
+        "registry": provider_adapters(),
+        "custom": [],
+    })))
+}
+
+pub async fn list_project_provider_adapters(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(slug): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    authorized_project_by_slug(&state, &headers, &slug, ProjectAccess::Read).await?;
+    Ok(Json(json!({ "providerAdapters": provider_adapters() })))
+}
+
 pub async fn list_project_providers(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(slug): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
-    admin(&state, &headers).await?;
-    db::get_project_by_slug(&state.pool, &slug).await?;
+    authorized_project_by_slug(&state, &headers, &slug, ProjectAccess::Read).await?;
     let mut providers = Vec::new();
     for connection in db::list_provider_connections(&state.pool, &slug).await? {
         providers.push(effective_provider_connection(&state, connection).await?);
@@ -1287,8 +1455,19 @@ pub async fn create_project_provider(
     Path(slug): Path<String>,
     Json(input): Json<CreateProjectProvider>,
 ) -> Result<(StatusCode, Json<Value>), ApiError> {
-    admin(&state, &headers).await?;
-    db::get_project_by_slug(&state.pool, &slug).await?;
+    deployment_credential(&headers).ok_or(ApiError::Unauthorized)?;
+    let project = db::get_project_by_slug(&state.pool, &slug).await?;
+    let identity = state
+        .auth
+        .authorize_project(
+            &headers,
+            Operation::ProjectWrite,
+            project.project.owner_user_id.as_deref(),
+        )
+        .await?;
+    if input.source.kind == "custom" && matches!(identity, Identity::ActingUser { .. }) {
+        return Err(ApiError::Forbidden);
+    }
     let mut source =
         resolve_project_provider_source(&state, &input.source.kind, &input.source.key).await?;
     let provider_key = if source.kind == "registry" {
@@ -1356,8 +1535,7 @@ pub async fn import_project_provider(
     Path(slug): Path<String>,
     Json(input): Json<ImportProjectProvider>,
 ) -> Result<(StatusCode, Json<Value>), ApiError> {
-    admin(&state, &headers).await?;
-    db::get_project_by_slug(&state.pool, &slug).await?;
+    authorized_project_by_slug(&state, &headers, &slug, ProjectAccess::Write).await?;
     let provider_key = required_identifier("provider key", &input.provider_key)?;
     let provider_type = required_identifier("provider type", &input.provider_type)?;
     let name = required_text("provider name", &input.name, 128)?;
@@ -1415,7 +1593,7 @@ pub async fn update_project_provider(
     Path((slug, provider_key)): Path<(String, String)>,
     Json(input): Json<UpdateProjectProvider>,
 ) -> Result<Json<Value>, ApiError> {
-    admin(&state, &headers).await?;
+    authorized_project_by_slug(&state, &headers, &slug, ProjectAccess::Write).await?;
     let provider_key = required_identifier("provider key", &provider_key)?;
     let current =
         db::get_provider_connection_secret_by_key(&state.pool, &slug, provider_key).await?;
@@ -1461,9 +1639,8 @@ pub async fn delete_project_provider(
     headers: HeaderMap,
     Path((slug, provider_key)): Path<(String, String)>,
 ) -> Result<StatusCode, ApiError> {
-    admin(&state, &headers).await?;
+    let project = authorized_project_by_slug(&state, &headers, &slug, ProjectAccess::Write).await?;
     let provider_key = required_identifier("provider key", &provider_key)?;
-    let project = db::get_project_by_slug(&state.pool, &slug).await?;
     db::unassign_project_provider(&state.pool, project.project.id, provider_key).await?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -1473,7 +1650,7 @@ pub async fn test_project_provider(
     headers: HeaderMap,
     Path((slug, provider_key)): Path<(String, String)>,
 ) -> Result<Json<Value>, ApiError> {
-    admin(&state, &headers).await?;
+    authorized_project_by_slug(&state, &headers, &slug, ProjectAccess::Write).await?;
     let connection =
         db::get_provider_connection_secret_by_key(&state.pool, &slug, &provider_key).await?;
     let (provider, message, added_agents) =
@@ -1488,8 +1665,7 @@ pub async fn list_project_agent_candidates(
     headers: HeaderMap,
     Path(slug): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
-    admin(&state, &headers).await?;
-    let project = db::get_project_by_slug(&state.pool, &slug).await?;
+    let project = authorized_project_by_slug(&state, &headers, &slug, ProjectAccess::Read).await?;
     let assigned = db::list_provider_connections(&state.pool, &slug)
         .await?
         .into_iter()
@@ -1525,6 +1701,9 @@ pub async fn list_project_agent_candidates(
             .await?
             .into_iter()
             .filter_map(|agent| {
+                if agent.gateway_id != project.project.gateway_id {
+                    return None;
+                }
                 let provider_key = agent
                     .metadata
                     .get("providerKey")
@@ -1562,11 +1741,13 @@ pub async fn import_project_agent(
     Path(slug): Path<String>,
     Json(input): Json<ImportProjectAgent>,
 ) -> Result<(StatusCode, Json<Value>), ApiError> {
-    admin(&state, &headers).await?;
+    let project = authorized_project_by_slug(&state, &headers, &slug, ProjectAccess::Write).await?;
     let gateway_id = required_identifier("agent gateway id", &input.gateway_id)?;
     let agent_id = required_identifier("agent id", &input.agent_id)?;
     let provider_key = required_identifier("provider key", &input.provider_key)?;
-    let project = db::get_project_by_slug(&state.pool, &slug).await?;
+    if gateway_id != project.project.gateway_id {
+        return Err(ApiError::Forbidden);
+    }
     if !db::project_provider_is_assigned(&state.pool, project.project.id, provider_key).await? {
         return Err(ApiError::Conflict(
             "assign the provider to this project before adding its agents".to_string(),
@@ -1622,8 +1803,7 @@ pub async fn restore_project_agent(
     headers: HeaderMap,
     Path((slug, profile_id)): Path<(String, Uuid)>,
 ) -> Result<Json<Value>, ApiError> {
-    admin(&state, &headers).await?;
-    let project = db::get_project_by_slug(&state.pool, &slug).await?;
+    let project = authorized_project_by_slug(&state, &headers, &slug, ProjectAccess::Write).await?;
     let profile = db::restore_project_profile(&state.pool, project.project.id, profile_id).await?;
     Ok(Json(profile_detail_payload(&state, profile).await?))
 }
@@ -1641,7 +1821,7 @@ pub async fn list_traces(
     headers: HeaderMap,
     Query(query): Query<TraceQuery>,
 ) -> Result<Json<Value>, ApiError> {
-    admin(&state, &headers).await?;
+    deployment_admin(&state, &headers, Operation::DeploymentRead).await?;
     if query.endpoint_id.is_some() && query.project_id.is_some() {
         return Err(ApiError::Invalid(
             "endpointId and projectId cannot be combined".to_string(),
@@ -1658,7 +1838,273 @@ pub async fn list_trace_spans(
     headers: HeaderMap,
     Path(trace_id): Path<Uuid>,
 ) -> Result<Json<Value>, ApiError> {
-    admin(&state, &headers).await?;
+    deployment_admin(&state, &headers, Operation::DeploymentRead).await?;
+    Ok(Json(json!({
+        "spans": db::list_trace_spans(&state.pool, trace_id).await?
+    })))
+}
+
+pub async fn list_project_bindings(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(slug): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let project = authorized_project_by_slug(&state, &headers, &slug, ProjectAccess::Read).await?;
+    let profile_ids = db::list_project_profiles(&state.pool, project.project.id)
+        .await?
+        .into_iter()
+        .map(|profile| profile.id)
+        .collect::<HashSet<_>>();
+    let bindings = db::list_bindings(&state.pool)
+        .await?
+        .into_iter()
+        .filter(|binding| profile_ids.contains(&binding.profile_id))
+        .collect::<Vec<_>>();
+    Ok(Json(json!({ "bindings": bindings })))
+}
+
+pub async fn create_project_binding(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(slug): Path<String>,
+    Json(input): Json<CreateBinding>,
+) -> Result<(StatusCode, Json<Value>), ApiError> {
+    let project = authorized_project_by_slug(&state, &headers, &slug, ProjectAccess::Write).await?;
+    db::get_project_profile(&state.pool, project.project.id, input.profile_id).await?;
+    create_binding_record(&state, input).await
+}
+
+pub async fn get_project_binding(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((slug, id)): Path<(String, Uuid)>,
+) -> Result<Json<Value>, ApiError> {
+    let project = authorized_project_by_slug(&state, &headers, &slug, ProjectAccess::Read).await?;
+    let binding = project_binding(&state, project.project.id, id).await?;
+    Ok(Json(json!({ "binding": binding })))
+}
+
+pub async fn update_project_binding(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((slug, id)): Path<(String, Uuid)>,
+    Json(input): Json<UpdateBinding>,
+) -> Result<Json<Value>, ApiError> {
+    let project = authorized_project_by_slug(&state, &headers, &slug, ProjectAccess::Write).await?;
+    project_binding(&state, project.project.id, id).await?;
+    update_binding_record(&state, id, input).await
+}
+
+pub async fn delete_project_binding(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((slug, id)): Path<(String, Uuid)>,
+) -> Result<StatusCode, ApiError> {
+    let project = authorized_project_by_slug(&state, &headers, &slug, ProjectAccess::Write).await?;
+    project_binding(&state, project.project.id, id).await?;
+    db::delete_binding(&state.pool, id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+pub async fn list_project_endpoints(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(slug): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let project = authorized_project_by_slug(&state, &headers, &slug, ProjectAccess::Read).await?;
+    let profile_ids = db::list_project_profiles(&state.pool, project.project.id)
+        .await?
+        .into_iter()
+        .map(|profile| profile.id)
+        .collect::<HashSet<_>>();
+    let endpoints = db::list_endpoints(&state.pool)
+        .await?
+        .into_iter()
+        .filter(|endpoint| profile_ids.contains(&endpoint.profile_id))
+        .collect::<Vec<_>>();
+    Ok(Json(json!({ "endpoints": endpoints })))
+}
+
+pub async fn create_project_endpoint(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(slug): Path<String>,
+    Json(input): Json<CreateEndpoint>,
+) -> Result<(StatusCode, Json<Value>), ApiError> {
+    let project = authorized_project_by_slug(&state, &headers, &slug, ProjectAccess::Write).await?;
+    db::get_project_profile(&state.pool, project.project.id, input.profile_id).await?;
+    project_binding(&state, project.project.id, input.binding_id).await?;
+    create_endpoint_record(&state, input).await
+}
+
+pub async fn get_project_endpoint(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((slug, id)): Path<(String, Uuid)>,
+) -> Result<Json<Value>, ApiError> {
+    let project = authorized_project_by_slug(&state, &headers, &slug, ProjectAccess::Read).await?;
+    let endpoint = project_endpoint(&state, project.project.id, id).await?;
+    Ok(Json(json!({ "endpoint": endpoint })))
+}
+
+pub async fn update_project_endpoint(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((slug, id)): Path<(String, Uuid)>,
+    Json(input): Json<UpdateEndpoint>,
+) -> Result<Json<Value>, ApiError> {
+    let project = authorized_project_by_slug(&state, &headers, &slug, ProjectAccess::Write).await?;
+    project_endpoint(&state, project.project.id, id).await?;
+    if let Some(profile_id) = input.profile_id {
+        db::get_project_profile(&state.pool, project.project.id, profile_id).await?;
+    }
+    if let Some(binding_id) = input.binding_id {
+        project_binding(&state, project.project.id, binding_id).await?;
+    }
+    update_endpoint_record(&state, id, input).await
+}
+
+pub async fn delete_project_endpoint(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((slug, id)): Path<(String, Uuid)>,
+) -> Result<StatusCode, ApiError> {
+    let project = authorized_project_by_slug(&state, &headers, &slug, ProjectAccess::Write).await?;
+    project_endpoint(&state, project.project.id, id).await?;
+    db::delete_endpoint(&state.pool, id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+pub async fn list_project_api_keys(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(slug): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let project = authorized_project_by_slug(&state, &headers, &slug, ProjectAccess::Read).await?;
+    let api_keys = db::list_api_keys(&state.pool)
+        .await?
+        .into_iter()
+        .filter(|key| key.project_id == project.project.id)
+        .collect::<Vec<_>>();
+    Ok(Json(json!({ "apiKeys": api_keys })))
+}
+
+pub async fn create_project_api_key(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(slug): Path<String>,
+    Json(mut input): Json<CreateApiKey>,
+) -> Result<(StatusCode, Json<Value>), ApiError> {
+    let project = authorized_project_by_slug(&state, &headers, &slug, ProjectAccess::Write).await?;
+    input.project_id = project.project.id;
+    create_api_key_record(&state, input).await
+}
+
+pub async fn update_project_api_key(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((slug, id)): Path<(String, Uuid)>,
+    Json(input): Json<UpdateApiKey>,
+) -> Result<Json<Value>, ApiError> {
+    let project = authorized_project_by_slug(&state, &headers, &slug, ProjectAccess::Write).await?;
+    update_api_key_record(&state, id, input, Some(project.project.id)).await
+}
+
+pub async fn revoke_project_api_key(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((slug, id)): Path<(String, Uuid)>,
+) -> Result<Json<Value>, ApiError> {
+    let project = authorized_project_by_slug(&state, &headers, &slug, ProjectAccess::Write).await?;
+    let key = db::get_api_key(&state.pool, id).await?;
+    if key.project_id != project.project.id {
+        return Err(ApiError::NotFound);
+    }
+    Ok(Json(
+        json!({ "apiKey": db::revoke_api_key(&state.pool, id).await? }),
+    ))
+}
+
+pub async fn delete_project_api_key(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((slug, id)): Path<(String, Uuid)>,
+) -> Result<StatusCode, ApiError> {
+    let project = authorized_project_by_slug(&state, &headers, &slug, ProjectAccess::Write).await?;
+    let key = db::get_api_key(&state.pool, id).await?;
+    if key.project_id != project.project.id {
+        return Err(ApiError::NotFound);
+    }
+    db::delete_api_key(&state.pool, id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+pub async fn list_project_agent_gateways(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(slug): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let project = authorized_project_by_slug(&state, &headers, &slug, ProjectAccess::Read).await?;
+    let sessions = db::list_agent_gateway_sessions(&state.pool)
+        .await?
+        .into_iter()
+        .filter(|session| session.gateway_id == project.project.gateway_id)
+        .collect::<Vec<_>>();
+    Ok(Json(json!({ "agentGateways": sessions })))
+}
+
+pub async fn list_project_available_agents(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(slug): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let project = authorized_project_by_slug(&state, &headers, &slug, ProjectAccess::Read).await?;
+    let agents = db::list_available_agents(&state.pool)
+        .await?
+        .into_iter()
+        .filter(|agent| agent.gateway_id == project.project.gateway_id)
+        .collect::<Vec<_>>();
+    Ok(Json(json!({ "agents": agents })))
+}
+
+pub async fn list_project_traces(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(slug): Path<String>,
+    Query(query): Query<TraceQuery>,
+) -> Result<Json<Value>, ApiError> {
+    let project = authorized_project_by_slug(&state, &headers, &slug, ProjectAccess::Read).await?;
+    if query
+        .project_id
+        .is_some_and(|project_id| project_id != project.project.id)
+    {
+        return Err(ApiError::Invalid(
+            "projectId does not match the project route".to_string(),
+        ));
+    }
+    if let Some(endpoint_id) = query.endpoint_id {
+        project_endpoint(&state, project.project.id, endpoint_id).await?;
+    }
+    let limit = query.limit.unwrap_or(100).clamp(1, 500);
+    Ok(Json(json!({
+        "traces": db::list_traces(
+            &state.pool,
+            query.endpoint_id,
+            Some(project.project.id),
+            limit,
+        ).await?
+    })))
+}
+
+pub async fn list_project_trace_spans(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((slug, trace_id)): Path<(String, Uuid)>,
+) -> Result<Json<Value>, ApiError> {
+    let project = authorized_project_by_slug(&state, &headers, &slug, ProjectAccess::Read).await?;
+    if db::get_trace_project_id(&state.pool, trace_id).await? != Some(project.project.id) {
+        return Err(ApiError::NotFound);
+    }
     Ok(Json(json!({
         "spans": db::list_trace_spans(&state.pool, trace_id).await?
     })))
@@ -3261,10 +3707,18 @@ async fn api_request_authority(
     state: &AppState,
     headers: &HeaderMap,
 ) -> Result<ApiRequestAuthority, ApiError> {
-    let token = bearer_token(headers).ok_or(ApiError::Unauthorized)?;
-    if is_secret_match(token, &state.config.admin_key) {
-        return Ok(ApiRequestAuthority::Admin);
+    if let Some(credential) = deployment_credential(headers) {
+        if matches!(
+            state
+                .auth
+                .authorize_token(credential, Operation::DeploymentWrite)
+                .await,
+            Ok(Identity::DeploymentAdmin)
+        ) {
+            return Ok(ApiRequestAuthority::Admin);
+        }
     }
+    let token = bearer_token(headers).ok_or(ApiError::Unauthorized)?;
     let key_hash = hash_api_key(token, &state.config.api_key_pepper);
     Ok(ApiRequestAuthority::Key(
         db::active_api_key_by_hash(&state.pool, &key_hash).await?,
@@ -4258,7 +4712,8 @@ async fn reconcile_project_provider_agents(
     let agents = db::list_available_agents(&state.pool).await?;
     let mut added = 0_usize;
     for agent in agents.into_iter().filter(|agent| {
-        agent.metadata.get("providerKey").and_then(Value::as_str) == Some(provider_key)
+        agent.gateway_id == project.project.gateway_id
+            && agent.metadata.get("providerKey").and_then(Value::as_str) == Some(provider_key)
             && agent.status == "connected"
     }) {
         match db::find_project_profile_by_provider_resource(
@@ -4524,11 +4979,78 @@ fn mask_secret(value: &str) -> String {
     format!("****{suffix}")
 }
 
-async fn admin(state: &AppState, headers: &HeaderMap) -> Result<(), ApiError> {
-    if bearer_token(headers).is_some_and(|token| is_secret_match(token, &state.config.admin_key)) {
-        return Ok(());
+#[derive(Clone, Copy)]
+enum ProjectAccess {
+    Read,
+    Write,
+}
+
+async fn authorized_project_by_slug(
+    state: &AppState,
+    headers: &HeaderMap,
+    slug: &str,
+    access: ProjectAccess,
+) -> Result<crate::models::ProjectWithBindings, ApiError> {
+    deployment_credential(headers).ok_or(ApiError::Unauthorized)?;
+    let project = db::get_project_by_slug(&state.pool, slug).await?;
+    state
+        .auth
+        .authorize_project(
+            headers,
+            match access {
+                ProjectAccess::Read => Operation::ProjectRead,
+                ProjectAccess::Write => Operation::ProjectWrite,
+            },
+            project.project.owner_user_id.as_deref(),
+        )
+        .await?;
+    Ok(project)
+}
+
+async fn project_binding(
+    state: &AppState,
+    project_id: Uuid,
+    binding_id: Uuid,
+) -> Result<crate::models::AgentBinding, ApiError> {
+    let binding = db::get_binding(&state.pool, binding_id).await?;
+    db::get_project_profile(&state.pool, project_id, binding.profile_id).await?;
+    Ok(binding)
+}
+
+async fn project_endpoint(
+    state: &AppState,
+    project_id: Uuid,
+    endpoint_id: Uuid,
+) -> Result<AgentEndpoint, ApiError> {
+    let endpoint = db::get_endpoint(&state.pool, endpoint_id).await?;
+    db::get_project_profile(&state.pool, project_id, endpoint.profile_id).await?;
+    project_binding(state, project_id, endpoint.binding_id).await?;
+    Ok(endpoint)
+}
+
+async fn deployment_identity(
+    state: &AppState,
+    headers: &HeaderMap,
+    operation: Operation,
+) -> Result<Identity, ApiError> {
+    state.auth.authorize(headers, operation).await
+}
+
+async fn deployment_admin(
+    state: &AppState,
+    headers: &HeaderMap,
+    operation: Operation,
+) -> Result<(), ApiError> {
+    match deployment_identity(state, headers, operation).await? {
+        Identity::DeploymentAdmin => Ok(()),
+        Identity::ActingUser { .. } => Err(ApiError::Forbidden),
     }
-    Err(ApiError::Forbidden)
+}
+
+async fn deployment_read(state: &AppState, headers: &HeaderMap) -> Result<(), ApiError> {
+    deployment_identity(state, headers, Operation::DeploymentRead)
+        .await
+        .map(|_| ())
 }
 
 fn require_agent_gateway_bootstrap(state: &AppState, headers: &HeaderMap) -> Result<(), ApiError> {

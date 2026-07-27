@@ -756,6 +756,7 @@ mod tests {
             pool,
             NewProject {
                 id: project_id,
+                owner_user_id: None,
                 slug: &project_slug,
                 name: "Wire Test Project",
                 description: None,

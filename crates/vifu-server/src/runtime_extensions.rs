@@ -17,12 +17,12 @@ use vifu_gateway::runtime_extension::{
     MAX_RUNTIME_RPC_BYTES,
 };
 
-use crate::auth::{bearer_token, hash_api_key, is_secret_match};
+use crate::auth::{bearer_token, deployment_credential, hash_api_key, Identity, Operation};
 use crate::db;
 use crate::error::ApiError;
 use crate::models::{
     ApiKeyRecord, CreateProjectRuntimeChannel, CreateRuntimeLaunchSession, ProjectRuntimeExtension,
-    SetProjectRuntimeExtension,
+    ProjectWithBindings, SetProjectRuntimeExtension,
 };
 use crate::AppState;
 
@@ -41,7 +41,7 @@ pub async fn list_runtime_extensions(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<Value>, ApiError> {
-    require_admin(&state, &headers).await?;
+    require_deployment_operation(&state, &headers, Operation::DeploymentRead).await?;
     let manifests = state
         .config
         .runtime_extensions
@@ -56,8 +56,7 @@ pub async fn get_project_runtime_extension(
     headers: HeaderMap,
     Path(project_slug): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
-    require_admin(&state, &headers).await?;
-    let project = db::get_project_by_slug(&state.pool, &project_slug).await?;
+    let project = authorized_project(&state, &headers, &project_slug, false).await?;
     let extension = db::get_project_runtime_extension(&state.pool, project.project.id).await?;
     Ok(Json(json!({ "runtimeExtension": extension })))
 }
@@ -68,8 +67,7 @@ pub async fn set_project_runtime_extension(
     Path(project_slug): Path<String>,
     Json(input): Json<SetProjectRuntimeExtension>,
 ) -> Result<Json<Value>, ApiError> {
-    require_admin(&state, &headers).await?;
-    let project = db::get_project_by_slug(&state.pool, &project_slug).await?;
+    let project = authorized_project(&state, &headers, &project_slug, true).await?;
     let definition = configured_extension(&state, &input.extension_id)
         .ok_or_else(|| ApiError::Invalid("runtime extension is not configured".to_string()))?;
     let active_release_ref = input
@@ -108,8 +106,7 @@ pub async fn delete_project_runtime_extension(
     headers: HeaderMap,
     Path(project_slug): Path<String>,
 ) -> Result<axum::http::StatusCode, ApiError> {
-    require_admin(&state, &headers).await?;
-    let project = db::get_project_by_slug(&state.pool, &project_slug).await?;
+    let project = authorized_project(&state, &headers, &project_slug, true).await?;
     db::delete_project_runtime_extension(&state.pool, project.project.id).await?;
     Ok(axum::http::StatusCode::NO_CONTENT)
 }
@@ -119,8 +116,7 @@ pub async fn list_project_runtime_channels(
     headers: HeaderMap,
     Path(project_slug): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
-    require_admin(&state, &headers).await?;
-    let project = db::get_project_by_slug(&state.pool, &project_slug).await?;
+    let project = authorized_project(&state, &headers, &project_slug, false).await?;
     let channels = db::list_project_runtime_channels(&state.pool, project.project.id).await?;
     Ok(Json(json!({ "channels": channels })))
 }
@@ -131,8 +127,7 @@ pub async fn create_project_runtime_channel(
     Path(project_slug): Path<String>,
     Json(input): Json<CreateProjectRuntimeChannel>,
 ) -> Result<(StatusCode, Json<Value>), ApiError> {
-    require_admin(&state, &headers).await?;
-    let project = db::get_project_by_slug(&state.pool, &project_slug).await?;
+    let project = authorized_project(&state, &headers, &project_slug, true).await?;
     let name = validated_text("channel name", &input.name, 128)?;
     let allowed_origins = input
         .allowed_origins
@@ -166,8 +161,7 @@ pub async fn delete_project_runtime_channel(
     headers: HeaderMap,
     Path((project_slug, channel_id)): Path<(String, Uuid)>,
 ) -> Result<StatusCode, ApiError> {
-    require_admin(&state, &headers).await?;
-    let project = db::get_project_by_slug(&state.pool, &project_slug).await?;
+    let project = authorized_project(&state, &headers, &project_slug, true).await?;
     db::delete_project_runtime_channel(&state.pool, project.project.id, channel_id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -320,7 +314,7 @@ pub async fn invoke_project_runtime(
     Path(project_slug): Path<String>,
     Json(request): Json<Value>,
 ) -> Result<Json<Value>, ApiError> {
-    let authority = runtime_authority(&state, bearer_token(&headers)).await?;
+    let authority = runtime_authority(&state, deployment_credential(&headers)).await?;
     let (project, attachment, definition) =
         resolve_runtime(&state, &authority, &project_slug).await?;
     let (request_id_value, method) = match validate_rpc_request(&request) {
@@ -641,7 +635,13 @@ async fn runtime_authority(
         .map(str::trim)
         .filter(|token| !token.is_empty())
         .ok_or(ApiError::Unauthorized)?;
-    if is_secret_match(token, &state.config.admin_key) {
+    if matches!(
+        state
+            .auth
+            .authorize_token(token, Operation::DeploymentWrite)
+            .await,
+        Ok(Identity::DeploymentAdmin)
+    ) {
         return Ok(RuntimeAuthority::Admin);
     }
     let key_hash = hash_api_key(token, &state.config.api_key_pepper);
@@ -654,11 +654,37 @@ async fn runtime_authority(
     Err(ApiError::Forbidden)
 }
 
-async fn require_admin(state: &AppState, headers: &HeaderMap) -> Result<(), ApiError> {
-    match runtime_authority(state, bearer_token(headers)).await? {
-        RuntimeAuthority::Admin => Ok(()),
-        RuntimeAuthority::Key(_) | RuntimeAuthority::Launch { .. } => Err(ApiError::Forbidden),
+async fn require_deployment_operation(
+    state: &AppState,
+    headers: &HeaderMap,
+    operation: Operation,
+) -> Result<(), ApiError> {
+    match state.auth.authorize(headers, operation).await? {
+        Identity::DeploymentAdmin => Ok(()),
+        Identity::ActingUser { .. } => Err(ApiError::Forbidden),
     }
+}
+
+async fn authorized_project(
+    state: &AppState,
+    headers: &HeaderMap,
+    slug: &str,
+    write: bool,
+) -> Result<ProjectWithBindings, ApiError> {
+    let project = db::get_project_by_slug(&state.pool, slug).await?;
+    state
+        .auth
+        .authorize_project(
+            headers,
+            if write {
+                Operation::ProjectWrite
+            } else {
+                Operation::ProjectRead
+            },
+            project.project.owner_user_id.as_deref(),
+        )
+        .await?;
+    Ok(project)
 }
 
 fn configured_extension<'a>(

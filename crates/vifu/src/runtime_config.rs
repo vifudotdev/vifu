@@ -30,11 +30,15 @@ pub struct ServerRuntimeConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub listen: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deployment_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub database_url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub database_url_file: Option<PathBuf>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub runtime_extensions: Vec<RuntimeExtensionConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authority: Option<AccessTokenAuthorityConfig>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -46,6 +50,12 @@ pub struct RuntimeExtensionConfig {
     pub credential: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub credential_file: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct AccessTokenAuthorityConfig {
+    pub url: String,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -93,6 +103,9 @@ impl LoadedRuntimeConfig {
         }
         config.apply_database_url(server.database_url(&self.path)?)?;
         config.apply_runtime_extensions(server.runtime_extensions(&self.path)?)?;
+        if server.authority.is_some() {
+            config.apply_access_token_authority(server.access_token_authority()?)?;
+        }
         Ok(config)
     }
 }
@@ -118,9 +131,11 @@ impl RuntimeConfig {
             version: CONFIG_VERSION,
             server: cfg!(feature = "server").then(|| ServerRuntimeConfig {
                 listen: Some("127.0.0.1:6790".to_string()),
+                deployment_id: None,
                 database_url: None,
                 database_url_file: None,
                 runtime_extensions: Vec::new(),
+                authority: None,
             }),
             gateway: cfg!(feature = "gateway").then(|| GatewayRuntimeConfig {
                 server_url: Some(vifu_gateway::config::DEFAULT_SERVER_URL.to_string()),
@@ -170,6 +185,18 @@ impl ServerRuntimeConfig {
             return Err(
                 "server configuration can set databaseUrl or databaseUrlFile, not both".to_string(),
             );
+        }
+        match (self.deployment_id.as_deref(), self.authority.as_ref()) {
+            (Some(deployment_id), Some(authority)) => {
+                validate_deployment_id(deployment_id)?;
+                authority.validate()?;
+            }
+            (None, None) => {}
+            _ => {
+                return Err(
+                    "server deploymentId and authority must be configured together".to_string(),
+                )
+            }
         }
         Ok(())
     }
@@ -240,6 +267,51 @@ impl ServerRuntimeConfig {
             })
             .collect()
     }
+
+    #[cfg(feature = "server")]
+    fn access_token_authority(
+        &self,
+    ) -> Result<Option<vifu_server::config::AccessTokenAuthorityConfig>, String> {
+        let (Some(deployment_id), Some(authority)) =
+            (self.deployment_id.as_ref(), self.authority.as_ref())
+        else {
+            return Ok(None);
+        };
+        vifu_server::config::AccessTokenAuthorityConfig::new(
+            authority.url.clone(),
+            deployment_id.clone(),
+        )
+        .map(Some)
+    }
+}
+
+impl AccessTokenAuthorityConfig {
+    fn validate(&self) -> Result<(), String> {
+        let url = self.url.trim();
+        if !(url.starts_with("https://")
+            || url.starts_with("http://localhost")
+            || url.starts_with("http://127.0.0.1")
+            || url.starts_with("http://[::1]"))
+        {
+            return Err("server authority URL must use HTTPS, except on loopback".to_string());
+        }
+        Ok(())
+    }
+}
+
+fn validate_deployment_id(value: &str) -> Result<(), String> {
+    let value = value.trim();
+    let suffix = value.strip_prefix("dep_").unwrap_or_default();
+    let mut bytes = suffix.bytes();
+    if !(12..=128).contains(&value.len())
+        || !bytes
+            .next()
+            .is_some_and(|byte| byte.is_ascii_alphanumeric())
+        || !bytes.all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+    {
+        return Err("server deploymentId is invalid".to_string());
+    }
+    Ok(())
 }
 
 impl RuntimeExtensionConfig {
@@ -386,6 +458,25 @@ mod tests {
         );
 
         std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[cfg(feature = "server")]
+    #[test]
+    fn loads_access_token_authority() {
+        let raw = r#"{"version":1,"server":{"deploymentId":"dep_01JTESTDEPLOYMENT","authority":{"url":"https://auth.vifu.test/v1/deployments/authorize"}}}"#;
+
+        let config = RuntimeConfig::parse(Path::new("/tmp/config.json"), raw).unwrap();
+        let authority = config
+            .server
+            .unwrap()
+            .access_token_authority()
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            authority.url,
+            "https://auth.vifu.test/v1/deployments/authorize"
+        );
+        assert_eq!(authority.deployment_id, "dep_01JTESTDEPLOYMENT");
     }
 
     #[test]

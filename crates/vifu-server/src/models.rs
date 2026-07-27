@@ -38,6 +38,8 @@ impl Capabilities {
 #[serde(rename_all = "camelCase")]
 pub struct Project {
     pub id: Uuid,
+    #[serde(skip_serializing)]
+    pub owner_user_id: Option<String>,
     pub slug: String,
     pub name: String,
     pub description: Option<String>,
@@ -64,6 +66,21 @@ pub struct UpdateProject {
     pub gateway_id: Option<String>,
     pub enabled: Option<bool>,
     pub binding_ids: Option<Vec<Uuid>>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AssignProjectOwner {
+    pub owner_user_id: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectOwnership {
+    pub project_id: Uuid,
+    pub slug: String,
+    pub name: String,
+    pub owner_user_id: Option<String>,
 }
 
 #[derive(Debug, Serialize)]

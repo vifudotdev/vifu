@@ -244,7 +244,7 @@ pub async fn mark_agent_gateway_sessions_disconnected(pool: &SqlitePool) -> Resu
 
 pub async fn list_projects(pool: &SqlitePool) -> Result<Vec<ProjectWithBindings>, ApiError> {
     let projects = sqlx::query_as::<_, Project>(
-        "SELECT id, slug, name, description, gateway_id, enabled,
+        "SELECT id, owner_user_id, slug, name, description, gateway_id, enabled,
                 created_at, updated_at
          FROM projects ORDER BY created_at ASC",
     )
@@ -253,9 +253,26 @@ pub async fn list_projects(pool: &SqlitePool) -> Result<Vec<ProjectWithBindings>
     projects_with_bindings(pool, projects).await
 }
 
+pub async fn list_projects_for_owner_user_id(
+    pool: &SqlitePool,
+    owner_user_id: &str,
+) -> Result<Vec<ProjectWithBindings>, ApiError> {
+    let projects = sqlx::query_as::<_, Project>(
+        "SELECT id, owner_user_id, slug, name, description, gateway_id, enabled,
+                created_at, updated_at
+         FROM projects
+         WHERE owner_user_id = $1
+         ORDER BY created_at ASC",
+    )
+    .bind(owner_user_id)
+    .fetch_all(pool)
+    .await?;
+    projects_with_bindings(pool, projects).await
+}
+
 pub async fn get_project(pool: &SqlitePool, id: Uuid) -> Result<ProjectWithBindings, ApiError> {
     let project = sqlx::query_as::<_, Project>(
-        "SELECT id, slug, name, description, gateway_id, enabled,
+        "SELECT id, owner_user_id, slug, name, description, gateway_id, enabled,
                 created_at, updated_at
          FROM projects WHERE id = $1",
     )
@@ -274,11 +291,34 @@ pub async fn get_project_by_slug(
     slug: &str,
 ) -> Result<ProjectWithBindings, ApiError> {
     let project = sqlx::query_as::<_, Project>(
-        "SELECT id, slug, name, description, gateway_id, enabled,
+        "SELECT id, owner_user_id, slug, name, description, gateway_id, enabled,
                 created_at, updated_at
          FROM projects WHERE slug = $1",
     )
     .bind(slug)
+    .fetch_optional(pool)
+    .await?
+    .ok_or(ApiError::NotFound)?;
+    Ok(ProjectWithBindings {
+        binding_ids: project_binding_ids(pool, project.id).await?,
+        project,
+    })
+}
+
+pub async fn set_project_owner_user_id(
+    pool: &SqlitePool,
+    id: Uuid,
+    owner_user_id: &str,
+) -> Result<ProjectWithBindings, ApiError> {
+    let project = sqlx::query_as::<_, Project>(
+        "UPDATE projects
+         SET owner_user_id = $2, updated_at = CURRENT_TIMESTAMP
+         WHERE id = $1
+         RETURNING id, owner_user_id, slug, name, description, gateway_id, enabled,
+                   created_at, updated_at",
+    )
+    .bind(id)
+    .bind(owner_user_id)
     .fetch_optional(pool)
     .await?
     .ok_or(ApiError::NotFound)?;
@@ -484,12 +524,13 @@ pub async fn create_project(
     let mut transaction = pool.begin().await?;
     let created = sqlx::query_as::<_, Project>(
         "INSERT INTO projects
-            (id, slug, name, description, gateway_id)
-         VALUES ($1, $2, $3, $4, $5)
-         RETURNING id, slug, name, description, gateway_id, enabled,
+            (id, owner_user_id, slug, name, description, gateway_id)
+         VALUES ($1, $2, $3, $4, $5, $6)
+         RETURNING id, owner_user_id, slug, name, description, gateway_id, enabled,
                    created_at, updated_at",
     )
     .bind(project.id)
+    .bind(project.owner_user_id)
     .bind(project.slug)
     .bind(project.name)
     .bind(project.description)
@@ -533,7 +574,7 @@ pub async fn update_project(
             enabled = COALESCE($7, enabled),
             updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
          WHERE id = $1
-         RETURNING id, slug, name, description, gateway_id, enabled,
+         RETURNING id, owner_user_id, slug, name, description, gateway_id, enabled,
                    created_at, updated_at",
     )
     .bind(id)
@@ -2986,6 +3027,25 @@ pub async fn list_trace_spans(
     .fetch_all(pool)
     .await
     .map_err(ApiError::from)
+}
+
+pub async fn get_trace_project_id(
+    pool: &SqlitePool,
+    trace_id: Uuid,
+) -> Result<Option<Uuid>, ApiError> {
+    let project_id: Option<String> =
+        sqlx::query_scalar("SELECT project_id FROM endpoint_traces WHERE id = ?")
+            .bind(trace_id.to_string())
+            .fetch_optional(pool)
+            .await
+            .map_err(ApiError::Database)?
+            .ok_or(ApiError::NotFound)?;
+    project_id
+        .map(|value| {
+            Uuid::parse_str(&value)
+                .map_err(|_| ApiError::Invalid("stored trace project ID is invalid".to_string()))
+        })
+        .transpose()
 }
 
 async fn delete_by_id(pool: &SqlitePool, table: &str, id: Uuid) -> Result<(), ApiError> {

@@ -100,8 +100,10 @@ dispatch! {
     pub async fn ready(storage: &Storage) -> Result<(), ApiError>;
     pub async fn mark_agent_gateway_sessions_disconnected(storage: &Storage) -> Result<(), ApiError>;
     pub async fn list_projects(storage: &Storage) -> Result<Vec<ProjectWithBindings>, ApiError>;
+    pub async fn list_projects_for_owner_user_id(storage: &Storage, owner_user_id: &str) -> Result<Vec<ProjectWithBindings>, ApiError>;
     pub async fn get_project(storage: &Storage, id: Uuid) -> Result<ProjectWithBindings, ApiError>;
     pub async fn get_project_by_slug(storage: &Storage, slug: &str) -> Result<ProjectWithBindings, ApiError>;
+    pub async fn set_project_owner_user_id(storage: &Storage, id: Uuid, owner_user_id: &str) -> Result<ProjectWithBindings, ApiError>;
     pub async fn get_project_runtime_extension(storage: &Storage, project_id: Uuid) -> Result<Option<ProjectRuntimeExtension>, ApiError>;
     pub async fn set_project_runtime_extension(storage: &Storage, project_id: Uuid, extension_id: &str, enabled: bool, active_release_ref: Option<&str>, metadata: &Value) -> Result<ProjectRuntimeExtension, ApiError>;
     pub async fn delete_project_runtime_extension(storage: &Storage, project_id: Uuid) -> Result<(), ApiError>;
@@ -189,6 +191,7 @@ dispatch! {
     pub async fn complete_trace_span(storage: &Storage, span_id: Uuid, status: &str, duration_ms: i64, output_summary: Option<&Value>, error: Option<&str>) -> Result<(), ApiError>;
     pub async fn complete_trace(storage: &Storage, request_id: Uuid, status: &str, latency_ms: i64, response: Option<&Value>, error: Option<&str>) -> Result<(), ApiError>;
     pub async fn list_traces(storage: &Storage, endpoint_id: Option<Uuid>, project_id: Option<Uuid>, limit: i64) -> Result<Vec<EndpointTrace>, ApiError>;
+    pub async fn get_trace_project_id(storage: &Storage, trace_id: Uuid) -> Result<Option<Uuid>, ApiError>;
     pub async fn list_trace_spans(storage: &Storage, trace_id: Uuid) -> Result<Vec<TraceSpan>, ApiError>;
 }
 
@@ -224,6 +227,7 @@ mod tests {
             &storage,
             NewProject {
                 id: project_id,
+                owner_user_id: None,
                 slug: "moon-train",
                 name: "Moon Train",
                 description: Some("Runtime storage contract"),
@@ -604,6 +608,71 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn sqlite_lists_only_projects_owned_by_the_canonical_user() {
+        let (storage, path) = sqlite_storage().await;
+        for (slug, owner_user_id) in [
+            ("owner-a-first", Some("user-a")),
+            ("owner-b", Some("user-b")),
+            ("admin-project", None),
+            ("owner-a-second", Some("user-a")),
+        ] {
+            create_project(
+                &storage,
+                NewProject {
+                    id: Uuid::new_v4(),
+                    owner_user_id,
+                    slug,
+                    name: slug,
+                    description: None,
+                    gateway_id: "gateway-local",
+                    binding_ids: &[],
+                },
+            )
+            .await
+            .expect("project should be created");
+        }
+
+        let projects = list_projects_for_owner_user_id(&storage, "user-a")
+            .await
+            .expect("owned projects should list");
+        assert_eq!(
+            projects
+                .iter()
+                .map(|project| project.project.slug.as_str())
+                .collect::<Vec<_>>(),
+            vec!["owner-a-first", "owner-a-second"]
+        );
+        assert!(projects
+            .iter()
+            .all(|project| project.project.owner_user_id.as_deref() == Some("user-a")));
+        assert_eq!(
+            list_projects(&storage)
+                .await
+                .expect("admin projects should list")
+                .len(),
+            4
+        );
+        let admin_project = list_projects(&storage)
+            .await
+            .expect("admin projects should list")
+            .into_iter()
+            .find(|project| project.project.slug == "admin-project")
+            .expect("unowned project should exist");
+        set_project_owner_user_id(&storage, admin_project.project.id, "user-a")
+            .await
+            .expect("legacy project should be assigned");
+        assert_eq!(
+            list_projects_for_owner_user_id(&storage, "user-a")
+                .await
+                .expect("assigned projects should list")
+                .len(),
+            3
+        );
+
+        close_and_remove(storage, &path).await;
+    }
+
+    #[tokio::test]
     async fn sqlite_persists_projects_across_pool_restarts() {
         let (storage, path) = sqlite_storage().await;
         let project_id = Uuid::new_v4();
@@ -611,6 +680,7 @@ mod tests {
             &storage,
             NewProject {
                 id: project_id,
+                owner_user_id: None,
                 slug: "persistent-project",
                 name: "Persistent project",
                 description: None,

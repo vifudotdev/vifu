@@ -34,6 +34,8 @@ pub enum ApiError {
     RuntimeNotPublished,
     #[error("the project runtime is temporarily unavailable")]
     RuntimeExtensionUnavailable,
+    #[error("deployment authority is temporarily unavailable")]
+    DeploymentAuthorityUnavailable,
     #[error("{0}")]
     AgentGateway(String),
     #[error("{0}")]
@@ -69,6 +71,10 @@ impl IntoResponse for ApiError {
             Self::RuntimeExtensionUnavailable => (
                 StatusCode::SERVICE_UNAVAILABLE,
                 "runtime_extension_unavailable",
+            ),
+            Self::DeploymentAuthorityUnavailable => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "deployment_authority_unavailable",
             ),
             Self::AgentGateway(_) => (StatusCode::BAD_GATEWAY, "AGENT_GATEWAY_ERROR"),
             Self::Provider(_) => (StatusCode::BAD_GATEWAY, "PROVIDER_ERROR"),

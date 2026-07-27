@@ -28,6 +28,13 @@ pub struct Config {
     pub provider_home_dir: PathBuf,
     pub provider_registry_file: Option<PathBuf>,
     pub runtime_extensions: Vec<RuntimeExtensionDefinition>,
+    pub access_token_authority: Option<AccessTokenAuthorityConfig>,
+}
+
+#[derive(Debug, Clone)]
+pub struct AccessTokenAuthorityConfig {
+    pub url: String,
+    pub deployment_id: String,
 }
 
 impl Config {
@@ -69,6 +76,17 @@ impl Config {
         Ok(())
     }
 
+    pub fn apply_access_token_authority(
+        &mut self,
+        access_token_authority: Option<AccessTokenAuthorityConfig>,
+    ) -> Result<(), String> {
+        if let Some(authority) = access_token_authority.as_ref() {
+            authority.validate()?;
+        }
+        self.access_token_authority = access_token_authority;
+        Ok(())
+    }
+
     fn from_lookup<F>(mut lookup: F) -> Result<Self, String>
     where
         F: FnMut(&str) -> Option<String>,
@@ -107,6 +125,7 @@ impl Config {
             "sqlite://{}",
             provider_home_dir.join("vifu.sqlite").display()
         );
+        let access_token_authority = access_token_authority(&mut lookup)?;
 
         Ok(Self {
             addr,
@@ -147,7 +166,58 @@ impl Config {
             provider_home_dir,
             provider_registry_file,
             runtime_extensions: Vec::new(),
+            access_token_authority,
         })
+    }
+}
+
+impl AccessTokenAuthorityConfig {
+    pub fn new(url: impl Into<String>, deployment_id: impl Into<String>) -> Result<Self, String> {
+        let config = Self {
+            url: url.into(),
+            deployment_id: deployment_id.into(),
+        };
+        config.validate()?;
+        Ok(config)
+    }
+
+    fn validate(&self) -> Result<(), String> {
+        let url = reqwest::Url::parse(self.url.trim())
+            .map_err(|error| format!("access-token authority URL is invalid: {error}"))?;
+        let host = url
+            .host_str()
+            .ok_or_else(|| "access-token authority URL must include a host".to_string())?;
+        let loopback = host.eq_ignore_ascii_case("localhost")
+            || host
+                .parse::<std::net::IpAddr>()
+                .is_ok_and(|ip| ip.is_loopback());
+        if url.scheme() != "https" && !(url.scheme() == "http" && loopback) {
+            return Err(
+                "access-token authority URL must use HTTPS, except on loopback".to_string(),
+            );
+        }
+        if !url.username().is_empty() || url.password().is_some() {
+            return Err("access-token authority URL must not contain credentials".to_string());
+        }
+        validate_deployment_id(&self.deployment_id)
+    }
+}
+
+fn access_token_authority<F>(lookup: &mut F) -> Result<Option<AccessTokenAuthorityConfig>, String>
+where
+    F: FnMut(&str) -> Option<String>,
+{
+    let url = configured_value(lookup, "VIFU_ACCESS_TOKEN_AUTHORITY_URL")?;
+    let deployment_id = configured_value(lookup, "VIFU_DEPLOYMENT_ID")?;
+    match (url, deployment_id) {
+        (None, None) => Ok(None),
+        (Some(url), Some(deployment_id)) => {
+            AccessTokenAuthorityConfig::new(url, deployment_id).map(Some)
+        }
+        _ => Err(
+            "VIFU_ACCESS_TOKEN_AUTHORITY_URL and VIFU_DEPLOYMENT_ID must be configured together"
+                .to_string(),
+        ),
     }
 }
 
@@ -248,6 +318,24 @@ fn validate_secret(name: &str, value: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn validate_deployment_id(value: &str) -> Result<(), String> {
+    let value = value.trim();
+    let suffix = value.strip_prefix("dep_").unwrap_or_default();
+    let mut bytes = suffix.bytes();
+    if !(12..=128).contains(&value.len())
+        || !bytes
+            .next()
+            .is_some_and(|byte| byte.is_ascii_alphanumeric())
+        || !bytes.all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+    {
+        return Err(
+            "VIFU_DEPLOYMENT_ID must start with dep_ and contain 12-128 ASCII letters, numbers, underscores, or hyphens"
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::{Config, DeploymentMode};
@@ -336,6 +424,60 @@ mod tests {
         })
         .unwrap();
         assert_eq!(config.deployment_mode, DeploymentMode::SelfHosted);
+    }
+
+    #[test]
+    fn accepts_a_complete_access_token_authority_configuration() {
+        let config = Config::from_lookup(|key| match key {
+            "VIFU_ACCESS_TOKEN_AUTHORITY_URL" => {
+                Some("https://auth.vifu.test/v1/deployments/authorize".to_string())
+            }
+            "VIFU_DEPLOYMENT_ID" => Some("dep_01JTESTDEPLOYMENT".to_string()),
+            _ => None,
+        })
+        .unwrap();
+        let authority = config.access_token_authority.unwrap();
+        assert_eq!(
+            authority.url,
+            "https://auth.vifu.test/v1/deployments/authorize"
+        );
+        assert_eq!(authority.deployment_id, "dep_01JTESTDEPLOYMENT");
+    }
+
+    #[test]
+    fn rejects_a_partial_access_token_authority_configuration() {
+        let error = Config::from_lookup(|key| {
+            (key == "VIFU_ACCESS_TOKEN_AUTHORITY_URL")
+                .then(|| "https://auth.vifu.test/v1/deployments/authorize".to_string())
+        })
+        .unwrap_err();
+        assert!(error.contains("must be configured together"));
+    }
+
+    #[test]
+    fn rejects_account_derived_deployment_identifiers() {
+        let error = Config::from_lookup(|key| match key {
+            "VIFU_ACCESS_TOKEN_AUTHORITY_URL" => {
+                Some("https://auth.vifu.test/v1/deployments/authorize".to_string())
+            }
+            "VIFU_DEPLOYMENT_ID" => Some("account:user-test".to_string()),
+            _ => None,
+        })
+        .unwrap_err();
+        assert!(error.contains("VIFU_DEPLOYMENT_ID"));
+    }
+
+    #[test]
+    fn rejects_plaintext_remote_access_token_authorities() {
+        let error = Config::from_lookup(|key| match key {
+            "VIFU_ACCESS_TOKEN_AUTHORITY_URL" => {
+                Some("http://auth.vifu.test/v1/deployments/authorize".to_string())
+            }
+            "VIFU_DEPLOYMENT_ID" => Some("dep_01JTESTDEPLOYMENT".to_string()),
+            _ => None,
+        })
+        .unwrap_err();
+        assert!(error.contains("must use HTTPS"));
     }
 
     #[test]
