@@ -51,6 +51,10 @@ export class DeploymentClient {
     return this.request<RuntimeStatus>("/v1/status", { method: "GET" }, false);
   }
 
+  verifyAdmin(): Promise<{ valid: boolean }> {
+    return this.request("/v1/admin/verify");
+  }
+
   async projects(): Promise<RuntimeProject[]> {
     return (await this.request<{ projects: RuntimeProject[] }>("/v1/projects")).projects ?? [];
   }
@@ -69,32 +73,32 @@ export class DeploymentClient {
     );
   }
 
-  async bindings(): Promise<AgentBinding[]> {
-    return (await this.request<{ bindings: AgentBinding[] }>("/v1/bindings")).bindings ?? [];
+  async projectBindings(slug: string): Promise<AgentBinding[]> {
+    return (await this.request<{ bindings: AgentBinding[] }>(`/v1/project/${encodeURIComponent(slug)}/bindings`)).bindings ?? [];
   }
 
-  async endpoints(): Promise<AgentEndpoint[]> {
-    return (await this.request<{ endpoints: AgentEndpoint[] }>("/v1/endpoints")).endpoints ?? [];
+  async projectEndpoints(slug: string): Promise<AgentEndpoint[]> {
+    return (await this.request<{ endpoints: AgentEndpoint[] }>(`/v1/project/${encodeURIComponent(slug)}/endpoints`)).endpoints ?? [];
   }
 
-  async apiKeys(): Promise<ApiKeyRecord[]> {
-    return (await this.request<{ apiKeys: ApiKeyRecord[] }>("/v1/api-keys")).apiKeys ?? [];
+  async projectApiKeys(slug: string): Promise<ApiKeyRecord[]> {
+    return (await this.request<{ apiKeys: ApiKeyRecord[] }>(`/v1/project/${encodeURIComponent(slug)}/api-keys`)).apiKeys ?? [];
   }
 
-  async agentGateways(): Promise<AgentGateway[]> {
-    return (await this.request<{ agentGateways: AgentGateway[] }>("/v1/agent-gateways")).agentGateways ?? [];
+  async projectAgentGateways(slug: string): Promise<AgentGateway[]> {
+    return (await this.request<{ agentGateways: AgentGateway[] }>(`/v1/project/${encodeURIComponent(slug)}/agent-gateways`)).agentGateways ?? [];
   }
 
-  async availableAgents(): Promise<AvailableAgent[]> {
-    return (await this.request<{ agents: AvailableAgent[] }>("/v1/agents")).agents ?? [];
+  async projectAvailableAgents(slug: string): Promise<AvailableAgent[]> {
+    return (await this.request<{ agents: AvailableAgent[] }>(`/v1/project/${encodeURIComponent(slug)}/agents`)).agents ?? [];
   }
 
   async providerAdapters(): Promise<ProviderAdapter[]> {
     return (await this.request<{ providerAdapters: ProviderAdapter[] }>("/v1/provider-adapters")).providerAdapters ?? [];
   }
 
-  async providerCatalog(): Promise<ProviderCatalog> {
-    const catalog = await this.request<Partial<ProviderCatalog>>("/v1/provider-catalog");
+  async projectProviderCatalog(slug: string): Promise<ProviderCatalog> {
+    const catalog = await this.request<Partial<ProviderCatalog>>(`/v1/project/${encodeURIComponent(slug)}/provider-catalog`);
     return { registry: catalog.registry ?? [], custom: catalog.custom ?? [] };
   }
 
@@ -106,8 +110,8 @@ export class DeploymentClient {
     return (await this.request<{ candidates: ProjectAgentCandidate[] }>(`/v1/project/${encodeURIComponent(slug)}/agent-candidates`)).candidates ?? [];
   }
 
-  async traces(): Promise<EndpointTrace[]> {
-    return (await this.request<{ traces: EndpointTrace[] }>("/v1/traces?limit=100")).traces ?? [];
+  async projectTraces(slug: string): Promise<EndpointTrace[]> {
+    return (await this.request<{ traces: EndpointTrace[] }>(`/v1/project/${encodeURIComponent(slug)}/traces?limit=100`)).traces ?? [];
   }
 
   async request<T>(path: string, init: RequestInit = {}, publicRequest = false): Promise<T> {
@@ -122,7 +126,7 @@ export class DeploymentClient {
     const headers = new Headers(init.headers);
     headers.set("accept", headers.get("accept") ?? "application/json");
     if (init.body && !headers.has("content-type")) headers.set("content-type", "application/json");
-    if (!publicRequest && this.credential) headers.set("authorization", `Bearer ${this.credential}`);
+    if (!publicRequest && this.credential) headers.set("authorization", `Vifu ${this.credential}`);
     return this.fetcher(appendApiPath(this.apiBaseUrl, path), {
       ...init,
       headers,

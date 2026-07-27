@@ -12,7 +12,6 @@ import {
   Settings,
 } from "lucide-react";
 import type { DashboardData } from "../lib/dashboard-data";
-import { authRequired } from "../lib/auth-providers";
 import type {
   AgentBinding,
   AgentEndpoint,
@@ -25,10 +24,10 @@ import type {
 import { RuntimeTraceWorkbench } from "./runtime-trace-workbench";
 import { ApiIntegrationsView } from "./runtime-api-integrations";
 import { AppLayout } from "./console-shell";
+import { ProjectHome } from "./project-home";
 import { ProjectSwitcher } from "./project-switcher";
 import {
   DeleteResourceButton,
-  ProjectCreateForm,
 } from "./runtime-actions";
 import { RuntimeAgentsView } from "./runtime-agents";
 import { RuntimeProvidersView } from "./runtime-providers";
@@ -79,7 +78,9 @@ export function RuntimeConsole({
 }) {
   const capabilities = data.authority.status.capabilities;
   const activeSection = isSectionAvailable(section, capabilities) ? section : "overview";
-  const selectedProject = selectProject(data.runtime.projects, projectSlug);
+  const selectedProject = projectSlug
+    ? selectProject(data.runtime.projects, projectSlug)
+    : null;
   const title = SECTION_TITLES[activeSection];
   return (
     <AppLayout
@@ -92,7 +93,7 @@ export function RuntimeConsole({
           {selectedProject ? (
             <Navigation project={selectedProject} items={PROJECT_NAVIGATION} active={activeSection} capabilities={capabilities} />
           ) : null}
-          {authRequired(data.authority.status.auth) ? (
+          {data.authority.status.auth.required ? (
             <div className="sidebar-footer">
               <form action="/auth/logout" method="post">
                 <button className="sidebar-signout" type="submit"><LogOut aria-hidden="true" /><span>Sign out</span></button>
@@ -103,11 +104,13 @@ export function RuntimeConsole({
       )}
       header={(
         <>
-          <ProjectSwitcher
-            projects={data.runtime.projects}
-            selectedProject={selectedProject}
-            activeSection={activeSection}
-          />
+          {selectedProject ? (
+            <ProjectSwitcher
+              projects={data.runtime.projects}
+              selectedProject={selectedProject}
+              activeSection={activeSection}
+            />
+          ) : <strong className="project-home-breadcrumb">Home</strong>}
           <div className="app-header-meta">
             <div className="runtime-state"><span className="status-dot" />{runtimeStatusLabel(data.authority.status.status)}</div>
             <div className="topbar-meta"><span>v{data.authority.status.version}</span><span>{gatewayCountLabel(data.authority.status.agentGateways)}</span></div>
@@ -128,7 +131,7 @@ export function RuntimeConsole({
           </div>
         </>
       ) : (
-        <NoProjectView data={data} />
+        <ProjectHome projects={data.runtime.projects} />
       )}
     </AppLayout>
   );
@@ -425,7 +428,7 @@ function ErrorTraceList({ traces }: { traces: EndpointTrace[] }) {
 function LogsView({ project, traces }: { project: RuntimeProject; traces: EndpointTrace[] }) {
   return (
     <section className="content-section trace-section convex-trace-section">
-      <RuntimeTraceWorkbench projectId={project.id} traces={traces} />
+      <RuntimeTraceWorkbench projectId={project.id} projectSlug={project.slug} traces={traces} />
     </section>
   );
 }
@@ -463,34 +466,6 @@ function SettingsView({
         </div>
       </section>
     </>
-  );
-}
-
-function NoProjectView({ data }: { data: DashboardData }) {
-  return (
-    <div className="console-content no-project-content">
-      <div className="first-run-layout">
-        <FirstRunRail />
-        <section className="content-section create-section">
-          <SectionHeading title="Create your first project" />
-          <ProjectCreateForm />
-        </section>
-      </div>
-    </div>
-  );
-}
-
-function FirstRunRail() {
-  return (
-    <aside className="setup-rail first-run-rail" aria-label="Setup path">
-      <span>Setup path</span>
-      <ol>
-        <li className="active"><strong>Project</strong><small>Name the game or app you are building.</small></li>
-        <li><strong>Provider</strong><small>Connect OpenClaw or another agent provider.</small></li>
-        <li><strong>Agents</strong><small>Add detected agents or create one from a provider.</small></li>
-        <li><strong>Endpoint</strong><small>Call this project from your game over HTTP or WebSocket.</small></li>
-      </ol>
-    </aside>
   );
 }
 
@@ -538,7 +513,7 @@ function SetupRail({ project, providerCount, agentCount, callableCount, connecte
 function TraceTable({ traces, project: _project, detailed = false }: { traces: EndpointTrace[]; project: RuntimeProject; detailed?: boolean }) {
   if (traces.length === 0) return <EmptyState>No logs yet.</EmptyState>;
   if (detailed) {
-    return <RuntimeTraceWorkbench projectId={_project.id} traces={traces} />;
+    return <RuntimeTraceWorkbench projectId={_project.id} projectSlug={_project.slug} traces={traces} />;
   }
   return (
     <div className="trace-compact-list">

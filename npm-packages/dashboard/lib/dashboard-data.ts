@@ -29,7 +29,7 @@ export async function loadDashboardData(
   ] = await Promise.all([
     loadRuntimeSnapshot(authority, projectSlug),
     projectSlug ? authority.deployment.projectProviders(projectSlug) : Promise.resolve([]),
-    authority.deployment.providerCatalog(),
+    projectSlug ? authority.deployment.projectProviderCatalog(projectSlug) : Promise.resolve({ registry: [], custom: [] }),
     projectSlug ? authority.deployment.projectAgentCandidates(projectSlug) : Promise.resolve([]),
   ]);
   const profileDetails = projectSlug

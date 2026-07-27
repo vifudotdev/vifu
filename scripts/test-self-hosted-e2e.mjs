@@ -3,8 +3,6 @@ import { readFile, writeFile } from "node:fs/promises";
 const apiBaseUrl = (process.env.VIFU_E2E_API_URL || "http://127.0.0.1:6790").replace(/\/+$/, "");
 const dashboardBaseUrl = (process.env.VIFU_E2E_DASHBOARD_URL || "http://127.0.0.1:6791").replace(/\/+$/, "");
 const adminKey = process.env.VIFU_E2E_ADMIN_KEY || process.env.VIFU_ADMIN_KEY || "";
-const authEmail = process.env.VIFU_E2E_AUTH_EMAIL || "admin@self-hosted.example";
-const authPassword = process.env.VIFU_E2E_AUTH_PASSWORD || "correct horse battery staple";
 const statePath = process.env.VIFU_E2E_STATE_PATH || "/tmp/vifu-self-hosted-e2e.json";
 const openClawMockUrl = process.env.VIFU_E2E_OPENCLAW_MOCK_URL?.replace(/\/+$/, "") || null;
 const expectTimeout = process.env.VIFU_E2E_EXPECT_TIMEOUT === "1";
@@ -23,87 +21,66 @@ async function setup() {
   assert(status.capabilities?.agentGateways === true, "Agent Gateway capability is required");
   assert(status.capabilities?.endpoints === true, "Endpoint capability is required");
   const signupProbe = await fetch(`${dashboardBaseUrl}/signup`, { redirect: "manual" });
-  const signupHtml = signupProbe.status === 200 ? await signupProbe.text() : "";
-  const signupOpen = signupProbe.status === 200 && signupHtml.includes("Create your account");
-  const authPagePath = signupOpen ? "/signup" : "/login";
-  const authPage = await fetch(`${dashboardBaseUrl}${authPagePath}`);
+  assert(signupProbe.status === 404, "Dashboard still exposes the removed signup route");
+  const authPage = await fetch(`${dashboardBaseUrl}/login`);
   const authHtml = await authPage.text();
-  assert(authPage.ok && authHtml.includes(signupOpen ? "Create your account" : "Sign in"), "Dashboard auth page is unavailable");
-  assert(!/self-hosted deployment|deployment administrator|postgresql database/i.test(authHtml), "Auth UI exposes deployment internals");
-
-  let initialAuthResponse = signupOpen
-    ? await dashboardForm("/api/auth/local/signup", {
-      email: authEmail,
-      password: authPassword,
-      displayName: "Self-hosted Admin",
-      returnTo: "/project",
-    })
-    : await dashboardForm("/api/auth/local/login", {
-      email: authEmail,
-      password: authPassword,
-      returnTo: "/project",
-    });
-  if (initialAuthResponse.status === 303 && initialAuthResponse.headers.get("location")?.includes("auth_error")) {
-    initialAuthResponse = await dashboardForm("/api/auth/local/login", {
-      email: authEmail,
-      password: authPassword,
-      returnTo: "/project",
-    });
-  }
-  assert(initialAuthResponse.status === 303, `Dashboard authentication returned HTTP ${initialAuthResponse.status}`);
-  const signupCookie = sessionCookie(initialAuthResponse);
-  assert(signupCookie.httpOnly, "Dashboard local session cookie is not HttpOnly");
-  assert(signupCookie.sameSite === "lax", "Dashboard local session cookie must use SameSite=Lax");
-  assert(!signupCookie.domain, "Dashboard local session cookie must be host-only");
-  const dashboardAfterSignup = await fetch(`${dashboardBaseUrl}/project`, {
-    headers: { cookie: `vifu_session=${signupCookie.cookieValue}` },
+  assert(authPage.ok && authHtml.includes("Connect to Vifu"), "Dashboard Admin Key page is unavailable");
+  assert(
+    !/email|sign up|create your account|postgresql database/i.test(authHtml),
+    "Dashboard exposes removed account authentication",
+  );
+  const invalidLogin = await dashboardForm("/api/auth/admin-key", {
+    adminKey: "incorrect-admin-key",
+    returnTo: "/project",
   });
-  assert(dashboardAfterSignup.ok, "Dashboard did not accept the local session cookie");
+  assert(
+    invalidLogin.status === 303 && invalidLogin.headers.get("location")?.includes("auth_error"),
+    "An invalid Admin Key was accepted",
+  );
+  const initialAuthResponse = await dashboardForm("/api/auth/admin-key", {
+    adminKey,
+    returnTo: "/project",
+  });
+  assert(initialAuthResponse.status === 303, `Dashboard Admin Key authentication returned HTTP ${initialAuthResponse.status}`);
+  assert(!initialAuthResponse.headers.get("location")?.includes("auth_error"), "Dashboard rejected the configured Admin Key");
+  const initialCookie = sessionCookie(initialAuthResponse);
+  assert(initialCookie.httpOnly, "Dashboard Admin Key session cookie is not HttpOnly");
+  assert(initialCookie.sameSite === "lax", "Dashboard Admin Key session cookie must use SameSite=Lax");
+  assert(!initialCookie.domain, "Dashboard Admin Key session cookie must be host-only");
+  assert(!initialCookie.cookieValue.includes(adminKey), "Dashboard session cookie exposed the Admin Key");
+  const dashboardAfterSignup = await fetch(`${dashboardBaseUrl}/project`, {
+    headers: { cookie: `vifu_admin_session=${initialCookie.cookieValue}` },
+  });
+  assert(dashboardAfterSignup.ok, "Dashboard did not accept the Admin Key session cookie");
   const dashboardHtml = await dashboardAfterSignup.text();
-  assert(dashboardHtml.includes("Create your first project"), "Dashboard did not render after local signup");
+  assert(dashboardHtml.includes("Create your first project"), "Dashboard did not render after Admin Key authentication");
   assert(!dashboardHtml.includes(adminKey), "Dashboard HTML exposed the bootstrap admin key");
   const getLogoutResponse = await fetch(`${dashboardBaseUrl}/auth/logout`, {
-    headers: { cookie: `vifu_session=${signupCookie.cookieValue}` },
+    headers: { cookie: `vifu_admin_session=${initialCookie.cookieValue}` },
     redirect: "manual",
   });
   assert(getLogoutResponse.status === 405, "Dashboard logout accepted a GET request");
   const dashboardAfterGetLogout = await fetch(`${dashboardBaseUrl}/project`, {
-    headers: { cookie: `vifu_session=${signupCookie.cookieValue}` },
+    headers: { cookie: `vifu_admin_session=${initialCookie.cookieValue}` },
   });
-  assert(dashboardAfterGetLogout.ok, "Dashboard GET logout invalidated the web session");
+  assert(dashboardAfterGetLogout.ok, "Dashboard GET logout invalidated the Admin Key session");
   const logoutResponse = await fetch(`${dashboardBaseUrl}/auth/logout`, {
     method: "POST",
     headers: {
-      cookie: `vifu_session=${signupCookie.cookieValue}`,
+      cookie: `vifu_admin_session=${initialCookie.cookieValue}`,
       origin: dashboardBaseUrl,
     },
     redirect: "manual",
   });
   assert(logoutResponse.status >= 300 && logoutResponse.status < 400, "Dashboard logout did not redirect");
-  const invalidLogin = await dashboardForm("/api/auth/local/login", {
-    email: authEmail,
-    password: "incorrect password",
+  const loginResponse = await dashboardForm("/api/auth/admin-key", {
+    adminKey,
     returnTo: "/project",
   });
-  assert(invalidLogin.status === 303 && invalidLogin.headers.get("location")?.includes("auth_error"), "An invalid password was accepted");
-  const loginResponse = await dashboardForm("/api/auth/local/login", {
-    email: authEmail,
-    password: authPassword,
-    returnTo: "/project",
-  });
-  assert(loginResponse.status === 303, `Dashboard login returned HTTP ${loginResponse.status}`);
+  assert(loginResponse.status === 303, `Dashboard Admin Key login returned HTTP ${loginResponse.status}`);
   const loginCookie = sessionCookie(loginResponse);
-  assert(loginCookie.backendToken, "Dashboard login did not set an opaque session cookie");
+  assert(loginCookie.cookieValue, "Dashboard login did not set a signed session cookie");
   runtimeCredential = adminKey;
-  const authAfterSignup = await fetch(`${dashboardBaseUrl}/signup`, { redirect: "manual" });
-  assert(authAfterSignup.status === 200, "Signup closed after first-account initialization");
-  const secondSignup = await dashboardForm("/api/auth/local/signup", {
-    email: `second-${suffix}@self-hosted.example`,
-    password: authPassword,
-    displayName: "Second Operator",
-    returnTo: "/project",
-  });
-  assert(secondSignup.status === 303 && !secondSignup.headers.get("location")?.includes("auth_error"), "Open self-hosted signup rejected another account");
 
   const agentGateways = (await request("/v1/agent-gateways")).agentGateways ?? [];
   const expectedMockAgent = openClawMockUrl ? "guide-agent" : null;
@@ -413,7 +390,7 @@ async function setup() {
     concurrentCalls: calls.length,
     completedTraces: completed.length,
     canceledRequest,
-    localAuth: true,
+    adminKeyAccess: true,
   }));
 }
 
@@ -421,7 +398,7 @@ async function verify() {
   const state = JSON.parse(await readFile(statePath, "utf8"));
   runtimeCredential = adminKey;
   const dashboardSession = await fetch(`${dashboardBaseUrl}/project`, {
-    headers: { cookie: `vifu_session=${state.authCookieValue}` },
+    headers: { cookie: `vifu_admin_session=${state.authCookieValue}` },
   });
   assert(dashboardSession.ok, "Dashboard web session did not survive restart");
   const [projects, profiles, bindings, endpoints, agentGateways, traces] = await Promise.all([
@@ -461,7 +438,7 @@ async function cleanup() {
   await fetch(`${dashboardBaseUrl}/auth/logout`, {
     method: "POST",
     headers: {
-      cookie: `vifu_session=${state.authCookieValue}`,
+      cookie: `vifu_admin_session=${state.authCookieValue}`,
       origin: dashboardBaseUrl,
     },
     redirect: "manual",
@@ -567,19 +544,9 @@ function dashboardForm(path, values) {
 
 function sessionCookie(response) {
   const header = response.headers.get("set-cookie") || "";
-  const cookieValue = decodeURIComponent(/(?:^|,\s*)vifu_session=([^;]+)/.exec(header)?.[1] || "");
-  let backendToken = "";
-  try {
-    const stored = JSON.parse(Buffer.from(cookieValue, "base64url").toString("utf8"));
-    if ((stored.adapter === "dashboard" || stored.adapter === "runtime") && typeof stored.token === "string") {
-      backendToken = stored.token;
-    }
-  } catch {
-    backendToken = "";
-  }
+  const cookieValue = decodeURIComponent(/(?:^|,\s*)vifu_admin_session=([^;]+)/.exec(header)?.[1] || "");
   return {
     cookieValue,
-    backendToken,
     httpOnly: /;\s*httponly(?:;|$)/i.test(header),
     sameSite: /;\s*samesite=([^;]+)/i.exec(header)?.[1]?.toLowerCase() || "",
     domain: /;\s*domain=([^;]+)/i.exec(header)?.[1] || "",

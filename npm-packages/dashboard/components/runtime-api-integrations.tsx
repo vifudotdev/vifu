@@ -208,11 +208,11 @@ export function ApiIntegrationsView({
                         <td>
                           <div className="api-key-row-actions">
                             {!key.revokedAt ? (
-                              <EditApiKeyDialog apiKey={key} agentOptions={agentOptions} />
+                              <EditApiKeyDialog projectSlug={project.slug} apiKey={key} agentOptions={agentOptions} />
                             ) : null}
                             {key.revokedAt
-                              ? <DeleteApiKeyButton id={key.id} name={key.name} />
-                              : <RevokeApiKeyButton id={key.id} name={key.name} />}
+                              ? <DeleteApiKeyButton projectSlug={project.slug} id={key.id} name={key.name} />
+                              : <RevokeApiKeyButton projectSlug={project.slug} id={key.id} name={key.name} />}
                           </div>
                         </td>
                       </tr>
@@ -359,7 +359,7 @@ function CreateApiKeyDialog({
     setPending(true);
     setError(null);
     try {
-      const payload = await runtimeRequest<{ apiKey?: { key?: string } }>("api-keys", "POST", {
+      const payload = await runtimeRequest<{ apiKey?: { key?: string } }>(`project/${project.slug}/api-keys`, "POST", {
         projectId: project.id,
         name: name.trim() || readableDefaultKeyName(),
         agentScope: agentScopePayload(scopeMode, selectedProfileIds),
@@ -459,9 +459,11 @@ function CreateApiKeyDialog({
 }
 
 function EditApiKeyDialog({
+  projectSlug,
   apiKey,
   agentOptions,
 }: {
+  projectSlug: string;
   apiKey: ApiKeyRecord;
   agentOptions: ApiKeyAgentOption[];
 }) {
@@ -492,7 +494,7 @@ function EditApiKeyDialog({
     setPending(true);
     setError(null);
     try {
-      await runtimeRequest(`api-keys/${apiKey.id}`, "PATCH", {
+      await runtimeRequest(`project/${projectSlug}/api-keys/${apiKey.id}`, "PATCH", {
         name: name.trim(),
         agentScope: agentScopePayload(scopeMode, selectedProfileIds),
         permissions,

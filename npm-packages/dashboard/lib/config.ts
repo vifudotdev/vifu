@@ -17,24 +17,8 @@ export function configuredAdminKey(): string | null {
   return configuredValue("VIFU_ADMIN_KEY");
 }
 
-export function configuredDatabaseUrl(): string | null {
-  return configuredValue("DATABASE_URL");
-}
-
-export function configuredDashboardOrigin(requestUrl: string): string | null {
-  const configured = process.env.VIFU_DASHBOARD_URL?.trim();
-  if (configured) return normalizeOrigin(configured);
-  return new URL(requestUrl).origin;
-}
-
 export function dashboardLoginPath(returnTo?: string): string {
   const url = new URL("/login", "https://dashboard.invalid");
-  if (returnTo) url.searchParams.set("returnTo", sanitizeReturnTo(returnTo));
-  return `${url.pathname}${url.search}`;
-}
-
-export function dashboardSignupPath(returnTo?: string): string {
-  const url = new URL("/signup", "https://dashboard.invalid");
   if (returnTo) url.searchParams.set("returnTo", sanitizeReturnTo(returnTo));
   return `${url.pathname}${url.search}`;
 }
@@ -83,11 +67,4 @@ function configuredValue(name: string): string | null {
   } catch {
     return null;
   }
-}
-
-function normalizeOrigin(value: string): string | null {
-  const normalized = normalizeHttpBase(value);
-  if (!normalized) return null;
-  const url = new URL(normalized);
-  return url.pathname === "/" ? url.origin : null;
 }

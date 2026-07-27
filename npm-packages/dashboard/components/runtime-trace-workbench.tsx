@@ -12,6 +12,7 @@ const ROW_HEIGHT = 32;
 
 type RuntimeTraceWorkbenchProps = {
   projectId: string;
+  projectSlug: string;
   traces: EndpointTrace[];
 };
 
@@ -25,7 +26,7 @@ type RuntimeTraceSpansResponse = {
   error?: { message?: string };
 };
 
-export function RuntimeTraceWorkbench({ projectId, traces: initialTraces }: RuntimeTraceWorkbenchProps) {
+export function RuntimeTraceWorkbench({ projectId, projectSlug, traces: initialTraces }: RuntimeTraceWorkbenchProps) {
   const [traces, setTraces] = useState(() => sortTraces(initialTraces).slice(0, MAX_LOGS));
   const [pausedTraces, setPausedTraces] = useState<EndpointTrace[]>([]);
   const [paused, setPaused] = useState(false);
@@ -58,7 +59,7 @@ export function RuntimeTraceWorkbench({ projectId, traces: initialTraces }: Runt
 
     async function poll() {
       try {
-        const response = await fetch("/api/runtime/traces?limit=100", {
+        const response = await fetch(`/api/runtime/project/${encodeURIComponent(projectSlug)}/traces?limit=100`, {
           cache: "no-store",
           signal: controller.signal,
         });
@@ -89,7 +90,7 @@ export function RuntimeTraceWorkbench({ projectId, traces: initialTraces }: Runt
       controller.abort();
       window.clearInterval(timer);
     };
-  }, [paused, projectId]);
+  }, [paused, projectId, projectSlug]);
 
   const agentOptions = useMemo(() => {
     return Array.from(new Set([...traces, ...pausedTraces].map(traceAgentLabel))).sort((a, b) => a.localeCompare(b));
@@ -121,7 +122,7 @@ export function RuntimeTraceWorkbench({ projectId, traces: initialTraces }: Runt
     setSelectedSpans([]);
     setSpansError(null);
     setSpansLoading(true);
-    void fetch(`/api/runtime/traces/${encodeURIComponent(selectedTraceId)}/spans`, {
+    void fetch(`/api/runtime/project/${encodeURIComponent(projectSlug)}/traces/${encodeURIComponent(selectedTraceId)}/spans`, {
       cache: "no-store",
       signal: controller.signal,
     })
@@ -137,7 +138,7 @@ export function RuntimeTraceWorkbench({ projectId, traces: initialTraces }: Runt
         if (!controller.signal.aborted) setSpansLoading(false);
       });
     return () => controller.abort();
-  }, [selectedTraceId]);
+  }, [projectSlug, selectedTraceId]);
 
   const selectTrace = useCallback((trace: EndpointTrace) => {
     setSelectedTraceId(trace.id);

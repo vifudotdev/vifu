@@ -1,100 +1,57 @@
 import Image from "next/image";
 import Link from "next/link";
-import type { AuthProvider } from "../lib/runtime-types";
 
 export function AuthScreen({
-  providers,
-  intent,
-  signupEnabled,
   returnTo,
-  email,
   error,
   unavailable = false,
 }: {
-  providers: AuthProvider[];
-  intent: "login" | "signup";
-  signupEnabled: boolean;
   returnTo: string;
-  email?: string;
   error?: string;
   unavailable?: boolean;
 }) {
-  const isSignup = intent === "signup";
-  const password = providers.find((provider) => provider.kind === "password");
-  const oidcProviders = providers.filter((provider) => provider.kind === "oidc");
-
   return (
     <main className="auth-shell">
-      <section className="auth-panel" aria-label={isSignup ? "Create your account" : "Sign in to Vifu"}>
+      <section className="auth-panel" aria-label="Connect to Vifu">
         <Link className="auth-brand" href="/" aria-label="Vifu Console">
           <Image src="/brand/vifu-lockup.png" width={100} height={40} alt="Vifu" priority />
         </Link>
 
         {unavailable ? (
           <div className="auth-form auth-message">
-            <p className="auth-eyebrow">Service unavailable</p>
-            <h1>Cannot reach Vifu Runtime</h1>
-            <p>Vifu could not load the sign-in settings.</p>
-            <div className="auth-notice">Check the server address and try again.</div>
+            <p className="auth-eyebrow">Setup required</p>
+            <h1>Admin access is not configured</h1>
+            <p>Configure an admin key for this deployment, then reload the page.</p>
           </div>
         ) : (
           <div className="auth-form">
-            <h1>{isSignup ? "Create your account" : "Sign in"}</h1>
-            <p className="auth-copy">{isSignup ? "Create an account to manage your agents and endpoints." : "Continue to your dashboard."}</p>
-
-            {oidcProviders.map((provider) => (
-              <a
-                className="auth-provider-button"
-                href={`/api/auth/oidc/${encodeURIComponent(provider.id)}/start?returnTo=${encodeURIComponent(returnTo)}`}
-                key={provider.id}
-              >
-                {provider.label}
-              </a>
-            ))}
-
-            {oidcProviders.length > 0 && password ? <div className="auth-divider"><span>or</span></div> : null}
-
-            {password ? (
-              <form action={`/api/auth/local/${intent}`} method="post">
-                <input type="hidden" name="returnTo" value={returnTo} />
-                {isSignup ? (
-                  <label>
-                    Display name
-                    <input name="displayName" autoComplete="name" maxLength={96} required />
-                  </label>
-                ) : null}
-                <label>
-                  Email
-                  <input name="email" type="email" autoComplete="email" defaultValue={email} maxLength={320} required />
-                </label>
-                <label>
-                  Password
-                  <input
-                    name="password"
-                    type="password"
-                    autoComplete={isSignup ? "new-password" : "current-password"}
-                    minLength={12}
-                    maxLength={128}
-                    required
-                  />
-                </label>
-                <button type="submit">{isSignup ? "Create account" : "Sign in"}</button>
-              </form>
-            ) : null}
+            <h1>Connect to Vifu</h1>
+            <p className="auth-copy">Enter the admin key for this Vifu deployment.</p>
+            <form action="/api/auth/admin-key" method="post">
+              <input type="hidden" name="returnTo" value={returnTo} />
+              <label>
+                Admin key
+                <input
+                  name="adminKey"
+                  type="password"
+                  autoComplete="current-password"
+                  maxLength={4096}
+                  required
+                  autoFocus
+                />
+              </label>
+              <button type="submit">Connect</button>
+            </form>
 
             {error ? <div className="auth-error" role="alert">{error}</div> : null}
           </div>
         )}
 
-        {!unavailable ? <footer className="auth-footer">
-          {isSignup ? (
-            <span>Already registered? <Link href="/login">Sign in</Link></span>
-          ) : signupEnabled ? (
-            <span>Need an account? <Link href="/signup">Sign up</Link></span>
-          ) : (
-            <span>Account creation is disabled for this deployment.</span>
-          )}
-        </footer> : null}
+        {!unavailable ? (
+          <footer className="auth-footer">
+            <span>Admin keys grant full access to this deployment. Keep yours private.</span>
+          </footer>
+        ) : null}
       </section>
     </main>
   );

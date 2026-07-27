@@ -20,9 +20,12 @@ const dashboardForbiddenPatterns = [
   ["edge-provider runtime package", /@opennextjs\//],
   ["edge-provider request context", /get[A-Z][A-Za-z]+Context/],
   ["private service binding", /\bAPI_GATEWAY\b/],
+  ["Dashboard database client", /from\s+["']postgres["']/],
+  ["Dashboard password hashing", /\bbcryptjs\b/],
+  ["legacy Dashboard auth environment", /\b(?:VIFU_AUTH_|AUTH_ENABLE_OIDC|AUTH_DISABLE_SIGNUP|AUTH_DISABLE_USERNAME_PASSWORD)\b/],
 ];
 const serverForbiddenAuthPatterns = [
-  ["web authentication route", /\/v1\/auth\//],
+  ["web authentication route", /\/v1\/auth\/(?!exchange\b)/],
   ["Dashboard auth environment", /\bVIFU_AUTH_/],
   ["password hashing dependency", /\bargon2\b/],
   ["OIDC dependency", /\bopenidconnect\b/],
@@ -45,12 +48,8 @@ await enforceDirectoryAllowlist("crates", workspaceCrateDirectories);
 for (const root of sourceRoots) {
   for (const file of await sourceFiles(root)) {
     const contents = await readFile(file, "utf8");
-    if (
-      file.startsWith("npm-packages/dashboard/")
-      && file !== "npm-packages/dashboard/lib/dashboard-auth-config.ts"
-      && /process\.env\.VIFU_DEPLOYMENT_MODE/.test(contents)
-    ) {
-      violations.push(`${file}: runtime authority must come from server capabilities; auth provider selection belongs in dashboard-auth-config.ts`);
+    if (file.startsWith("npm-packages/dashboard/") && /process\.env\.VIFU_DEPLOYMENT_MODE/.test(contents)) {
+      violations.push(`${file}: runtime authority must come from server capabilities`);
     }
     if (file.startsWith("npm-packages/dashboard/")) {
       for (const [label, pattern] of dashboardForbiddenPatterns) {
@@ -70,7 +69,7 @@ if (violations.length > 0) {
   process.exit(1);
 }
 
-console.log("One dashboard uses provider-neutral runtime adapters and Next-owned auth provider configuration.");
+console.log("One dashboard uses provider-neutral runtime adapters and deployment credentials.");
 
 async function enforceDirectoryAllowlist(root, allowed) {
   for (const entry of await readdir(root, { withFileTypes: true })) {

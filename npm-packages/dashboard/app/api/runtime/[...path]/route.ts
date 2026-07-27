@@ -54,7 +54,7 @@ async function proxyRuntimeRequest(
   try {
     const { path } = await context.params;
     if (!isAllowedPath(path)) return errorResponse(404, "NOT_FOUND", "Resource not found.");
-    const body = method === "GET" || method === "DELETE" ? undefined : await readBody(request);
+    const body = method === "GET" ? undefined : await readBody(request);
     const authority = await resolveAuthority({ redirectToLogin: false });
     const query = new URL(request.url).search;
     const runtimePath = runtimeApiPath(path);
@@ -82,14 +82,14 @@ async function proxyRuntimeRequest(
   }
 }
 
-async function readBody(request: Request): Promise<ArrayBuffer> {
+async function readBody(request: Request): Promise<ArrayBuffer | undefined> {
   const declaredLength = Number(request.headers.get("content-length") ?? 0);
   if (Number.isFinite(declaredLength) && declaredLength > MAX_BODY_BYTES) {
     throw new BodyError(413, "Request body is too large.");
   }
   const body = await request.arrayBuffer();
   if (body.byteLength > MAX_BODY_BYTES) throw new BodyError(413, "Request body is too large.");
-  return body;
+  return body.byteLength > 0 ? body : undefined;
 }
 
 function isAllowedPath(path: string[]): boolean {
@@ -109,8 +109,24 @@ function isAllowedPath(path: string[]): boolean {
         || (path.length === 5 && path[4] === "test");
     }
     if (path[2] === "agent-candidates") return path.length === 3;
+    if (["bindings", "endpoints"].includes(path[2] ?? "")) {
+      return path.length === 3 || path.length === 4;
+    }
+    if (path[2] === "api-keys") {
+      return path.length === 3
+        || path.length === 4
+        || (path.length === 5 && path[4] === "revoke");
+    }
+    if (["agent-gateways", "provider-adapters", "provider-catalog"].includes(path[2] ?? "")) {
+      return path.length === 3;
+    }
+    if (path[2] === "traces") {
+      return path.length === 3
+        || (path.length === 5 && path[4] === "spans");
+    }
     if (path[2] === "agents") {
-      return (path.length === 4 && path[3] === "import")
+      return path.length === 3
+        || (path.length === 4 && path[3] === "import")
         || (path.length === 5 && path[4] === "restore");
     }
     if (path[2] === "profiles") {

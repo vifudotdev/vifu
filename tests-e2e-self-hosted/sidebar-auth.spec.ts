@@ -1,26 +1,26 @@
 import { expect, test } from "@playwright/test";
 
 test("session remains valid across sidebar navigation on the bind address", async ({ context, page }) => {
-  const email = process.env.VIFU_SELF_HOSTED_E2E_AUTH_EMAIL ?? "admin@self-hosted.example";
-  const password = process.env.VIFU_SELF_HOSTED_E2E_AUTH_PASSWORD ?? "correct horse battery staple";
+  const adminKey = process.env.VIFU_SELF_HOSTED_E2E_ADMIN_KEY;
+  expect(adminKey, "VIFU_SELF_HOSTED_E2E_ADMIN_KEY is required").toBeTruthy();
   const keyName = `Playwright project key ${Date.now()}`;
 
   await page.goto("/login");
-  await page.getByLabel("Email").fill(email);
-  await page.getByLabel("Password").fill(password);
+  await page.getByLabel("Admin key").fill(adminKey!);
   const loginResponsePromise = page.waitForResponse((response) =>
-    response.request().method() === "POST" && response.url().endsWith("/api/auth/local/login")
+    response.request().method() === "POST" && response.url().endsWith("/api/auth/admin-key")
   );
-  await page.getByRole("button", { name: "Sign in" }).click();
+  await page.getByRole("button", { name: "Connect" }).click();
   const loginResponse = await loginResponsePromise;
   expect(loginResponse.status()).toBe(303);
   expect(loginResponse.headers()["location"] ?? "").not.toContain("auth_error");
 
-  const session = (await context.cookies()).find((cookie) => cookie.name === "vifu_session");
+  const session = (await context.cookies()).find((cookie) => cookie.name === "vifu_admin_session");
   expect(session).toBeDefined();
   expect(session?.httpOnly).toBe(true);
   expect(session?.path).toBe("/");
   expect(session?.domain).toBe(new URL(page.url()).hostname);
+  expect(session?.value).not.toContain(adminKey!);
   await expect(page).toHaveURL(/\/project\/[^/]+(?:\/overview)?$/);
 
   await page.getByRole("link", { name: "Agents", exact: true }).click();

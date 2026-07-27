@@ -35,11 +35,6 @@ write_e2e_env() {
   postgres_password="$(rand_hex 24)"
   {
     printf '%s\n' "VIFU_DEPLOYMENT_MODE=self-hosted"
-    printf '%s\n' "VIFU_AUTH_MODE=local-password"
-    printf '%s\n' "VIFU_AUTH_PASSWORD_ENABLED=true"
-    printf '%s\n' "VIFU_SIGNUP_ENABLED=true"
-    printf '%s\n' "AUTH_DISABLE_USERNAME_PASSWORD=false"
-    printf '%s\n' "AUTH_DISABLE_SIGNUP=false"
     printf '%s\n' "VIFU_ADMIN_KEY=$admin_key"
     printf '%s\n' "VIFU_AGENT_GATEWAY_BOOTSTRAP_TOKEN=$agent_gateway_bootstrap_token"
     printf '%s\n' "VIFU_API_KEY_PEPPER=$api_key_pepper"
@@ -284,8 +279,7 @@ done
 
 VIFU_E2E_STATE_PATH="$state_path" node scripts/test-self-hosted-e2e.mjs verify
 VIFU_SELF_HOSTED_E2E_DASHBOARD_URL="http://0.0.0.0:$browser_dashboard_port" \
-VIFU_SELF_HOSTED_E2E_AUTH_EMAIL="${VIFU_E2E_AUTH_EMAIL:-admin@self-hosted.example}" \
-VIFU_SELF_HOSTED_E2E_AUTH_PASSWORD="${VIFU_E2E_AUTH_PASSWORD:-correct horse battery staple}" \
+VIFU_SELF_HOSTED_E2E_ADMIN_KEY="$VIFU_ADMIN_KEY" \
 npx playwright test --config playwright.self-hosted.config.ts
 VIFU_E2E_STATE_PATH="$state_path" node scripts/test-self-hosted-e2e.mjs cleanup
 

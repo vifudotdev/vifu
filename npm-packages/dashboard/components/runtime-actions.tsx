@@ -277,7 +277,7 @@ export function DeleteResourceButton({
   );
 }
 
-export function RevokeApiKeyButton({ id, name }: { id: string; name: string }) {
+export function RevokeApiKeyButton({ projectSlug, id, name }: { projectSlug: string; id: string; name: string }) {
   const router = useRouter();
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -287,7 +287,7 @@ export function RevokeApiKeyButton({ id, name }: { id: string; name: string }) {
     setPending(true);
     setError(null);
     try {
-      await runtimeRequest(`api-keys/${id}/revoke`, "POST");
+      await runtimeRequest(`project/${projectSlug}/api-keys/${id}/revoke`, "POST");
       router.refresh();
     } catch (nextError) {
       setError(errorMessage(nextError));
@@ -306,7 +306,7 @@ export function RevokeApiKeyButton({ id, name }: { id: string; name: string }) {
   );
 }
 
-export function DeleteApiKeyButton({ id, name }: { id: string; name: string }) {
+export function DeleteApiKeyButton({ projectSlug, id, name }: { projectSlug: string; id: string; name: string }) {
   const router = useRouter();
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -316,7 +316,7 @@ export function DeleteApiKeyButton({ id, name }: { id: string; name: string }) {
     setPending(true);
     setError(null);
     try {
-      await runtimeRequest(`api-keys/${id}`, "DELETE");
+      await runtimeRequest(`project/${projectSlug}/api-keys/${id}`, "DELETE");
       router.refresh();
     } catch (nextError) {
       setError(errorMessage(nextError));

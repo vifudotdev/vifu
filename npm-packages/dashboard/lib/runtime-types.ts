@@ -1,12 +1,4 @@
 export type DeploymentMode = "local" | "self-hosted";
-export type AuthMode = "none" | "local-password" | "oidc";
-export type AuthProviderKind = "password" | "oidc";
-
-export type AuthProvider = {
-  id: string;
-  kind: AuthProviderKind;
-  label: string;
-};
 
 export type ServerCapabilities = {
   projects: boolean;
@@ -20,26 +12,8 @@ export type ServerCapabilities = {
 };
 
 export type AuthCapability = {
-  required?: boolean;
-  mode: AuthMode;
-  signupEnabled: boolean;
-  providers?: AuthProvider[];
-};
-
-export type Principal = {
-  userId: string;
-  email: string;
-  displayName?: string | null;
-  roles: string[];
-  provider: "local" | "oidc";
-};
-
-export type AuthenticatedSession = {
-  principal: Principal;
-  session: {
-    token: string;
-    expiresAt: string;
-  };
+  required: true;
+  mode: "admin-key";
 };
 
 export type RuntimeProject = {
