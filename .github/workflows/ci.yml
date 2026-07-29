@@ -90,9 +90,14 @@ jobs:
       - name: Verify publishable crates
         run: |
           cargo package --locked -p vifu-runtime
-          cargo package --locked -p vifu-gateway
-          cargo package --locked -p vifu-server
-          cargo package --locked -p vifu
+          cargo package --locked -p vifu-gateway \
+            --config 'patch.crates-io.vifu-runtime.path="crates/vifu-runtime"'
+          cargo package --locked -p vifu-server \
+            --config 'patch.crates-io.vifu-runtime.path="crates/vifu-runtime"'
+          cargo package --locked -p vifu \
+            --config 'patch.crates-io.vifu-runtime.path="crates/vifu-runtime"' \
+            --config 'patch.crates-io.vifu-gateway.path="crates/vifu-gateway"' \
+            --config 'patch.crates-io.vifu-server.path="crates/vifu-server"'
 
   dashboard:
     name: Dashboard and JavaScript packages
