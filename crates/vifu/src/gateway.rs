@@ -19,11 +19,12 @@ const PROVIDER_RETRY_DELAY: Duration = Duration::from_secs(10);
 #[derive(Debug, Clone)]
 pub struct GatewayRuntimeOptions {
     pub server_url: String,
+    pub enrollment_token: Option<String>,
 }
 
 impl GatewayRuntimeOptions {
     pub fn load_config(&self) -> Result<Config, String> {
-        Config::load(self.server_url.clone())
+        Config::load(self.server_url.clone(), self.enrollment_token.clone())
     }
 }
 
@@ -36,7 +37,7 @@ pub async fn run(
         if *shutdown.borrow() {
             return Ok(());
         }
-        let config = options.load_config()?;
+        let mut config = options.load_config()?;
         ensure_home_dir(&config)?;
         print_server_config(&config)?;
         let providers = config.openclaw_providers().cloned().collect::<Vec<_>>();
@@ -109,7 +110,8 @@ pub async fn run(
         let session_file = config.session_file();
         let runtime = relay::AgentGatewayRuntime {
             server_url: &config.server_url,
-            agent_gateway_bootstrap_token: &config.agent_gateway_bootstrap_token,
+            agent_gateway_bootstrap_token: config.agent_gateway_bootstrap_token.as_deref(),
+            enrollment_token: config.enrollment_token.take(),
             providers: &runtime_providers,
             agents: &agents,
             session_path: &session_file,

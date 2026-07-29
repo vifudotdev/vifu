@@ -178,7 +178,9 @@ dispatch! {
     pub async fn resolve_endpoint_route(storage: &Storage, id_or_slug: &str) -> Result<EndpointRoute, ApiError>;
     pub async fn resolve_project_endpoint_route(storage: &Storage, project_slug: &str, id_or_slug: &str) -> Result<EndpointRoute, ApiError>;
     pub async fn resolve_project_model_route(storage: &Storage, project_id: Uuid, model: &str) -> Result<EndpointRoute, ApiError>;
-    pub async fn register_agent_gateway_credential(storage: &Storage, gateway_id: &str, credential_prefix: &str, credential_hash: &[u8]) -> Result<AgentGatewayRegistration, ApiError>;
+    pub async fn register_agent_gateway_credential(storage: &Storage, gateway_id: &str, owner_user_id: Option<&str>, credential_prefix: &str, credential_hash: &[u8]) -> Result<AgentGatewayRegistration, ApiError>;
+    pub async fn create_agent_gateway_enrollment(storage: &Storage, input: NewAgentGatewayEnrollment<'_>) -> Result<(), ApiError>;
+    pub async fn consume_agent_gateway_enrollment(storage: &Storage, token_hash: &[u8], gateway_id: &str, credential_prefix: &str, credential_hash: &[u8]) -> Result<AgentGatewayRegistration, ApiError>;
     pub async fn authenticate_agent_gateway_credential(storage: &Storage, credential_hash: &[u8]) -> Result<String, ApiError>;
     pub async fn revoke_agent_gateway_credential(storage: &Storage, gateway_id: &str) -> Result<AgentGatewayCredential, ApiError>;
     pub async fn open_agent_gateway_session(storage: &Storage, gateway_id: &str, resume_session_id: Option<Uuid>, agents: &Value, metadata: &Value) -> Result<(Uuid, bool), ApiError>;
@@ -435,6 +437,7 @@ mod tests {
         register_agent_gateway_credential(
             &storage,
             "gateway-local",
+            None,
             "gateway_",
             b"gateway-credential-hash",
         )
@@ -605,6 +608,376 @@ mod tests {
             .expect("profile should restore");
 
         close_and_remove(storage, &path).await;
+    }
+
+    #[tokio::test]
+    async fn sqlite_consumes_gateway_enrollment_once_and_assigns_the_project() {
+        let (storage, path) = sqlite_storage().await;
+        let project_id = Uuid::new_v4();
+        create_project(
+            &storage,
+            NewProject {
+                id: project_id,
+                owner_user_id: Some("user-123"),
+                slug: "remote-project",
+                name: "Remote project",
+                description: None,
+                gateway_id: "project-remote-project",
+                binding_ids: &[],
+            },
+        )
+        .await
+        .expect("project should be created");
+        create_agent_gateway_enrollment(
+            &storage,
+            NewAgentGatewayEnrollment {
+                id: Uuid::new_v4(),
+                project_id,
+                owner_user_id: "user-123",
+                token_hash: b"enrollment-hash",
+                expires_at: Utc::now() + ChronoDuration::minutes(5),
+            },
+        )
+        .await
+        .expect("enrollment should be created");
+
+        assert_eq!(
+            consume_agent_gateway_enrollment(
+                &storage,
+                b"enrollment-hash",
+                "gateway-remote",
+                "vifu_gw_remote",
+                b"remote-credential-hash",
+            )
+            .await
+            .expect("enrollment should register the gateway"),
+            AgentGatewayRegistration::Registered
+        );
+        assert_eq!(
+            get_project(&storage, project_id)
+                .await
+                .expect("project should load")
+                .project
+                .gateway_id,
+            "gateway-remote"
+        );
+        assert_eq!(
+            authenticate_agent_gateway_credential(&storage, b"remote-credential-hash")
+                .await
+                .expect("gateway credential should authenticate"),
+            "gateway-remote"
+        );
+        assert_eq!(
+            consume_agent_gateway_enrollment(
+                &storage,
+                b"enrollment-hash",
+                "gateway-remote",
+                "vifu_gw_remote",
+                b"remote-credential-hash",
+            )
+            .await
+            .expect("the exact enrollment retry should be idempotent"),
+            AgentGatewayRegistration::Existing
+        );
+        assert!(matches!(
+            consume_agent_gateway_enrollment(
+                &storage,
+                b"enrollment-hash",
+                "gateway-other",
+                "vifu_gw_other",
+                b"other-credential-hash",
+            )
+            .await,
+            Err(ApiError::Unauthorized)
+        ));
+
+        close_and_remove(storage, &path).await;
+    }
+
+    #[tokio::test]
+    async fn sqlite_gateway_enrollment_revokes_prior_tokens_and_rejects_expired_tokens() {
+        let (storage, path) = sqlite_storage().await;
+        let project_id = Uuid::new_v4();
+        create_project(
+            &storage,
+            NewProject {
+                id: project_id,
+                owner_user_id: Some("user-123"),
+                slug: "rotated-enrollment",
+                name: "Rotated enrollment",
+                description: None,
+                gateway_id: "project-rotated-enrollment",
+                binding_ids: &[],
+            },
+        )
+        .await
+        .expect("project should be created");
+        for (token_hash, expires_at) in [
+            (
+                b"superseded-enrollment".as_slice(),
+                Utc::now() + ChronoDuration::minutes(5),
+            ),
+            (
+                b"current-enrollment".as_slice(),
+                Utc::now() + ChronoDuration::minutes(5),
+            ),
+        ] {
+            create_agent_gateway_enrollment(
+                &storage,
+                NewAgentGatewayEnrollment {
+                    id: Uuid::new_v4(),
+                    project_id,
+                    owner_user_id: "user-123",
+                    token_hash,
+                    expires_at,
+                },
+            )
+            .await
+            .expect("enrollment should be created");
+        }
+
+        assert!(matches!(
+            consume_agent_gateway_enrollment(
+                &storage,
+                b"superseded-enrollment",
+                "gateway-superseded",
+                "vifu_gw_superseded",
+                b"superseded-credential",
+            )
+            .await,
+            Err(ApiError::Unauthorized)
+        ));
+
+        let expired_project_id = Uuid::new_v4();
+        create_project(
+            &storage,
+            NewProject {
+                id: expired_project_id,
+                owner_user_id: Some("user-123"),
+                slug: "expired-enrollment",
+                name: "Expired enrollment",
+                description: None,
+                gateway_id: "project-expired-enrollment",
+                binding_ids: &[],
+            },
+        )
+        .await
+        .expect("expired project should be created");
+        create_agent_gateway_enrollment(
+            &storage,
+            NewAgentGatewayEnrollment {
+                id: Uuid::new_v4(),
+                project_id: expired_project_id,
+                owner_user_id: "user-123",
+                token_hash: b"expired-enrollment",
+                expires_at: Utc::now() - ChronoDuration::seconds(1),
+            },
+        )
+        .await
+        .expect("expired enrollment should be stored");
+        assert!(matches!(
+            consume_agent_gateway_enrollment(
+                &storage,
+                b"expired-enrollment",
+                "gateway-expired",
+                "vifu_gw_expired",
+                b"expired-credential",
+            )
+            .await,
+            Err(ApiError::Unauthorized)
+        ));
+
+        close_and_remove(storage, &path).await;
+    }
+
+    #[tokio::test]
+    async fn sqlite_gateway_can_enroll_multiple_projects_for_one_owner_only() {
+        let (storage, path) = sqlite_storage().await;
+        let first_project_id = Uuid::new_v4();
+        let second_project_id = Uuid::new_v4();
+        let other_project_id = Uuid::new_v4();
+        for (id, owner_user_id, slug) in [
+            (first_project_id, "user-123", "gateway-owner-first"),
+            (second_project_id, "user-123", "gateway-owner-second"),
+            (other_project_id, "user-456", "gateway-other-owner"),
+        ] {
+            create_project(
+                &storage,
+                NewProject {
+                    id,
+                    owner_user_id: Some(owner_user_id),
+                    slug,
+                    name: slug,
+                    description: None,
+                    gateway_id: slug,
+                    binding_ids: &[],
+                },
+            )
+            .await
+            .expect("project should be created");
+        }
+        for (project_id, owner_user_id, token_hash) in [
+            (
+                first_project_id,
+                "user-123",
+                b"owner-first-enrollment".as_slice(),
+            ),
+            (
+                second_project_id,
+                "user-123",
+                b"owner-second-enrollment".as_slice(),
+            ),
+            (
+                other_project_id,
+                "user-456",
+                b"other-owner-enrollment".as_slice(),
+            ),
+        ] {
+            create_agent_gateway_enrollment(
+                &storage,
+                NewAgentGatewayEnrollment {
+                    id: Uuid::new_v4(),
+                    project_id,
+                    owner_user_id,
+                    token_hash,
+                    expires_at: Utc::now() + ChronoDuration::minutes(5),
+                },
+            )
+            .await
+            .expect("enrollment should be created");
+        }
+
+        consume_agent_gateway_enrollment(
+            &storage,
+            b"owner-first-enrollment",
+            "gateway-owner",
+            "vifu_gw_owner",
+            b"owner-credential",
+        )
+        .await
+        .expect("first owner project should enroll");
+        assert_eq!(
+            consume_agent_gateway_enrollment(
+                &storage,
+                b"owner-second-enrollment",
+                "gateway-owner",
+                "vifu_gw_owner",
+                b"owner-credential",
+            )
+            .await
+            .expect("second owner project should enroll"),
+            AgentGatewayRegistration::Existing
+        );
+        assert!(matches!(
+            consume_agent_gateway_enrollment(
+                &storage,
+                b"other-owner-enrollment",
+                "gateway-owner",
+                "vifu_gw_owner",
+                b"owner-credential",
+            )
+            .await,
+            Err(ApiError::Conflict(_))
+        ));
+        assert_eq!(
+            get_project(&storage, second_project_id)
+                .await
+                .expect("second project should load")
+                .project
+                .gateway_id,
+            "gateway-owner"
+        );
+
+        close_and_remove(storage, &path).await;
+    }
+
+    async fn concurrent_gateway_enrollment_should_allow_only_one_binding(
+        storage: &Storage,
+        project_slug: &str,
+    ) {
+        let project_id = Uuid::new_v4();
+        create_project(
+            storage,
+            NewProject {
+                id: project_id,
+                owner_user_id: Some("concurrent-owner"),
+                slug: project_slug,
+                name: project_slug,
+                description: None,
+                gateway_id: project_slug,
+                binding_ids: &[],
+            },
+        )
+        .await
+        .expect("concurrent project should be created");
+        create_agent_gateway_enrollment(
+            storage,
+            NewAgentGatewayEnrollment {
+                id: Uuid::new_v4(),
+                project_id,
+                owner_user_id: "concurrent-owner",
+                token_hash: project_slug.as_bytes(),
+                expires_at: Utc::now() + ChronoDuration::minutes(5),
+            },
+        )
+        .await
+        .expect("concurrent enrollment should be created");
+
+        let first = consume_agent_gateway_enrollment(
+            storage,
+            project_slug.as_bytes(),
+            "gateway-concurrent-a",
+            "vifu_gw_concurrent_a",
+            b"concurrent-credential-a",
+        );
+        let second = consume_agent_gateway_enrollment(
+            storage,
+            project_slug.as_bytes(),
+            "gateway-concurrent-b",
+            "vifu_gw_concurrent_b",
+            b"concurrent-credential-b",
+        );
+        let (first, second) = tokio::join!(first, second);
+        assert_eq!(
+            usize::from(first.is_ok()) + usize::from(second.is_ok()),
+            1,
+            "exactly one concurrent enrollment should bind the project"
+        );
+        delete_project(storage, project_id)
+            .await
+            .expect("concurrent project should be removed");
+    }
+
+    #[tokio::test]
+    async fn sqlite_gateway_enrollment_is_atomic_under_concurrency() {
+        let (storage, path) = sqlite_storage().await;
+        concurrent_gateway_enrollment_should_allow_only_one_binding(
+            &storage,
+            "sqlite-concurrent-enrollment",
+        )
+        .await;
+        close_and_remove(storage, &path).await;
+    }
+
+    #[tokio::test]
+    async fn postgres_gateway_enrollment_is_atomic_under_concurrency_when_available() {
+        if std::env::var("VIFU_TEST_DATABASE_REQUIRED").as_deref() != Ok("1") {
+            eprintln!("skipping PostgreSQL enrollment test outside the CI database job");
+            return;
+        }
+        let database_url = "postgres://vifu@127.0.0.1:5432/vifu";
+        let storage = connect(database_url, 5)
+            .await
+            .expect("PostgreSQL is required for enrollment tests");
+        migrate(&storage)
+            .await
+            .expect("PostgreSQL migrations should run");
+        let slug = format!("postgres-concurrent-{}", Uuid::new_v4().simple());
+        concurrent_gateway_enrollment_should_allow_only_one_binding(&storage, &slug).await;
+        match storage {
+            Storage::Postgres(pool) => pool.close().await,
+            Storage::Sqlite(_) => unreachable!("PostgreSQL URL should create PostgreSQL storage"),
+        }
     }
 
     #[tokio::test]

@@ -1,4 +1,5 @@
 use std::collections::VecDeque;
+use std::fmt;
 
 use bevy_app::{App, Plugin};
 use bevy_ecs::prelude::*;
@@ -9,13 +10,24 @@ use serde_json::Value;
 #[derive(Clone, Debug, Hash, PartialEq, Eq, ScheduleLabel)]
 pub struct RuntimeSchedule;
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RuntimeCommand {
     pub id: String,
     pub name: String,
     #[serde(default)]
     pub payload: Value,
+}
+
+impl fmt::Debug for RuntimeCommand {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("RuntimeCommand")
+            .field("id", &self.id)
+            .field("name", &self.name)
+            .field("payload", &"[REDACTED]")
+            .finish()
+    }
 }
 
 impl RuntimeCommand {
@@ -28,7 +40,7 @@ impl RuntimeCommand {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RuntimeEvent {
     pub sequence: u64,
@@ -37,7 +49,18 @@ pub struct RuntimeEvent {
     pub payload: Value,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+impl fmt::Debug for RuntimeEvent {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("RuntimeEvent")
+            .field("sequence", &self.sequence)
+            .field("name", &self.name)
+            .field("payload", &"[REDACTED]")
+            .finish()
+    }
+}
+
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EffectRequest {
     pub id: String,
@@ -46,7 +69,18 @@ pub struct EffectRequest {
     pub payload: Value,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+impl fmt::Debug for EffectRequest {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("EffectRequest")
+            .field("id", &self.id)
+            .field("kind", &self.kind)
+            .field("payload", &"[REDACTED]")
+            .finish()
+    }
+}
+
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EffectResult {
     pub effect_id: String,
@@ -55,12 +89,33 @@ pub struct EffectResult {
     pub output: Value,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+impl fmt::Debug for EffectResult {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("EffectResult")
+            .field("effect_id", &self.effect_id)
+            .field("succeeded", &self.succeeded)
+            .field("output", &"[REDACTED]")
+            .finish()
+    }
+}
+
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RuntimeSnapshot {
     pub revision: u64,
     #[serde(default)]
     pub state: Value,
+}
+
+impl fmt::Debug for RuntimeSnapshot {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("RuntimeSnapshot")
+            .field("revision", &self.revision)
+            .field("state", &"[REDACTED]")
+            .finish()
+    }
 }
 
 impl Default for RuntimeSnapshot {
@@ -168,10 +223,20 @@ impl EffectResultQueue {
     }
 }
 
-#[derive(Resource, Clone, Debug)]
+#[derive(Resource, Clone)]
 pub struct RuntimeState {
     pub revision: u64,
     pub value: Value,
+}
+
+impl fmt::Debug for RuntimeState {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("RuntimeState")
+            .field("revision", &self.revision)
+            .field("value", &"[REDACTED]")
+            .finish()
+    }
 }
 
 impl Default for RuntimeState {

@@ -42,7 +42,7 @@ binary = [
   "dep:tracing",
   "dep:tracing-subscriber",
 ]
-local-whisper = ["gateway", "vifu-gateway/local-whisper"]
+local-whisper = ["gateway", "vifu-gateway/local-whisper", "vifu-runtime/local-whisper"]
 
 [dependencies]
 serde = { workspace = true, features = ["derive"], optional = true }

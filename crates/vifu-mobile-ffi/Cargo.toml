@@ -15,10 +15,13 @@ crate-type = ["staticlib", "cdylib"]
 name = "vifu_mobile_ffi"
 
 [dependencies]
+serde.workspace = true
+serde_json.workspace = true
 thiserror.workspace = true
 tokio = { version = "1", features = ["rt"] }
 uniffi.workspace = true
 vifu-gateway = { path = "../vifu-gateway" }
+vifu-runtime = { path = "../vifu-runtime" }
 
 [[bin]]
 name = "uniffi-bindgen"

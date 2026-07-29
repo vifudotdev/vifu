@@ -32,6 +32,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 uuid = { version = "1", features = ["serde", "v4"] }
 vifu-gateway = { version = "0.1.0", path = "../vifu-gateway", default-features = false }
+vifu-runtime = { version = "0.1.0", path = "../vifu-runtime" }
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }

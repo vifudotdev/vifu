@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, HashSet};
 use std::path::Path as FsPath;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use axum::body::Body;
@@ -20,10 +21,15 @@ use vifu_gateway::config::{
     AgentProviderAuthDefinition, AgentProviderDefinition, AgentProvidersFile,
 };
 use vifu_gateway::protocol::validate_identifier;
+use vifu_runtime::{
+    AgentDefinition, AgentProvider, EndpointDefinition, HttpCapabilityProvider,
+    HttpCapabilityRoute, InvocationData, InvocationInput, RuntimeError, VifuRuntime,
+};
 
 use crate::auth::{
     bearer_token, decrypt_secret_json, deployment_credential, encrypt_secret_json,
-    hash_agent_gateway_credential, hash_api_key, is_secret_match, Identity, Operation,
+    hash_agent_gateway_credential, hash_agent_gateway_enrollment, hash_api_key, is_secret_match,
+    Identity, Operation,
 };
 use crate::config::DeploymentMode;
 use crate::db::{self, EndpointPatch, NewEndpoint, NewProject, ProfilePatch, ProjectPatch};
@@ -39,7 +45,7 @@ use crate::models::{
     UpdateProfile, UpdateProject, UpdateProjectProvider, UpsertProviderConnection,
 };
 use crate::openclaw_device;
-use crate::relay::RelayCallError;
+use crate::relay::RelayAgentProvider;
 use crate::AppState;
 
 #[derive(Serialize)]
@@ -1344,10 +1350,47 @@ pub async fn register_agent_gateway(
     let registration = db::register_agent_gateway_credential(
         &state.pool,
         gateway_id,
+        None,
         &credential_prefix,
         &credential_hash,
     )
     .await?;
+    Ok(agent_gateway_registration_response(
+        gateway_id,
+        registration,
+    ))
+}
+
+pub async fn enroll_agent_gateway(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<RegisterAgentGateway>,
+) -> Result<(StatusCode, Json<Value>), ApiError> {
+    let enrollment_token = bearer_token(&headers).ok_or(ApiError::Unauthorized)?;
+    validate_agent_gateway_enrollment_token(enrollment_token)?;
+    let gateway_id = required_identifier("agent gateway id", &input.gateway_id)?;
+    let credential = validate_agent_gateway_credential(&input.credential)?;
+    let credential_prefix = credential.chars().take(20).collect::<String>();
+    let credential_hash = hash_agent_gateway_credential(credential, &state.config.api_key_pepper);
+    let token_hash = hash_agent_gateway_enrollment(enrollment_token, &state.config.api_key_pepper);
+    let registration = db::consume_agent_gateway_enrollment(
+        &state.pool,
+        &token_hash,
+        gateway_id,
+        &credential_prefix,
+        &credential_hash,
+    )
+    .await?;
+    Ok(agent_gateway_registration_response(
+        gateway_id,
+        registration,
+    ))
+}
+
+fn agent_gateway_registration_response(
+    gateway_id: &str,
+    registration: db::AgentGatewayRegistration,
+) -> (StatusCode, Json<Value>) {
     let status = match registration {
         db::AgentGatewayRegistration::Registered => "registered",
         db::AgentGatewayRegistration::Existing => "existing",
@@ -1357,9 +1400,53 @@ pub async fn register_agent_gateway(
     } else {
         StatusCode::OK
     };
-    Ok((
+    (
         status_code,
         Json(json!({ "gatewayId": gateway_id, "status": status })),
+    )
+}
+
+pub async fn create_project_agent_gateway_enrollment(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(slug): Path<String>,
+) -> Result<(StatusCode, Json<Value>), ApiError> {
+    let project = db::get_project_by_slug(&state.pool, &slug).await?;
+    let identity = state
+        .auth
+        .authorize_project(
+            &headers,
+            Operation::ProjectWrite,
+            project.project.owner_user_id.as_deref(),
+        )
+        .await?;
+    let Identity::ActingUser { subject, .. } = identity else {
+        return Err(ApiError::Forbidden);
+    };
+    let token = format!(
+        "vifu_ge_{}{}",
+        Uuid::new_v4().simple(),
+        Uuid::new_v4().simple()
+    );
+    let expires_at = Utc::now() + ChronoDuration::minutes(5);
+    let token_hash = hash_agent_gateway_enrollment(&token, &state.config.api_key_pepper);
+    db::create_agent_gateway_enrollment(
+        &state.pool,
+        db::NewAgentGatewayEnrollment {
+            id: Uuid::new_v4(),
+            project_id: project.project.id,
+            owner_user_id: &subject,
+            token_hash: &token_hash,
+            expires_at,
+        },
+    )
+    .await?;
+    Ok((
+        StatusCode::CREATED,
+        Json(json!({
+            "enrollmentToken": token,
+            "expiresAt": expires_at,
+        })),
     ))
 }
 
@@ -1666,11 +1753,24 @@ pub async fn list_project_agent_candidates(
     Path(slug): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
     let project = authorized_project_by_slug(&state, &headers, &slug, ProjectAccess::Read).await?;
-    let assigned = db::list_provider_connections(&state.pool, &slug)
+    let mut available_provider_keys = db::list_provider_connections(&state.pool, &slug)
         .await?
         .into_iter()
         .map(|provider| provider.provider_key)
         .collect::<HashSet<_>>();
+    let available_agents = db::list_available_agents(&state.pool).await?;
+    available_provider_keys.extend(
+        available_agents
+            .iter()
+            .filter(|agent| agent.gateway_id == project.project.gateway_id)
+            .filter_map(|agent| {
+                agent
+                    .metadata
+                    .get("providerKey")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            }),
+    );
     let imported = db::list_project_profile_provider_resources(&state.pool, project.project.id)
         .await?
         .into_iter()
@@ -1682,7 +1782,7 @@ pub async fn list_project_agent_candidates(
         .collect::<HashSet<_>>();
     let mut candidates = archived
         .into_iter()
-        .filter(|agent| assigned.contains(&agent.provider_key))
+        .filter(|agent| available_provider_keys.contains(&agent.provider_key))
         .map(|agent| {
             json!({
                 "profileId": agent.profile_id,
@@ -1696,42 +1796,36 @@ pub async fn list_project_agent_candidates(
             })
         })
         .collect::<Vec<_>>();
-    candidates.extend(
-        db::list_available_agents(&state.pool)
-            .await?
-            .into_iter()
-            .filter_map(|agent| {
-                if agent.gateway_id != project.project.gateway_id {
-                    return None;
-                }
-                let provider_key = agent
-                    .metadata
-                    .get("providerKey")
-                    .and_then(Value::as_str)?
-                    .to_string();
-                if !assigned.contains(&provider_key)
-                    || imported.contains(&(provider_key.clone(), agent.id.clone()))
-                    || archived_resources.contains(&(provider_key.clone(), agent.id.clone()))
-                {
-                    return None;
-                }
-                let provider_type = agent
-                    .metadata
-                    .get("providerType")
-                    .and_then(Value::as_str)
-                    .unwrap_or("openclaw");
-                Some(json!({
-                    "profileId": null,
-                    "gatewayId": agent.gateway_id,
-                    "id": agent.id,
-                    "name": agent.name,
-                    "status": agent.status,
-                    "providerKey": provider_key,
-                    "providerType": provider_type,
-                    "metadata": agent.metadata,
-                }))
-            }),
-    );
+    candidates.extend(available_agents.into_iter().filter_map(|agent| {
+        if agent.gateway_id != project.project.gateway_id {
+            return None;
+        }
+        let provider_key = agent
+            .metadata
+            .get("providerKey")
+            .and_then(Value::as_str)?
+            .to_string();
+        if imported.contains(&(provider_key.clone(), agent.id.clone()))
+            || archived_resources.contains(&(provider_key.clone(), agent.id.clone()))
+        {
+            return None;
+        }
+        let provider_type = agent
+            .metadata
+            .get("providerType")
+            .and_then(Value::as_str)
+            .unwrap_or("openclaw");
+        Some(json!({
+            "profileId": null,
+            "gatewayId": agent.gateway_id,
+            "id": agent.id,
+            "name": agent.name,
+            "status": agent.status,
+            "providerKey": provider_key,
+            "providerType": provider_type,
+            "metadata": agent.metadata,
+        }))
+    }));
     Ok(Json(json!({ "candidates": candidates })))
 }
 
@@ -1747,11 +1841,6 @@ pub async fn import_project_agent(
     let provider_key = required_identifier("provider key", &input.provider_key)?;
     if gateway_id != project.project.gateway_id {
         return Err(ApiError::Forbidden);
-    }
-    if !db::project_provider_is_assigned(&state.pool, project.project.id, provider_key).await? {
-        return Err(ApiError::Conflict(
-            "assign the provider to this project before adding its agents".to_string(),
-        ));
     }
     let agent = db::list_available_agents(&state.pool)
         .await?
@@ -2293,18 +2382,48 @@ pub async fn create_project_speech(
     )
     .await?;
     let started_at = Instant::now();
-    let result = vifu_gateway::providers::elevenlabs_speech(
-        &provider.base_url,
-        provider.token.as_deref(),
-        voice_id,
-        &provider_request,
+    let timeout = profile_timeout(&route.runtime, state.config.request_timeout);
+    let provider: Arc<dyn AgentProvider> = Arc::new(
+        HttpCapabilityProvider::new("http-provider", provider.base_url, provider.token)
+            .map_err(map_runtime_error)?
+            .with_route(
+                "speech",
+                HttpCapabilityRoute::ElevenLabsSpeech {
+                    voice_id: voice_id.to_string(),
+                },
+            )
+            .map_err(map_runtime_error)?,
+    );
+    let result = invoke_registered_provider(
+        RegisteredInvocation {
+            project_id: &project_slug,
+            agent_id: route.profile_id,
+            agent_name: &route.profile_name,
+            endpoint: &route.profile_slug,
+            capability: "speech",
+            timeout,
+            request_id,
+        },
+        provider,
+        InvocationData::Json(provider_request),
     )
-    .await;
+    .await
+    .and_then(|(data, metadata)| {
+        let InvocationData::Binary(body) = data else {
+            return Err(ApiError::Internal);
+        };
+        let content_type = metadata
+            .get("contentType")
+            .and_then(Value::as_str)
+            .unwrap_or("application/octet-stream")
+            .to_string();
+        Ok((body, content_type))
+    });
     match result {
-        Ok(audio) => {
+        Ok((audio, content_type)) => {
             let response_summary = json!({
-                "bytes": audio.body.len(),
-                "contentType": audio.content_type,
+                "bytes": audio.len(),
+                "contentType": content_type,
             });
             db::complete_trace_span(
                 &state.pool,
@@ -2324,26 +2443,35 @@ pub async fn create_project_speech(
                 None,
             )
             .await;
-            let mut response = Response::new(Body::from(audio.body));
+            let mut response = Response::new(Body::from(audio));
             response.headers_mut().insert(
                 header::CONTENT_TYPE,
-                HeaderValue::from_str(&audio.content_type)
+                HeaderValue::from_str(&content_type)
                     .unwrap_or_else(|_| HeaderValue::from_static("application/octet-stream")),
             );
             Ok(response)
         }
         Err(error) => {
+            let message = error.to_string();
             db::complete_trace_span(
                 &state.pool,
                 span_id,
                 "failed",
                 db::elapsed_millis(started_at),
                 None,
-                Some(&error),
+                Some(&message),
             )
             .await?;
-            persist_trace(&state, request_id, "failed", started_at, None, Some(&error)).await;
-            Err(ApiError::Provider(error))
+            persist_trace(
+                &state,
+                request_id,
+                api_error_trace_status(&error),
+                started_at,
+                None,
+                Some(&message),
+            )
+            .await;
+            Err(error)
         }
     }
 }
@@ -2463,10 +2591,13 @@ pub async fn create_project_transcription(
         &state,
         &project_slug,
         &route,
-        audio,
-        &file_name,
-        &content_type,
-        language.as_deref(),
+        TranscriptionInvocation {
+            audio,
+            file_name: &file_name,
+            content_type: &content_type,
+            language: language.as_deref(),
+        },
+        request_id,
     )
     .await;
     match result {
@@ -2680,15 +2811,26 @@ async fn resolve_profile_route_for_authority(
     Ok(route)
 }
 
+struct TranscriptionInvocation<'a> {
+    audio: Vec<u8>,
+    file_name: &'a str,
+    content_type: &'a str,
+    language: Option<&'a str>,
+}
+
 async fn transcribe_profile_audio(
     state: &AppState,
     project_slug: &str,
     route: &crate::models::ProfileRoute,
-    audio: Vec<u8>,
-    file_name: &str,
-    content_type: &str,
-    language: Option<&str>,
+    invocation: TranscriptionInvocation<'_>,
+    request_id: Uuid,
 ) -> Result<Value, ApiError> {
+    let TranscriptionInvocation {
+        audio,
+        file_name,
+        content_type,
+        language,
+    } = invocation;
     match route.provider_type.as_str() {
         "local-whisper" => {
             if content_type != "audio/wav" && !file_name.to_ascii_lowercase().ends_with(".wav") {
@@ -2729,16 +2871,38 @@ async fn transcribe_profile_audio(
                     "transcription capability is missing a provider model".to_string(),
                 )
             })?;
-            vifu_gateway::providers::openai_audio_transcription(
-                &provider.base_url,
-                provider.token.as_deref(),
-                model,
-                audio,
-                file_name,
-                content_type,
+            let provider: Arc<dyn AgentProvider> = Arc::new(
+                HttpCapabilityProvider::new("http-provider", provider.base_url, provider.token)
+                    .map_err(map_runtime_error)?
+                    .with_route(
+                        "transcription",
+                        HttpCapabilityRoute::OpenAiTranscription {
+                            model: model.to_string(),
+                            file_name: file_name.to_string(),
+                            content_type: content_type.to_string(),
+                        },
+                    )
+                    .map_err(map_runtime_error)?,
+            );
+            let timeout = profile_timeout(&route.runtime, state.config.request_timeout);
+            let (output, _) = invoke_registered_provider(
+                RegisteredInvocation {
+                    project_id: project_slug,
+                    agent_id: route.profile_id,
+                    agent_name: &route.profile_name,
+                    endpoint: &route.profile_slug,
+                    capability: "transcription",
+                    timeout,
+                    request_id,
+                },
+                provider,
+                InvocationData::Binary(audio),
             )
-            .await
-            .map_err(ApiError::Provider)
+            .await?;
+            match output {
+                InvocationData::Json(output) => Ok(output),
+                InvocationData::Binary(_) => Err(ApiError::Internal),
+            }
         }
         provider => Err(ApiError::Invalid(format!(
             "provider type {provider} does not support transcription"
@@ -2897,10 +3061,13 @@ async fn run_realtime_socket(
                             &state,
                             &project_slug,
                             &route,
-                            audio,
-                            "realtime.wav",
-                            "audio/wav",
-                            None,
+                            TranscriptionInvocation {
+                                audio,
+                                file_name: "realtime.wav",
+                                content_type: "audio/wav",
+                                language: None,
+                            },
+                            Uuid::new_v4(),
                         )
                         .await
                         {
@@ -3287,11 +3454,7 @@ async fn create_chat_completion_for_project(
             .min(state.config.request_timeout.as_millis() as u64),
     );
     let started_at = Instant::now();
-    match state
-        .relay
-        .invoke(&route, request_id, request, timeout)
-        .await
-    {
+    match invoke_endpoint_chat(&state, &route, request_id, request, timeout).await {
         Ok(output) => {
             let response = chat_completion_response(request_id, &route.endpoint_slug, output);
             persist_trace(
@@ -3306,17 +3469,17 @@ async fn create_chat_completion_for_project(
             Ok(Json(response))
         }
         Err(error) => {
-            let message = relay_error_message(&error);
+            let message = error.to_string();
             persist_trace(
                 &state,
                 request_id,
-                relay_error_status(&error),
+                api_error_trace_status(&error),
                 started_at,
                 None,
                 Some(&message),
             )
             .await;
-            Err(map_relay_error(error))
+            Err(error)
         }
     }
 }
@@ -3610,7 +3773,7 @@ async fn invoke_profile_chat(
     mut request: Value,
     timeout: Duration,
 ) -> Result<Value, ApiError> {
-    match route.provider_type.as_str() {
+    let provider: Arc<dyn AgentProvider> = match route.provider_type.as_str() {
         "openclaw" => {
             if route.source.get("managed").and_then(Value::as_bool) == Some(false) {
                 vifu_gateway::providers::apply_persona_to_chat_request(
@@ -3644,11 +3807,14 @@ async fn invoke_profile_chat(
                 agent_id: agent_id.to_string(),
                 binding_config,
             };
-            state
-                .relay
-                .invoke(&endpoint_route, request_id, request, timeout)
-                .await
-                .map_err(map_relay_error)
+            Arc::new(RelayAgentProvider::new(
+                "agent-gateway",
+                "chat",
+                state.relay.clone(),
+                endpoint_route,
+                request_id,
+                timeout,
+            ))
         }
         "openai-compatible" => {
             let provider =
@@ -3661,19 +3827,163 @@ async fn invoke_profile_chat(
             let model = route.resource_id.as_deref().ok_or_else(|| {
                 ApiError::Invalid("chat capability is missing a provider model".to_string())
             })?;
-            vifu_gateway::providers::openai_chat_completion(
-                &provider.base_url,
-                provider.token.as_deref(),
-                model,
-                &request,
-                &route.persona,
+            Arc::new(
+                HttpCapabilityProvider::new("http-provider", provider.base_url, provider.token)
+                    .map_err(map_runtime_error)?
+                    .with_route(
+                        "chat",
+                        HttpCapabilityRoute::OpenAiChat {
+                            model: model.to_string(),
+                            persona: route.persona.clone(),
+                        },
+                    )
+                    .map_err(map_runtime_error)?,
             )
-            .await
-            .map_err(ApiError::Provider)
         }
-        provider => Err(ApiError::Invalid(format!(
-            "provider type {provider} does not support chat"
-        ))),
+        provider => {
+            return Err(ApiError::Invalid(format!(
+                "provider type {provider} does not support chat"
+            )))
+        }
+    };
+    let (output, _) = invoke_registered_provider(
+        RegisteredInvocation {
+            project_id: project_slug,
+            agent_id: route.profile_id,
+            agent_name: &route.profile_name,
+            endpoint: &route.profile_slug,
+            capability: "chat",
+            timeout,
+            request_id,
+        },
+        provider,
+        InvocationData::Json(request),
+    )
+    .await?;
+    match output {
+        InvocationData::Json(output) => Ok(output),
+        InvocationData::Binary(_) => Err(ApiError::Internal),
+    }
+}
+
+async fn invoke_endpoint_chat(
+    state: &AppState,
+    route: &EndpointRoute,
+    request_id: Uuid,
+    request: Value,
+    timeout: Duration,
+) -> Result<Value, ApiError> {
+    let provider: Arc<dyn AgentProvider> = Arc::new(RelayAgentProvider::new(
+        "agent-gateway",
+        "chat",
+        state.relay.clone(),
+        route.clone(),
+        request_id,
+        timeout,
+    ));
+    let (output, _) = invoke_registered_provider(
+        RegisteredInvocation {
+            project_id: "server",
+            agent_id: route.profile_id,
+            agent_name: &route.endpoint_name,
+            endpoint: &route.endpoint_slug,
+            capability: "chat",
+            timeout,
+            request_id,
+        },
+        provider,
+        InvocationData::Json(request),
+    )
+    .await?;
+    match output {
+        InvocationData::Json(output) => Ok(output),
+        InvocationData::Binary(_) => Err(ApiError::Internal),
+    }
+}
+
+struct RegisteredInvocation<'a> {
+    project_id: &'a str,
+    agent_id: Uuid,
+    agent_name: &'a str,
+    endpoint: &'a str,
+    capability: &'a str,
+    timeout: Duration,
+    request_id: Uuid,
+}
+
+async fn invoke_registered_provider(
+    invocation: RegisteredInvocation<'_>,
+    provider: Arc<dyn AgentProvider>,
+    data: InvocationData,
+) -> Result<(InvocationData, Value), ApiError> {
+    let RegisteredInvocation {
+        project_id,
+        agent_id,
+        agent_name,
+        endpoint,
+        capability,
+        timeout,
+        request_id,
+    } = invocation;
+    let runtime = VifuRuntime::new(project_id).map_err(map_runtime_error)?;
+    runtime
+        .register_provider("server-provider", provider)
+        .map_err(map_runtime_error)?;
+    runtime
+        .register_agent(AgentDefinition {
+            id: agent_id.to_string(),
+            name: agent_name.to_string(),
+            provider: "server-provider".to_string(),
+            capabilities: vec![capability.to_string()],
+            metadata: json!({}),
+        })
+        .map_err(map_runtime_error)?;
+    runtime
+        .register_endpoint(EndpointDefinition {
+            name: endpoint.to_string(),
+            agent: agent_id.to_string(),
+            capability: capability.to_string(),
+            timeout_ms: u64::try_from(timeout.as_millis())
+                .unwrap_or(120_000)
+                .clamp(1, 120_000),
+        })
+        .map_err(map_runtime_error)?;
+    runtime
+        .invoke(InvocationInput {
+            endpoint: endpoint.to_string(),
+            session_id: request_id.to_string(),
+            data,
+            metadata: json!({ "requestId": request_id }),
+        })
+        .await
+        .map(|output| (output.data, output.metadata))
+        .map_err(map_runtime_error)
+}
+
+fn map_runtime_error(error: RuntimeError) -> ApiError {
+    match error {
+        RuntimeError::Timeout(_) | RuntimeError::Cancelled => ApiError::Timeout,
+        RuntimeError::Unavailable(_) => ApiError::AgentGatewayUnavailable,
+        RuntimeError::Backpressure(_) => ApiError::Backpressure,
+        RuntimeError::Provider { provider, message } if provider == "agent-gateway" => {
+            ApiError::AgentGateway(message)
+        }
+        RuntimeError::Provider { message, .. } => ApiError::Provider(message),
+        RuntimeError::InvalidDefinition(message)
+        | RuntimeError::EndpointNotFound(message)
+        | RuntimeError::AgentNotFound(message)
+        | RuntimeError::ProviderNotFound(message)
+        | RuntimeError::Snapshot(message) => ApiError::Invalid(message),
+        RuntimeError::CapabilityUnavailable {
+            provider,
+            capability,
+        } => ApiError::Invalid(format!(
+            "provider {provider} does not support capability {capability}"
+        )),
+        RuntimeError::Store(_)
+        | RuntimeError::EffectLimitExceeded(_)
+        | RuntimeError::InvocationNotFound(_)
+        | RuntimeError::Internal => ApiError::Internal,
     }
 }
 
@@ -5097,6 +5407,17 @@ fn validate_agent_gateway_credential(value: &str) -> Result<&str, ApiError> {
     Ok(value)
 }
 
+fn validate_agent_gateway_enrollment_token(value: &str) -> Result<&str, ApiError> {
+    let value = value.trim();
+    let secret = value
+        .strip_prefix("vifu_ge_")
+        .ok_or(ApiError::Unauthorized)?;
+    if value.len() != 72 || !secret.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(ApiError::Unauthorized);
+    }
+    Ok(value)
+}
+
 fn profile_slug(explicit: Option<&str>, name: &str) -> Result<String, ApiError> {
     match explicit {
         Some(value) => validate_explicit_slug(value),
@@ -5320,39 +5641,12 @@ fn generate_api_key() -> String {
     )
 }
 
-fn relay_error_status(error: &RelayCallError) -> &'static str {
-    match error {
-        RelayCallError::AgentGatewayUnavailable => "unavailable",
-        RelayCallError::Backpressure => "rejected",
-        RelayCallError::Timeout => "timed_out",
-        RelayCallError::AgentGateway(_) => "failed",
-    }
-}
-
 fn api_error_trace_status(error: &ApiError) -> &'static str {
     match error {
         ApiError::AgentGatewayUnavailable => "unavailable",
         ApiError::Backpressure => "rejected",
         ApiError::Timeout => "timed_out",
         _ => "failed",
-    }
-}
-
-fn relay_error_message(error: &RelayCallError) -> String {
-    match error {
-        RelayCallError::AgentGatewayUnavailable => "agent gateway is not available".to_string(),
-        RelayCallError::Backpressure => "agent gateway is busy".to_string(),
-        RelayCallError::Timeout => "agent request timed out".to_string(),
-        RelayCallError::AgentGateway(message) => message.clone(),
-    }
-}
-
-fn map_relay_error(error: RelayCallError) -> ApiError {
-    match error {
-        RelayCallError::AgentGatewayUnavailable => ApiError::AgentGatewayUnavailable,
-        RelayCallError::Backpressure => ApiError::Backpressure,
-        RelayCallError::Timeout => ApiError::Timeout,
-        RelayCallError::AgentGateway(message) => ApiError::AgentGateway(message),
     }
 }
 

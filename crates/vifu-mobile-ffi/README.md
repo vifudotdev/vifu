@@ -1,12 +1,19 @@
 # Vifu Mobile FFI
 
-This crate is the native mobile adapter for Vifu runtime bindings. It links the
-Vifu gateway runtime into one library and exposes a small UniFFI surface for
-iOS and Android clients.
+This crate is the native mobile adapter for embedding Vifu in iOS and Android
+applications. It exposes the self-contained Runtime and the existing Gateway
+configuration and probe utilities through UniFFI.
 
-Current component:
+`VifuEmbeddedRuntime` provides:
 
-- `vifu-gateway`
+- dynamic native `VifuAgentProvider` callbacks;
+- provider, agent, and named endpoint registration;
+- non-blocking start, poll, and cancel operations for application loops;
+- JSON and binary invocation data;
+- project snapshot export and restore.
+
+The embedded Runtime executes in the application process. Native provider
+callbacks connect it to the host's local or remote agent implementations.
 
 Build examples:
 

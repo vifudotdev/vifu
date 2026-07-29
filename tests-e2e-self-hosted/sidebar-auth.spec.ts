@@ -21,6 +21,12 @@ test("session remains valid across sidebar navigation on the bind address", asyn
   expect(session?.path).toBe("/");
   expect(session?.domain).toBe(new URL(page.url()).hostname);
   expect(session?.value).not.toContain(adminKey!);
+  await expect(page).toHaveURL(/\/project$/);
+  await expect(page.getByRole("heading", { level: 1, name: "Projects" })).toBeVisible();
+  const projectCards = page.locator(".project-home-card");
+  await expect(projectCards.first()).toBeVisible();
+  expect(await projectCards.count()).toBeGreaterThanOrEqual(2);
+  await projectCards.first().click();
   await expect(page).toHaveURL(/\/project\/[^/]+(?:\/overview)?$/);
 
   await page.getByRole("link", { name: "Agents", exact: true }).click();

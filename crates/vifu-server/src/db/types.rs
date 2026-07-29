@@ -106,6 +106,14 @@ pub enum AgentGatewayRegistration {
     Existing,
 }
 
+pub struct NewAgentGatewayEnrollment<'a> {
+    pub id: Uuid,
+    pub project_id: Uuid,
+    pub owner_user_id: &'a str,
+    pub token_hash: &'a [u8],
+    pub expires_at: DateTime<Utc>,
+}
+
 pub struct NewTrace<'a> {
     pub request_id: Uuid,
     pub endpoint_id: Option<Uuid>,

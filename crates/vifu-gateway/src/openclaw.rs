@@ -102,7 +102,11 @@ fn is_local_openclaw_host(host: &str) -> bool {
     matches!(
         host,
         "127.0.0.1" | "localhost" | "::1" | "host.docker.internal"
-    )
+    ) || (!host.is_empty()
+        && !host.contains('.')
+        && host
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-'))
 }
 
 async fn probe_endpoint(endpoint: &Endpoint) -> ProbeStatus {
@@ -401,6 +405,13 @@ mod tests {
     fn parses_docker_host_endpoint() {
         let endpoint = parse_endpoint("http://host.docker.internal:18789").unwrap();
         assert_eq!(endpoint.host, "host.docker.internal");
+        assert_eq!(endpoint.port, 18789);
+    }
+
+    #[test]
+    fn parses_container_network_endpoint() {
+        let endpoint = parse_endpoint("http://openclaw-mock:18789").unwrap();
+        assert_eq!(endpoint.host, "openclaw-mock");
         assert_eq!(endpoint.port, 18789);
     }
 

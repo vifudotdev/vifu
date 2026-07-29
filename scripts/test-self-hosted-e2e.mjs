@@ -110,12 +110,14 @@ async function setup() {
   const project = await createProjectWithProvider({
     name: `E2E Project ${suffix}`,
     slug: `e2e-project-${suffix}`,
+    gatewayId: agentGateway.gatewayId,
     providerKey,
     minimumAgents: projectAgentIds.length,
   });
   const scopeTargetProject = await createProjectWithProvider({
     name: `E2E Scope Target ${suffix}`,
     slug: `e2e-scope-target-${suffix}`,
+    gatewayId: agentGateway.gatewayId,
     providerKey,
     minimumAgents: 1,
   });
@@ -446,11 +448,15 @@ async function cleanup() {
   console.log(JSON.stringify({ status: "ok", cleanedEndpoints: state.endpointIds.length }));
 }
 
-async function createProjectWithProvider({ name, slug, providerKey, minimumAgents }) {
+async function createProjectWithProvider({ name, slug, gatewayId, providerKey, minimumAgents }) {
   const created = (await request("/v1/projects", {
     method: "POST",
     body: { name, slug },
   })).project;
+  await request(`/v1/projects/${created.id}`, {
+    method: "PATCH",
+    body: { gatewayId },
+  });
   const provider = await request(`/v1/project/${slug}/providers`, {
     method: "POST",
     body: {

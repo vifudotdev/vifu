@@ -11,24 +11,16 @@ Runtime support is included by default:
 vifu = "0.1"
 ```
 
-```rust
-use vifu::runtime::prelude::*;
-
-let mut runtime = HeadlessRuntime::new();
-let advance = runtime.dispatch(RuntimeCommand::new(
-    "command-1",
-    "application.input",
-    json!({ "text": "Hello" }),
-));
-
-assert_eq!(advance.snapshot.revision, 1);
-```
+`VifuRuntime` registers providers, agents, and stable named endpoints directly
+inside the host process. It supports both async invocation and a non-blocking
+start/poll/cancel API for game loops. See the
+[embedding guide](https://vifu.dev/docs/runtime-embedding).
 
 Available features:
 
 | Feature | Capability |
 | --- | --- |
-| `runtime` | Portable command, state, event, effect, and snapshot runtime; included by default |
+| `runtime` | Providers, agents, endpoints, sessions, state, effects, and snapshots; included by default |
 | `gateway` | Provider discovery and multiplexed Agent Gateway client |
 | `server` | HTTP, WebSocket, SQLite, and PostgreSQL Vifu Server |
 | `full` | Runtime, Gateway, and Server library APIs |
@@ -36,7 +28,8 @@ Available features:
 | `local-whisper` | Optional local Whisper provider support |
 
 Advanced builds can disable default features and select only the capabilities
-they use.
+they use. Provider integrations are registered dynamically and do not require
+vendor-specific feature flags.
 
 ## Install the binary
 

@@ -68,9 +68,11 @@ pub struct GatewayRuntimeConfig {
 impl LoadedRuntimeConfig {
     pub fn load() -> Result<Self, String> {
         let home_dir = vifu_gateway::config::default_home_dir()?;
-        vifu_gateway::config::ensure_provider_registry_file(&home_dir)?;
         let path = home_dir.join(CONFIG_FILE_NAME);
         let config = RuntimeConfig::load_or_create(&path)?;
+        if config.gateway.is_some() {
+            vifu_gateway::config::ensure_provider_registry_file(&home_dir)?;
+        }
         Ok(Self { path, config })
     }
 
@@ -85,7 +87,10 @@ impl LoadedRuntimeConfig {
             .server_url
             .clone()
             .unwrap_or_else(|| vifu_gateway::config::DEFAULT_SERVER_URL.to_string());
-        Ok(GatewayRuntimeOptions { server_url })
+        Ok(GatewayRuntimeOptions {
+            server_url,
+            enrollment_token: None,
+        })
     }
 
     #[cfg(feature = "server")]
@@ -400,6 +405,17 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.contains("unknown field"));
+    }
+
+    #[test]
+    fn rejects_persisted_gateway_enrollment_tokens() {
+        let error = RuntimeConfig::parse(
+            Path::new("/tmp/config.json"),
+            r#"{"version":1,"gateway":{"serverUrl":"https://runtime.example.com","enrollmentToken":"vifu_ge_not-persisted"}}"#,
+        )
+        .unwrap_err();
+
+        assert!(error.contains("unknown field `enrollmentToken`"));
     }
 
     #[test]

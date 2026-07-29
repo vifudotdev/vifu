@@ -57,10 +57,20 @@ cat > ~/.vifu/providers.json <<'JSON'
 }
 JSON
 cd crates/vifu
-cargo run
+VIFU_AGENT_GATEWAY_ENROLLMENT_TOKEN_FILE=/secure/path/to/one-time-token cargo run
 ```
 
-For a provider that does not require authentication, omit the `auth` block.
+The project owner issues the one-time enrollment token through
+`POST /v1/project/{slug}/agent-gateway-enrollments`. Gateway consumes it on its
+first successful registration, stores only its long-lived credential in the
+server-scoped Gateway session file, and reconnects with that credential on
+later starts. Remove the one-time token file after enrollment. There is no
+enrollment command-line flag, and enrollment tokens are rejected in persistent
+Vifu runtime configuration.
+
+For a provider that does not require authentication, omit its `auth` block.
+The repository's combined local and Docker configurations use deployment
+bootstrap registration and do not require a project enrollment token.
 
 For an isolated adapter test, run the included mock on another port and point
 the Agent Gateway at it:

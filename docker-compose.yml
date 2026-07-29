@@ -104,7 +104,7 @@ services:
       - "${VIFU_BIND_HOST:-127.0.0.1}:${VIFU_SERVER_PORT:-6790}:6790"
     volumes:
       - vifu_secrets:/run/vifu/secrets:ro
-      - vifu_runtime_state:/home/vifu/.vifu
+      - vifu_server_state:/home/vifu/.vifu
     configs:
       - source: server_runtime_config
         target: /home/vifu/.vifu/config.json
@@ -168,4 +168,5 @@ services:
 volumes:
   vifu_secrets:
   postgres_data:
+  vifu_server_state:
   vifu_runtime_state:

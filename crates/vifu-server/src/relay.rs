@@ -6,6 +6,10 @@ use serde_json::Value;
 use tokio::sync::{mpsc, oneshot, Mutex};
 use uuid::Uuid;
 use vifu_gateway::protocol::AgentGatewayCommand;
+use vifu_runtime::{
+    AgentProvider, CancellationToken, InvocationData, ProviderFuture, ProviderRequest,
+    ProviderResponse, RuntimeError,
+};
 
 use crate::models::EndpointRoute;
 
@@ -39,7 +43,124 @@ pub enum RelayCallError {
     AgentGatewayUnavailable,
     Backpressure,
     Timeout,
+    Cancelled,
     AgentGateway(String),
+}
+
+struct PendingInvocation {
+    hub: RelayHub,
+    request_id: Uuid,
+    channel_id: u64,
+    sender: mpsc::Sender<AgentGatewayCommand>,
+    armed: bool,
+}
+
+impl PendingInvocation {
+    async fn abort(&mut self) {
+        if !self.armed {
+            return;
+        }
+        self.armed = false;
+        self.hub.remove_pending(self.request_id).await;
+        let _ = self.sender.try_send(AgentGatewayCommand::Cancel {
+            request_id: self.request_id,
+            channel_id: self.channel_id,
+        });
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for PendingInvocation {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        let hub = self.hub.clone();
+        let request_id = self.request_id;
+        let channel_id = self.channel_id;
+        let sender = self.sender.clone();
+        tokio::spawn(async move {
+            hub.remove_pending(request_id).await;
+            let _ = sender.try_send(AgentGatewayCommand::Cancel {
+                request_id,
+                channel_id,
+            });
+        });
+    }
+}
+
+pub(crate) struct RelayAgentProvider {
+    name: String,
+    capability: String,
+    hub: RelayHub,
+    route: EndpointRoute,
+    request_id: Uuid,
+    timeout: Duration,
+}
+
+impl RelayAgentProvider {
+    pub(crate) fn new(
+        name: impl Into<String>,
+        capability: impl Into<String>,
+        hub: RelayHub,
+        route: EndpointRoute,
+        request_id: Uuid,
+        timeout: Duration,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            capability: capability.into(),
+            hub,
+            route,
+            request_id,
+            timeout,
+        }
+    }
+}
+
+impl AgentProvider for RelayAgentProvider {
+    fn supports(&self, capability: &str) -> bool {
+        capability == self.capability
+    }
+
+    fn invoke<'a>(
+        &'a self,
+        request: ProviderRequest,
+        cancellation: CancellationToken,
+    ) -> ProviderFuture<'a> {
+        Box::pin(async move {
+            let InvocationData::Json(input) = request.data else {
+                return Err(RuntimeError::InvalidDefinition(
+                    "agent gateway capabilities require JSON input".to_string(),
+                ));
+            };
+            let output = self
+                .hub
+                .invoke_with_cancellation(
+                    &self.route,
+                    self.request_id,
+                    input,
+                    self.timeout,
+                    cancellation,
+                )
+                .await
+                .map_err(|error| match error {
+                    RelayCallError::AgentGatewayUnavailable => {
+                        RuntimeError::Unavailable(self.name.clone())
+                    }
+                    RelayCallError::Backpressure => RuntimeError::Backpressure(self.name.clone()),
+                    RelayCallError::Timeout => RuntimeError::Timeout(duration_millis(self.timeout)),
+                    RelayCallError::Cancelled => RuntimeError::Cancelled,
+                    RelayCallError::AgentGateway(message) => {
+                        RuntimeError::provider(&self.name, message)
+                    }
+                })?;
+            Ok(ProviderResponse::json(output))
+        })
+    }
 }
 
 impl RelayHub {
@@ -162,6 +283,24 @@ impl RelayHub {
         input: Value,
         timeout: Duration,
     ) -> Result<Value, RelayCallError> {
+        self.invoke_with_cancellation(
+            route,
+            request_id,
+            input,
+            timeout,
+            CancellationToken::default(),
+        )
+        .await
+    }
+
+    pub async fn invoke_with_cancellation(
+        &self,
+        route: &EndpointRoute,
+        request_id: Uuid,
+        input: Value,
+        timeout: Duration,
+        cancellation: CancellationToken,
+    ) -> Result<Value, RelayCallError> {
         let (response_sender, response_receiver) = oneshot::channel();
         let (connection, channel_id) = {
             let mut state = self.inner.lock().await;
@@ -204,16 +343,33 @@ impl RelayHub {
             };
         }
 
-        match tokio::time::timeout(timeout, response_receiver).await {
-            Ok(Ok(result)) => result,
-            Ok(Err(_)) => Err(RelayCallError::AgentGatewayUnavailable),
-            Err(_) => {
-                self.remove_pending(request_id).await;
-                let _ = connection.sender.try_send(AgentGatewayCommand::Cancel {
-                    request_id,
-                    channel_id,
-                });
-                Err(RelayCallError::Timeout)
+        let mut pending = PendingInvocation {
+            hub: self.clone(),
+            request_id,
+            channel_id,
+            sender: connection.sender,
+            armed: true,
+        };
+        tokio::select! {
+            response = tokio::time::timeout(timeout, response_receiver) => {
+                match response {
+                    Ok(Ok(result)) => {
+                        pending.disarm();
+                        result
+                    }
+                    Ok(Err(_)) => {
+                        pending.disarm();
+                        Err(RelayCallError::AgentGatewayUnavailable)
+                    }
+                    Err(_) => {
+                        pending.abort().await;
+                        Err(RelayCallError::Timeout)
+                    }
+                }
+            }
+            _ = cancellation.cancelled() => {
+                pending.abort().await;
+                Err(RelayCallError::Cancelled)
             }
         }
     }
@@ -273,6 +429,10 @@ fn next_channel_id(state: &mut RelayState) -> u64 {
     channel_id
 }
 
+fn duration_millis(duration: Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
@@ -283,6 +443,7 @@ mod tests {
 
     use super::{RelayCallError, RelayHub};
     use crate::models::EndpointRoute;
+    use vifu_runtime::CancellationToken;
 
     #[tokio::test]
     async fn multiplexes_ten_concurrent_calls_on_one_connection() {
@@ -371,6 +532,54 @@ mod tests {
             .await;
         assert_eq!(second, Err(RelayCallError::Backpressure));
         first.abort();
+    }
+
+    #[tokio::test]
+    async fn cancelling_a_call_removes_it_and_notifies_the_agent_gateway() {
+        let hub = RelayHub::new(4);
+        let (sender, mut receiver) = hub.channel();
+        let connection_id = Uuid::new_v4();
+        hub.register(
+            "openclaw-local".to_string(),
+            connection_id,
+            Uuid::new_v4(),
+            sender,
+        )
+        .await;
+        let request_id = Uuid::new_v4();
+        let cancellation = CancellationToken::default();
+        let call = {
+            let hub = hub.clone();
+            let cancellation = cancellation.clone();
+            tokio::spawn(async move {
+                hub.invoke_with_cancellation(
+                    &route(),
+                    request_id,
+                    json!({}),
+                    Duration::from_secs(5),
+                    cancellation,
+                )
+                .await
+            })
+        };
+        let invoke = receiver.recv().await.expect("invoke should be queued");
+        let AgentGatewayCommand::Invoke { channel_id, .. } = invoke else {
+            panic!("expected invoke");
+        };
+
+        cancellation.cancel();
+        assert_eq!(call.await.unwrap(), Err(RelayCallError::Cancelled));
+        assert_eq!(
+            receiver.recv().await,
+            Some(AgentGatewayCommand::Cancel {
+                request_id,
+                channel_id,
+            })
+        );
+        assert!(
+            !hub.complete_result(connection_id, request_id, channel_id, json!({}))
+                .await
+        );
     }
 
     fn route() -> EndpointRoute {

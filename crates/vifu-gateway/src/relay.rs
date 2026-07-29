@@ -24,7 +24,8 @@ const MAX_RECONNECT_DELAY: Duration = Duration::from_secs(30);
 
 pub struct AgentGatewayRuntime<'a> {
     pub server_url: &'a str,
-    pub agent_gateway_bootstrap_token: &'a str,
+    pub agent_gateway_bootstrap_token: Option<&'a str>,
+    pub enrollment_token: Option<String>,
     pub providers: &'a [OpenClawRuntimeProvider],
     pub agents: &'a [AgentDescriptor],
     pub session_path: &'a Path,
@@ -38,31 +39,68 @@ pub struct OpenClawRuntimeProvider {
 }
 
 pub async fn run_agent_gateway(
-    runtime: AgentGatewayRuntime<'_>,
+    mut runtime: AgentGatewayRuntime<'_>,
     session: &mut SessionSummary,
 ) -> Result<(), String> {
     let websocket_url = agent_gateway_websocket_url(runtime.server_url)?;
     let mut reconnect_delay = Duration::from_secs(1);
 
     loop {
-        if let Err(error) = ensure_agent_gateway_registered(&runtime, session).await {
-            if error == RegisterAgentGatewayError::Revoked {
-                return Err(
-                    "agent gateway access was revoked; run `vifu --reset` to enroll a new gateway identity"
-                        .to_string(),
+        let (registration, used_enrollment_token) =
+            if let Some(token) = runtime.enrollment_token.as_deref() {
+                (
+                    Some(
+                        register_agent_gateway(
+                            runtime.server_url,
+                            RegistrationEndpoint::Enrollment,
+                            token,
+                            &session.gateway_id,
+                            &session.gateway_credential,
+                        )
+                        .await,
+                    ),
+                    true,
+                )
+            } else if let Some(token) = runtime.agent_gateway_bootstrap_token {
+                (
+                    Some(
+                        register_agent_gateway(
+                            runtime.server_url,
+                            RegistrationEndpoint::Bootstrap,
+                            token,
+                            &session.gateway_id,
+                            &session.gateway_credential,
+                        )
+                        .await,
+                    ),
+                    false,
+                )
+            } else {
+                (None, false)
+            };
+        if let Some(registration) = registration {
+            if let Err(error) = registration {
+                if error == RegisterAgentGatewayError::Revoked {
+                    return Err(
+                        "agent gateway access was revoked; run `vifu --reset` to enroll a new gateway identity"
+                            .to_string(),
+                    );
+                }
+                eprintln!(
+                    "Agent Gateway registration failed: {}. Retrying in {}s.",
+                    sanitize_error(&error.into_message()),
+                    reconnect_delay.as_secs()
                 );
+                tokio::select! {
+                    _ = tokio::time::sleep(reconnect_delay) => {}
+                    _ = tokio::signal::ctrl_c() => return Ok(()),
+                }
+                reconnect_delay = reconnect_delay.saturating_mul(2).min(MAX_RECONNECT_DELAY);
+                continue;
             }
-            eprintln!(
-                "Agent Gateway registration failed: {}. Retrying in {}s.",
-                sanitize_error(&error.into_message()),
-                reconnect_delay.as_secs()
-            );
-            tokio::select! {
-                _ = tokio::time::sleep(reconnect_delay) => {}
-                _ = tokio::signal::ctrl_c() => return Ok(()),
+            if used_enrollment_token {
+                runtime.enrollment_token.take();
             }
-            reconnect_delay = reconnect_delay.saturating_mul(2).min(MAX_RECONNECT_DELAY);
-            continue;
         }
         match run_connection(&websocket_url, &runtime, session).await {
             Ok(ConnectionOutcome::Shutdown) => return Ok(()),
@@ -320,19 +358,6 @@ fn resolve_openclaw_provider<'a>(
     }
 }
 
-async fn ensure_agent_gateway_registered(
-    runtime: &AgentGatewayRuntime<'_>,
-    session: &SessionSummary,
-) -> Result<(), RegisterAgentGatewayError> {
-    register_agent_gateway(
-        runtime.server_url,
-        runtime.agent_gateway_bootstrap_token,
-        &session.gateway_id,
-        &session.gateway_credential,
-    )
-    .await
-}
-
 #[derive(Debug, PartialEq, Eq)]
 enum RegisterAgentGatewayError {
     Revoked,
@@ -348,17 +373,24 @@ impl RegisterAgentGatewayError {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+enum RegistrationEndpoint {
+    Bootstrap,
+    Enrollment,
+}
+
 async fn register_agent_gateway(
     server_url: &str,
-    bootstrap_token: &str,
+    endpoint: RegistrationEndpoint,
+    registration_token: &str,
     gateway_id: &str,
     credential: &str,
 ) -> Result<(), RegisterAgentGatewayError> {
-    let registration_url =
-        agent_gateway_registration_url(server_url).map_err(RegisterAgentGatewayError::Failed)?;
+    let registration_url = agent_gateway_registration_url(server_url, endpoint)
+        .map_err(RegisterAgentGatewayError::Failed)?;
     let response = reqwest::Client::new()
         .post(registration_url)
-        .bearer_auth(bootstrap_token)
+        .bearer_auth(registration_token)
         .json(&serde_json::json!({
             "gatewayId": gateway_id,
             "credential": credential,
@@ -378,18 +410,29 @@ async fn register_agent_gateway(
     if code == Some("gateway_credential_revoked") {
         return Err(RegisterAgentGatewayError::Revoked);
     }
+    let operation = match endpoint {
+        RegistrationEndpoint::Bootstrap => "registration",
+        RegistrationEndpoint::Enrollment => "enrollment",
+    };
     Err(RegisterAgentGatewayError::Failed(format!(
-        "server rejected agent gateway registration (HTTP {})",
+        "server rejected agent gateway {operation} (HTTP {})",
         status.as_u16()
     )))
 }
 
-fn agent_gateway_registration_url(server_url: &str) -> Result<Url, String> {
+fn agent_gateway_registration_url(
+    server_url: &str,
+    endpoint: RegistrationEndpoint,
+) -> Result<Url, String> {
     let _ = agent_gateway_websocket_url(server_url)?;
     let mut url = Url::parse(server_url.trim())
         .map_err(|_| "gateway.serverUrl must be a valid HTTP or HTTPS URL".to_string())?;
     let base_path = url.path().trim_end_matches('/');
-    url.set_path(&format!("{base_path}/v1/agent-gateways/register"));
+    let suffix = match endpoint {
+        RegistrationEndpoint::Bootstrap => "register",
+        RegistrationEndpoint::Enrollment => "enroll",
+    };
+    url.set_path(&format!("{base_path}/v1/agent-gateways/{suffix}"));
     Ok(url)
 }
 

@@ -3456,7 +3456,6 @@ name = "vifu-gateway"
 version = "0.1.0"
 dependencies = [
  "futures-util",
- "hound",
  "reqwest",
  "serde",
  "serde_json",
@@ -3464,17 +3463,20 @@ dependencies = [
  "tokio-tungstenite",
  "url",
  "uuid",
- "whisper-rs",
+ "vifu-runtime",
 ]
 
 [[package]]
 name = "vifu-mobile-ffi"
 version = "0.1.0"
 dependencies = [
+ "serde",
+ "serde_json",
  "thiserror",
  "tokio",
  "uniffi",
  "vifu-gateway",
+ "vifu-runtime",
 ]
 
 [[package]]
@@ -3483,8 +3485,12 @@ version = "0.1.0"
 dependencies = [
  "bevy_app",
  "bevy_ecs",
+ "hound",
+ "reqwest",
  "serde",
  "serde_json",
+ "tokio",
+ "whisper-rs",
 ]
 
 [[package]]
@@ -3512,6 +3518,7 @@ dependencies = [
  "tracing-subscriber",
  "uuid",
  "vifu-gateway",
+ "vifu-runtime",
 ]
 
 [[package]]

@@ -2415,18 +2415,20 @@ pub async fn resolve_project_model_route(
 #[derive(Debug, FromRow)]
 struct AgentGatewayCredentialSecret {
     credential_hash: Vec<u8>,
+    owner_user_id: Option<String>,
     revoked_at: Option<DateTime<Utc>>,
 }
 
 pub async fn register_agent_gateway_credential(
     pool: &PgPool,
     gateway_id: &str,
+    owner_user_id: Option<&str>,
     credential_prefix: &str,
     credential_hash: &[u8],
 ) -> Result<AgentGatewayRegistration, ApiError> {
     let mut transaction = pool.begin().await?;
     let existing = sqlx::query_as::<_, AgentGatewayCredentialSecret>(
-        "SELECT credential_hash, revoked_at
+        "SELECT credential_hash, owner_user_id, revoked_at
          FROM agent_gateway_credentials
          WHERE gateway_id = $1
          FOR UPDATE",
@@ -2439,10 +2441,11 @@ pub async fn register_agent_gateway_credential(
         None => {
             sqlx::query(
                 "INSERT INTO agent_gateway_credentials
-                    (gateway_id, credential_prefix, credential_hash)
-                 VALUES ($1, $2, $3)",
+                    (gateway_id, owner_user_id, credential_prefix, credential_hash)
+                 VALUES ($1, $2, $3, $4)",
             )
             .bind(gateway_id)
+            .bind(owner_user_id)
             .bind(credential_prefix)
             .bind(credential_hash)
             .execute(&mut *transaction)
@@ -2451,7 +2454,9 @@ pub async fn register_agent_gateway_credential(
             AgentGatewayRegistration::Registered
         }
         Some(existing)
-            if existing.revoked_at.is_none() && existing.credential_hash == credential_hash =>
+            if existing.revoked_at.is_none()
+                && existing.credential_hash == credential_hash
+                && existing.owner_user_id.as_deref() == owner_user_id =>
         {
             AgentGatewayRegistration::Existing
         }
@@ -2464,6 +2469,171 @@ pub async fn register_agent_gateway_credential(
     };
     transaction.commit().await?;
     Ok(registration)
+}
+
+pub async fn create_agent_gateway_enrollment(
+    pool: &PgPool,
+    input: NewAgentGatewayEnrollment<'_>,
+) -> Result<(), ApiError> {
+    let mut transaction = pool.begin().await?;
+    sqlx::query(
+        "UPDATE agent_gateway_enrollments
+         SET revoked_at = NOW()
+         WHERE project_id = $1
+           AND consumed_at IS NULL
+           AND revoked_at IS NULL",
+    )
+    .bind(input.project_id)
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO agent_gateway_enrollments
+            (id, project_id, owner_user_id, token_hash, expires_at)
+         VALUES ($1, $2, $3, $4, $5)",
+    )
+    .bind(input.id)
+    .bind(input.project_id)
+    .bind(input.owner_user_id)
+    .bind(input.token_hash)
+    .bind(input.expires_at)
+    .execute(&mut *transaction)
+    .await
+    .map_err(map_database_error)?;
+    transaction.commit().await?;
+    Ok(())
+}
+
+#[derive(Debug, FromRow)]
+struct AgentGatewayEnrollmentSecret {
+    project_id: Uuid,
+    owner_user_id: String,
+    gateway_id: Option<String>,
+    consumed_at: Option<DateTime<Utc>>,
+    revoked_at: Option<DateTime<Utc>>,
+    expires_at: DateTime<Utc>,
+}
+
+pub async fn consume_agent_gateway_enrollment(
+    pool: &PgPool,
+    token_hash: &[u8],
+    gateway_id: &str,
+    credential_prefix: &str,
+    credential_hash: &[u8],
+) -> Result<AgentGatewayRegistration, ApiError> {
+    let mut transaction = pool.begin().await?;
+    let claimed = sqlx::query_as::<_, AgentGatewayEnrollmentSecret>(
+        "UPDATE agent_gateway_enrollments
+         SET gateway_id = $2, consumed_at = NOW()
+         WHERE token_hash = $1
+           AND consumed_at IS NULL
+           AND revoked_at IS NULL
+           AND expires_at > NOW()
+         RETURNING project_id, owner_user_id, gateway_id, consumed_at, revoked_at, expires_at",
+    )
+    .bind(token_hash)
+    .bind(gateway_id)
+    .fetch_optional(&mut *transaction)
+    .await?;
+    let (enrollment, is_idempotent_retry) = match claimed {
+        Some(enrollment) => (enrollment, false),
+        None => (
+            sqlx::query_as::<_, AgentGatewayEnrollmentSecret>(
+                "SELECT project_id, owner_user_id, gateway_id, consumed_at, revoked_at, expires_at
+                 FROM agent_gateway_enrollments
+                 WHERE token_hash = $1
+                 FOR UPDATE",
+            )
+            .bind(token_hash)
+            .fetch_optional(&mut *transaction)
+            .await?
+            .ok_or(ApiError::Unauthorized)?,
+            true,
+        ),
+    };
+    if enrollment.revoked_at.is_some()
+        || (enrollment.consumed_at.is_none() && enrollment.expires_at <= Utc::now())
+    {
+        return Err(ApiError::Unauthorized);
+    }
+    if is_idempotent_retry
+        && (enrollment.consumed_at.is_none()
+            || enrollment.gateway_id.as_deref() != Some(gateway_id))
+    {
+        return Err(ApiError::Unauthorized);
+    }
+
+    let existing = sqlx::query_as::<_, AgentGatewayCredentialSecret>(
+        "SELECT credential_hash, owner_user_id, revoked_at
+         FROM agent_gateway_credentials
+         WHERE gateway_id = $1
+         FOR UPDATE",
+    )
+    .bind(gateway_id)
+    .fetch_optional(&mut *transaction)
+    .await?;
+    let registration = match existing {
+        None => {
+            sqlx::query(
+                "INSERT INTO agent_gateway_credentials
+                    (gateway_id, owner_user_id, credential_prefix, credential_hash)
+                 VALUES ($1, $2, $3, $4)",
+            )
+            .bind(gateway_id)
+            .bind(&enrollment.owner_user_id)
+            .bind(credential_prefix)
+            .bind(credential_hash)
+            .execute(&mut *transaction)
+            .await
+            .map_err(map_database_error)?;
+            AgentGatewayRegistration::Registered
+        }
+        Some(existing)
+            if existing.revoked_at.is_none()
+                && existing.credential_hash == credential_hash
+                && existing.owner_user_id.as_deref() == Some(enrollment.owner_user_id.as_str()) =>
+        {
+            AgentGatewayRegistration::Existing
+        }
+        Some(existing) if existing.revoked_at.is_none() => {
+            return Err(ApiError::Conflict(
+                "agent gateway id is already registered".to_string(),
+            ));
+        }
+        Some(_) => return Err(ApiError::AgentGatewayCredentialRevoked),
+    };
+
+    let project_update = if is_idempotent_retry {
+        sqlx::query(
+            "UPDATE projects
+             SET updated_at = updated_at
+             WHERE id = $1 AND owner_user_id = $2 AND gateway_id = $3",
+        )
+        .bind(enrollment.project_id)
+        .bind(&enrollment.owner_user_id)
+        .bind(gateway_id)
+        .execute(&mut *transaction)
+        .await?
+    } else {
+        sqlx::query(
+            "UPDATE projects
+             SET gateway_id = $1, updated_at = NOW()
+             WHERE id = $2 AND owner_user_id = $3",
+        )
+        .bind(gateway_id)
+        .bind(enrollment.project_id)
+        .bind(&enrollment.owner_user_id)
+        .execute(&mut *transaction)
+        .await?
+    };
+    if project_update.rows_affected() != 1 {
+        return Err(ApiError::Forbidden);
+    }
+    transaction.commit().await?;
+    Ok(if is_idempotent_retry {
+        AgentGatewayRegistration::Existing
+    } else {
+        registration
+    })
 }
 
 pub async fn authenticate_agent_gateway_credential(

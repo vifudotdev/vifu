@@ -349,6 +349,11 @@ pub fn app(state: AppState) -> Router {
             "/v1/agent-gateways/register",
             post(api::register_agent_gateway),
         )
+        .route("/v1/agent-gateways/enroll", post(api::enroll_agent_gateway))
+        .route(
+            "/v1/project/{slug}/agent-gateway-enrollments",
+            post(api::create_project_agent_gateway_enrollment),
+        )
         .route(
             "/v1/agent-gateways/{gateway_id}/revoke",
             post(api::revoke_agent_gateway),
@@ -597,6 +602,180 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(forbidden.status(), StatusCode::FORBIDDEN);
+
+        match storage {
+            Storage::Postgres(pool) => pool.close().await,
+            Storage::Sqlite(pool) => pool.close().await,
+        }
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn account_project_enrollment_registers_one_gateway_once() {
+        let path = std::env::temp_dir().join(format!(
+            "vifu-gateway-enrollment-{}.sqlite",
+            uuid::Uuid::new_v4()
+        ));
+        let storage = crate::db::connect(&format!("sqlite://{}", path.display()), 5)
+            .await
+            .unwrap();
+        crate::db::migrate(&storage).await.unwrap();
+        let config = Config::from_env().unwrap();
+        let (owner_state, owner_credential) = state_with_storage_access_token_auth(
+            config,
+            storage.clone(),
+            "user-123",
+            vec![Operation::ProjectRead, Operation::ProjectWrite],
+        )
+        .await;
+        let owner_app = app(owner_state);
+        let created = owner_app
+            .clone()
+            .oneshot(
+                Request::post("/v1/projects")
+                    .header("authorization", format!("Vifu {owner_credential}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"name":"Gateway project"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = to_bytes(created.into_body(), 64 * 1024).await.unwrap();
+        let project: Value = serde_json::from_slice(&body).unwrap();
+        let slug = project["project"]["slug"].as_str().unwrap();
+
+        let enrollment = owner_app
+            .clone()
+            .oneshot(
+                Request::post(format!("/v1/project/{slug}/agent-gateway-enrollments"))
+                    .header("authorization", format!("Vifu {owner_credential}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(enrollment.status(), StatusCode::CREATED);
+        let body = to_bytes(enrollment.into_body(), 64 * 1024).await.unwrap();
+        let enrollment: Value = serde_json::from_slice(&body).unwrap();
+        let token = enrollment["enrollmentToken"].as_str().unwrap();
+
+        let wrong_endpoint = owner_app
+            .clone()
+            .oneshot(
+                Request::post("/v1/agent-gateways/register")
+                    .header("authorization", format!("Bearer {token}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"gatewayId":"gateway-account","credential":"vifu_gw_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(wrong_endpoint.status(), StatusCode::FORBIDDEN);
+
+        let registered = owner_app
+            .clone()
+            .oneshot(
+                Request::post("/v1/agent-gateways/enroll")
+                    .header("authorization", format!("Bearer {token}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"gatewayId":"gateway-account","credential":"vifu_gw_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(registered.status(), StatusCode::CREATED);
+        assert_eq!(
+            crate::db::get_project_by_slug(&storage, slug)
+                .await
+                .unwrap()
+                .project
+                .gateway_id,
+            "gateway-account"
+        );
+        crate::db::open_agent_gateway_session(
+            &storage,
+            "gateway-account",
+            None,
+            &serde_json::json!([{
+                "id": "guide",
+                "name": "Guide",
+                "metadata": {
+                    "providerKey": "openclaw-local",
+                    "providerType": "openclaw"
+                }
+            }]),
+            &serde_json::json!({}),
+        )
+        .await
+        .unwrap();
+
+        let candidates = owner_app
+            .clone()
+            .oneshot(
+                Request::get(format!("/v1/project/{slug}/agent-candidates"))
+                    .header("authorization", format!("Vifu {owner_credential}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(candidates.status(), StatusCode::OK);
+        let body = to_bytes(candidates.into_body(), 64 * 1024).await.unwrap();
+        let candidates: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(candidates["candidates"].as_array().unwrap().len(), 1);
+        assert_eq!(candidates["candidates"][0]["providerKey"], "openclaw-local");
+
+        let imported = owner_app
+            .clone()
+            .oneshot(
+                Request::post(format!("/v1/project/{slug}/agents/import"))
+                    .header("authorization", format!("Vifu {owner_credential}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{
+                            "gatewayId":"gateway-account",
+                            "agentId":"guide",
+                            "providerKey":"openclaw-local"
+                        }"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(imported.status(), StatusCode::CREATED);
+
+        let retried = owner_app
+            .clone()
+            .oneshot(
+                Request::post("/v1/agent-gateways/enroll")
+                    .header("authorization", format!("Bearer {token}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"gatewayId":"gateway-account","credential":"vifu_gw_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(retried.status(), StatusCode::OK);
+
+        let replayed = owner_app
+            .oneshot(
+                Request::post("/v1/agent-gateways/enroll")
+                    .header("authorization", format!("Bearer {token}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"gatewayId":"gateway-replay","credential":"vifu_gw_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(replayed.status(), StatusCode::UNAUTHORIZED);
 
         match storage {
             Storage::Postgres(pool) => pool.close().await,

@@ -528,6 +528,10 @@ pub fn hash_agent_gateway_credential(value: &str, pepper: &str) -> Vec<u8> {
     hash_credential(b"vifu-agent-gateway-credential-v1", value, pepper)
 }
 
+pub fn hash_agent_gateway_enrollment(value: &str, pepper: &str) -> Vec<u8> {
+    hash_credential(b"vifu-agent-gateway-enrollment-v1", value, pepper)
+}
+
 fn hash_credential(domain: &[u8], value: &str, pepper: &str) -> Vec<u8> {
     let mut digest = Sha256::new();
     digest.update(domain);

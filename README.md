@@ -8,12 +8,15 @@
 [![CI](https://github.com/vifudotdev/vifu/actions/workflows/ci.yml/badge.svg)](https://github.com/vifudotdev/vifu/actions/workflows/ci.yml)
 [![Discord](https://img.shields.io/badge/Discord-Join-5865F2?logo=discord&logoColor=white)](https://discord.com/invite/VdqqFwJbNE)
 
-Vifu is a small, fast, stateful, and portable Agent Runtime. Embed it into an
-application to connect, control, coordinate, and monitor local or remote Agents.
+Vifu is a small, fast, stateful, and portable runtime for agents.
+
+Connect applications to agents from local or remote providers through one
+runtime for stable APIs, durable state, access control, routing, and traces.
 
 Vifu includes the cross-platform Rust runtime, Agent Gateway, durable state,
-stable application APIs, traces, and a small operations Console. Applications
-define their behavior by composing plugins with the headless runtime.
+stable application APIs, traces, and a small operations Console. A runtime can
+live directly inside an application, or the same invocation model can sit behind
+Vifu Server for multi-project deployments.
 
 ## Embed Vifu
 
@@ -25,9 +28,10 @@ Runtime support is included by default:
 vifu = "0.1"
 ```
 
-Advanced builds can disable default features to select only `runtime`,
-`gateway`, or `server`. The default build also produces the complete Vifu Server
-and Agent Gateway executable.
+Advanced builds can disable default features and select the broad capabilities
+they use: `runtime`, `gateway`, or `server`. Provider capabilities are registered
+at runtime rather than selected with vendor-specific Cargo features. The default
+build also produces the complete Vifu Server and Agent Gateway executable.
 
 See [Embed the runtime](docs/runtime-embedding.md) and the
 [crates.io release contract](docs/crates-io.md).
@@ -74,6 +78,23 @@ Console and PostgreSQL-backed self-hosting.
 
 ## Architecture
 
+Vifu has one runtime model and two optional deployment components:
+
+| Component | Primary resource | Role |
+| --- | --- | --- |
+| Embedded Runtime | One application or project | Registers providers, agents, named endpoints, sessions, state, and effects inside the host process |
+| Vifu Server | Many projects | Adds HTTP/WebSocket APIs, project keys, provider configuration, database persistence, and traces |
+| Agent Gateway | One Server connection | Connects provider resources on another machine to Server over an authenticated multiplexed transport |
+| Operations Console | One Server deployment | Operates Server projects, providers, keys, gateways, and traces |
+
+Embedded applications call `VifuRuntime` directly:
+
+```text
+Application -> VifuRuntime -> local or remote provider
+```
+
+Multi-project deployments use Server and can add any number of Gateways:
+
 ```text
 Application -> Vifu Server -> SQLite or PostgreSQL
                      |
@@ -83,6 +104,10 @@ Application -> Vifu Server -> SQLite or PostgreSQL
 
 Console -----> Vifu Server
 ```
+
+Agent Gateway is a Server transport, so it connects to a running Vifu Server.
+The embedded Runtime is independently usable: a host registers its provider
+implementations directly and owns its snapshot storage.
 
 Applications call a project-scoped, OpenAI-compatible endpoint:
 
@@ -102,11 +127,15 @@ multiplexed WebSocket. Projects, profiles, API keys, provider settings, and
 traces use embedded SQLite locally and PostgreSQL in the Docker self-hosted
 stack.
 
-## Headless Runtime
+## Embedded Runtime
 
 `crates/vifu-runtime` is the Bevy-based execution kernel behind the public
 `vifu` crate. It supplies:
 
+- dynamic provider, agent, and named endpoint registration;
+- async invocation and non-blocking start/poll/cancel APIs for game loops;
+- independent session state with host-provided storage;
+- portable project snapshot export and restore;
 - a deterministic runtime schedule;
 - command and effect-result queues;
 - event and effect-request queues;
@@ -114,8 +143,8 @@ stack.
 - a standard Bevy `Plugin` extension point.
 
 It does not prescribe a graph language, narrative schema, or editor format.
-Application-specific behavior stays in application plugins. See
-[Embed the runtime](docs/runtime-embedding.md).
+Application-specific behavior stays in provider adapters and application
+plugins. See [Embed the runtime](docs/runtime-embedding.md).
 
 ## Repository Layout
 
@@ -138,6 +167,23 @@ providers/            Provider integration guides
 - [crates.io release contract](docs/crates-io.md)
 - [Provider integrations](providers/README.md)
 - [Build and test](BUILD.md)
+
+## Related Agent Runtimes
+
+These open-source projects solve adjacent parts of the agent runtime stack. The
+comparison describes each project's primary model, not an exhaustive feature
+checklist.
+
+| Project | Primary model | How Vifu differs |
+| --- | --- | --- |
+| [ADK-Rust](https://github.com/zavora-ai/adk-rust) | Rust framework and execution runtime for defining agents, tools, workflows, sessions, memory, and servers | Vifu centers the project-level contract through which applications access agents exposed by local or remote providers |
+| [Google Agent Development Kit](https://github.com/google/adk-python) | Code-first framework for building, evaluating, orchestrating, and deploying agent systems | Vifu centers stable project endpoints, provider connections, access, durable state, and traces at the application boundary |
+| [LangGraph](https://github.com/langchain-ai/langgraph) | Graph orchestration framework and runtime for long-running, stateful agents and workflows | Vifu organizes agents and access around a project rather than a workflow graph |
+| [Cloudflare Agents SDK](https://github.com/cloudflare/agents) | Cloudflare-hosted runtime for durable agent instances, state, sessions, connections, and scheduling | Vifu keeps the application contract portable across agents running on local or remote providers |
+
+**Vifu does not replace agent providers. It gives applications a stable,
+stateful runtime contract for accessing agents across local and remote
+providers.**
 
 Read [CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request. Report
 security issues through the private process in [SECURITY.md](SECURITY.md).
