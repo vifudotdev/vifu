@@ -97,6 +97,8 @@ services:
       VIFU_AGENT_GATEWAY_BOOTSTRAP_TOKEN_FILE: /run/vifu/secrets/agent_gateway_bootstrap_token
       VIFU_API_KEY_PEPPER_FILE: /run/vifu/secrets/api_key_pepper
       VIFU_PROVIDER_SECRET_KEY_FILE: /run/vifu/secrets/provider_secret_key
+      VIFU_ACCESS_TOKEN_AUTHORITY_URL: ${VIFU_ACCESS_TOKEN_AUTHORITY_URL:-}
+      VIFU_DEPLOYMENT_ID: ${VIFU_DEPLOYMENT_ID:-}
       RUST_LOG: ${RUST_LOG:-vifu_server=info,tower_http=info}
     ports:
       - "${VIFU_BIND_HOST:-127.0.0.1}:${VIFU_SERVER_PORT:-6790}:6790"
