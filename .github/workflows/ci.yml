@@ -187,10 +187,7 @@ jobs:
       - name: Production builds
         run: bun run build
       - name: Inspect public package artifacts
-        run: |
-          npm pack --dry-run --json ./packages/protocol
-          npm pack --dry-run --json ./packages/runtime
-          npm pack --dry-run --json ./packages/sdk
+        run: npm pack --dry-run --json ./packages/protocol
 
   self-hosted-docker:
     name: Clean self-hosted Docker smoke

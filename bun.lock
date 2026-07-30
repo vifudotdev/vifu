@@ -33,19 +33,6 @@
       "name": "@vifu/protocol",
       "version": "0.1.0",
     },
-    "packages/runtime": {
-      "name": "@vifu/runtime",
-      "version": "0.1.0",
-    },
-    "packages/sdk": {
-      "name": "@vifu/sdk",
-      "version": "0.1.0-alpha.9",
-      "devDependencies": {
-        "esbuild": "^0.28.0",
-        "typescript": "^5.7.0",
-        "vitest": "^3.2.4",
-      },
-    },
   },
   "packages": {
     "@emnapi/runtime": ["@emnapi/runtime@1.11.2", "", { "dependencies": { "tslib": "^2.4.0" } }, "sha512-kyOl3X0DuTiT1h2ft8r2fYO8JYtU9a9Xis/zBSiGArNaagCOWx90N1k2wxp18czFDH+OgcWGb5ZP/XMt3dcyPA=="],
@@ -247,10 +234,6 @@
     "@vifu/dashboard": ["@vifu/dashboard@workspace:npm-packages/dashboard"],
 
     "@vifu/protocol": ["@vifu/protocol@workspace:packages/protocol"],
-
-    "@vifu/runtime": ["@vifu/runtime@workspace:packages/runtime"],
-
-    "@vifu/sdk": ["@vifu/sdk@workspace:packages/sdk"],
 
     "@vitest/expect": ["@vitest/expect@3.2.7", "", { "dependencies": { "@types/chai": "^5.2.2", "@vitest/spy": "3.2.7", "@vitest/utils": "3.2.7", "chai": "^5.2.0", "tinyrainbow": "^2.0.0" } }, "sha512-E8eBXaKibuvH2pSZErOjdVb5vF4PbKYcrnluBTYxEk1l/VhhwZg1kZQsdtjq+CsF5CFydf2Rdkz7jDHKSisi3w=="],
 

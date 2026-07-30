@@ -7,8 +7,6 @@ WORKDIR /app
 COPY package.json bun.lock tsconfig.base.json ./
 COPY npm-packages/dashboard/package.json npm-packages/dashboard/package.json
 COPY packages/protocol/package.json packages/protocol/package.json
-COPY packages/runtime/package.json packages/runtime/package.json
-COPY packages/sdk/package.json packages/sdk/package.json
 RUN bun install --frozen-lockfile
 
 FROM deps AS build
