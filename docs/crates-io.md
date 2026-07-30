@@ -1,35 +1,27 @@
 # crates.io Release Contract
 
-The public Rust entry point is the `vifu` crate. It provides both:
+The public packages have two explicit entry points:
 
-- a library SDK for embedding selected Vifu capabilities; and
-- the `vifu` binary, which runs Vifu Server and Agent Gateway from the same
-  configuration model used by repository builds.
+- `vifu` installs the complete configuration-driven Runtime, Agent Gateway, and
+  Server application.
+- `vifu-runtime` is the portable Rust SDK for applications that embed Vifu.
 
-## Feature Contract
-
-```toml
-# Default SDK with the embedded Runtime
-vifu = "0.1"
-
-# Runtime plus Agent Gateway
-vifu = { version = "0.1", default-features = false, features = ["runtime", "gateway"] }
-
-# Explicit Runtime-only dependency graph
-vifu = { version = "0.1", default-features = false, features = ["runtime"] }
-```
-
-The `binary` feature enables the Runtime, Gateway, and Server and builds the
-executable:
+Install the application without feature selection:
 
 ```bash
-cargo install vifu --features binary
+cargo install vifu
 ```
 
-Cargo cannot choose different default features based on whether `vifu` is
-installed as a binary or added as a dependency. The default therefore keeps
-application dependencies small; binary installation opts into deployment
-components explicitly.
+Embed the execution kernel directly:
+
+```toml
+[dependencies]
+vifu-runtime = "0.1"
+```
+
+The application always includes its Server and Agent Gateway roles. Runtime
+configuration selects which roles start. The `local-whisper` feature is reserved
+for the optional native Whisper dependency.
 
 ## Package Layout
 
@@ -41,10 +33,11 @@ tested and optimized independently:
 | `vifu-runtime` | Portable Bevy execution kernel |
 | `vifu-gateway` | Provider, protocol, relay, and session implementation |
 | `vifu-server` | HTTP, WebSocket, SQLite, and PostgreSQL server implementation |
-| `vifu` | Stable public facade, feature selection, and binary |
+| `vifu` | Complete configuration-driven application and binary |
 
-Users should depend on `vifu`. The implementation packages are published only
-because crates.io must resolve every dependency in a published package.
+Embedded applications should depend on `vifu-runtime`. The Gateway and Server
+packages remain public implementation boundaries that can also support custom
+deployments.
 
 ## Release Order
 

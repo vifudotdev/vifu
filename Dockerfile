@@ -23,7 +23,7 @@ COPY crates ./crates
 RUN --mount=type=cache,id=vifu-cargo-registry,target=/usr/local/cargo/registry \
     --mount=type=cache,id=vifu-cargo-git,target=/usr/local/cargo/git \
     --mount=type=cache,id=vifu-cargo-target,target=/src/target \
-    cargo build --release --locked -p vifu --features binary \
+    cargo build --release --locked -p vifu \
     && mkdir -p /out \
     && cp /src/target/release/vifu /out/vifu
 

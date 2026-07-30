@@ -49,7 +49,7 @@ jobs:
         with:
           key: ${{ matrix.target }}
       - name: Build runtime
-        run: cargo build --release --locked -p vifu --features binary --target ${{ matrix.target }}
+        run: cargo build --release --locked -p vifu --target ${{ matrix.target }}
       - name: Package Unix binary
         if: matrix.archive == 'tar'
         shell: bash

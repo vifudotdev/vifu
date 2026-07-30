@@ -25,7 +25,7 @@ Source development uses loopback defaults. Docker self-hosting uses the root
 
 ```bash
 cd crates/vifu
-cargo run --features binary
+cargo run
 ```
 
 The first `cargo run` creates `~/.vifu/config.json` and
@@ -59,7 +59,7 @@ cat > ~/.vifu/providers.json <<'JSON'
 }
 JSON
 cd crates/vifu
-VIFU_AGENT_GATEWAY_ENROLLMENT_TOKEN_FILE=/secure/path/to/one-time-token cargo run --features binary
+VIFU_AGENT_GATEWAY_ENROLLMENT_TOKEN_FILE=/secure/path/to/one-time-token cargo run
 ```
 
 The project owner issues the one-time enrollment token through
@@ -100,7 +100,7 @@ cat > ~/.vifu/providers.json <<'JSON'
 JSON
 OPENCLAW_MOCK_PORT=18790 node scripts/mock-openclaw.mjs
 cd crates/vifu
-cargo run --features binary
+cargo run
 ```
 
 ## Rust Workspace
@@ -109,7 +109,7 @@ The Rust workspace produces one runtime executable. Its configuration selects
 the Server role, Agent Gateway role, or both:
 
 ```bash
-cargo build --release --locked -p vifu --features binary
+cargo build --release --locked -p vifu
 ```
 
 It is written to `target/release/vifu`. The binary uses embedded SQLite unless
@@ -121,7 +121,7 @@ cargo fmt --all -- --check
 cargo test --workspace --all-targets
 cargo clippy --workspace --all-targets -- -D warnings
 cargo build --workspace
-cargo build -p vifu --features binary
+cargo build -p vifu
 ```
 
 SQLite and PostgreSQL migrations are embedded in the Vifu Server role and run

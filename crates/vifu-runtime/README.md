@@ -1,26 +1,26 @@
 # vifu-runtime
 
 `vifu-runtime` is the small, stateful execution kernel at the center of Vifu.
-Most applications should depend on the `vifu` crate, which includes Runtime
-support by default. This lower-level crate remains available for hosts that only
-need the kernel implementation.
+Rust applications use this crate to embed Vifu directly in their process. The
+separate `vifu` package installs the complete Server and Agent Gateway
+application.
 
 The crate uses Bevy App and ECS primitives without the renderer, windowing
 stack, database, HTTP server, or Vifu Console. It also provides the higher-level
 `VifuRuntime` API used by applications and Vifu Server.
 
-## Use the public Vifu SDK
+## Add the runtime
 
 ```toml
 [dependencies]
-vifu = "0.1"
+vifu-runtime = "0.1"
 ```
 
 ## Register providers, agents, and endpoints
 
 ```rust
 use std::sync::Arc;
-use vifu::runtime::prelude::*;
+use vifu_runtime::prelude::*;
 
 let mut provider = HttpCapabilityProvider::new(
     "models",

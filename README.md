@@ -4,7 +4,7 @@
 
 [![Crates.io](https://img.shields.io/crates/v/vifu.svg)](https://crates.io/crates/vifu)
 [![Downloads](https://img.shields.io/crates/d/vifu.svg)](https://crates.io/crates/vifu)
-[![Docs](https://docs.rs/vifu/badge.svg)](https://docs.rs/vifu)
+[![Runtime API](https://docs.rs/vifu-runtime/badge.svg)](https://docs.rs/vifu-runtime)
 [![CI](https://github.com/vifudotdev/vifu/actions/workflows/ci.yml/badge.svg)](https://github.com/vifudotdev/vifu/actions/workflows/ci.yml)
 [![Discord](https://img.shields.io/badge/Discord-Join-5865F2?logo=discord&logoColor=white)](https://discord.com/invite/VdqqFwJbNE)
 
@@ -18,20 +18,28 @@ stable application APIs, traces, and a small operations Console. A runtime can
 live directly inside an application, or the same invocation model can sit behind
 Vifu Server for multi-project deployments.
 
+## Install Vifu
+
+The `vifu` package installs the complete Runtime, Agent Gateway, and Server
+application:
+
+```bash
+cargo install vifu
+vifu
+```
+
+Its configuration selects whether the process runs the Server role, Agent
+Gateway role, or both. Provider capabilities are registered at runtime rather
+than selected through vendor-specific Cargo features.
+
 ## Embed Vifu
 
-The `vifu` crate is the public Rust SDK and also produces the `vifu` binary.
-Runtime support is included by default:
+Rust applications embed the portable execution kernel directly:
 
 ```toml
 [dependencies]
-vifu = "0.1"
+vifu-runtime = "0.1"
 ```
-
-Advanced builds can disable default features and select the broad capabilities
-they use: `runtime`, `gateway`, or `server`. Provider capabilities are registered
-at runtime rather than selected with vendor-specific Cargo features. Enable the
-`binary` feature to build the complete Vifu Server and Agent Gateway executable.
 
 See [Embed the runtime](docs/runtime-embedding.md) and the
 [crates.io release contract](docs/crates-io.md).
@@ -74,7 +82,7 @@ See [Self-hosting Vifu](docs/self-hosting.md) for configuration and upgrades.
 
 ```bash
 cd crates/vifu
-cargo run --features binary
+cargo run
 ```
 
 On first run, `vifu` creates its local configuration under `~/.vifu/`. The
@@ -139,8 +147,8 @@ stack.
 
 ## Embedded Runtime
 
-`crates/vifu-runtime` is the Bevy-based execution kernel behind the public
-`vifu` crate. It supplies:
+`crates/vifu-runtime` is the public Bevy-based execution kernel for embedded
+applications. It supplies:
 
 - dynamic provider, agent, and named endpoint registration;
 - async invocation and non-blocking start/poll/cancel APIs for game loops;

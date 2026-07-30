@@ -1,11 +1,11 @@
 # Embed The Runtime
 
-The `vifu` crate is both the public Rust SDK and the source of the `vifu`
-binary. Runtime support is included by default.
+The `vifu-runtime` crate is the portable Rust SDK for embedding Vifu directly
+inside an application.
 
 ```toml
 [dependencies]
-vifu = "0.1"
+vifu-runtime = "0.1"
 ```
 
 One `VifuRuntime` represents one application or project. It owns the registry
@@ -54,7 +54,7 @@ protocols:
 
 ```rust
 use std::sync::Arc;
-use vifu::runtime::prelude::*;
+use vifu_runtime::prelude::*;
 
 let mut provider = HttpCapabilityProvider::new(
     "models",
@@ -159,7 +159,7 @@ The lower-level Bevy API remains available for deterministic application
 behavior and custom effects:
 
 ```rust
-use vifu::runtime::prelude::*;
+use vifu_runtime::prelude::*;
 
 pub struct MyRuntimePlugin;
 
@@ -187,19 +187,9 @@ fn handle_commands(
 registered endpoint contract and returns application-defined effects to the
 host.
 
-## Features
-
-| Feature | Adds |
-| --- | --- |
-| `runtime` | Providers, agents, endpoints, sessions, state, effects, and snapshots |
-| `gateway` | Provider discovery and the multiplexed Agent Gateway client |
-| `server` | HTTP, WebSocket, SQLite, and PostgreSQL Vifu Server |
-| `full` | Runtime, Gateway, and Server library APIs |
-| `binary` | The complete `vifu` executable |
-| `local-whisper` | Optional local Whisper execution support |
-
 Provider vendors and normal provider capabilities are registered at runtime.
-Feature flags select broad binary capabilities only.
+Optional local Whisper execution is available through the `local-whisper`
+feature.
 
 ## Boundary
 

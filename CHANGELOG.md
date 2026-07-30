@@ -2,6 +2,15 @@
 
 All notable changes to Vifu are documented here.
 
+## 0.1.4 - 2026-07-30
+
+- Made `cargo install vifu` and `cargo run -p vifu` build the complete
+  configuration-driven application without a feature flag.
+- Established `vifu-runtime` as the direct dependency for embedded Rust
+  applications.
+- Removed the unused broad application feature matrix; `local-whisper` remains
+  the only optional Vifu application capability.
+
 ## 0.1.3 - 2026-07-30
 
 - Added embedded SQLite as the default local runtime store while retaining

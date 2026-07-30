@@ -1,8 +1,10 @@
-#[cfg(feature = "runtime")]
-#[test]
-fn public_sdk_exposes_the_embeddable_runtime() {
-    use vifu::runtime::prelude::*;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
+use vifu_runtime::prelude::*;
+
+#[test]
+fn public_api_exposes_the_headless_runtime() {
     let mut runtime = HeadlessRuntime::new();
     let advance = runtime.dispatch(RuntimeCommand::new(
         "command-1",
@@ -13,14 +15,8 @@ fn public_sdk_exposes_the_embeddable_runtime() {
     assert_eq!(advance.snapshot.revision, 1);
 }
 
-#[cfg(feature = "runtime")]
 #[test]
-fn public_sdk_invokes_a_registered_provider_without_server_or_gateway() {
-    use std::sync::Arc;
-    use std::time::{Duration, Instant};
-
-    use vifu::runtime::prelude::*;
-
+fn public_api_invokes_a_registered_provider() {
     struct EchoProvider;
 
     impl AgentProvider for EchoProvider {
@@ -81,11 +77,4 @@ fn public_sdk_invokes_a_registered_provider_without_server_or_gateway() {
         output.data,
         InvocationData::Json(json!({ "text": "Hello" }))
     );
-}
-
-#[cfg(feature = "gateway")]
-#[test]
-fn public_sdk_exposes_gateway_provider_and_extension_contracts() {
-    let _: Option<vifu::gateway::config::AgentProviderDefinition> = None;
-    let _: Option<vifu::gateway::runtime_extension::RuntimeExtensionDefinition> = None;
 }

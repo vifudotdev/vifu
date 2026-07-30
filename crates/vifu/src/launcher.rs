@@ -25,13 +25,6 @@ pub async fn execute(options: Options) -> Result<(), String> {
 }
 
 async fn start(config: LoadedRuntimeConfig) -> Result<(), String> {
-    if config.config.server.is_some() && !cfg!(feature = "server") {
-        return Err("this vifu build does not include the Server role".to_string());
-    }
-    if config.config.gateway.is_some() && !cfg!(feature = "gateway") {
-        return Err("this vifu build does not include the Agent Gateway role".to_string());
-    }
-
     match (
         config.config.server.is_some(),
         config.config.gateway.is_some(),
@@ -88,7 +81,6 @@ fn role_status(enabled: bool) -> &'static str {
     }
 }
 
-#[cfg(feature = "server")]
 async fn run_combined(config: LoadedRuntimeConfig) -> Result<(), String> {
     let server_config = config.server_config()?;
     let gateway_options = config.gateway_options()?;
@@ -121,12 +113,6 @@ async fn run_combined(config: LoadedRuntimeConfig) -> Result<(), String> {
     }
 }
 
-#[cfg(not(feature = "server"))]
-async fn run_combined(_config: LoadedRuntimeConfig) -> Result<(), String> {
-    Err("this vifu build does not include the Server role".to_string())
-}
-
-#[cfg(feature = "server")]
 async fn run_server_only(config: LoadedRuntimeConfig) -> Result<(), String> {
     let server_config = config.server_config()?;
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
@@ -146,11 +132,6 @@ async fn run_server_only(config: LoadedRuntimeConfig) -> Result<(), String> {
         }
         SingleRuntimeOutcome::Role(result) => join_result("Vifu Server", result),
     }
-}
-
-#[cfg(not(feature = "server"))]
-async fn run_server_only(_config: LoadedRuntimeConfig) -> Result<(), String> {
-    Err("this vifu build does not include the Server role".to_string())
 }
 
 async fn run_gateway_only(config: LoadedRuntimeConfig) -> Result<(), String> {
@@ -193,7 +174,6 @@ fn join_result(
     }
 }
 
-#[cfg(feature = "server")]
 async fn wait_for_shutdown(mut shutdown: watch::Receiver<bool>) {
     if *shutdown.borrow() {
         return;

@@ -63,18 +63,10 @@ jobs:
         run: cargo test --workspace --locked
       - name: Clippy
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
-      - name: Clippy complete binary
-        run: >-
-          cargo clippy --locked -p vifu --all-targets
-          --no-default-features --features binary -- -D warnings
-      - name: Public facade feature matrix
+      - name: Vifu application configurations
         run: |
           cargo check --locked -p vifu
-          cargo check --locked -p vifu --no-default-features --features runtime
-          cargo check --locked -p vifu --no-default-features --features gateway
-          cargo check --locked -p vifu --no-default-features --features server
-          cargo check --locked -p vifu --no-default-features --features full
-          cargo check --locked -p vifu --no-default-features --features binary
+          cargo check --locked -p vifu --features local-whisper
       - name: Public repository hygiene
         run: node scripts/check-public-repo.mjs
         env:
@@ -100,7 +92,7 @@ jobs:
           cargo package --locked -p vifu-server \
             --config 'patch.crates-io.vifu-runtime.path="crates/vifu-runtime"' \
             --config 'patch.crates-io.vifu-gateway.path="crates/vifu-gateway"'
-          cargo package --locked -p vifu --features binary \
+          cargo package --locked -p vifu \
             --config 'patch.crates-io.vifu-runtime.path="crates/vifu-runtime"' \
             --config 'patch.crates-io.vifu-gateway.path="crates/vifu-gateway"' \
             --config 'patch.crates-io.vifu-server.path="crates/vifu-server"'

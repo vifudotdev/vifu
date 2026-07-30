@@ -93,7 +93,6 @@ impl LoadedRuntimeConfig {
         })
     }
 
-    #[cfg(feature = "server")]
     pub fn server_config(&self) -> Result<vifu_server::config::Config, String> {
         let server =
             self.config.server.as_ref().ok_or_else(|| {
@@ -132,9 +131,9 @@ impl RuntimeConfig {
     }
 
     fn local_defaults() -> Result<Self, String> {
-        let config = Self {
+        Ok(Self {
             version: CONFIG_VERSION,
-            server: cfg!(feature = "server").then(|| ServerRuntimeConfig {
+            server: Some(ServerRuntimeConfig {
                 listen: Some("127.0.0.1:6790".to_string()),
                 deployment_id: None,
                 database_url: None,
@@ -142,14 +141,10 @@ impl RuntimeConfig {
                 runtime_extensions: Vec::new(),
                 authority: None,
             }),
-            gateway: cfg!(feature = "gateway").then(|| GatewayRuntimeConfig {
+            gateway: Some(GatewayRuntimeConfig {
                 server_url: Some(vifu_gateway::config::DEFAULT_SERVER_URL.to_string()),
             }),
-        };
-        if config.server.is_none() && config.gateway.is_none() {
-            return Err("this vifu build does not include a runtime role".to_string());
-        }
-        Ok(config)
+        })
     }
 
     fn write(&self, path: &Path) -> Result<(), String> {
@@ -238,7 +233,6 @@ impl ServerRuntimeConfig {
         ))
     }
 
-    #[cfg(feature = "server")]
     fn runtime_extensions(
         &self,
         config_path: &Path,
@@ -273,7 +267,6 @@ impl ServerRuntimeConfig {
             .collect()
     }
 
-    #[cfg(feature = "server")]
     fn access_token_authority(
         &self,
     ) -> Result<Option<vifu_server::config::AccessTokenAuthorityConfig>, String> {
@@ -476,7 +469,6 @@ mod tests {
         std::fs::remove_dir_all(directory).unwrap();
     }
 
-    #[cfg(feature = "server")]
     #[test]
     fn loads_access_token_authority() {
         let raw = r#"{"version":1,"server":{"deploymentId":"dep_01JTESTDEPLOYMENT","authority":{"url":"https://auth.vifu.test/v1/deployments/authorize"}}}"#;
