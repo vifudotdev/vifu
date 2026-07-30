@@ -144,8 +144,6 @@ pub struct VifuProviderResponse {
 
 #[uniffi::export(callback_interface)]
 pub trait VifuAgentProvider: Send + Sync {
-    fn supports(&self, capability: String) -> bool;
-
     fn invoke(
         &self,
         request: VifuProviderRequest,
@@ -154,19 +152,21 @@ pub trait VifuAgentProvider: Send + Sync {
 
 struct FfiAgentProvider {
     id: String,
-    inner: Box<dyn VifuAgentProvider>,
+    inner: Arc<dyn VifuAgentProvider>,
 }
 
 impl AgentProvider for FfiAgentProvider {
-    fn supports(&self, capability: &str) -> bool {
-        self.inner.supports(capability.to_string())
+    fn supports(&self, _capability: &str) -> bool {
+        true
     }
 
     fn invoke<'a>(
         &'a self,
         request: ProviderRequest,
-        _cancellation: CancellationToken,
+        cancellation: CancellationToken,
     ) -> ProviderFuture<'a> {
+        let provider_id = self.id.clone();
+        let inner = Arc::clone(&self.inner);
         Box::pin(async move {
             let ffi_request = VifuProviderRequest {
                 project_id: request.project_id,
@@ -179,9 +179,17 @@ impl AgentProvider for FfiAgentProvider {
                 state_json: encode_json(&request.snapshot.state)?,
                 state_revision: request.snapshot.revision,
             };
-            let response = self.inner.invoke(ffi_request).map_err(|_error| {
-                RuntimeError::provider(&self.id, "native provider callback failed")
-            })?;
+            let callback = tokio::task::spawn_blocking(move || inner.invoke(ffi_request));
+            let response = tokio::select! {
+                _ = cancellation.cancelled() => return Err(RuntimeError::Cancelled),
+                result = callback => result
+                    .map_err(|_error| {
+                        RuntimeError::provider(&provider_id, "native provider callback stopped")
+                    })?
+                    .map_err(|_error| {
+                        RuntimeError::provider(&provider_id, "native provider callback failed")
+                    })?,
+            };
             Ok(ProviderResponse {
                 data: response.data.try_into()?,
                 metadata: parse_json(&response.metadata_json, "provider metadata")?,
@@ -284,7 +292,7 @@ impl VifuEmbeddedRuntime {
             provider_id.clone(),
             Arc::new(FfiAgentProvider {
                 id: provider_id,
-                inner: provider,
+                inner: Arc::from(provider),
             }),
         )?;
         Ok(())
@@ -354,6 +362,18 @@ impl VifuEmbeddedRuntime {
         })
     }
 
+    pub fn take_invocation(&self, handle: String) -> Result<VifuInvocationPoll, VifuRuntimeError> {
+        let poll = self
+            .runtime
+            .take_invocation(&InvocationHandle(handle.clone()))?;
+        Ok(VifuInvocationPoll {
+            handle,
+            state: poll.status.into(),
+            result: poll.output.map(TryInto::try_into).transpose()?,
+            error: poll.error,
+        })
+    }
+
     pub fn cancel_invocation(&self, handle: String) -> Result<(), VifuRuntimeError> {
         self.runtime
             .cancel_invocation(&InvocationHandle(handle))
@@ -413,10 +433,6 @@ mod tests {
     struct EchoProvider;
 
     impl VifuAgentProvider for EchoProvider {
-        fn supports(&self, capability: String) -> bool {
-            capability == "chat"
-        }
-
         fn invoke(
             &self,
             request: VifuProviderRequest,
@@ -425,6 +441,22 @@ mod tests {
                 data: request.data,
                 metadata_json: r#"{"contentType":"application/json"}"#.to_string(),
                 state_json: Some(r#"{"turns":1}"#.to_string()),
+            })
+        }
+    }
+
+    struct BlockingProvider;
+
+    impl VifuAgentProvider for BlockingProvider {
+        fn invoke(
+            &self,
+            request: VifuProviderRequest,
+        ) -> Result<VifuProviderResponse, VifuRuntimeError> {
+            std::thread::sleep(Duration::from_millis(250));
+            Ok(VifuProviderResponse {
+                data: request.data,
+                metadata_json: "{}".to_string(),
+                state_json: None,
             })
         }
     }
@@ -483,5 +515,54 @@ mod tests {
         restored.restore_snapshot(snapshot).unwrap();
         let restored_snapshot = restored.export_snapshot().unwrap();
         assert!(String::from_utf8_lossy(&restored_snapshot).contains("\"turns\":1"));
+    }
+
+    #[test]
+    fn blocking_native_provider_does_not_block_runtime_timeouts() {
+        let runtime = VifuEmbeddedRuntime::new("blocking-ffi-project".to_string()).unwrap();
+        runtime
+            .register_provider("native".to_string(), Box::new(BlockingProvider))
+            .unwrap();
+        runtime
+            .register_agent(
+                "guide".to_string(),
+                "Guide".to_string(),
+                "native".to_string(),
+                vec!["chat".to_string()],
+                "{}".to_string(),
+            )
+            .unwrap();
+        runtime
+            .register_endpoint(
+                "guide".to_string(),
+                "guide".to_string(),
+                "chat".to_string(),
+                20,
+            )
+            .unwrap();
+
+        let started = Instant::now();
+        let handle = runtime
+            .start_invoke(
+                "guide".to_string(),
+                "player-one".to_string(),
+                VifuInvocationData::Json {
+                    json: "{}".to_string(),
+                },
+                "{}".to_string(),
+            )
+            .unwrap();
+        let deadline = started + Duration::from_millis(150);
+        loop {
+            let poll = runtime.poll_invocation(handle.clone()).unwrap();
+            if matches!(poll.state, VifuInvocationState::Failed) {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "blocking callback prevented the runtime timeout"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
     }
 }

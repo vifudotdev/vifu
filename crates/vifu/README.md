@@ -24,7 +24,7 @@ Available features:
 | `gateway` | Provider discovery and multiplexed Agent Gateway client |
 | `server` | HTTP, WebSocket, SQLite, and PostgreSQL Vifu Server |
 | `full` | Runtime, Gateway, and Server library APIs |
-| `binary` | Complete `vifu` executable; enabled by default |
+| `binary` | Complete `vifu` executable |
 | `local-whisper` | Optional local Whisper provider support |
 
 Advanced builds can disable default features and select only the capabilities
@@ -34,7 +34,7 @@ vendor-specific feature flags.
 ## Install the binary
 
 ```bash
-cargo install vifu
+cargo install vifu --features binary
 vifu
 ```
 
@@ -43,7 +43,7 @@ Vifu configuration and stores local state in `~/.vifu/vifu.sqlite`. Local
 Whisper support is opt-in:
 
 ```bash
-cargo install vifu --features local-whisper
+cargo install vifu --features binary,local-whisper
 ```
 
 Read the [Vifu documentation](https://vifu.dev/docs) or view the

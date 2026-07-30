@@ -24,6 +24,28 @@ Agent Gateway is a Server transport and connects to a running Vifu Server. An
 embedded Runtime is self-contained at the Vifu layer: it executes directly in
 the application and calls the providers registered by that host.
 
+## Add Vifu To An Apple Application
+
+In Xcode, choose **File > Add Package Dependencies** and enter:
+
+```text
+https://github.com/vifudotdev/vifu
+```
+
+Choose a released version and add the `Vifu` product to the application target.
+The package supports iOS 17 or newer and macOS 14 or newer.
+
+```swift
+import Vifu
+
+let runtime = try VifuEmbeddedRuntime(projectId: "my-application")
+let snapshot = try runtime.exportSnapshot()
+```
+
+The Swift source API is generated from the same UniFFI contract used by the
+Rust mobile adapter. The package downloads a checksum-verified XCFramework
+containing device, simulator, and macOS libraries.
+
 ## Register An Agent
 
 Providers are dynamic Rust implementations, not vendor Cargo features. The
@@ -99,7 +121,8 @@ let handle = runtime.start_invoke(InvocationInput::json(
 ))?;
 
 // Call from later frames until the operation reaches a terminal state.
-let poll = runtime.poll_invocation(&handle)?;
+// take_invocation removes a terminal result after returning it.
+let poll = runtime.take_invocation(&handle)?;
 match poll.status {
     InvocationStatus::Completed => {
         let output = poll.output.expect("completed invocation has output");
@@ -172,7 +195,7 @@ host.
 | `gateway` | Provider discovery and the multiplexed Agent Gateway client |
 | `server` | HTTP, WebSocket, SQLite, and PostgreSQL Vifu Server |
 | `full` | Runtime, Gateway, and Server library APIs |
-| `binary` | The complete `vifu` executable; enabled by default |
+| `binary` | The complete `vifu` executable |
 | `local-whisper` | Optional local Whisper execution support |
 
 Provider vendors and normal provider capabilities are registered at runtime.

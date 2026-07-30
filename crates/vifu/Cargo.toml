@@ -1,6 +1,6 @@
 [package]
 name = "vifu"
-version = "0.1.2"
+version = "0.1.3"
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
@@ -23,7 +23,7 @@ path = "src/main.rs"
 required-features = ["binary"]
 
 [features]
-default = ["runtime", "binary"]
+default = ["runtime"]
 runtime = ["dep:vifu-runtime"]
 gateway = [
   "dep:serde_json",
@@ -51,6 +51,6 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "syn
 tracing = { version = "0.1", optional = true }
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"], optional = true }
 uuid = { version = "1", features = ["serde", "v4"], optional = true }
-vifu-gateway = { version = "0.1.0", path = "../vifu-gateway", optional = true, default-features = false }
-vifu-runtime = { version = "0.1.0", path = "../vifu-runtime", optional = true }
-vifu-server = { version = "0.1.0", path = "../vifu-server", optional = true }
+vifu-gateway = { version = "0.1.1", path = "../vifu-gateway", optional = true, default-features = false }
+vifu-runtime = { version = "0.1.1", path = "../vifu-runtime", optional = true }
+vifu-server = { version = "0.1.1", path = "../vifu-server", optional = true }

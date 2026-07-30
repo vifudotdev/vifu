@@ -30,11 +30,21 @@ vifu = "0.1"
 
 Advanced builds can disable default features and select the broad capabilities
 they use: `runtime`, `gateway`, or `server`. Provider capabilities are registered
-at runtime rather than selected with vendor-specific Cargo features. The default
-build also produces the complete Vifu Server and Agent Gateway executable.
+at runtime rather than selected with vendor-specific Cargo features. Enable the
+`binary` feature to build the complete Vifu Server and Agent Gateway executable.
 
 See [Embed the runtime](docs/runtime-embedding.md) and the
 [crates.io release contract](docs/crates-io.md).
+
+Apple applications can add this repository directly as a Swift Package:
+
+```text
+https://github.com/vifudotdev/vifu
+```
+
+Select the `Vifu` product, then use `import Vifu`. SwiftPM downloads the
+versioned XCFramework from the matching GitHub release, so application
+developers do not need a Rust toolchain.
 
 ## Run With Docker
 
@@ -64,7 +74,7 @@ See [Self-hosting Vifu](docs/self-hosting.md) for configuration and upgrades.
 
 ```bash
 cd crates/vifu
-cargo run
+cargo run --features binary
 ```
 
 On first run, `vifu` creates its local configuration under `~/.vifu/`. The

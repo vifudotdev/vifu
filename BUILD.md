@@ -5,10 +5,12 @@ repository root because the Compose file lives there.
 
 ## Prerequisites
 
-- Rust 1.90 or newer
+- Rust 1.95 or newer
 - Bun 1.3.9
 - Node.js 22
 - Docker with Compose v2
+
+Building the Apple XCFramework additionally requires Xcode 15 or newer.
 
 Install Dashboard dependencies:
 
@@ -23,7 +25,7 @@ Source development uses loopback defaults. Docker self-hosting uses the root
 
 ```bash
 cd crates/vifu
-cargo run
+cargo run --features binary
 ```
 
 The first `cargo run` creates `~/.vifu/config.json` and
@@ -57,7 +59,7 @@ cat > ~/.vifu/providers.json <<'JSON'
 }
 JSON
 cd crates/vifu
-VIFU_AGENT_GATEWAY_ENROLLMENT_TOKEN_FILE=/secure/path/to/one-time-token cargo run
+VIFU_AGENT_GATEWAY_ENROLLMENT_TOKEN_FILE=/secure/path/to/one-time-token cargo run --features binary
 ```
 
 The project owner issues the one-time enrollment token through
@@ -98,7 +100,7 @@ cat > ~/.vifu/providers.json <<'JSON'
 JSON
 OPENCLAW_MOCK_PORT=18790 node scripts/mock-openclaw.mjs
 cd crates/vifu
-cargo run
+cargo run --features binary
 ```
 
 ## Rust Workspace
@@ -107,7 +109,7 @@ The Rust workspace produces one runtime executable. Its configuration selects
 the Server role, Agent Gateway role, or both:
 
 ```bash
-cargo build --release --locked -p vifu
+cargo build --release --locked -p vifu --features binary
 ```
 
 It is written to `target/release/vifu`. The binary uses embedded SQLite unless
@@ -119,6 +121,7 @@ cargo fmt --all -- --check
 cargo test --workspace --all-targets
 cargo clippy --workspace --all-targets -- -D warnings
 cargo build --workspace
+cargo build -p vifu --features binary
 ```
 
 SQLite and PostgreSQL migrations are embedded in the Vifu Server role and run
@@ -129,6 +132,27 @@ Tokens and the Admin Key use the same `Vifu` authorization interface,
 then enter the same identity and deployment-operation checks.
 SQLx uses runtime-checked queries. SQLite lifecycle and restart tests always
 run; PostgreSQL integration is mandatory in CI.
+
+## Apple Package
+
+The root `Package.swift` is the public SwiftPM manifest. It combines the tracked
+UniFFI Swift wrapper with `VifuMobileFFI.xcframework` from a version-matched
+GitHub release.
+
+```bash
+rustup target add \
+  aarch64-apple-ios \
+  aarch64-apple-ios-sim \
+  x86_64-apple-ios \
+  x86_64-apple-darwin
+scripts/build-apple-package.sh
+```
+
+The script prints a local SwiftPM checksum. Before tagging, run the **Release
+Vifu binaries** workflow manually for the intended commit and use the checksum
+from its job summary in `Package.swift`. The tag run rebuilds the artifact on
+the same release environment, verifies its URL and checksum, links the Swift
+smoke test, and uploads it with the other release files.
 
 ## Dashboard
 

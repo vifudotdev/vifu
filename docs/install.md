@@ -8,7 +8,7 @@
 
 ```bash
 cd crates/vifu
-cargo run
+cargo run --features binary
 ```
 
 The first run creates `~/.vifu/config.json` and

@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
@@ -17,6 +17,9 @@ const SNAPSHOT_VERSION: u32 = 1;
 const DEFAULT_TIMEOUT_MS: u64 = 30_000;
 const MAX_TIMEOUT_MS: u64 = 120_000;
 const DEFAULT_EFFECT_LIMIT: usize = 64;
+const MAX_IN_FLIGHT_INVOCATIONS: usize = 64;
+const MAX_RETAINED_INVOCATIONS: usize = 256;
+const WORKER_QUEUE_CAPACITY: usize = 64;
 
 /// A boxed provider future used by [`AgentProvider`].
 pub type ProviderFuture<'a> =
@@ -434,7 +437,7 @@ impl RuntimeError {
             Self::Store(_) => "runtime state could not be persisted".to_string(),
             Self::Snapshot(_) => "runtime snapshot is invalid".to_string(),
             Self::Unavailable(_) => "provider is not available".to_string(),
-            Self::Backpressure(_) => "provider is busy".to_string(),
+            Self::Backpressure(_) => "runtime is busy".to_string(),
             _ => self.to_string(),
         }
     }
@@ -517,7 +520,7 @@ impl fmt::Display for RuntimeError {
             Self::Unavailable(message) => {
                 write!(formatter, "provider is not available: {message}")
             }
-            Self::Backpressure(message) => write!(formatter, "provider is busy: {message}"),
+            Self::Backpressure(message) => write!(formatter, "runtime is busy: {message}"),
             Self::Provider { provider, message } => {
                 write!(formatter, "provider {provider} failed: {message}")
             }
@@ -549,13 +552,100 @@ struct RuntimeCore {
     store: Arc<dyn RuntimeStore>,
     sessions: RwLock<HashMap<String, RuntimeSnapshot>>,
     session_locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
-    invocations: Mutex<HashMap<String, InvocationEntry>>,
+    invocations: Mutex<InvocationRegistry>,
     next_invocation: AtomicU64,
 }
 
 struct InvocationEntry {
     poll: InvocationPoll,
     cancellation: CancellationToken,
+}
+
+#[derive(Default)]
+struct InvocationRegistry {
+    entries: HashMap<String, InvocationEntry>,
+    terminal_order: VecDeque<String>,
+    active_count: usize,
+}
+
+impl InvocationRegistry {
+    fn insert(
+        &mut self,
+        handle: InvocationHandle,
+        cancellation: CancellationToken,
+    ) -> Result<(), RuntimeError> {
+        if self.active_count >= MAX_IN_FLIGHT_INVOCATIONS {
+            return Err(RuntimeError::Backpressure(
+                "too many invocations are already running".to_string(),
+            ));
+        }
+        self.entries.insert(
+            handle.0.clone(),
+            InvocationEntry {
+                poll: InvocationPoll {
+                    handle,
+                    status: InvocationStatus::Pending,
+                    output: None,
+                    error: None,
+                },
+                cancellation,
+            },
+        );
+        self.active_count += 1;
+        Ok(())
+    }
+
+    fn update(
+        &mut self,
+        handle: &InvocationHandle,
+        status: InvocationStatus,
+        output: Option<InvocationOutput>,
+        error: Option<String>,
+    ) {
+        let Some(entry) = self.entries.get_mut(&handle.0) else {
+            return;
+        };
+        if is_terminal_status(entry.poll.status) {
+            return;
+        }
+        entry.poll.status = status;
+        entry.poll.output = output;
+        entry.poll.error = error;
+        if is_terminal_status(status) {
+            self.active_count = self.active_count.saturating_sub(1);
+            self.terminal_order.push_back(handle.0.clone());
+            self.evict_old_terminal_entries();
+        }
+    }
+
+    fn remove(&mut self, handle: &InvocationHandle) {
+        if let Some(entry) = self.entries.remove(&handle.0) {
+            if !is_terminal_status(entry.poll.status) {
+                self.active_count = self.active_count.saturating_sub(1);
+            }
+        }
+        self.terminal_order.retain(|stored| stored != &handle.0);
+    }
+
+    fn take(&mut self, handle: &InvocationHandle) -> Result<InvocationPoll, RuntimeError> {
+        let poll = self
+            .entries
+            .get(&handle.0)
+            .map(|entry| entry.poll.clone())
+            .ok_or_else(|| RuntimeError::InvocationNotFound(handle.0.clone()))?;
+        if is_terminal_status(poll.status) {
+            self.remove(handle);
+        }
+        Ok(poll)
+    }
+
+    fn evict_old_terminal_entries(&mut self) {
+        while self.terminal_order.len() > MAX_RETAINED_INVOCATIONS {
+            if let Some(handle) = self.terminal_order.pop_front() {
+                self.entries.remove(&handle);
+            }
+        }
+    }
 }
 
 impl RuntimeCore {
@@ -702,11 +792,7 @@ impl RuntimeCore {
         error: Option<String>,
     ) {
         if let Ok(mut invocations) = self.invocations.lock() {
-            if let Some(entry) = invocations.get_mut(&handle.0) {
-                entry.poll.status = status;
-                entry.poll.output = output;
-                entry.poll.error = error;
-            }
+            invocations.update(handle, status, output, error);
         }
     }
 }
@@ -720,13 +806,13 @@ enum WorkerCommand {
 }
 
 struct RuntimeWorker {
-    sender: Mutex<Option<mpsc::UnboundedSender<WorkerCommand>>>,
+    sender: Mutex<Option<mpsc::Sender<WorkerCommand>>>,
     thread: Mutex<Option<JoinHandle<()>>>,
 }
 
 impl RuntimeWorker {
     fn spawn(core: Arc<RuntimeCore>) -> Result<Self, RuntimeError> {
-        let (sender, mut receiver) = mpsc::unbounded_channel();
+        let (sender, mut receiver) = mpsc::channel(WORKER_QUEUE_CAPACITY);
         let thread = std::thread::Builder::new()
             .name(format!("vifu-runtime-{}", core.project_id))
             .spawn(move || {
@@ -795,8 +881,13 @@ impl RuntimeWorker {
             .map_err(|_| RuntimeError::Internal)?
             .as_ref()
             .ok_or(RuntimeError::Internal)?
-            .send(command)
-            .map_err(|_| RuntimeError::Internal)
+            .try_send(command)
+            .map_err(|error| match error {
+                mpsc::error::TrySendError::Full(_) => {
+                    RuntimeError::Backpressure("invocation queue is full".to_string())
+                }
+                mpsc::error::TrySendError::Closed(_) => RuntimeError::Internal,
+            })
     }
 }
 
@@ -858,7 +949,7 @@ impl VifuRuntime {
             store,
             sessions: RwLock::new(HashMap::new()),
             session_locks: Mutex::new(HashMap::new()),
-            invocations: Mutex::new(HashMap::new()),
+            invocations: Mutex::new(InvocationRegistry::default()),
             next_invocation: AtomicU64::new(1),
         });
         let worker = Arc::new(Mutex::new(None));
@@ -965,34 +1056,32 @@ impl VifuRuntime {
         validate_identifier("session", &input.session_id)?;
         let handle = InvocationHandle(self.core.next_invocation_id());
         let cancellation = CancellationToken::default();
-        self.core
-            .invocations
-            .lock()
-            .map_err(|_| RuntimeError::Internal)?
-            .insert(
-                handle.0.clone(),
-                InvocationEntry {
-                    poll: InvocationPoll {
-                        handle: handle.clone(),
-                        status: InvocationStatus::Pending,
-                        output: None,
-                        error: None,
-                    },
-                    cancellation: cancellation.clone(),
-                },
-            );
         let mut worker = self.worker.lock().map_err(|_| RuntimeError::Internal)?;
         if worker.is_none() {
             *worker = Some(RuntimeWorker::spawn(Arc::clone(&self.core))?);
         }
-        worker
-            .as_ref()
-            .ok_or(RuntimeError::Internal)?
-            .send(WorkerCommand::Start {
-                handle: handle.clone(),
-                input,
-                cancellation,
-            })?;
+        self.core
+            .invocations
+            .lock()
+            .map_err(|_| RuntimeError::Internal)?
+            .insert(handle.clone(), cancellation.clone())?;
+        let send_result =
+            worker
+                .as_ref()
+                .ok_or(RuntimeError::Internal)?
+                .send(WorkerCommand::Start {
+                    handle: handle.clone(),
+                    input,
+                    cancellation,
+                });
+        if let Err(error) = send_result {
+            self.core
+                .invocations
+                .lock()
+                .map_err(|_| RuntimeError::Internal)?
+                .remove(&handle);
+            return Err(error);
+        }
         Ok(handle)
     }
 
@@ -1004,27 +1093,40 @@ impl VifuRuntime {
             .invocations
             .lock()
             .map_err(|_| RuntimeError::Internal)?
+            .entries
             .get(&handle.0)
             .map(|entry| entry.poll.clone())
             .ok_or_else(|| RuntimeError::InvocationNotFound(handle.0.clone()))
     }
 
+    /// Returns the current poll state and removes it once it is terminal.
+    ///
+    /// Pending and running invocations remain registered so callers can keep
+    /// polling the same handle.
+    pub fn take_invocation(
+        &self,
+        handle: &InvocationHandle,
+    ) -> Result<InvocationPoll, RuntimeError> {
+        self.core
+            .invocations
+            .lock()
+            .map_err(|_| RuntimeError::Internal)?
+            .take(handle)
+    }
+
     pub fn cancel_invocation(&self, handle: &InvocationHandle) -> Result<(), RuntimeError> {
-        let mut invocations = self
+        let cancellation = self
             .core
             .invocations
             .lock()
-            .map_err(|_| RuntimeError::Internal)?;
-        let entry = invocations
-            .get_mut(&handle.0)
+            .map_err(|_| RuntimeError::Internal)?
+            .entries
+            .get(&handle.0)
+            .map(|entry| entry.cancellation.clone())
             .ok_or_else(|| RuntimeError::InvocationNotFound(handle.0.clone()))?;
-        entry.cancellation.cancel();
-        if matches!(
-            entry.poll.status,
-            InvocationStatus::Pending | InvocationStatus::Running
-        ) {
-            entry.poll.status = InvocationStatus::Cancelled;
-        }
+        cancellation.cancel();
+        self.core
+            .update_poll(handle, InvocationStatus::Cancelled, None, None);
         Ok(())
     }
 
@@ -1169,6 +1271,13 @@ fn validate_identifier(kind: &str, value: &str) -> Result<(), RuntimeError> {
 
 fn duration_ms(duration: Duration) -> u64 {
     u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+}
+
+const fn is_terminal_status(status: InvocationStatus) -> bool {
+    matches!(
+        status,
+        InvocationStatus::Completed | InvocationStatus::Failed | InvocationStatus::Cancelled
+    )
 }
 
 #[cfg(test)]
@@ -1461,6 +1570,102 @@ mod tests {
                 "input": { "text": "hello" },
             }))
         );
+    }
+
+    #[test]
+    fn taking_a_terminal_invocation_releases_its_result() {
+        let runtime = configured_runtime(Arc::new(TestProvider::immediate()));
+        let handle = runtime
+            .start_invoke(InvocationInput::json("chat", json!({})))
+            .expect("invocation should start");
+        let deadline = Instant::now() + Duration::from_secs(1);
+        loop {
+            let poll = runtime
+                .take_invocation(&handle)
+                .expect("invocation should remain available until terminal");
+            if is_terminal_status(poll.status) {
+                break;
+            }
+            assert!(Instant::now() < deadline, "invocation did not complete");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+
+        assert!(matches!(
+            runtime.poll_invocation(&handle),
+            Err(RuntimeError::InvocationNotFound(_))
+        ));
+    }
+
+    #[test]
+    fn game_loop_api_applies_backpressure_to_excess_invocations() {
+        let runtime = configured_runtime(Arc::new(TestProvider {
+            fail: false,
+            delay: Duration::from_secs(5),
+        }));
+        let handles = (0..MAX_IN_FLIGHT_INVOCATIONS)
+            .map(|index| {
+                runtime
+                    .start_invoke(
+                        InvocationInput::json("chat", json!({}))
+                            .with_session(format!("session-{index}")),
+                    )
+                    .expect("invocation within the bound should start")
+            })
+            .collect::<Vec<_>>();
+
+        let error = runtime
+            .start_invoke(
+                InvocationInput::json("chat", json!({})).with_session("one-session-too-many"),
+            )
+            .expect_err("invocations above the bound should be rejected");
+        assert!(matches!(error, RuntimeError::Backpressure(_)));
+
+        for handle in handles {
+            runtime
+                .cancel_invocation(&handle)
+                .expect("test invocation should cancel");
+        }
+    }
+
+    #[test]
+    fn terminal_invocation_history_is_bounded() {
+        let runtime = configured_runtime(Arc::new(TestProvider::immediate()));
+        let first = runtime
+            .start_invoke(
+                InvocationInput::json("chat", json!({})).with_session("retained-session-0"),
+            )
+            .expect("first invocation should start");
+        let mut last = first.clone();
+        for index in 0..=MAX_RETAINED_INVOCATIONS {
+            let handle = if index == 0 {
+                first.clone()
+            } else {
+                runtime
+                    .start_invoke(
+                        InvocationInput::json("chat", json!({}))
+                            .with_session(format!("retained-session-{index}")),
+                    )
+                    .expect("invocation should start")
+            };
+            let deadline = Instant::now() + Duration::from_secs(1);
+            loop {
+                let poll = runtime
+                    .poll_invocation(&handle)
+                    .expect("latest invocation should remain available");
+                if is_terminal_status(poll.status) {
+                    break;
+                }
+                assert!(Instant::now() < deadline, "invocation did not complete");
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            last = handle;
+        }
+
+        assert!(matches!(
+            runtime.poll_invocation(&first),
+            Err(RuntimeError::InvocationNotFound(_))
+        ));
+        assert!(runtime.poll_invocation(&last).is_ok());
     }
 
     #[tokio::test(flavor = "current_thread")]

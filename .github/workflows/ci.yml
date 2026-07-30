@@ -63,6 +63,10 @@ jobs:
         run: cargo test --workspace --locked
       - name: Clippy
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Clippy complete binary
+        run: >-
+          cargo clippy --locked -p vifu --all-targets
+          --no-default-features --features binary -- -D warnings
       - name: Public facade feature matrix
         run: |
           cargo check --locked -p vifu
@@ -70,6 +74,7 @@ jobs:
           cargo check --locked -p vifu --no-default-features --features gateway
           cargo check --locked -p vifu --no-default-features --features server
           cargo check --locked -p vifu --no-default-features --features full
+          cargo check --locked -p vifu --no-default-features --features binary
       - name: Public repository hygiene
         run: node scripts/check-public-repo.mjs
         env:
@@ -93,11 +98,80 @@ jobs:
           cargo package --locked -p vifu-gateway \
             --config 'patch.crates-io.vifu-runtime.path="crates/vifu-runtime"'
           cargo package --locked -p vifu-server \
-            --config 'patch.crates-io.vifu-runtime.path="crates/vifu-runtime"'
-          cargo package --locked -p vifu \
+            --config 'patch.crates-io.vifu-runtime.path="crates/vifu-runtime"' \
+            --config 'patch.crates-io.vifu-gateway.path="crates/vifu-gateway"'
+          cargo package --locked -p vifu --features binary \
             --config 'patch.crates-io.vifu-runtime.path="crates/vifu-runtime"' \
             --config 'patch.crates-io.vifu-gateway.path="crates/vifu-gateway"' \
             --config 'patch.crates-io.vifu-server.path="crates/vifu-server"'
+
+  mobile-ffi-apple:
+    name: Mobile FFI (Apple)
+    runs-on: macos-14
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@1.95.0
+        with:
+          targets: aarch64-apple-ios,aarch64-apple-ios-sim,x86_64-apple-ios,x86_64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: mobile-ffi-apple
+      - name: Build and verify Swift package
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/vifu-apple-target
+          VIFU_APPLE_DIST_DIR: ${{ runner.temp }}/dist
+        run: |
+          scripts/build-apple-package.sh
+          mkdir -p target/vifu-apple-ci
+          cp -R \
+            "$RUNNER_TEMP/dist/VifuMobileFFI.xcframework" \
+            target/vifu-apple-ci/VifuMobileFFI.xcframework
+          VIFU_SWIFT_LOCAL_ARTIFACT=target/vifu-apple-ci/VifuMobileFFI.xcframework \
+            swift test
+          VIFU_SWIFT_LOCAL_ARTIFACT=target/vifu-apple-ci/VifuMobileFFI.xcframework \
+            xcodebuild \
+              -scheme Vifu \
+              -destination "generic/platform=iOS Simulator" \
+              -derivedDataPath "$RUNNER_TEMP/vifu-swift-ios-derived" \
+              CODE_SIGNING_ALLOWED=NO \
+              build
+
+  mobile-ffi-android:
+    name: Mobile FFI (Android)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@1.95.0
+        with:
+          targets: aarch64-linux-android
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: mobile-ffi-android
+      - name: Configure Android linker
+        run: |
+          echo "CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=$ANDROID_NDK_LATEST_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang" >> "$GITHUB_ENV"
+          echo "CC_aarch64_linux_android=$ANDROID_NDK_LATEST_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang" >> "$GITHUB_ENV"
+          echo "AR_aarch64_linux_android=$ANDROID_NDK_LATEST_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar" >> "$GITHUB_ENV"
+      - name: Build Android library
+        run: |
+          cargo build --locked -p vifu-mobile-ffi
+          cargo build --locked -p vifu-mobile-ffi --bin uniffi-bindgen
+          cargo build --locked -p vifu-mobile-ffi --release --target aarch64-linux-android
+      - name: Generate Kotlin bindings
+        run: |
+          bindings="$RUNNER_TEMP/vifu-mobile-bindings"
+          target/debug/uniffi-bindgen generate \
+            --library target/debug/libvifu_mobile_ffi.so \
+            --language kotlin \
+            --out-dir "$bindings" \
+            --config crates/vifu-mobile-ffi/uniffi.toml
+          test -f "$bindings/dev/vifu/runtime/vifu_mobile_ffi.kt"
 
   dashboard:
     name: Dashboard and JavaScript packages

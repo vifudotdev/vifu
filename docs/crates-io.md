@@ -9,26 +9,27 @@ The public Rust entry point is the `vifu` crate. It provides both:
 ## Feature Contract
 
 ```toml
-# Default SDK with Runtime, Gateway, and Server support
+# Default SDK with the embedded Runtime
 vifu = "0.1"
 
-# Advanced: Runtime plus Agent Gateway without the default binary feature
+# Runtime plus Agent Gateway
 vifu = { version = "0.1", default-features = false, features = ["runtime", "gateway"] }
 
-# Advanced: smallest Runtime-only dependency graph
+# Explicit Runtime-only dependency graph
 vifu = { version = "0.1", default-features = false, features = ["runtime"] }
 ```
 
-The default `binary` feature enables `full` and builds the executable:
+The `binary` feature enables the Runtime, Gateway, and Server and builds the
+executable:
 
 ```bash
-cargo install vifu
+cargo install vifu --features binary
 ```
 
 Cargo cannot choose different default features based on whether `vifu` is
-installed as a binary or added as a dependency. The default favors a direct
-first experience; advanced embedded builds can disable default features when
-dependency size matters.
+installed as a binary or added as a dependency. The default therefore keeps
+application dependencies small; binary installation opts into deployment
+components explicitly.
 
 ## Package Layout
 

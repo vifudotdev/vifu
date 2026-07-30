@@ -8,7 +8,7 @@ use tokio::sync::{mpsc, Semaphore};
 use tokio::task::JoinHandle;
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
-use tokio_tungstenite::tungstenite::http::{header::AUTHORIZATION, HeaderValue};
+use tokio_tungstenite::tungstenite::http::{header::AUTHORIZATION, HeaderValue, StatusCode};
 use tokio_tungstenite::tungstenite::Message;
 use url::Url;
 use uuid::Uuid;
@@ -110,7 +110,13 @@ pub async fn run_agent_gateway(
                     reconnect_delay.as_secs()
                 );
             }
-            Err(error) => {
+            Err(AgentGatewayConnectionError::CredentialRejected) => {
+                return Err(
+                    "agent gateway credential was rejected or revoked; run `vifu --reset` to enroll a new gateway identity"
+                        .to_string(),
+                );
+            }
+            Err(AgentGatewayConnectionError::Failed(error)) => {
                 eprintln!(
                     "Agent Gateway connection failed: {}. Retrying in {}s.",
                     sanitize_error(&error),
@@ -133,11 +139,23 @@ enum ConnectionOutcome {
     Shutdown,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum AgentGatewayConnectionError {
+    CredentialRejected,
+    Failed(String),
+}
+
+impl From<String> for AgentGatewayConnectionError {
+    fn from(value: String) -> Self {
+        Self::Failed(value)
+    }
+}
+
 async fn run_connection(
     websocket_url: &str,
     runtime: &AgentGatewayRuntime<'_>,
     session: &mut SessionSummary,
-) -> Result<ConnectionOutcome, String> {
+) -> Result<ConnectionOutcome, AgentGatewayConnectionError> {
     let mut request = websocket_url
         .into_client_request()
         .map_err(|error| error.to_string())?;
@@ -147,9 +165,17 @@ async fn run_connection(
             "agent gateway credential contains invalid header characters".to_string()
         })?,
     );
-    let (mut socket, _) = connect_async(request)
-        .await
-        .map_err(|error| error.to_string())?;
+    let (mut socket, _) = connect_async(request).await.map_err(|error| {
+        if matches!(
+            &error,
+            tokio_tungstenite::tungstenite::Error::Http(response)
+                if is_credential_rejection_status(response.status())
+        ) {
+            AgentGatewayConnectionError::CredentialRejected
+        } else {
+            AgentGatewayConnectionError::Failed(error.to_string())
+        }
+    })?;
 
     send_command(
         &mut socket,
@@ -177,10 +203,14 @@ async fn run_connection(
         resumed,
     } = welcome
     else {
-        return Err("server must send welcome after agent gateway hello".to_string());
+        return Err("server must send welcome after agent gateway hello"
+            .to_string()
+            .into());
     };
     if gateway_id != session.gateway_id {
-        return Err("server authenticated a different agent gateway identity".to_string());
+        return Err("server authenticated a different agent gateway identity"
+            .to_string()
+            .into());
     }
     session.resume_session_id = Some(session_id);
     session::write_session(runtime.session_path, session)?;
@@ -200,7 +230,7 @@ async fn run_connection(
             _ = tokio::signal::ctrl_c() => break ConnectionOutcome::Shutdown,
             outbound = outbound_receiver.recv() => {
                 let Some(outbound) = outbound else {
-                    return Err("agent gateway output queue closed".to_string());
+                    return Err("agent gateway output queue closed".to_string().into());
                 };
                 send_command(&mut socket, &outbound).await?;
             }
@@ -208,7 +238,7 @@ async fn run_connection(
                 let incoming = match incoming {
                     Ok(message) => message,
                     Err(error) if error == "server disconnected" => break ConnectionOutcome::Disconnected,
-                    Err(error) => return Err(error),
+                    Err(error) => return Err(error.into()),
                 };
                 match incoming {
                     AgentGatewayCommand::Invoke {
@@ -295,7 +325,7 @@ async fn run_connection(
                     }
                     AgentGatewayCommand::Heartbeat { session_id: received } => {
                         if received != session_id {
-                            return Err("server heartbeat session does not match".to_string());
+                            return Err("server heartbeat session does not match".to_string().into());
                         }
                         outbound_sender
                             .send(AgentGatewayCommand::HeartbeatAck { session_id })
@@ -316,17 +346,26 @@ async fn run_connection(
                         code,
                         ..
                     } if code == "CREDENTIAL_REVOKED" => {
-                        return Err(
-                            "agent gateway access was revoked; run `vifu --reset` to enroll a new gateway identity"
-                                .to_string(),
-                        );
+                        return Err(AgentGatewayConnectionError::CredentialRejected);
                     }
                     AgentGatewayCommand::Error {
                         request_id: None,
                         message,
                         ..
-                    } => return Err(format!("server rejected agent gateway: {}", sanitize_error(&message))),
-                    _ => return Err("server sent an unexpected agent gateway message".to_string()),
+                    } => {
+                        return Err(format!(
+                            "server rejected agent gateway: {}",
+                            sanitize_error(&message)
+                        )
+                        .into())
+                    }
+                    _ => {
+                        return Err(
+                            "server sent an unexpected agent gateway message"
+                                .to_string()
+                                .into(),
+                        )
+                    }
                 }
             }
         }
@@ -337,6 +376,10 @@ async fn run_connection(
     }
     let _ = socket.close(None).await;
     Ok(outcome)
+}
+
+fn is_credential_rejection_status(status: StatusCode) -> bool {
+    matches!(status, StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN)
 }
 
 fn resolve_openclaw_provider<'a>(
@@ -597,8 +640,9 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        agent_gateway_websocket_url, decode_command, encode_command, resolve_openclaw_provider,
-        sanitize_error, OpenClawRuntimeProvider,
+        agent_gateway_websocket_url, decode_command, encode_command,
+        is_credential_rejection_status, resolve_openclaw_provider, sanitize_error,
+        OpenClawRuntimeProvider,
     };
     use crate::gateway_frame;
     use crate::openclaw::Endpoint;
@@ -673,6 +717,19 @@ mod tests {
     #[test]
     fn sanitizes_agent_gateway_errors() {
         assert_eq!(sanitize_error("bad\0token"), "bad token");
+    }
+
+    #[test]
+    fn treats_rejected_credentials_as_fatal_connection_errors() {
+        assert!(is_credential_rejection_status(
+            tokio_tungstenite::tungstenite::http::StatusCode::UNAUTHORIZED
+        ));
+        assert!(is_credential_rejection_status(
+            tokio_tungstenite::tungstenite::http::StatusCode::FORBIDDEN
+        ));
+        assert!(!is_credential_rejection_status(
+            tokio_tungstenite::tungstenite::http::StatusCode::INTERNAL_SERVER_ERROR
+        ));
     }
 
     #[test]

@@ -11,15 +11,13 @@ CREATE TABLE agent_gateway_enrollments (
     owner_user_id TEXT NOT NULL,
     token_hash BYTEA NOT NULL UNIQUE,
     expires_at TIMESTAMPTZ NOT NULL,
-    gateway_id TEXT,
     consumed_at TIMESTAMPTZ,
-    revoked_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 CREATE INDEX agent_gateway_enrollments_active_idx
-    ON agent_gateway_enrollments (project_id, expires_at)
-    WHERE consumed_at IS NULL AND revoked_at IS NULL;
+    ON agent_gateway_enrollments (expires_at)
+    WHERE consumed_at IS NULL;
 
 UPDATE agent_gateway_credentials AS credential
 SET owner_user_id = owned.owner_user_id

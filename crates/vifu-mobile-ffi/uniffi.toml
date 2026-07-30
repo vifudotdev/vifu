@@ -4,7 +4,7 @@
 [bindings.swift]
 ffi_module_name = "VifuMobileFFI"
 ffi_module_filename = "vifu_mobile_ffiFFI"
-generate_module_map = false
+generate_module_map = true
 
 [bindings.kotlin]
 package_name = "dev.vifu.runtime"

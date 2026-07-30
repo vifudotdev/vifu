@@ -324,7 +324,7 @@ EOF
   export VIFU_E2E_API_URL="http://$docker_access_host:$VIFU_SERVER_PORT"
   export VIFU_E2E_DASHBOARD_URL="http://$docker_access_host:$VIFU_DASHBOARD_PORT"
 else
-  cargo build -p vifu
+  cargo build -p vifu --features binary
   HOME="$gateway_root" \
   VIFU_AGENT_GATEWAY_BOOTSTRAP_TOKEN="${VIFU_E2E_AGENT_GATEWAY_BOOTSTRAP_TOKEN:-$VIFU_AGENT_GATEWAY_BOOTSTRAP_TOKEN}" \
   target/debug/vifu \

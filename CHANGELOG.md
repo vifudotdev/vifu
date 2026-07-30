@@ -2,12 +2,19 @@
 
 All notable changes to Vifu are documented here.
 
-## Unreleased
+## 0.1.3 - 2026-07-30
 
 - Added embedded SQLite as the default local runtime store while retaining
   PostgreSQL for the complete Compose stack.
 - Replaced Dashboard accounts and identity providers with deployment Admin Key
   access and a signed, stateless HttpOnly browser session.
+- Added bounded, non-blocking embedded invocation APIs with native provider
+  callbacks for Apple and Android hosts.
+- Added a GitHub-installable Swift Package with device, simulator, and macOS
+  XCFramework slices.
+- Added Agent Gateway enrollment lifecycle and revoked-credential handling.
+- Kept the default `vifu` crate focused on the embedded Runtime; binary
+  installation now opts into the `binary` feature.
 
 ## 0.1.1 - 2026-07-26
 
