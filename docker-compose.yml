@@ -18,6 +18,21 @@ configs:
           "serverUrl": "http://backend:6790"
         }
       }
+  pgadmin_servers:
+    content: |
+      {
+        "Servers": {
+          "1": {
+            "Name": "Vifu PostgreSQL",
+            "Group": "Vifu",
+            "Host": "postgres",
+            "Port": 5432,
+            "MaintenanceDB": "${POSTGRES_DB:-vifu}",
+            "Username": "${POSTGRES_USER:-vifu}",
+            "SSLMode": "prefer"
+          }
+        }
+      }
 
 services:
   secrets:
@@ -62,6 +77,39 @@ services:
         fi
         chmod 0444 /run/vifu/secrets/database_url
 
+  pgadmin-secrets:
+    image: postgres:17-bookworm
+    profiles:
+      - database-tools
+    depends_on:
+      secrets:
+        condition: service_completed_successfully
+    environment:
+      VIFU_PGADMIN_PASSWORD: ${VIFU_PGADMIN_PASSWORD:-}
+      POSTGRES_DB: ${POSTGRES_DB:-vifu}
+      POSTGRES_USER: ${POSTGRES_USER:-vifu}
+    volumes:
+      - vifu_secrets:/run/vifu/secrets
+    command:
+      - sh
+      - -eu
+      - -c
+      - |
+        if [ -n "$$VIFU_PGADMIN_PASSWORD" ]; then
+          printf '%s\n' "$$VIFU_PGADMIN_PASSWORD" > /run/vifu/secrets/pgadmin_password
+        elif [ ! -s /run/vifu/secrets/pgadmin_password ]; then
+          openssl rand -hex 24 > /run/vifu/secrets/pgadmin_password
+        fi
+        postgres_password="$$(cat /run/vifu/secrets/postgres_password)"
+        printf 'postgres:5432:%s:%s:%s\n' \
+          "$$POSTGRES_DB" \
+          "$$POSTGRES_USER" \
+          "$$postgres_password" \
+          > /run/vifu/secrets/pgadmin_pgpass
+        chmod 0444 \
+          /run/vifu/secrets/pgadmin_password \
+          /run/vifu/secrets/pgadmin_pgpass
+
   postgres:
     image: postgres:17-bookworm
     depends_on:
@@ -82,6 +130,51 @@ services:
       interval: 5s
       timeout: 3s
       retries: 20
+
+  pgadmin:
+    image: dpage/pgadmin4:9.16
+    profiles:
+      - database-tools
+    depends_on:
+      pgadmin-secrets:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+    environment:
+      PGADMIN_DEFAULT_EMAIL: ${VIFU_PGADMIN_EMAIL:-pgadmin@vifu.dev}
+      PGADMIN_DEFAULT_PASSWORD_FILE: /run/vifu/secrets/pgadmin_password
+      PGADMIN_DISABLE_POSTFIX: "1"
+      PGADMIN_LISTEN_ADDRESS: 0.0.0.0
+      PGADMIN_LISTEN_PORT: 5050
+      PGADMIN_SERVER_JSON_FILE: /pgadmin4/servers.json
+      PGADMIN_REPLACE_SERVERS_ON_STARTUP: "True"
+      PGADMIN_CONFIG_ENHANCED_COOKIE_PROTECTION: "True"
+      PGADMIN_CONFIG_UPGRADE_CHECK_ENABLED: "False"
+      PGPASS_FILE: /run/vifu/secrets/pgadmin_pgpass
+    ports:
+      - "${VIFU_PGADMIN_BIND_HOST:-${VIFU_BIND_HOST:-127.0.0.1}}:${VIFU_PGADMIN_PORT:-5050}:5050"
+    volumes:
+      - pgadmin_data:/var/lib/pgadmin
+      - vifu_secrets:/run/vifu/secrets:ro
+    configs:
+      - source: pgadmin_servers
+        target: /pgadmin4/servers.json
+        mode: 0444
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+    healthcheck:
+      test:
+        - CMD
+        - python3
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:5050/misc/ping', timeout=5)"
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
 
   backend:
     image: vifu-runtime:local
@@ -166,6 +259,7 @@ services:
       retries: 20
 
 volumes:
+  pgadmin_data:
   vifu_secrets:
   postgres_data:
   vifu_server_state:

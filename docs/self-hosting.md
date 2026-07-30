@@ -66,6 +66,28 @@ docker compose down
 `docker compose down` preserves the named PostgreSQL volume. Use normal database
 backup procedures before upgrades or destructive maintenance.
 
+## Inspect PostgreSQL
+
+Start the optional, loopback-only pgAdmin service:
+
+```bash
+docker compose --profile database-tools up -d pgadmin
+```
+
+Open `http://<VIFU_PGADMIN_BIND_HOST>:5050` and sign in with the email
+configured by `VIFU_PGADMIN_EMAIL` (default: `pgadmin@vifu.dev`). The bind host
+falls back to `VIFU_BIND_HOST`, whose public default is `127.0.0.1`. Read the
+generated pgAdmin password from the running container:
+
+```bash
+docker compose exec pgadmin cat /run/vifu/secrets/pgadmin_password
+```
+
+The `Vifu PostgreSQL` server is registered automatically. Its database password
+is loaded from the deployment secret volume and is not stored in the Compose
+file. Keep the pgAdmin bind host on loopback or a private operator network such
+as Tailscale; do not expose it directly to the public Internet.
+
 ## Configure
 
 Copy `.env.example` once and set deployment-local values there. Runtime role and
