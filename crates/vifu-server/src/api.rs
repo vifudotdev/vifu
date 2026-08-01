@@ -205,8 +205,14 @@ async fn guest_project_response(
         .find(|deployment| deployment.is_primary)
         .ok_or(ApiError::Internal)?;
     Ok(json!({
-        "project": project,
-        "deployment": deployment,
+        "project": {
+            "id": project.project.id,
+            "slug": project.project.slug,
+        },
+        "deployment": {
+            "id": deployment.id,
+            "name": deployment.name,
+        },
         "endpointPath": format!("/{}/v1", project.project.slug),
         "apiKey": project_key,
         "claimToken": derive_guest_claim_token(

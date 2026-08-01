@@ -151,11 +151,17 @@ pub async fn run_agent_gateway(
             }
             runtime.enrollment_token.take();
         }
-        if let Err(error) = sync_runtime_state(&runtime, session).await {
-            eprintln!(
-                "Runtime configuration sync is unavailable: {}",
-                sanitize_error(&error)
-            );
+        if should_sync_before_connect(
+            guest_bootstrap_allowed,
+            guest_bootstrap_attempted,
+            session.guest_project.is_some(),
+        ) {
+            if let Err(error) = sync_runtime_state(&runtime, session).await {
+                eprintln!(
+                    "Runtime configuration sync is unavailable: {}",
+                    sanitize_error(&error)
+                );
+            }
         }
         match run_connection(&websocket_url, &runtime, session).await {
             Ok(ConnectionOutcome::Shutdown) => return Ok(()),
@@ -266,6 +272,14 @@ fn guest_project_summary(guest: &GuestProjectBootstrap) -> GuestProjectSummary {
         claim_token: guest.claim_token.clone(),
         expires_at: guest.expires_at.clone(),
     }
+}
+
+fn should_sync_before_connect(
+    guest_bootstrap_allowed: bool,
+    guest_bootstrap_attempted: bool,
+    has_guest_project: bool,
+) -> bool {
+    !guest_bootstrap_allowed || guest_bootstrap_attempted || has_guest_project
 }
 
 fn print_guest_project(server_url: &str, guest: &GuestProjectBootstrap) {
@@ -906,8 +920,8 @@ mod tests {
 
     use super::{
         agent_gateway_websocket_url, decode_command, encode_command,
-        is_credential_rejection_status, resolve_provider, sanitize_error, AgentGatewayProvider,
-        OpenClawGatewayProvider,
+        is_credential_rejection_status, resolve_provider, sanitize_error,
+        should_sync_before_connect, AgentGatewayProvider, OpenClawGatewayProvider,
     };
     use crate::gateway_frame;
     use crate::openclaw::Endpoint;
@@ -941,6 +955,13 @@ mod tests {
             .expect("story provider must resolve");
         assert_eq!(selected.id(), "story");
         assert!(resolve_provider(&providers, &json!({})).is_none());
+    }
+
+    #[test]
+    fn new_guest_gateway_registers_before_runtime_sync() {
+        assert!(!should_sync_before_connect(true, false, false));
+        assert!(should_sync_before_connect(true, true, true));
+        assert!(should_sync_before_connect(false, false, false));
     }
 
     #[test]

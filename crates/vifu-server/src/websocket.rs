@@ -188,6 +188,7 @@ async fn reconcile_project_agents(
     gateway_id: &str,
     agents: &[vifu_gateway::protocol::AgentDescriptor],
 ) -> Result<(), crate::error::ApiError> {
+    let gateway_projects = db::list_projects_for_gateway(&state.pool, gateway_id).await?;
     for agent in agents {
         let Some(provider_key) = agent
             .metadata
@@ -201,8 +202,11 @@ async fn reconcile_project_agents(
             .get("providerType")
             .and_then(serde_json::Value::as_str)
             .unwrap_or("openclaw");
-        for (project_id, _) in db::list_projects_for_provider_key(&state.pool, provider_key).await?
-        {
+        let mut projects = gateway_projects.clone();
+        projects.extend(db::list_projects_for_provider_key(&state.pool, provider_key).await?);
+        projects.sort_unstable_by_key(|(project_id, _)| *project_id);
+        projects.dedup_by_key(|(project_id, _)| *project_id);
+        for (project_id, _) in projects {
             match db::find_project_profile_by_provider_resource(
                 &state.pool,
                 project_id,
@@ -314,11 +318,11 @@ mod tests {
         self, GatewayFrame, RequestFrame, RequestFrameType, ResponseFrame, ResponseFrameType,
     };
     use vifu_gateway::protocol::{
-        AgentGatewayCommand, AGENT_GATEWAY_HELLO_METHOD, AGENT_GATEWAY_HELLO_REQUEST_ID,
-        AGENT_GATEWAY_INVOKE_METHOD, VERSION,
+        AgentDescriptor, AgentGatewayCommand, AGENT_GATEWAY_HELLO_METHOD,
+        AGENT_GATEWAY_HELLO_REQUEST_ID, AGENT_GATEWAY_INVOKE_METHOD, VERSION,
     };
 
-    use super::{decode_command, encode_command};
+    use super::{decode_command, encode_command, reconcile_project_agents};
     use crate::auth::hash_api_key;
     use crate::config::Config;
     use crate::db::{self, NewProject};
@@ -402,6 +406,57 @@ mod tests {
         assert!(decode_command(&extra_protocol_payload_field)
             .unwrap_err()
             .contains("invalid gateway.hello params"));
+    }
+
+    #[tokio::test]
+    async fn gateway_owned_project_adds_discovered_agents_without_provider_setup() {
+        let Some(pool) = maybe_test_pool().await else {
+            return;
+        };
+        let gateway_id = format!("guest-gateway-{}", Uuid::new_v4().simple());
+        let project_id = Uuid::new_v4();
+        let project_slug = format!("guest-project-{}", Uuid::new_v4().simple());
+        db::create_project(
+            &pool,
+            NewProject {
+                id: project_id,
+                owner_user_id: None,
+                slug: &project_slug,
+                name: "Guest project",
+                description: None,
+                gateway_id: &gateway_id,
+                binding_ids: &[],
+            },
+        )
+        .await
+        .unwrap();
+        let state = state_with_storage(Config::from_env().unwrap(), pool);
+
+        reconcile_project_agents(
+            &state,
+            &gateway_id,
+            &[AgentDescriptor {
+                id: "guide-agent".to_string(),
+                name: "Guide".to_string(),
+                metadata: json!({
+                    "providerKey": "openclaw-local",
+                    "providerType": "openclaw"
+                }),
+            }],
+        )
+        .await
+        .unwrap();
+
+        let profiles = db::list_project_profiles(&state.pool, project_id)
+            .await
+            .unwrap();
+        assert_eq!(profiles.len(), 1);
+        assert_eq!(profiles[0].name, "Guide");
+        assert!(
+            !db::project_provider_is_assigned(&state.pool, project_id, "openclaw-local")
+                .await
+                .unwrap()
+        );
     }
 
     #[tokio::test]

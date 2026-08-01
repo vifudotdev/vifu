@@ -1110,6 +1110,8 @@ mod tests {
         let claim_token = created["claimToken"].as_str().unwrap();
         assert!(api_key.starts_with("vifu_pk_"));
         assert!(claim_token.starts_with("vifu_gc_"));
+        assert_eq!(created["project"].as_object().unwrap().len(), 2);
+        assert_eq!(created["deployment"].as_object().unwrap().len(), 2);
         assert_eq!(created["deployment"]["name"], "development");
 
         let repeated = guest_app

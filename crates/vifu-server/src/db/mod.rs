@@ -145,6 +145,7 @@ dispatch! {
     pub async fn upsert_custom_provider(storage: &Storage, connection: NewProviderConnection<'_>) -> Result<CustomProvider, ApiError>;
     pub async fn get_custom_provider_secret_by_key(storage: &Storage, provider_key: &str) -> Result<CustomProviderSecret, ApiError>;
     pub async fn project_provider_is_assigned(storage: &Storage, project_id: Uuid, provider_key: &str) -> Result<bool, ApiError>;
+    pub async fn list_projects_for_gateway(storage: &Storage, gateway_id: &str) -> Result<Vec<(Uuid, String)>, ApiError>;
     pub async fn list_projects_for_provider_key(storage: &Storage, provider_key: &str) -> Result<Vec<(Uuid, String)>, ApiError>;
     pub async fn list_project_profile_provider_resources(storage: &Storage, project_id: Uuid) -> Result<Vec<(String, String)>, ApiError>;
     pub async fn list_archived_project_agent_sources(storage: &Storage, project_id: Uuid) -> Result<Vec<ArchivedProjectAgentSource>, ApiError>;

@@ -7,7 +7,12 @@ configs:
         "version": 1,
         "server": {
           "listen": "0.0.0.0:6790",
-          "databaseUrlFile": "/run/vifu/secrets/database_url"
+          "databaseUrlFile": "/run/vifu/secrets/database_url",
+          "guestBootstrap": {
+            "enabled": ${VIFU_GUEST_BOOTSTRAP_ENABLED:-true},
+            "ttlHours": ${VIFU_GUEST_BOOTSTRAP_TTL_HOURS:-168},
+            "maxProjects": ${VIFU_GUEST_BOOTSTRAP_MAX_PROJECTS:-10000}
+          }
         }
       }
   gateway_runtime_config:

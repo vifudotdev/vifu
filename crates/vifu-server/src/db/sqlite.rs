@@ -1370,6 +1370,22 @@ pub async fn list_projects_for_provider_key(
     .map_err(ApiError::from)
 }
 
+pub async fn list_projects_for_gateway(
+    pool: &SqlitePool,
+    gateway_id: &str,
+) -> Result<Vec<(Uuid, String)>, ApiError> {
+    sqlx::query_as::<_, (Uuid, String)>(
+        "SELECT id, slug
+         FROM projects
+         WHERE gateway_id = $1 AND enabled = TRUE
+         ORDER BY created_at ASC",
+    )
+    .bind(gateway_id)
+    .fetch_all(pool)
+    .await
+    .map_err(ApiError::from)
+}
+
 pub async fn list_project_profile_provider_resources(
     pool: &SqlitePool,
     project_id: Uuid,

@@ -18,14 +18,14 @@ pub struct GuestProjectBootstrap {
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
 pub struct GuestProject {
     pub id: Uuid,
     pub slug: String,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
 pub struct GuestDeployment {
     pub id: Uuid,
     pub name: String,
@@ -277,5 +277,38 @@ mod tests {
             }))
             .unwrap();
         assert_eq!(configuration.deployments[0].project_slug, "moon-train");
+    }
+
+    #[test]
+    fn parses_guest_bootstrap_with_expanded_server_resources() {
+        let project_id = Uuid::new_v4();
+        let deployment_id = Uuid::new_v4();
+        let bootstrap = serde_json::from_value::<GuestProjectBootstrap>(serde_json::json!({
+            "project": {
+                "id": project_id,
+                "slug": "guest-example",
+                "name": "Guest project",
+                "gatewayId": "gateway-example",
+                "bindings": []
+            },
+            "deployment": {
+                "id": deployment_id,
+                "projectId": project_id,
+                "name": "development",
+                "isPrimary": true,
+                "configSync": false,
+                "traceMode": "summary",
+                "remoteInvocation": false
+            },
+            "endpointPath": "/guest-example/v1",
+            "apiKey": "vifu_pk_example",
+            "claimToken": "vifu_gc_example",
+            "expiresAt": "2026-08-08T00:00:00Z"
+        }))
+        .unwrap();
+
+        assert_eq!(bootstrap.project.id, project_id);
+        assert_eq!(bootstrap.deployment.id, deployment_id);
+        assert_eq!(bootstrap.endpoint_path, "/guest-example/v1");
     }
 }
