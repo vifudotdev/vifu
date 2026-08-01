@@ -27,7 +27,23 @@ if [ -z "${VIFU_E2E_DOCKER_HOST:-}" ]; then
 fi
 
 free_port() {
-  node -e 'const net=require("node:net");const server=net.createServer();server.listen(0,"127.0.0.1",()=>{console.log(server.address().port);server.close();});'
+  node -e '
+    const net = require("node:net");
+    const excluded = new Set(
+      process.argv.slice(1).map(Number).filter((port) => Number.isInteger(port) && port > 0),
+    );
+    const listen = () => {
+      const server = net.createServer();
+      server.listen(0, "127.0.0.1", () => {
+        const port = server.address().port;
+        server.close(() => {
+          if (excluded.has(port)) listen();
+          else console.log(port);
+        });
+      });
+    };
+    listen();
+  ' "$@"
 }
 
 json_escape() {
@@ -73,13 +89,12 @@ else
   env_file="$state_dir/.env"
   write_e2e_env "$env_file"
   server_port="$(free_port)"
-  dashboard_port="$(free_port)"
+  dashboard_port="$(free_port "$server_port")"
   browser_dashboard_port="$dashboard_port"
-  postgres_port="$(free_port)"
   {
     printf '%s\n' "VIFU_SERVER_PORT=$server_port"
     printf '%s\n' "VIFU_DASHBOARD_PORT=$dashboard_port"
-    printf '%s\n' "POSTGRES_PORT=$postgres_port"
+    printf '%s\n' "POSTGRES_PORT=0"
   } >> "$env_file"
   compose_project="vifu-e2e-$$"
   managed_stack=1
@@ -105,7 +120,7 @@ if [ -n "${VIFU_E2E_OPENCLAW_PORT:-}" ]; then
 elif [ "$use_existing_openclaw" = "1" ]; then
   openclaw_port="18789"
 else
-  openclaw_port="$(free_port)"
+  openclaw_port="$(free_port "${server_port:-}" "${dashboard_port:-}")"
 fi
 agent_gateway_log="$state_dir/agent-gateway.log"
 mock_log="$state_dir/openclaw.log"
