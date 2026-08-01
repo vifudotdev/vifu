@@ -28,8 +28,9 @@ public actor VifuRuntimeBridgeConnection {
             bufferingPolicy: .bufferingNewest(256)
         )
         continuation.onTermination = { [weak self] _ in
+            guard let connection = self else { return }
             Task {
-                await self?.removeSubscriber(id)
+                await connection.removeSubscriber(id)
             }
         }
         subscribers[id] = continuation

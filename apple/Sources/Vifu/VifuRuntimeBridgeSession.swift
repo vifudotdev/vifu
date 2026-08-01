@@ -130,8 +130,9 @@ public actor VifuRuntimeBridgeSession {
             bufferingPolicy: .bufferingNewest(256)
         )
         pair.continuation.onTermination = { [weak self] _ in
+            guard let session = self else { return }
             Task {
-                await self?.removeSubscriber(id)
+                await session.removeSubscriber(id)
             }
         }
         subscribers[id] = pair.continuation
