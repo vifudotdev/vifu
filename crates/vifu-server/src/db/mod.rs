@@ -104,6 +104,26 @@ dispatch! {
     pub async fn get_project(storage: &Storage, id: Uuid) -> Result<ProjectWithBindings, ApiError>;
     pub async fn get_project_by_slug(storage: &Storage, slug: &str) -> Result<ProjectWithBindings, ApiError>;
     pub async fn set_project_owner_user_id(storage: &Storage, id: Uuid, owner_user_id: &str) -> Result<ProjectWithBindings, ApiError>;
+    pub async fn list_runtime_deployments(storage: &Storage, project_id: Uuid) -> Result<Vec<RuntimeDeployment>, ApiError>;
+    pub async fn get_runtime_deployment(storage: &Storage, project_id: Uuid, name: &str) -> Result<RuntimeDeployment, ApiError>;
+    pub async fn create_runtime_deployment(storage: &Storage, input: NewRuntimeDeployment<'_>) -> Result<RuntimeDeployment, ApiError>;
+    pub async fn update_runtime_deployment(storage: &Storage, project_id: Uuid, name: &str, patch: RuntimeDeploymentPatch<'_>) -> Result<RuntimeDeployment, ApiError>;
+    pub async fn promote_runtime_deployment(storage: &Storage, project_id: Uuid, name: &str) -> Result<RuntimeDeployment, ApiError>;
+    pub async fn delete_runtime_deployment(storage: &Storage, project_id: Uuid, name: &str) -> Result<(), ApiError>;
+    pub async fn list_runtime_deployment_gateway_ids(storage: &Storage, deployment_id: Uuid) -> Result<Vec<String>, ApiError>;
+    pub async fn assign_runtime_deployment_gateway(storage: &Storage, project_id: Uuid, deployment_id: Uuid, gateway_id: &str) -> Result<(), ApiError>;
+    pub async fn unassign_runtime_deployment_gateway(storage: &Storage, project_id: Uuid, deployment_id: Uuid, gateway_id: &str) -> Result<(), ApiError>;
+    pub async fn list_runtime_deployments_for_gateway(storage: &Storage, gateway_id: &str) -> Result<Vec<RuntimeDeployment>, ApiError>;
+    pub async fn runtime_deployment_allows_remote_invocation(storage: &Storage, project_id: Uuid, gateway_id: &str) -> Result<bool, ApiError>;
+    pub async fn create_project_runtime_release(storage: &Storage, input: NewProjectRuntimeRelease<'_>) -> Result<ProjectRuntimeRelease, ApiError>;
+    pub async fn list_project_runtime_releases(storage: &Storage, project_id: Uuid) -> Result<Vec<ProjectRuntimeRelease>, ApiError>;
+    pub async fn get_project_runtime_release(storage: &Storage, project_id: Uuid, version: i64) -> Result<ProjectRuntimeRelease, ApiError>;
+    pub async fn activate_runtime_deployment_release(storage: &Storage, project_id: Uuid, deployment_name: &str, version: i64) -> Result<RuntimeDeployment, ApiError>;
+    pub async fn create_guest_project(storage: &Storage, input: NewGuestProject<'_>) -> Result<(), ApiError>;
+    pub async fn get_active_guest_project_for_gateway(storage: &Storage, gateway_id: &str) -> Result<Option<(ProjectWithBindings, DateTime<Utc>)>, ApiError>;
+    pub async fn count_active_guest_projects(storage: &Storage) -> Result<i64, ApiError>;
+    pub async fn prune_expired_guest_projects(storage: &Storage) -> Result<u64, ApiError>;
+    pub async fn claim_guest_project(storage: &Storage, claim_token_hash: &[u8], owner_user_id: &str) -> Result<ProjectWithBindings, ApiError>;
     pub async fn get_project_runtime_extension(storage: &Storage, project_id: Uuid) -> Result<Option<ProjectRuntimeExtension>, ApiError>;
     pub async fn set_project_runtime_extension(storage: &Storage, project_id: Uuid, extension_id: &str, enabled: bool, active_release_ref: Option<&str>, metadata: &Value) -> Result<ProjectRuntimeExtension, ApiError>;
     pub async fn delete_project_runtime_extension(storage: &Storage, project_id: Uuid) -> Result<(), ApiError>;
@@ -154,7 +174,7 @@ dispatch! {
     pub async fn list_bindings(storage: &Storage) -> Result<Vec<AgentBinding>, ApiError>;
     pub async fn get_binding(storage: &Storage, id: Uuid) -> Result<AgentBinding, ApiError>;
     pub async fn create_binding(storage: &Storage, id: Uuid, profile_id: Uuid, provider: &str, gateway_id: &str, agent_id: &str, config: &Value) -> Result<AgentBinding, ApiError>;
-    pub async fn ensure_discovered_binding(storage: &Storage, project_id: Uuid, gateway_id: &str, agent_id: &str, agent_name: &str, provider_key: &str) -> Result<Uuid, ApiError>;
+    pub async fn ensure_discovered_binding(storage: &Storage, project_id: Uuid, gateway_id: &str, agent_id: &str, agent_name: &str, provider_key: &str, provider_type: &str) -> Result<Uuid, ApiError>;
     pub async fn update_binding(storage: &Storage, id: Uuid, gateway_id: Option<&str>, agent_id: Option<&str>, config: Option<&Value>) -> Result<AgentBinding, ApiError>;
     pub async fn delete_binding(storage: &Storage, id: Uuid) -> Result<(), ApiError>;
     pub async fn list_endpoints(storage: &Storage) -> Result<Vec<AgentEndpoint>, ApiError>;
@@ -189,6 +209,7 @@ dispatch! {
     pub async fn list_agent_gateway_sessions(storage: &Storage) -> Result<Vec<AgentGatewaySession>, ApiError>;
     pub async fn list_available_agents(storage: &Storage) -> Result<Vec<AvailableAgent>, ApiError>;
     pub async fn create_trace(storage: &Storage, trace: NewTrace<'_>) -> Result<Uuid, ApiError>;
+    pub async fn create_uploaded_runtime_trace(storage: &Storage, trace: NewUploadedRuntimeTrace<'_>) -> Result<bool, ApiError>;
     pub async fn create_trace_span(storage: &Storage, span: NewTraceSpan<'_>) -> Result<Uuid, ApiError>;
     pub async fn complete_trace_span(storage: &Storage, span_id: Uuid, status: &str, duration_ms: i64, output_summary: Option<&Value>, error: Option<&str>) -> Result<(), ApiError>;
     pub async fn complete_trace(storage: &Storage, request_id: Uuid, status: &str, latency_ms: i64, response: Option<&Value>, error: Option<&str>) -> Result<(), ApiError>;
@@ -219,6 +240,16 @@ mod tests {
             Storage::Sqlite(pool) => pool.close().await,
         }
         std::fs::remove_file(path).expect("SQLite database should be removable");
+    }
+
+    async fn primary_deployment_id(storage: &Storage, project_id: Uuid) -> Uuid {
+        list_runtime_deployments(storage, project_id)
+            .await
+            .expect("runtime deployments should list")
+            .into_iter()
+            .find(|deployment| deployment.is_primary)
+            .expect("project should have a primary deployment")
+            .id
     }
 
     #[tokio::test]
@@ -633,6 +664,7 @@ mod tests {
             NewAgentGatewayEnrollment {
                 id: Uuid::new_v4(),
                 project_id,
+                deployment_id: primary_deployment_id(&storage, project_id).await,
                 owner_user_id: "user-123",
                 token_hash: b"enrollment-hash",
                 expires_at: Utc::now() + ChronoDuration::minutes(5),
@@ -727,6 +759,7 @@ mod tests {
                 NewAgentGatewayEnrollment {
                     id: Uuid::new_v4(),
                     project_id,
+                    deployment_id: primary_deployment_id(&storage, project_id).await,
                     owner_user_id: "user-123",
                     token_hash,
                     expires_at,
@@ -768,6 +801,7 @@ mod tests {
             NewAgentGatewayEnrollment {
                 id: Uuid::new_v4(),
                 project_id: expired_project_id,
+                deployment_id: primary_deployment_id(&storage, expired_project_id).await,
                 owner_user_id: "user-123",
                 token_hash: b"expired-enrollment",
                 expires_at: Utc::now() - ChronoDuration::seconds(1),
@@ -838,6 +872,7 @@ mod tests {
                 NewAgentGatewayEnrollment {
                     id: Uuid::new_v4(),
                     project_id,
+                    deployment_id: primary_deployment_id(&storage, project_id).await,
                     owner_user_id,
                     token_hash,
                     expires_at: Utc::now() + ChronoDuration::minutes(5),
@@ -915,6 +950,7 @@ mod tests {
             NewAgentGatewayEnrollment {
                 id: Uuid::new_v4(),
                 project_id,
+                deployment_id: primary_deployment_id(storage, project_id).await,
                 owner_user_id: "concurrent-owner",
                 token_hash: project_slug.as_bytes(),
                 expires_at: Utc::now() + ChronoDuration::minutes(5),

@@ -276,6 +276,17 @@ impl RelayHub {
             .is_ok()
     }
 
+    pub async fn notify_runtime_config(&self, gateway_id: &str, deployment_ids: Vec<Uuid>) -> bool {
+        let connection = self.inner.lock().await.connections.get(gateway_id).cloned();
+        let Some(connection) = connection else {
+            return false;
+        };
+        connection
+            .sender
+            .try_send(AgentGatewayCommand::RuntimeConfigChanged { deployment_ids })
+            .is_ok()
+    }
+
     pub async fn invoke(
         &self,
         route: &EndpointRoute,

@@ -1,0 +1,8 @@
+{
+  "type": "req",
+  "id": "hello-1",
+  "method": "runtime.hello",
+  "params": {
+    "protocol": "vifu.runtime-bridge/1"
+  }
+}

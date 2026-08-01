@@ -1,0 +1,17 @@
+{
+  "type": "event",
+  "event": "runtime.invocation.outputDelta",
+  "payload": {
+    "handle": "bridge-project:1",
+    "event": {
+      "sequence": 2,
+      "kind": "outputDelta",
+      "data": {
+        "format": "json",
+        "value": {
+          "text": "Hello"
+        }
+      }
+    }
+  }
+}

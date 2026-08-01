@@ -1,6 +1,9 @@
 use std::collections::HashMap;
+use std::future::Future;
 use std::net::IpAddr;
 use std::path::Path;
+use std::pin::Pin;
+use std::sync::Arc;
 use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
@@ -13,10 +16,15 @@ use tokio_tungstenite::tungstenite::Message;
 use url::Url;
 use uuid::Uuid;
 
+use crate::control::{GuestProjectBootstrap, RuntimeControlClient};
 use crate::gateway_frame;
 use crate::openclaw::{self, Endpoint};
 use crate::protocol::{self, AgentDescriptor, AgentGatewayCommand};
-use crate::session::{self, SessionSummary};
+use crate::session::{self, GuestProjectSummary, SessionSummary};
+
+use vifu_runtime::VifuRuntime;
+#[cfg(feature = "sqlite")]
+use vifu_runtime::{RuntimeStore, SqliteRuntimeStore};
 
 const MAX_CONCURRENT_CALLS: usize = 64;
 const OUTBOUND_QUEUE_CAPACITY: usize = 128;
@@ -26,16 +34,68 @@ pub struct AgentGatewayRuntime<'a> {
     pub server_url: &'a str,
     pub agent_gateway_bootstrap_token: Option<&'a str>,
     pub enrollment_token: Option<String>,
-    pub providers: &'a [OpenClawRuntimeProvider],
+    pub allow_guest_bootstrap: bool,
+    pub providers: &'a [Arc<dyn AgentGatewayProvider>],
     pub agents: &'a [AgentDescriptor],
-    pub session_path: &'a Path,
+    pub session_path: Option<&'a Path>,
+    pub runtime_database_path: &'a Path,
+    pub embedded_runtime: Option<&'a VifuRuntime>,
+}
+
+pub trait AgentGatewayProvider: Send + Sync {
+    fn id(&self) -> &str;
+    fn provider_type(&self) -> &str;
+    fn invoke<'a>(
+        &'a self,
+        agent_id: &'a str,
+        binding: &'a serde_json::Value,
+        input: &'a serde_json::Value,
+        timeout: Duration,
+    ) -> Pin<Box<dyn Future<Output = Result<serde_json::Value, String>> + Send + 'a>>;
 }
 
 #[derive(Debug, Clone)]
-pub struct OpenClawRuntimeProvider {
-    pub id: String,
-    pub endpoint: Endpoint,
-    pub token: Option<String>,
+pub struct OpenClawGatewayProvider {
+    id: String,
+    endpoint: Endpoint,
+    token: Option<String>,
+}
+
+impl OpenClawGatewayProvider {
+    pub fn new(id: impl Into<String>, endpoint: Endpoint, token: Option<String>) -> Self {
+        Self {
+            id: id.into(),
+            endpoint,
+            token,
+        }
+    }
+}
+
+impl AgentGatewayProvider for OpenClawGatewayProvider {
+    fn id(&self) -> &str {
+        &self.id
+    }
+
+    fn provider_type(&self) -> &str {
+        "openclaw"
+    }
+
+    fn invoke<'a>(
+        &'a self,
+        agent_id: &'a str,
+        binding: &'a serde_json::Value,
+        input: &'a serde_json::Value,
+        timeout: Duration,
+    ) -> Pin<Box<dyn Future<Output = Result<serde_json::Value, String>> + Send + 'a>> {
+        Box::pin(openclaw::invoke(
+            &self.endpoint,
+            self.token.as_deref(),
+            agent_id,
+            binding,
+            input,
+            timeout,
+        ))
+    }
 }
 
 pub async fn run_agent_gateway(
@@ -44,53 +104,44 @@ pub async fn run_agent_gateway(
 ) -> Result<(), String> {
     let websocket_url = agent_gateway_websocket_url(runtime.server_url)?;
     let mut reconnect_delay = Duration::from_secs(1);
+    let guest_bootstrap_allowed = runtime.allow_guest_bootstrap
+        && runtime.enrollment_token.is_none()
+        && runtime.agent_gateway_bootstrap_token.is_none();
+    let mut guest_bootstrap_attempted = false;
+    let mut bootstrap_registration_completed = false;
 
     loop {
-        let (registration, used_enrollment_token) =
-            if let Some(token) = runtime.enrollment_token.as_deref() {
-                (
-                    Some(
-                        register_agent_gateway(
-                            runtime.server_url,
-                            RegistrationEndpoint::Enrollment,
-                            token,
-                            &session.gateway_id,
-                            &session.gateway_credential,
-                        )
-                        .await,
-                    ),
-                    true,
-                )
-            } else if let Some(token) = runtime.agent_gateway_bootstrap_token {
-                (
-                    Some(
-                        register_agent_gateway(
-                            runtime.server_url,
-                            RegistrationEndpoint::Bootstrap,
-                            token,
-                            &session.gateway_id,
-                            &session.gateway_credential,
-                        )
-                        .await,
-                    ),
-                    false,
-                )
-            } else {
-                (None, false)
-            };
-        if let Some(registration) = registration {
+        if let Some(token) = runtime.enrollment_token.as_deref() {
+            let registration = register_agent_gateway(
+                runtime.server_url,
+                RegistrationEndpoint::Enrollment,
+                token,
+                &session.gateway_id,
+                &session.gateway_credential,
+            )
+            .await;
             if let Err(error) = registration {
-                if error == RegisterAgentGatewayError::Revoked {
-                    return Err(
-                        "agent gateway access was revoked; run `vifu --reset` to enroll a new gateway identity"
-                            .to_string(),
-                    );
+                match error {
+                    RegisterAgentGatewayError::Revoked => {
+                        return Err(
+                            "agent gateway access was revoked; run `vifu --reset` to enroll a new gateway identity"
+                                .to_string(),
+                        );
+                    }
+                    RegisterAgentGatewayError::Conflict => {
+                        return Err(
+                            "agent gateway id is already registered; run `vifu --reset` to enroll a new gateway identity"
+                                .to_string(),
+                        );
+                    }
+                    RegisterAgentGatewayError::Failed(error) => {
+                        eprintln!(
+                            "Agent Gateway enrollment failed: {}. Retrying in {}s.",
+                            sanitize_error(&error),
+                            reconnect_delay.as_secs()
+                        );
+                    }
                 }
-                eprintln!(
-                    "Agent Gateway registration failed: {}. Retrying in {}s.",
-                    sanitize_error(&error.into_message()),
-                    reconnect_delay.as_secs()
-                );
                 tokio::select! {
                     _ = tokio::time::sleep(reconnect_delay) => {}
                     _ = tokio::signal::ctrl_c() => return Ok(()),
@@ -98,9 +149,13 @@ pub async fn run_agent_gateway(
                 reconnect_delay = reconnect_delay.saturating_mul(2).min(MAX_RECONNECT_DELAY);
                 continue;
             }
-            if used_enrollment_token {
-                runtime.enrollment_token.take();
-            }
+            runtime.enrollment_token.take();
+        }
+        if let Err(error) = sync_runtime_state(&runtime, session).await {
+            eprintln!(
+                "Runtime configuration sync is unavailable: {}",
+                sanitize_error(&error)
+            );
         }
         match run_connection(&websocket_url, &runtime, session).await {
             Ok(ConnectionOutcome::Shutdown) => return Ok(()),
@@ -111,6 +166,73 @@ pub async fn run_agent_gateway(
                 );
             }
             Err(AgentGatewayConnectionError::CredentialRejected) => {
+                if let Some(token) = runtime
+                    .agent_gateway_bootstrap_token
+                    .filter(|_| !bootstrap_registration_completed)
+                {
+                    match register_agent_gateway(
+                        runtime.server_url,
+                        RegistrationEndpoint::Bootstrap,
+                        token,
+                        &session.gateway_id,
+                        &session.gateway_credential,
+                    )
+                    .await
+                    {
+                        Ok(()) => {
+                            bootstrap_registration_completed = true;
+                            reconnect_delay = Duration::from_secs(1);
+                            continue;
+                        }
+                        Err(RegisterAgentGatewayError::Revoked) => {
+                            return Err(
+                                "agent gateway access was revoked; run `vifu --reset` to enroll a new gateway identity"
+                                    .to_string(),
+                            );
+                        }
+                        Err(RegisterAgentGatewayError::Conflict) => {
+                            return Err(
+                                "agent gateway id is already registered; run `vifu --reset` to enroll a new gateway identity"
+                                    .to_string(),
+                            );
+                        }
+                        Err(RegisterAgentGatewayError::Failed(error)) => {
+                            eprintln!(
+                                "Agent Gateway registration failed: {}. Retrying in {}s.",
+                                sanitize_error(&error),
+                                reconnect_delay.as_secs()
+                            );
+                            tokio::select! {
+                                _ = tokio::time::sleep(reconnect_delay) => {}
+                                _ = tokio::signal::ctrl_c() => return Ok(()),
+                            }
+                            reconnect_delay =
+                                reconnect_delay.saturating_mul(2).min(MAX_RECONNECT_DELAY);
+                            continue;
+                        }
+                    }
+                }
+                if guest_bootstrap_allowed && !guest_bootstrap_attempted {
+                    guest_bootstrap_attempted = true;
+                    let guest = RuntimeControlClient::bootstrap_guest_project(
+                        runtime.server_url,
+                        &session.gateway_id,
+                        &session.gateway_credential,
+                    )
+                    .await
+                    .map_err(|error| {
+                        format!(
+                            "agent gateway credential was rejected and guest registration failed: {}",
+                            sanitize_error(&error)
+                        )
+                    })?;
+                    session.guest_project = Some(guest_project_summary(&guest));
+                    session.resume_session_id = None;
+                    persist_session(&runtime, session)?;
+                    print_guest_project(runtime.server_url, &guest);
+                    reconnect_delay = Duration::from_secs(1);
+                    continue;
+                }
                 return Err(
                     "agent gateway credential was rejected or revoked; run `vifu --reset` to enroll a new gateway identity"
                         .to_string(),
@@ -131,6 +253,42 @@ pub async fn run_agent_gateway(
         }
         reconnect_delay = reconnect_delay.saturating_mul(2).min(MAX_RECONNECT_DELAY);
     }
+}
+
+fn guest_project_summary(guest: &GuestProjectBootstrap) -> GuestProjectSummary {
+    GuestProjectSummary {
+        project_id: guest.project.id,
+        project_slug: guest.project.slug.clone(),
+        deployment_id: guest.deployment.id,
+        deployment: guest.deployment.name.clone(),
+        endpoint_path: guest.endpoint_path.clone(),
+        api_key: guest.api_key.clone(),
+        claim_token: guest.claim_token.clone(),
+        expires_at: guest.expires_at.clone(),
+    }
+}
+
+fn print_guest_project(server_url: &str, guest: &GuestProjectBootstrap) {
+    let endpoint = guest_endpoint_url(server_url, &guest.endpoint_path)
+        .unwrap_or_else(|_| guest.endpoint_path.clone());
+    println!("Gateway registered");
+    println!("Project: {}", guest.project.slug);
+    println!("Deployment: {}", guest.deployment.name);
+    println!("Endpoint: {endpoint}");
+    println!("API key: {}", guest.api_key);
+    println!("Claim token: {}", guest.claim_token);
+    println!("Expires: {}", guest.expires_at);
+}
+
+fn guest_endpoint_url(server_url: &str, endpoint_path: &str) -> Result<String, String> {
+    let mut url = Url::parse(server_url.trim())
+        .map_err(|_| "gateway.serverUrl must be a valid HTTP or HTTPS URL".to_string())?;
+    let base_path = url.path().trim_end_matches('/');
+    url.set_path(&format!(
+        "{base_path}/{}",
+        endpoint_path.trim_start_matches('/')
+    ));
+    Ok(url.to_string().trim_end_matches('/').to_string())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -184,8 +342,12 @@ async fn run_connection(
             resume_session_id: session.resume_session_id,
             agents: runtime.agents.to_vec(),
             metadata: serde_json::json!({
-                "adapter": "openclaw",
-                "providerIds": runtime.providers.iter().map(|provider| provider.id.as_str()).collect::<Vec<_>>(),
+                "adapter": "vifu",
+                "features": ["config-sync-v1", "trace-upload-v1", "embedded-runtime-v1"],
+                "providers": runtime.providers.iter().map(|provider| serde_json::json!({
+                    "id": provider.id(),
+                    "type": provider.provider_type(),
+                })).collect::<Vec<_>>(),
                 "version": env!("CARGO_PKG_VERSION")
             }),
         },
@@ -213,7 +375,7 @@ async fn run_connection(
             .into());
     }
     session.resume_session_id = Some(session_id);
-    session::write_session(runtime.session_path, session)?;
+    persist_session(runtime, session)?;
     println!(
         "Agent Gateway: connected as {} (connection {}, session {}, resumed: {})",
         session.gateway_id, connection_id, session_id, resumed
@@ -223,11 +385,21 @@ async fn run_connection(
         mpsc::channel::<AgentGatewayCommand>(OUTBOUND_QUEUE_CAPACITY);
     let semaphore = std::sync::Arc::new(Semaphore::new(MAX_CONCURRENT_CALLS));
     let mut calls = HashMap::<Uuid, JoinHandle<()>>::new();
+    let mut configuration_sync = tokio::time::interval(Duration::from_secs(30));
+    configuration_sync.tick().await;
 
     let outcome = loop {
         reap_finished(&mut calls);
         tokio::select! {
             _ = tokio::signal::ctrl_c() => break ConnectionOutcome::Shutdown,
+            _ = configuration_sync.tick() => {
+                if let Err(error) = sync_runtime_state(runtime, session).await {
+                    eprintln!(
+                        "Runtime configuration sync is unavailable: {}",
+                        sanitize_error(&error)
+                    );
+                }
+            }
             outbound = outbound_receiver.recv() => {
                 let Some(outbound) = outbound else {
                     return Err("agent gateway output queue closed".to_string().into());
@@ -275,7 +447,7 @@ async fn run_connection(
                                 continue;
                             }
                         };
-                        let Some(provider) = resolve_openclaw_provider(runtime.providers, &binding)
+                        let Some(provider) = resolve_provider(runtime.providers, &binding)
                         else {
                             queue_error(
                                 &outbound_sender,
@@ -287,19 +459,17 @@ async fn run_connection(
                             .await?;
                             continue;
                         };
-                        let endpoint = provider.endpoint.clone();
-                        let openclaw_token = provider.token.clone();
+                        let provider = Arc::clone(provider);
                         let sender = outbound_sender.clone();
                         let handle = tokio::spawn(async move {
-                            let result = openclaw::invoke(
-                                &endpoint,
-                                openclaw_token.as_deref(),
-                                &agent_id,
-                                &binding,
-                                &input,
-                                Duration::from_millis(timeout_ms),
-                            )
-                            .await;
+                            let result = provider
+                                .invoke(
+                                    &agent_id,
+                                    &binding,
+                                    &input,
+                                    Duration::from_millis(timeout_ms),
+                                )
+                                .await;
                             let message = match result {
                                 Ok(output) => AgentGatewayCommand::Result {
                                     request_id,
@@ -309,7 +479,7 @@ async fn run_connection(
                                 Err(error) => agent_gateway_error(
                                     request_id,
                                     channel_id,
-                                    "OPENCLAW_ERROR",
+                                    "PROVIDER_ERROR",
                                     &error,
                                 ),
                             };
@@ -331,6 +501,14 @@ async fn run_connection(
                             .send(AgentGatewayCommand::HeartbeatAck { session_id })
                             .await
                             .map_err(|_| "agent gateway output queue closed".to_string())?;
+                    }
+                    AgentGatewayCommand::RuntimeConfigChanged { .. } => {
+                        if let Err(error) = sync_runtime_state(runtime, session).await {
+                            eprintln!(
+                                "Runtime configuration sync is unavailable: {}",
+                                sanitize_error(&error)
+                            );
+                        }
                     }
                     AgentGatewayCommand::Error {
                         request_id: None,
@@ -378,14 +556,105 @@ async fn run_connection(
     Ok(outcome)
 }
 
+fn persist_session(
+    runtime: &AgentGatewayRuntime<'_>,
+    session: &SessionSummary,
+) -> Result<(), String> {
+    match runtime.session_path {
+        Some(path) => session::write_session(path, session),
+        None => Ok(()),
+    }
+}
+
+#[cfg(feature = "sqlite")]
+async fn sync_runtime_state(
+    runtime: &AgentGatewayRuntime<'_>,
+    session: &SessionSummary,
+) -> Result<(), String> {
+    let client = RuntimeControlClient::new(runtime.server_url, &session.gateway_credential)?;
+    let configuration = client.configuration().await?;
+    if configuration.gateway_id != session.gateway_id {
+        return Err("server returned configuration for another Agent Gateway".to_string());
+    }
+    let store = SqliteRuntimeStore::open(runtime.runtime_database_path)
+        .map_err(|error| error.to_string())?;
+    for mut deployment in configuration.deployments {
+        if deployment.policies.config_sync {
+            if deployment.release.is_none() {
+                if let Some(embedded) = runtime
+                    .embedded_runtime
+                    .filter(|embedded| embedded.project_id() == deployment.project_slug)
+                {
+                    if let Some(manifest) = embedded
+                        .current_manifest()
+                        .map_err(|error| error.to_string())?
+                    {
+                        deployment.release = Some(
+                            client
+                                .bootstrap_runtime_release(deployment.deployment_id, &manifest)
+                                .await?,
+                        );
+                    }
+                }
+            }
+            if let Some(release) = deployment.release.as_ref() {
+                release.validate().map_err(|error| error.to_string())?;
+                store
+                    .save_release(release)
+                    .map_err(|error| error.to_string())?;
+                store
+                    .set_active_release(&deployment.project_slug, release.version)
+                    .map_err(|error| error.to_string())?;
+                if let Some(embedded) = runtime
+                    .embedded_runtime
+                    .filter(|embedded| embedded.project_id() == deployment.project_slug)
+                {
+                    embedded
+                        .install_release(release)
+                        .map_err(|error| error.to_string())?;
+                    embedded
+                        .activate_release(release.version)
+                        .map_err(|error| error.to_string())?;
+                }
+            }
+        }
+        if deployment.policies.trace_mode == "off" {
+            continue;
+        }
+        let traces = store
+            .pending_traces(1_000)
+            .map_err(|error| error.to_string())?
+            .into_iter()
+            .filter(|trace| trace.project_id == deployment.project_slug)
+            .collect::<Vec<_>>();
+        for batch in traces.chunks(100) {
+            let acknowledged = client
+                .upload_traces(deployment.deployment_id, batch)
+                .await?;
+            store
+                .acknowledge_traces(&acknowledged)
+                .map_err(|error| error.to_string())?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(feature = "sqlite"))]
+async fn sync_runtime_state(
+    _runtime: &AgentGatewayRuntime<'_>,
+    _session: &SessionSummary,
+) -> Result<(), String> {
+    Ok(())
+}
+
 fn is_credential_rejection_status(status: StatusCode) -> bool {
     matches!(status, StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN)
 }
 
-fn resolve_openclaw_provider<'a>(
-    providers: &'a [OpenClawRuntimeProvider],
+fn resolve_provider<'a>(
+    providers: &'a [Arc<dyn AgentGatewayProvider>],
     binding: &serde_json::Value,
-) -> Option<&'a OpenClawRuntimeProvider> {
+) -> Option<&'a Arc<dyn AgentGatewayProvider>> {
     let provider_key = binding
         .get("providerKey")
         .or_else(|| binding.pointer("/source/providerKey"))
@@ -395,7 +664,7 @@ fn resolve_openclaw_provider<'a>(
     match provider_key {
         Some(provider_key) => providers
             .iter()
-            .find(|provider| provider.id == provider_key),
+            .find(|provider| provider.id() == provider_key),
         None if providers.len() == 1 => providers.first(),
         None => None,
     }
@@ -404,16 +673,8 @@ fn resolve_openclaw_provider<'a>(
 #[derive(Debug, PartialEq, Eq)]
 enum RegisterAgentGatewayError {
     Revoked,
+    Conflict,
     Failed(String),
-}
-
-impl RegisterAgentGatewayError {
-    fn into_message(self) -> String {
-        match self {
-            Self::Revoked => "agent gateway credential was revoked".to_string(),
-            Self::Failed(message) => message,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -452,6 +713,9 @@ async fn register_agent_gateway(
         .and_then(serde_json::Value::as_str);
     if code == Some("gateway_credential_revoked") {
         return Err(RegisterAgentGatewayError::Revoked);
+    }
+    if status == StatusCode::CONFLICT {
+        return Err(RegisterAgentGatewayError::Conflict);
     }
     let operation = match endpoint {
         RegistrationEndpoint::Bootstrap => "registration",
@@ -637,12 +901,13 @@ fn sanitize_error(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use serde_json::json;
+    use std::sync::Arc;
     use uuid::Uuid;
 
     use super::{
         agent_gateway_websocket_url, decode_command, encode_command,
-        is_credential_rejection_status, resolve_openclaw_provider, sanitize_error,
-        OpenClawRuntimeProvider,
+        is_credential_rejection_status, resolve_provider, sanitize_error, AgentGatewayProvider,
+        OpenClawGatewayProvider,
     };
     use crate::gateway_frame;
     use crate::openclaw::Endpoint;
@@ -653,29 +918,29 @@ mod tests {
 
     #[test]
     fn routes_calls_to_the_provider_named_by_the_binding() {
-        let providers = vec![
-            OpenClawRuntimeProvider {
-                id: "primary".to_string(),
-                endpoint: Endpoint {
+        let providers: Vec<Arc<dyn AgentGatewayProvider>> = vec![
+            Arc::new(OpenClawGatewayProvider::new(
+                "primary",
+                Endpoint {
                     host: "127.0.0.1".to_string(),
                     port: 18789,
                 },
-                token: None,
-            },
-            OpenClawRuntimeProvider {
-                id: "story".to_string(),
-                endpoint: Endpoint {
+                None,
+            )),
+            Arc::new(OpenClawGatewayProvider::new(
+                "story",
+                Endpoint {
                     host: "127.0.0.1".to_string(),
                     port: 18790,
                 },
-                token: None,
-            },
+                None,
+            )),
         ];
 
-        let selected = resolve_openclaw_provider(&providers, &json!({ "providerKey": "story" }))
+        let selected = resolve_provider(&providers, &json!({ "providerKey": "story" }))
             .expect("story provider must resolve");
-        assert_eq!(selected.id, "story");
-        assert!(resolve_openclaw_provider(&providers, &json!({})).is_none());
+        assert_eq!(selected.id(), "story");
+        assert!(resolve_provider(&providers, &json!({})).is_none());
     }
 
     #[test]

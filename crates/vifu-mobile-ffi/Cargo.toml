@@ -21,7 +21,12 @@ thiserror.workspace = true
 tokio = { version = "1", features = ["rt"] }
 uniffi.workspace = true
 vifu-gateway = { path = "../vifu-gateway" }
-vifu-runtime = { path = "../vifu-runtime" }
+vifu-provider-llama = { path = "../vifu-provider-llama", optional = true }
+vifu-runtime = { path = "../vifu-runtime", features = ["sqlite"] }
+
+[features]
+default = []
+local-llama = ["dep:vifu-provider-llama"]
 
 [[bin]]
 name = "uniffi-bindgen"

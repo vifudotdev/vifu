@@ -15,8 +15,9 @@ use crate::models::{
     AgentGatewaySession, AgentProfile, AgentProfileCapability, AgentProfileRollout,
     AgentProfileVersion, ApiKeyAgentScope, ApiKeyPermissions, ApiKeyRecord, AvailableAgent,
     CustomProvider, CustomProviderSecret, EndpointRoute, EndpointTrace, ProfileCapabilityDraft,
-    ProfileRoute, Project, ProjectRuntimeChannel, ProjectRuntimeExtension, ProjectWithBindings,
-    ProviderConnection, ProviderConnectionSecret, PublicAgent, RealtimeSession, TraceSpan,
+    ProfileRoute, Project, ProjectRuntimeChannel, ProjectRuntimeExtension, ProjectRuntimeRelease,
+    ProjectWithBindings, ProviderConnection, ProviderConnectionSecret, PublicAgent,
+    RealtimeSession, RuntimeDeployment, TraceSpan,
 };
 
 #[derive(Debug, FromRow)]
@@ -163,6 +164,484 @@ pub async fn set_project_owner_user_id(
         binding_ids: project_binding_ids(pool, project.id).await?,
         project,
     })
+}
+
+pub async fn list_runtime_deployments(
+    pool: &PgPool,
+    project_id: Uuid,
+) -> Result<Vec<RuntimeDeployment>, ApiError> {
+    sqlx::query_as::<_, RuntimeDeployment>(
+        "SELECT id, project_id, name, is_primary, config_sync_enabled, trace_mode,
+                remote_invocation_enabled, active_release_version, created_at, updated_at
+         FROM runtime_deployments
+         WHERE project_id = $1
+         ORDER BY is_primary DESC, created_at ASC",
+    )
+    .bind(project_id)
+    .fetch_all(pool)
+    .await
+    .map_err(ApiError::Database)
+}
+
+pub async fn get_runtime_deployment(
+    pool: &PgPool,
+    project_id: Uuid,
+    name: &str,
+) -> Result<RuntimeDeployment, ApiError> {
+    sqlx::query_as::<_, RuntimeDeployment>(
+        "SELECT id, project_id, name, is_primary, config_sync_enabled, trace_mode,
+                remote_invocation_enabled, active_release_version, created_at, updated_at
+         FROM runtime_deployments
+         WHERE project_id = $1 AND name = $2",
+    )
+    .bind(project_id)
+    .bind(name)
+    .fetch_optional(pool)
+    .await?
+    .ok_or(ApiError::NotFound)
+}
+
+pub async fn create_runtime_deployment(
+    pool: &PgPool,
+    input: NewRuntimeDeployment<'_>,
+) -> Result<RuntimeDeployment, ApiError> {
+    sqlx::query_as::<_, RuntimeDeployment>(
+        "INSERT INTO runtime_deployments(
+            id, project_id, name, is_primary, config_sync_enabled, trace_mode,
+            remote_invocation_enabled
+         ) VALUES ($1, $2, $3, $4, $5, $6, $7)
+         RETURNING id, project_id, name, is_primary, config_sync_enabled, trace_mode,
+                   remote_invocation_enabled, active_release_version, created_at, updated_at",
+    )
+    .bind(input.id)
+    .bind(input.project_id)
+    .bind(input.name)
+    .bind(input.is_primary)
+    .bind(input.config_sync_enabled)
+    .bind(input.trace_mode)
+    .bind(input.remote_invocation_enabled)
+    .fetch_one(pool)
+    .await
+    .map_err(map_database_error)
+}
+
+pub async fn update_runtime_deployment(
+    pool: &PgPool,
+    project_id: Uuid,
+    name: &str,
+    patch: RuntimeDeploymentPatch<'_>,
+) -> Result<RuntimeDeployment, ApiError> {
+    sqlx::query_as::<_, RuntimeDeployment>(
+        "UPDATE runtime_deployments SET
+            config_sync_enabled = COALESCE($3, config_sync_enabled),
+            trace_mode = COALESCE($4, trace_mode),
+            remote_invocation_enabled = COALESCE($5, remote_invocation_enabled),
+            updated_at = NOW()
+         WHERE project_id = $1 AND name = $2
+         RETURNING id, project_id, name, is_primary, config_sync_enabled, trace_mode,
+                   remote_invocation_enabled, active_release_version, created_at, updated_at",
+    )
+    .bind(project_id)
+    .bind(name)
+    .bind(patch.config_sync_enabled)
+    .bind(patch.trace_mode)
+    .bind(patch.remote_invocation_enabled)
+    .fetch_optional(pool)
+    .await?
+    .ok_or(ApiError::NotFound)
+}
+
+pub async fn promote_runtime_deployment(
+    pool: &PgPool,
+    project_id: Uuid,
+    name: &str,
+) -> Result<RuntimeDeployment, ApiError> {
+    let deployment = get_runtime_deployment(pool, project_id, name).await?;
+    let mut transaction = pool.begin().await?;
+    sqlx::query("UPDATE runtime_deployments SET is_primary = FALSE WHERE project_id = $1")
+        .bind(project_id)
+        .execute(&mut *transaction)
+        .await?;
+    let deployment = sqlx::query_as::<_, RuntimeDeployment>(
+        "UPDATE runtime_deployments
+         SET is_primary = TRUE, updated_at = NOW()
+         WHERE id = $1
+         RETURNING id, project_id, name, is_primary, config_sync_enabled, trace_mode,
+                   remote_invocation_enabled, active_release_version, created_at, updated_at",
+    )
+    .bind(deployment.id)
+    .fetch_one(&mut *transaction)
+    .await?;
+    if let Some(gateway_id) = sqlx::query_scalar::<_, String>(
+        "SELECT gateway_id FROM runtime_deployment_gateways
+         WHERE deployment_id = $1 ORDER BY created_at ASC LIMIT 1",
+    )
+    .bind(deployment.id)
+    .fetch_optional(&mut *transaction)
+    .await?
+    {
+        sqlx::query("UPDATE projects SET gateway_id = $2, updated_at = NOW() WHERE id = $1")
+            .bind(project_id)
+            .bind(gateway_id)
+            .execute(&mut *transaction)
+            .await?;
+    }
+    transaction.commit().await?;
+    Ok(deployment)
+}
+
+pub async fn delete_runtime_deployment(
+    pool: &PgPool,
+    project_id: Uuid,
+    name: &str,
+) -> Result<(), ApiError> {
+    let result = sqlx::query(
+        "DELETE FROM runtime_deployments
+         WHERE project_id = $1 AND name = $2 AND NOT is_primary",
+    )
+    .bind(project_id)
+    .bind(name)
+    .execute(pool)
+    .await?;
+    if result.rows_affected() == 0 {
+        let deployment = get_runtime_deployment(pool, project_id, name).await?;
+        if deployment.is_primary {
+            return Err(ApiError::Conflict(
+                "the primary runtime deployment cannot be deleted".to_string(),
+            ));
+        }
+        return Err(ApiError::NotFound);
+    }
+    Ok(())
+}
+
+pub async fn list_runtime_deployment_gateway_ids(
+    pool: &PgPool,
+    deployment_id: Uuid,
+) -> Result<Vec<String>, ApiError> {
+    sqlx::query_scalar(
+        "SELECT gateway_id FROM runtime_deployment_gateways
+         WHERE deployment_id = $1 ORDER BY created_at ASC",
+    )
+    .bind(deployment_id)
+    .fetch_all(pool)
+    .await
+    .map_err(ApiError::Database)
+}
+
+pub async fn assign_runtime_deployment_gateway(
+    pool: &PgPool,
+    project_id: Uuid,
+    deployment_id: Uuid,
+    gateway_id: &str,
+) -> Result<(), ApiError> {
+    let mut transaction = pool.begin().await?;
+    let is_primary = sqlx::query_scalar::<_, bool>(
+        "SELECT is_primary FROM runtime_deployments WHERE id = $1 AND project_id = $2",
+    )
+    .bind(deployment_id)
+    .bind(project_id)
+    .fetch_optional(&mut *transaction)
+    .await?
+    .ok_or(ApiError::NotFound)?;
+    sqlx::query(
+        "DELETE FROM runtime_deployment_gateways AS assignment
+         USING runtime_deployments AS deployment
+         WHERE assignment.deployment_id = deployment.id
+           AND deployment.project_id = $1
+           AND assignment.gateway_id = $2
+           AND assignment.deployment_id <> $3",
+    )
+    .bind(project_id)
+    .bind(gateway_id)
+    .bind(deployment_id)
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO runtime_deployment_gateways(deployment_id, gateway_id)
+         VALUES ($1, $2) ON CONFLICT DO NOTHING",
+    )
+    .bind(deployment_id)
+    .bind(gateway_id)
+    .execute(&mut *transaction)
+    .await?;
+    if is_primary {
+        sqlx::query("UPDATE projects SET gateway_id = $2, updated_at = NOW() WHERE id = $1")
+            .bind(project_id)
+            .bind(gateway_id)
+            .execute(&mut *transaction)
+            .await?;
+    } else {
+        sqlx::query(
+            "UPDATE projects
+             SET gateway_id = COALESCE((
+                   SELECT assignment.gateway_id
+                   FROM runtime_deployments AS deployment
+                   JOIN runtime_deployment_gateways AS assignment
+                     ON assignment.deployment_id = deployment.id
+                   WHERE deployment.project_id = $1 AND deployment.is_primary
+                   ORDER BY assignment.created_at ASC
+                   LIMIT 1
+                 ), ''),
+                 updated_at = NOW()
+             WHERE id = $1",
+        )
+        .bind(project_id)
+        .execute(&mut *transaction)
+        .await?;
+    }
+    transaction.commit().await?;
+    Ok(())
+}
+
+pub async fn unassign_runtime_deployment_gateway(
+    pool: &PgPool,
+    project_id: Uuid,
+    deployment_id: Uuid,
+    gateway_id: &str,
+) -> Result<(), ApiError> {
+    let result = sqlx::query(
+        "DELETE FROM runtime_deployment_gateways AS assignment
+         USING runtime_deployments AS deployment
+         WHERE assignment.deployment_id = deployment.id
+           AND deployment.id = $1 AND deployment.project_id = $2
+           AND assignment.gateway_id = $3",
+    )
+    .bind(deployment_id)
+    .bind(project_id)
+    .bind(gateway_id)
+    .execute(pool)
+    .await?;
+    if result.rows_affected() == 0 {
+        return Err(ApiError::NotFound);
+    }
+    Ok(())
+}
+
+pub async fn list_runtime_deployments_for_gateway(
+    pool: &PgPool,
+    gateway_id: &str,
+) -> Result<Vec<RuntimeDeployment>, ApiError> {
+    sqlx::query_as::<_, RuntimeDeployment>(
+        "SELECT deployment.id, deployment.project_id, deployment.name,
+                deployment.is_primary, deployment.config_sync_enabled,
+                deployment.trace_mode, deployment.remote_invocation_enabled,
+                deployment.active_release_version, deployment.created_at,
+                deployment.updated_at
+         FROM runtime_deployments AS deployment
+         JOIN runtime_deployment_gateways AS assignment
+           ON assignment.deployment_id = deployment.id
+         WHERE assignment.gateway_id = $1
+         ORDER BY deployment.created_at ASC",
+    )
+    .bind(gateway_id)
+    .fetch_all(pool)
+    .await
+    .map_err(ApiError::Database)
+}
+
+pub async fn runtime_deployment_allows_remote_invocation(
+    pool: &PgPool,
+    project_id: Uuid,
+    gateway_id: &str,
+) -> Result<bool, ApiError> {
+    sqlx::query_scalar(
+        "SELECT EXISTS(
+           SELECT 1
+           FROM runtime_deployments AS deployment
+           JOIN runtime_deployment_gateways AS assignment
+             ON assignment.deployment_id = deployment.id
+           WHERE deployment.project_id = $1
+             AND assignment.gateway_id = $2
+             AND deployment.remote_invocation_enabled
+         )",
+    )
+    .bind(project_id)
+    .bind(gateway_id)
+    .fetch_one(pool)
+    .await
+    .map_err(ApiError::Database)
+}
+
+pub async fn create_project_runtime_release(
+    pool: &PgPool,
+    input: NewProjectRuntimeRelease<'_>,
+) -> Result<ProjectRuntimeRelease, ApiError> {
+    sqlx::query_as::<_, ProjectRuntimeRelease>(
+        "INSERT INTO project_runtime_releases(
+            id, project_id, version, content_hash, manifest, created_by
+         ) VALUES ($1, $2, $3, $4, $5, $6)
+         RETURNING id, project_id, version, content_hash, manifest, created_by, created_at",
+    )
+    .bind(input.id)
+    .bind(input.project_id)
+    .bind(input.version)
+    .bind(input.content_hash)
+    .bind(input.manifest)
+    .bind(input.created_by)
+    .fetch_one(pool)
+    .await
+    .map_err(map_database_error)
+}
+
+pub async fn list_project_runtime_releases(
+    pool: &PgPool,
+    project_id: Uuid,
+) -> Result<Vec<ProjectRuntimeRelease>, ApiError> {
+    sqlx::query_as::<_, ProjectRuntimeRelease>(
+        "SELECT id, project_id, version, content_hash, manifest, created_by, created_at
+         FROM project_runtime_releases WHERE project_id = $1 ORDER BY version DESC",
+    )
+    .bind(project_id)
+    .fetch_all(pool)
+    .await
+    .map_err(ApiError::Database)
+}
+
+pub async fn get_project_runtime_release(
+    pool: &PgPool,
+    project_id: Uuid,
+    version: i64,
+) -> Result<ProjectRuntimeRelease, ApiError> {
+    sqlx::query_as::<_, ProjectRuntimeRelease>(
+        "SELECT id, project_id, version, content_hash, manifest, created_by, created_at
+         FROM project_runtime_releases WHERE project_id = $1 AND version = $2",
+    )
+    .bind(project_id)
+    .bind(version)
+    .fetch_optional(pool)
+    .await?
+    .ok_or(ApiError::NotFound)
+}
+
+pub async fn activate_runtime_deployment_release(
+    pool: &PgPool,
+    project_id: Uuid,
+    deployment_name: &str,
+    version: i64,
+) -> Result<RuntimeDeployment, ApiError> {
+    get_project_runtime_release(pool, project_id, version).await?;
+    sqlx::query_as::<_, RuntimeDeployment>(
+        "UPDATE runtime_deployments SET active_release_version = $3, updated_at = NOW()
+         WHERE project_id = $1 AND name = $2
+         RETURNING id, project_id, name, is_primary, config_sync_enabled, trace_mode,
+                   remote_invocation_enabled, active_release_version, created_at, updated_at",
+    )
+    .bind(project_id)
+    .bind(deployment_name)
+    .bind(version)
+    .fetch_optional(pool)
+    .await?
+    .ok_or(ApiError::NotFound)
+}
+
+pub async fn create_guest_project(
+    pool: &PgPool,
+    input: NewGuestProject<'_>,
+) -> Result<(), ApiError> {
+    sqlx::query(
+        "INSERT INTO guest_projects(project_id, gateway_id, claim_token_hash, expires_at)
+         VALUES ($1, $2, $3, $4)",
+    )
+    .bind(input.project_id)
+    .bind(input.gateway_id)
+    .bind(input.claim_token_hash)
+    .bind(input.expires_at)
+    .execute(pool)
+    .await
+    .map_err(map_database_error)?;
+    Ok(())
+}
+
+pub async fn get_active_guest_project_for_gateway(
+    pool: &PgPool,
+    gateway_id: &str,
+) -> Result<Option<(ProjectWithBindings, DateTime<Utc>)>, ApiError> {
+    let guest = sqlx::query_as::<_, (Uuid, DateTime<Utc>)>(
+        "SELECT project_id, expires_at
+         FROM guest_projects
+         WHERE gateway_id = $1 AND claimed_at IS NULL AND expires_at > NOW()",
+    )
+    .bind(gateway_id)
+    .fetch_optional(pool)
+    .await?;
+    match guest {
+        Some((project_id, expires_at)) => {
+            Ok(Some((get_project(pool, project_id).await?, expires_at)))
+        }
+        None => Ok(None),
+    }
+}
+
+pub async fn count_active_guest_projects(pool: &PgPool) -> Result<i64, ApiError> {
+    sqlx::query_scalar(
+        "SELECT COUNT(*) FROM guest_projects WHERE claimed_at IS NULL AND expires_at > NOW()",
+    )
+    .fetch_one(pool)
+    .await
+    .map_err(ApiError::Database)
+}
+
+pub async fn prune_expired_guest_projects(pool: &PgPool) -> Result<u64, ApiError> {
+    let result = sqlx::query(
+        "DELETE FROM projects
+         WHERE id IN (
+            SELECT project_id FROM guest_projects
+            WHERE claimed_at IS NULL AND expires_at <= NOW()
+         )",
+    )
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected())
+}
+
+pub async fn claim_guest_project(
+    pool: &PgPool,
+    claim_token_hash: &[u8],
+    owner_user_id: &str,
+) -> Result<ProjectWithBindings, ApiError> {
+    let mut transaction = pool.begin().await?;
+    let project_id = sqlx::query_scalar::<_, Uuid>(
+        "UPDATE guest_projects
+         SET claimed_by = $2, claimed_at = NOW()
+         WHERE claim_token_hash = $1 AND claimed_at IS NULL AND expires_at > NOW()
+         RETURNING project_id",
+    )
+    .bind(claim_token_hash)
+    .bind(owner_user_id)
+    .fetch_optional(&mut *transaction)
+    .await?
+    .ok_or(ApiError::Unauthorized)?;
+    let updated = sqlx::query(
+        "UPDATE projects SET owner_user_id = $2, updated_at = NOW()
+         WHERE id = $1 AND owner_user_id IS NULL",
+    )
+    .bind(project_id)
+    .bind(owner_user_id)
+    .execute(&mut *transaction)
+    .await?;
+    if updated.rows_affected() != 1 {
+        return Err(ApiError::Conflict(
+            "guest project already has an owner".to_string(),
+        ));
+    }
+    sqlx::query(
+        "UPDATE agent_gateway_credentials
+         SET owner_user_id = $2
+         WHERE owner_user_id IS NULL
+           AND gateway_id IN (
+             SELECT assignment.gateway_id
+             FROM runtime_deployment_gateways AS assignment
+             JOIN runtime_deployments AS deployment ON deployment.id = assignment.deployment_id
+             WHERE deployment.project_id = $1
+           )",
+    )
+    .bind(project_id)
+    .bind(owner_user_id)
+    .execute(&mut *transaction)
+    .await?;
+    transaction.commit().await?;
+    get_project(pool, project_id).await
 }
 
 pub async fn get_project_runtime_extension(
@@ -368,6 +847,27 @@ pub async fn create_project(
     .fetch_one(&mut *transaction)
     .await
     .map_err(map_database_error)?;
+    let deployment_id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO runtime_deployments(
+            id, project_id, name, is_primary, config_sync_enabled, trace_mode,
+            remote_invocation_enabled
+         ) VALUES ($1, $2, 'development', TRUE, TRUE, 'summary', FALSE)",
+    )
+    .bind(deployment_id)
+    .bind(project.id)
+    .execute(&mut *transaction)
+    .await?;
+    if !project.gateway_id.is_empty() {
+        sqlx::query(
+            "INSERT INTO runtime_deployment_gateways(deployment_id, gateway_id)
+             VALUES ($1, $2)",
+        )
+        .bind(deployment_id)
+        .bind(project.gateway_id)
+        .execute(&mut *transaction)
+        .await?;
+    }
     for binding_id in project.binding_ids {
         sqlx::query("INSERT INTO project_bindings (project_id, binding_id) VALUES ($1, $2)")
             .bind(project.id)
@@ -1602,6 +2102,7 @@ pub async fn ensure_discovered_binding(
     agent_id: &str,
     agent_name: &str,
     provider_key: &str,
+    provider_type: &str,
 ) -> Result<Uuid, ApiError> {
     if let Some(binding) =
         find_binding_by_agent_gateway_agent(pool, project_id, gateway_id, agent_id, provider_key)
@@ -1621,8 +2122,16 @@ pub async fn ensure_discovered_binding(
         if vifu_gateway::protocol::validate_identifier("provider key", provider_key).is_ok() {
             provider_key
         } else {
-            "openclaw"
+            "gateway-provider"
         };
+    let provider_type =
+        if vifu_gateway::protocol::validate_identifier("provider type", provider_type).is_ok() {
+            provider_type
+        } else {
+            "gateway"
+        };
+    let source_kind = format!("{provider_type}-discovery");
+    let description = format!("Discovered from {provider_type}");
     let slug = unique_profile_slug(
         pool,
         project_id,
@@ -1633,7 +2142,7 @@ pub async fn ensure_discovered_binding(
     let binding_id = Uuid::new_v4();
     let version_id = Uuid::new_v4();
     let binding_config = json!({
-        "source": "openclaw-discovery",
+        "source": source_kind,
         "agentName": display_name,
         "providerKey": provider_key,
     });
@@ -1641,7 +2150,7 @@ pub async fn ensure_discovered_binding(
     let runtime = json!({});
     let presentation = json!({});
     let source = json!({
-        "type": "openclaw",
+        "type": provider_type,
         "providerKey": provider_key,
         "gatewayId": gateway_id,
         "resourceId": agent_id,
@@ -1649,12 +2158,12 @@ pub async fn ensure_discovered_binding(
     });
     let capability = ProfileCapabilityDraft {
         kind: "chat".to_string(),
-        provider_type: "openclaw".to_string(),
+        provider_type: provider_type.to_string(),
         provider_key: provider_key.to_string(),
         resource_id: Some(agent_id.to_string()),
         config: json!({
             "gatewayId": gateway_id,
-            "source": "openclaw-discovery",
+            "source": source_kind,
         }),
         input_schema: json!({}),
         output_schema: json!({}),
@@ -1666,7 +2175,7 @@ pub async fn ensure_discovered_binding(
         presentation: &presentation,
         source: &source,
         capabilities: &capabilities,
-        change_summary: Some("Discovered from OpenClaw"),
+        change_summary: Some(&description),
     };
     let content_hash = profile_version_content_hash(&version_input)?;
     let mut transaction = pool.begin().await?;
@@ -1678,17 +2187,18 @@ pub async fn ensure_discovered_binding(
     .bind(project_id)
     .bind(&slug)
     .bind(display_name)
-    .bind("Discovered from OpenClaw")
+    .bind(&description)
     .execute(&mut *transaction)
     .await
     .map_err(map_database_error)?;
     sqlx::query(
         "INSERT INTO agent_bindings
             (id, profile_id, provider, gateway_id, agent_id, config)
-         VALUES ($1, $2, 'openclaw', $3, $4, $5)",
+         VALUES ($1, $2, $3, $4, $5, $6)",
     )
     .bind(binding_id)
     .bind(profile_id)
+    .bind(provider_type)
     .bind(gateway_id)
     .bind(agent_id)
     .bind(&binding_config)
@@ -1708,7 +2218,7 @@ pub async fn ensure_discovered_binding(
     .bind(&presentation)
     .bind(&source)
     .bind(content_hash)
-    .bind("Discovered from OpenClaw")
+    .bind(&description)
     .execute(&mut *transaction)
     .await
     .map_err(map_database_error)?;
@@ -2479,20 +2989,21 @@ pub async fn create_agent_gateway_enrollment(
     sqlx::query(
         "UPDATE agent_gateway_enrollments
          SET revoked_at = NOW()
-         WHERE project_id = $1
+         WHERE deployment_id = $1
            AND consumed_at IS NULL
            AND revoked_at IS NULL",
     )
-    .bind(input.project_id)
+    .bind(input.deployment_id)
     .execute(&mut *transaction)
     .await?;
     sqlx::query(
         "INSERT INTO agent_gateway_enrollments
-            (id, project_id, owner_user_id, token_hash, expires_at)
-         VALUES ($1, $2, $3, $4, $5)",
+            (id, project_id, deployment_id, owner_user_id, token_hash, expires_at)
+         VALUES ($1, $2, $3, $4, $5, $6)",
     )
     .bind(input.id)
     .bind(input.project_id)
+    .bind(input.deployment_id)
     .bind(input.owner_user_id)
     .bind(input.token_hash)
     .bind(input.expires_at)
@@ -2506,6 +3017,7 @@ pub async fn create_agent_gateway_enrollment(
 #[derive(Debug, FromRow)]
 struct AgentGatewayEnrollmentSecret {
     project_id: Uuid,
+    deployment_id: Uuid,
     owner_user_id: String,
     gateway_id: Option<String>,
     consumed_at: Option<DateTime<Utc>>,
@@ -2528,7 +3040,8 @@ pub async fn consume_agent_gateway_enrollment(
            AND consumed_at IS NULL
            AND revoked_at IS NULL
            AND expires_at > NOW()
-         RETURNING project_id, owner_user_id, gateway_id, consumed_at, revoked_at, expires_at",
+         RETURNING project_id, deployment_id, owner_user_id, gateway_id, consumed_at,
+                   revoked_at, expires_at",
     )
     .bind(token_hash)
     .bind(gateway_id)
@@ -2538,7 +3051,8 @@ pub async fn consume_agent_gateway_enrollment(
         Some(enrollment) => (enrollment, false),
         None => (
             sqlx::query_as::<_, AgentGatewayEnrollmentSecret>(
-                "SELECT project_id, owner_user_id, gateway_id, consumed_at, revoked_at, expires_at
+                "SELECT project_id, deployment_id, owner_user_id, gateway_id, consumed_at,
+                        revoked_at, expires_at
                  FROM agent_gateway_enrollments
                  WHERE token_hash = $1
                  FOR UPDATE",
@@ -2550,9 +3064,7 @@ pub async fn consume_agent_gateway_enrollment(
             true,
         ),
     };
-    if enrollment.revoked_at.is_some()
-        || (enrollment.consumed_at.is_none() && enrollment.expires_at <= Utc::now())
-    {
+    if enrollment.revoked_at.is_some() || enrollment.expires_at <= Utc::now() {
         return Err(ApiError::Unauthorized);
     }
     if is_idempotent_retry
@@ -2602,31 +3114,72 @@ pub async fn consume_agent_gateway_enrollment(
         Some(_) => return Err(ApiError::AgentGatewayCredentialRevoked),
     };
 
-    let project_update = if is_idempotent_retry {
+    sqlx::query(
+        "DELETE FROM runtime_deployment_gateways AS assignment
+         USING runtime_deployments AS deployment
+         WHERE assignment.deployment_id = deployment.id
+           AND deployment.project_id = $1
+           AND assignment.gateway_id = $2
+           AND assignment.deployment_id <> $3",
+    )
+    .bind(enrollment.project_id)
+    .bind(gateway_id)
+    .bind(enrollment.deployment_id)
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO runtime_deployment_gateways(deployment_id, gateway_id)
+         VALUES ($1, $2) ON CONFLICT DO NOTHING",
+    )
+    .bind(enrollment.deployment_id)
+    .bind(gateway_id)
+    .execute(&mut *transaction)
+    .await?;
+    let primary_update = sqlx::query(
+        "UPDATE projects AS project
+         SET gateway_id = $1, updated_at = NOW()
+         FROM runtime_deployments AS deployment
+         WHERE project.id = $2
+           AND deployment.id = $3
+           AND deployment.project_id = project.id
+           AND deployment.is_primary",
+    )
+    .bind(gateway_id)
+    .bind(enrollment.project_id)
+    .bind(enrollment.deployment_id)
+    .execute(&mut *transaction)
+    .await?;
+    if primary_update.rows_affected() == 0 {
+        let deployment_exists = sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS(
+               SELECT 1 FROM runtime_deployments
+               WHERE id = $1 AND project_id = $2
+             )",
+        )
+        .bind(enrollment.deployment_id)
+        .bind(enrollment.project_id)
+        .fetch_one(&mut *transaction)
+        .await?;
+        if !deployment_exists {
+            return Err(ApiError::Forbidden);
+        }
         sqlx::query(
             "UPDATE projects
-             SET updated_at = updated_at
-             WHERE id = $1 AND owner_user_id = $2 AND gateway_id = $3",
+             SET gateway_id = COALESCE((
+                   SELECT assignment.gateway_id
+                   FROM runtime_deployments AS deployment
+                   JOIN runtime_deployment_gateways AS assignment
+                     ON assignment.deployment_id = deployment.id
+                   WHERE deployment.project_id = $1 AND deployment.is_primary
+                   ORDER BY assignment.created_at ASC
+                   LIMIT 1
+                 ), ''),
+                 updated_at = NOW()
+             WHERE id = $1",
         )
         .bind(enrollment.project_id)
-        .bind(&enrollment.owner_user_id)
-        .bind(gateway_id)
         .execute(&mut *transaction)
-        .await?
-    } else {
-        sqlx::query(
-            "UPDATE projects
-             SET gateway_id = $1, updated_at = NOW()
-             WHERE id = $2 AND owner_user_id = $3",
-        )
-        .bind(gateway_id)
-        .bind(enrollment.project_id)
-        .bind(&enrollment.owner_user_id)
-        .execute(&mut *transaction)
-        .await?
-    };
-    if project_update.rows_affected() != 1 {
-        return Err(ApiError::Forbidden);
+        .await?;
     }
     transaction.commit().await?;
     Ok(if is_idempotent_retry {
@@ -2838,6 +3391,32 @@ pub async fn create_trace(pool: &PgPool, trace: NewTrace<'_>) -> Result<Uuid, Ap
     .await
     .map_err(map_database_error)?;
     Ok(trace_id)
+}
+
+pub async fn create_uploaded_runtime_trace(
+    pool: &PgPool,
+    trace: NewUploadedRuntimeTrace<'_>,
+) -> Result<bool, ApiError> {
+    let result = sqlx::query(
+        "INSERT INTO endpoint_traces
+            (id, request_id, project_id, operation, provider_key, capability_kind,
+             status, latency_ms, request, created_at, completed_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $10)
+         ON CONFLICT (request_id) DO NOTHING",
+    )
+    .bind(trace.id)
+    .bind(trace.request_id)
+    .bind(trace.project_id)
+    .bind(trace.operation)
+    .bind(trace.provider_key)
+    .bind(trace.capability_kind)
+    .bind(trace.status)
+    .bind(trace.latency_ms)
+    .bind(trace.request)
+    .bind(trace.created_at)
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected() == 1)
 }
 
 pub async fn create_trace_span(pool: &PgPool, span: NewTraceSpan<'_>) -> Result<Uuid, ApiError> {

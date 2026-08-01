@@ -29,3 +29,4 @@ vifu-runtime = { version = "0.1.1", path = "../vifu-runtime" }
 [features]
 default = []
 local-whisper = ["vifu-runtime/local-whisper"]
+sqlite = ["vifu-runtime/sqlite"]

@@ -1,0 +1,16 @@
+{
+  "type": "req",
+  "id": "invoke-1",
+  "method": "runtime.invoke",
+  "params": {
+    "endpoint": "companion",
+    "sessionId": "player-one",
+    "data": {
+      "format": "json",
+      "value": {
+        "message": "Hello"
+      }
+    },
+    "metadata": {}
+  }
+}

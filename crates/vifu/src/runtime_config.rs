@@ -39,6 +39,19 @@ pub struct ServerRuntimeConfig {
     pub runtime_extensions: Vec<RuntimeExtensionConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub authority: Option<AccessTokenAuthorityConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guest_bootstrap: Option<GuestBootstrapConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct GuestBootstrapConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_guest_ttl_hours")]
+    pub ttl_hours: u64,
+    #[serde(default = "default_guest_project_limit")]
+    pub max_projects: u32,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -110,6 +123,13 @@ impl LoadedRuntimeConfig {
         if server.authority.is_some() {
             config.apply_access_token_authority(server.access_token_authority()?)?;
         }
+        if let Some(guest) = server.guest_bootstrap.as_ref() {
+            config.apply_guest_bootstrap(
+                guest.enabled,
+                std::time::Duration::from_secs(guest.ttl_hours.saturating_mul(60 * 60)),
+                guest.max_projects,
+            )?;
+        }
         Ok(config)
     }
 }
@@ -140,6 +160,7 @@ impl RuntimeConfig {
                 database_url_file: None,
                 runtime_extensions: Vec::new(),
                 authority: None,
+                guest_bootstrap: None,
             }),
             gateway: Some(GatewayRuntimeConfig {
                 server_url: Some(vifu_gateway::config::DEFAULT_SERVER_URL.to_string()),
@@ -179,6 +200,14 @@ impl RuntimeConfig {
     }
 }
 
+const fn default_guest_ttl_hours() -> u64 {
+    7 * 24
+}
+
+const fn default_guest_project_limit() -> u32 {
+    10_000
+}
+
 impl ServerRuntimeConfig {
     fn validate(&self) -> Result<(), String> {
         if self.database_url.is_some() && self.database_url_file.is_some() {
@@ -196,6 +225,18 @@ impl ServerRuntimeConfig {
                 return Err(
                     "server deploymentId and authority must be configured together".to_string(),
                 )
+            }
+        }
+        if let Some(guest) = self.guest_bootstrap.as_ref() {
+            let ttl = std::time::Duration::from_secs(guest.ttl_hours.saturating_mul(60 * 60));
+            if !(std::time::Duration::from_secs(60 * 60)
+                ..=std::time::Duration::from_secs(30 * 24 * 60 * 60))
+                .contains(&ttl)
+            {
+                return Err("guestBootstrap.ttlHours must be between 1 and 720".to_string());
+            }
+            if !(1..=1_000_000).contains(&guest.max_projects) {
+                return Err("guestBootstrap.maxProjects must be between 1 and 1000000".to_string());
             }
         }
         Ok(())

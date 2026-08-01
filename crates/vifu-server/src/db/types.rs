@@ -24,6 +24,31 @@ pub struct NewProject<'a> {
     pub binding_ids: &'a [Uuid],
 }
 
+pub struct NewRuntimeDeployment<'a> {
+    pub id: Uuid,
+    pub project_id: Uuid,
+    pub name: &'a str,
+    pub is_primary: bool,
+    pub config_sync_enabled: bool,
+    pub trace_mode: &'a str,
+    pub remote_invocation_enabled: bool,
+}
+
+pub struct RuntimeDeploymentPatch<'a> {
+    pub config_sync_enabled: Option<bool>,
+    pub trace_mode: Option<&'a str>,
+    pub remote_invocation_enabled: Option<bool>,
+}
+
+pub struct NewProjectRuntimeRelease<'a> {
+    pub id: Uuid,
+    pub project_id: Uuid,
+    pub version: i64,
+    pub content_hash: &'a str,
+    pub manifest: &'a Value,
+    pub created_by: Option<&'a str>,
+}
+
 pub struct ProjectPatch<'a> {
     pub slug: Option<&'a str>,
     pub name: Option<&'a str>,
@@ -110,7 +135,15 @@ pub struct NewAgentGatewayEnrollment<'a> {
     pub id: Uuid,
     pub project_id: Uuid,
     pub owner_user_id: &'a str,
+    pub deployment_id: Uuid,
     pub token_hash: &'a [u8],
+    pub expires_at: DateTime<Utc>,
+}
+
+pub struct NewGuestProject<'a> {
+    pub project_id: Uuid,
+    pub gateway_id: &'a str,
+    pub claim_token_hash: &'a [u8],
     pub expires_at: DateTime<Utc>,
 }
 
@@ -126,6 +159,19 @@ pub struct NewTrace<'a> {
     pub capability_kind: Option<&'a str>,
     pub selection_key: Option<&'a str>,
     pub request: &'a Value,
+}
+
+pub struct NewUploadedRuntimeTrace<'a> {
+    pub id: Uuid,
+    pub request_id: Uuid,
+    pub project_id: Uuid,
+    pub operation: &'a str,
+    pub provider_key: Option<&'a str>,
+    pub capability_kind: Option<&'a str>,
+    pub status: &'a str,
+    pub latency_ms: i64,
+    pub request: &'a Value,
+    pub created_at: DateTime<Utc>,
 }
 
 pub struct NewTraceSpan<'a> {

@@ -93,6 +93,71 @@ pub struct ProjectWithBindings {
 
 #[derive(Debug, Clone, Serialize, FromRow)]
 #[serde(rename_all = "camelCase")]
+pub struct RuntimeDeployment {
+    pub id: Uuid,
+    pub project_id: Uuid,
+    pub name: String,
+    pub is_primary: bool,
+    pub config_sync_enabled: bool,
+    pub trace_mode: String,
+    pub remote_invocation_enabled: bool,
+    pub active_release_version: Option<i64>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeDeploymentView {
+    #[serde(flatten)]
+    pub deployment: RuntimeDeployment,
+    pub gateway_ids: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CreateRuntimeDeployment {
+    pub name: String,
+    pub config_sync_enabled: Option<bool>,
+    pub trace_mode: Option<String>,
+    pub remote_invocation_enabled: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct UpdateRuntimeDeployment {
+    pub config_sync_enabled: Option<bool>,
+    pub trace_mode: Option<String>,
+    pub remote_invocation_enabled: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, FromRow)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectRuntimeRelease {
+    pub id: Uuid,
+    pub project_id: Uuid,
+    pub version: i64,
+    pub content_hash: String,
+    pub manifest: Value,
+    pub created_by: Option<String>,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PublishRuntimeRelease {
+    pub manifest: Value,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BootstrapGatewayRuntimeRelease {
+    pub deployment_id: Uuid,
+    pub manifest: Value,
+}
+
+#[derive(Debug, Clone, Serialize, FromRow)]
+#[serde(rename_all = "camelCase")]
 pub struct ProjectRuntimeExtension {
     pub project_id: Uuid,
     pub extension_id: String,
@@ -721,6 +786,12 @@ pub struct UpdateApiKey {
 pub struct RegisterAgentGateway {
     pub gateway_id: String,
     pub credential: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ClaimGuestProject {
+    pub claim_token: String,
 }
 
 #[derive(Debug, Clone, Serialize, FromRow)]

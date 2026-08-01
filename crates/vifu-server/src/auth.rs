@@ -532,6 +532,41 @@ pub fn hash_agent_gateway_enrollment(value: &str, pepper: &str) -> Vec<u8> {
     hash_credential(b"vifu-agent-gateway-enrollment-v1", value, pepper)
 }
 
+pub fn hash_guest_claim_token(value: &str, pepper: &str) -> Vec<u8> {
+    hash_credential(b"vifu-guest-claim-v1", value, pepper)
+}
+
+pub fn derive_guest_claim_token(gateway_credential: &str, pepper: &str) -> String {
+    format!(
+        "vifu_gc_{}",
+        encode_lower_hex(&hash_credential(
+            b"vifu-guest-claim-token-v1",
+            gateway_credential,
+            pepper,
+        ))
+    )
+}
+
+pub fn derive_guest_project_key(gateway_credential: &str, pepper: &str) -> String {
+    format!(
+        "vifu_pk_{}",
+        encode_lower_hex(&hash_credential(
+            b"vifu-guest-project-key-v1",
+            gateway_credential,
+            pepper,
+        ))
+    )
+}
+
+fn encode_lower_hex(bytes: &[u8]) -> String {
+    let mut output = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        use std::fmt::Write;
+        let _ = write!(&mut output, "{byte:02x}");
+    }
+    output
+}
+
 fn hash_credential(domain: &[u8], value: &str, pepper: &str) -> Vec<u8> {
     let mut digest = Sha256::new();
     digest.update(domain);

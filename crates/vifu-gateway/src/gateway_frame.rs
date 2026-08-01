@@ -2,167 +2,24 @@ use serde::de::{self, DeserializeOwned};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 
-pub const MAX_GATEWAY_FRAME_BYTES: usize = 16 * 1024 * 1024;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum RequestFrameType {
-    #[serde(rename = "req")]
-    Req,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum ResponseFrameType {
-    #[serde(rename = "res")]
-    Res,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum EventFrameType {
-    #[serde(rename = "event")]
-    Event,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct RequestFrame {
-    #[serde(rename = "type")]
-    pub frame_type: RequestFrameType,
-    pub id: String,
-    pub method: String,
-    #[serde(
-        default,
-        deserialize_with = "optional_json_value",
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub params: Option<Value>,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct ResponseFrame {
-    #[serde(rename = "type")]
-    pub frame_type: ResponseFrameType,
-    pub id: String,
-    pub ok: bool,
-    #[serde(
-        default,
-        deserialize_with = "optional_json_value",
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub payload: Option<Value>,
-    #[serde(
-        default,
-        deserialize_with = "optional_non_null",
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub error: Option<ErrorShape>,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct EventFrame {
-    #[serde(rename = "type")]
-    pub frame_type: EventFrameType,
-    pub event: String,
-    #[serde(
-        default,
-        deserialize_with = "optional_json_value",
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub payload: Option<Value>,
-    #[serde(
-        default,
-        deserialize_with = "optional_non_null",
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub seq: Option<u64>,
-    #[serde(
-        default,
-        deserialize_with = "optional_non_null",
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub state_version: Option<StateVersion>,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(untagged)]
-pub enum GatewayFrame {
-    Request(RequestFrame),
-    Response(ResponseFrame),
-    Event(EventFrame),
-}
+pub use vifu_runtime::protocol::{
+    ErrorShape, EventFrame, EventFrameType, ProtocolFrame as GatewayFrame, RequestFrame,
+    RequestFrameType, ResponseFrame, ResponseFrameType, StateVersion,
+    MAX_PROTOCOL_FRAME_BYTES as MAX_GATEWAY_FRAME_BYTES,
+};
 
 pub fn encode(frame: &GatewayFrame) -> Result<String, String> {
-    validate_gateway_frame(frame)?;
-    let encoded = serde_json::to_string(frame).map_err(|error| error.to_string())?;
-    if encoded.len() > MAX_GATEWAY_FRAME_BYTES {
-        return Err("gateway frame is too large".to_string());
-    }
-    Ok(encoded)
+    vifu_runtime::protocol::encode_protocol_frame(frame)
+        .map_err(|error| error.replace("protocol frame", "gateway frame"))
 }
 
 pub fn decode(source: &str) -> Result<GatewayFrame, String> {
-    if source.is_empty() {
-        return Err("gateway frame is empty".to_string());
-    }
-    if source.len() > MAX_GATEWAY_FRAME_BYTES {
-        return Err("gateway frame is too large".to_string());
-    }
-    let frame = serde_json::from_str(source).map_err(|_| "invalid gateway frame".to_string())?;
-    validate_gateway_frame(&frame)?;
-    Ok(frame)
+    vifu_runtime::protocol::decode_protocol_frame(source)
+        .map_err(|error| error.replace("protocol frame", "gateway frame"))
 }
 
 pub fn validate_gateway_frame(frame: &GatewayFrame) -> Result<(), String> {
-    match frame {
-        GatewayFrame::Request(request) => {
-            validate_non_empty("request id", &request.id)?;
-            validate_non_empty("request method", &request.method)
-        }
-        GatewayFrame::Response(response) => {
-            validate_non_empty("response id", &response.id)?;
-            if let Some(error) = &response.error {
-                validate_error_shape(error)?;
-            }
-            Ok(())
-        }
-        GatewayFrame::Event(event) => {
-            validate_non_empty("event name", &event.event)?;
-            Ok(())
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct ErrorShape {
-    pub code: String,
-    pub message: String,
-    #[serde(
-        default,
-        deserialize_with = "optional_json_value",
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub details: Option<Value>,
-    #[serde(
-        default,
-        deserialize_with = "optional_non_null",
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub retryable: Option<bool>,
-    #[serde(
-        default,
-        deserialize_with = "optional_non_null",
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub retry_after_ms: Option<u64>,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct StateVersion {
-    pub presence: u64,
-    pub health: u64,
+    vifu_runtime::protocol::validate_protocol_frame(frame)
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -253,19 +110,6 @@ where
         return Err(de::Error::custom("null is not allowed for this field"));
     }
     T::deserialize(value).map(Some).map_err(de::Error::custom)
-}
-
-fn validate_error_shape(error: &ErrorShape) -> Result<(), String> {
-    validate_non_empty("error code", &error.code)?;
-    validate_non_empty("error message", &error.message)
-}
-
-fn validate_non_empty(name: &str, value: &str) -> Result<(), String> {
-    if value.is_empty() {
-        Err(format!("{name} must not be empty"))
-    } else {
-        Ok(())
-    }
 }
 
 #[cfg(test)]

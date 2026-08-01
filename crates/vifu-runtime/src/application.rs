@@ -11,7 +11,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio::sync::{mpsc, Notify};
 
-use crate::{EffectRequest, EffectResult, RuntimeSnapshot};
+use crate::{
+    EffectRequest, EffectResult, LocalProviderBinding, RuntimeManifest, RuntimeRelease,
+    RuntimeSnapshot, RuntimeTraceRecord,
+};
 
 const SNAPSHOT_VERSION: u32 = 1;
 const DEFAULT_TIMEOUT_MS: u64 = 30_000;
@@ -19,6 +22,8 @@ const MAX_TIMEOUT_MS: u64 = 120_000;
 const DEFAULT_EFFECT_LIMIT: usize = 64;
 const MAX_IN_FLIGHT_INVOCATIONS: usize = 64;
 const MAX_RETAINED_INVOCATIONS: usize = 256;
+const MAX_RETAINED_INVOCATION_EVENTS: usize = 256;
+const MAX_COALESCED_EVENT_BYTES: usize = 64 * 1024;
 const WORKER_QUEUE_CAPACITY: usize = 64;
 
 /// A boxed provider future used by [`AgentProvider`].
@@ -230,6 +235,73 @@ impl fmt::Debug for CancellationToken {
     }
 }
 
+/// Kind of event emitted while a non-blocking invocation is running.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum InvocationEventKind {
+    Started,
+    OutputDelta,
+    Completed,
+    Failed,
+    Cancelled,
+}
+
+/// One ordered event produced by an invocation.
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InvocationEvent {
+    pub sequence: u64,
+    pub kind: InvocationEventKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data: Option<InvocationData>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+impl fmt::Debug for InvocationEvent {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("InvocationEvent")
+            .field("sequence", &self.sequence)
+            .field("kind", &self.kind)
+            .field("data", &self.data.as_ref().map(|_| "[REDACTED]"))
+            .field("error", &self.error.as_ref().map(|_| "[REDACTED]"))
+            .finish()
+    }
+}
+
+/// Sink supplied to providers that can produce incremental output.
+///
+/// Providers that only return a final response can keep implementing
+/// [`AgentProvider::invoke`]. Streaming providers call [`Self::output_delta`]
+/// while their invocation is running.
+#[derive(Clone)]
+pub struct ProviderEventSink {
+    output_delta: Arc<dyn Fn(InvocationData) + Send + Sync>,
+}
+
+impl ProviderEventSink {
+    fn new(output_delta: impl Fn(InvocationData) + Send + Sync + 'static) -> Self {
+        Self {
+            output_delta: Arc::new(output_delta),
+        }
+    }
+
+    pub fn discard() -> Self {
+        Self::new(|_data| {})
+    }
+
+    pub fn output_delta(&self, data: InvocationData) {
+        (self.output_delta)(data);
+    }
+}
+
+impl fmt::Debug for ProviderEventSink {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("ProviderEventSink")
+    }
+}
+
 /// Runtime-selected provider implementation.
 ///
 /// Providers are registered dynamically by name. A provider may hold credentials
@@ -243,6 +315,15 @@ pub trait AgentProvider: Send + Sync + 'static {
         request: ProviderRequest,
         cancellation: CancellationToken,
     ) -> ProviderFuture<'a>;
+
+    fn invoke_with_events<'a>(
+        &'a self,
+        request: ProviderRequest,
+        cancellation: CancellationToken,
+        _events: ProviderEventSink,
+    ) -> ProviderFuture<'a> {
+        self.invoke(request, cancellation)
+    }
 }
 
 /// Persistence adapter supplied by an embedding host.
@@ -262,12 +343,73 @@ pub trait RuntimeStore: Send + Sync + 'static {
         session_id: &str,
         snapshot: &RuntimeSnapshot,
     ) -> Result<(), RuntimeError>;
+
+    fn save_release(&self, _release: &RuntimeRelease) -> Result<(), RuntimeError> {
+        Err(RuntimeError::store(
+            "this runtime store does not support releases".to_string(),
+        ))
+    }
+
+    fn load_release(
+        &self,
+        _project_id: &str,
+        _version: u64,
+    ) -> Result<Option<RuntimeRelease>, RuntimeError> {
+        Ok(None)
+    }
+
+    fn list_releases(&self, _project_id: &str) -> Result<Vec<RuntimeRelease>, RuntimeError> {
+        Ok(Vec::new())
+    }
+
+    fn active_release(&self, _project_id: &str) -> Result<Option<u64>, RuntimeError> {
+        Ok(None)
+    }
+
+    fn set_active_release(&self, _project_id: &str, _version: u64) -> Result<(), RuntimeError> {
+        Err(RuntimeError::store(
+            "this runtime store does not support releases".to_string(),
+        ))
+    }
+
+    fn save_local_provider_binding(
+        &self,
+        _project_id: &str,
+        _binding: &LocalProviderBinding,
+    ) -> Result<(), RuntimeError> {
+        Err(RuntimeError::store(
+            "this runtime store does not support provider bindings".to_string(),
+        ))
+    }
+
+    fn local_provider_bindings(
+        &self,
+        _project_id: &str,
+    ) -> Result<Vec<LocalProviderBinding>, RuntimeError> {
+        Ok(Vec::new())
+    }
+
+    fn enqueue_trace(&self, _trace: &RuntimeTraceRecord) -> Result<(), RuntimeError> {
+        Ok(())
+    }
+
+    fn pending_traces(&self, _limit: usize) -> Result<Vec<RuntimeTraceRecord>, RuntimeError> {
+        Ok(Vec::new())
+    }
+
+    fn acknowledge_traces(&self, _trace_ids: &[String]) -> Result<(), RuntimeError> {
+        Ok(())
+    }
 }
 
 /// In-memory persistence used by the standalone embedded runtime.
 #[derive(Default)]
 pub struct MemoryRuntimeStore {
     snapshots: RwLock<HashMap<(String, String), RuntimeSnapshot>>,
+    releases: RwLock<HashMap<(String, u64), RuntimeRelease>>,
+    active_releases: RwLock<HashMap<String, u64>>,
+    provider_bindings: RwLock<HashMap<(String, String), LocalProviderBinding>>,
+    trace_outbox: RwLock<VecDeque<RuntimeTraceRecord>>,
 }
 
 impl RuntimeStore for MemoryRuntimeStore {
@@ -293,6 +435,139 @@ impl RuntimeStore for MemoryRuntimeStore {
             (project_id.to_string(), session_id.to_string()),
             snapshot.clone(),
         );
+        Ok(())
+    }
+
+    fn save_release(&self, release: &RuntimeRelease) -> Result<(), RuntimeError> {
+        release.validate()?;
+        let key = (release.manifest.project_id.clone(), release.version);
+        let mut releases = self.releases.write().map_err(|_| RuntimeError::Internal)?;
+        if let Some(existing) = releases.get(&key) {
+            if existing != release {
+                return Err(RuntimeError::store(
+                    "runtime release versions are immutable".to_string(),
+                ));
+            }
+            return Ok(());
+        }
+        releases.insert(key, release.clone());
+        Ok(())
+    }
+
+    fn load_release(
+        &self,
+        project_id: &str,
+        version: u64,
+    ) -> Result<Option<RuntimeRelease>, RuntimeError> {
+        Ok(self
+            .releases
+            .read()
+            .map_err(|_| RuntimeError::Internal)?
+            .get(&(project_id.to_string(), version))
+            .cloned())
+    }
+
+    fn list_releases(&self, project_id: &str) -> Result<Vec<RuntimeRelease>, RuntimeError> {
+        let mut releases = self
+            .releases
+            .read()
+            .map_err(|_| RuntimeError::Internal)?
+            .iter()
+            .filter(|((stored_project_id, _), _)| stored_project_id == project_id)
+            .map(|(_, release)| release.clone())
+            .collect::<Vec<_>>();
+        releases.sort_by_key(|release| std::cmp::Reverse(release.version));
+        Ok(releases)
+    }
+
+    fn active_release(&self, project_id: &str) -> Result<Option<u64>, RuntimeError> {
+        Ok(self
+            .active_releases
+            .read()
+            .map_err(|_| RuntimeError::Internal)?
+            .get(project_id)
+            .copied())
+    }
+
+    fn set_active_release(&self, project_id: &str, version: u64) -> Result<(), RuntimeError> {
+        if !self
+            .releases
+            .read()
+            .map_err(|_| RuntimeError::Internal)?
+            .contains_key(&(project_id.to_string(), version))
+        {
+            return Err(RuntimeError::store("runtime release was not found"));
+        }
+        self.active_releases
+            .write()
+            .map_err(|_| RuntimeError::Internal)?
+            .insert(project_id.to_string(), version);
+        Ok(())
+    }
+
+    fn save_local_provider_binding(
+        &self,
+        project_id: &str,
+        binding: &LocalProviderBinding,
+    ) -> Result<(), RuntimeError> {
+        self.provider_bindings
+            .write()
+            .map_err(|_| RuntimeError::Internal)?
+            .insert(
+                (project_id.to_string(), binding.provider_id.clone()),
+                binding.clone(),
+            );
+        Ok(())
+    }
+
+    fn local_provider_bindings(
+        &self,
+        project_id: &str,
+    ) -> Result<Vec<LocalProviderBinding>, RuntimeError> {
+        let mut bindings = self
+            .provider_bindings
+            .read()
+            .map_err(|_| RuntimeError::Internal)?
+            .iter()
+            .filter(|((stored_project_id, _), _)| stored_project_id == project_id)
+            .map(|(_, binding)| binding.clone())
+            .collect::<Vec<_>>();
+        bindings.sort_by(|left, right| left.provider_id.cmp(&right.provider_id));
+        Ok(bindings)
+    }
+
+    fn enqueue_trace(&self, trace: &RuntimeTraceRecord) -> Result<(), RuntimeError> {
+        const MAX_MEMORY_TRACES: usize = 1_000;
+        let mut traces = self
+            .trace_outbox
+            .write()
+            .map_err(|_| RuntimeError::Internal)?;
+        if traces.iter().any(|stored| stored.id == trace.id) {
+            return Ok(());
+        }
+        traces.push_back(trace.clone());
+        while traces.len() > MAX_MEMORY_TRACES {
+            traces.pop_front();
+        }
+        Ok(())
+    }
+
+    fn pending_traces(&self, limit: usize) -> Result<Vec<RuntimeTraceRecord>, RuntimeError> {
+        Ok(self
+            .trace_outbox
+            .read()
+            .map_err(|_| RuntimeError::Internal)?
+            .iter()
+            .take(limit)
+            .cloned()
+            .collect())
+    }
+
+    fn acknowledge_traces(&self, trace_ids: &[String]) -> Result<(), RuntimeError> {
+        self.trace_outbox
+            .write()
+            .map_err(|_| RuntimeError::Internal)?
+            .retain(|trace| !trace_ids.contains(&trace.id));
         Ok(())
     }
 }
@@ -549,6 +824,7 @@ struct RuntimeRegistry {
 struct RuntimeCore {
     project_id: String,
     registry: RwLock<RuntimeRegistry>,
+    manifest: RwLock<Option<RuntimeManifest>>,
     store: Arc<dyn RuntimeStore>,
     sessions: RwLock<HashMap<String, RuntimeSnapshot>>,
     session_locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
@@ -559,6 +835,8 @@ struct RuntimeCore {
 struct InvocationEntry {
     poll: InvocationPoll,
     cancellation: CancellationToken,
+    events: VecDeque<InvocationEvent>,
+    next_event_sequence: u64,
 }
 
 #[derive(Default)]
@@ -589,6 +867,8 @@ impl InvocationRegistry {
                     error: None,
                 },
                 cancellation,
+                events: VecDeque::new(),
+                next_event_sequence: 1,
             },
         );
         self.active_count += 1;
@@ -611,6 +891,22 @@ impl InvocationRegistry {
         entry.poll.status = status;
         entry.poll.output = output;
         entry.poll.error = error;
+        let event = match status {
+            InvocationStatus::Pending => None,
+            InvocationStatus::Running => Some((InvocationEventKind::Started, None, None)),
+            InvocationStatus::Completed => Some((
+                InvocationEventKind::Completed,
+                entry.poll.output.as_ref().map(|value| value.data.clone()),
+                None,
+            )),
+            InvocationStatus::Failed => {
+                Some((InvocationEventKind::Failed, None, entry.poll.error.clone()))
+            }
+            InvocationStatus::Cancelled => Some((InvocationEventKind::Cancelled, None, None)),
+        };
+        if let Some((kind, data, error)) = event {
+            entry.push_event(kind, data, error);
+        }
         if is_terminal_status(status) {
             self.active_count = self.active_count.saturating_sub(1);
             self.terminal_order.push_back(handle.0.clone());
@@ -639,6 +935,26 @@ impl InvocationRegistry {
         Ok(poll)
     }
 
+    fn push_output_delta(&mut self, handle: &InvocationHandle, data: InvocationData) {
+        if let Some(entry) = self.entries.get_mut(&handle.0) {
+            if entry.poll.status != InvocationStatus::Running {
+                return;
+            }
+            entry.push_event(InvocationEventKind::OutputDelta, Some(data), None);
+        }
+    }
+
+    fn drain_events(
+        &mut self,
+        handle: &InvocationHandle,
+    ) -> Result<Vec<InvocationEvent>, RuntimeError> {
+        let entry = self
+            .entries
+            .get_mut(&handle.0)
+            .ok_or_else(|| RuntimeError::InvocationNotFound(handle.0.clone()))?;
+        Ok(entry.events.drain(..).collect())
+    }
+
     fn evict_old_terminal_entries(&mut self) {
         while self.terminal_order.len() > MAX_RETAINED_INVOCATIONS {
             if let Some(handle) = self.terminal_order.pop_front() {
@@ -648,9 +964,90 @@ impl InvocationRegistry {
     }
 }
 
+impl InvocationEntry {
+    fn push_event(
+        &mut self,
+        kind: InvocationEventKind,
+        data: Option<InvocationData>,
+        error: Option<String>,
+    ) {
+        if kind == InvocationEventKind::OutputDelta {
+            if let (
+                Some(InvocationEvent {
+                    kind: InvocationEventKind::OutputDelta,
+                    data: Some(previous),
+                    ..
+                }),
+                Some(next),
+            ) = (self.events.back_mut(), data.as_ref())
+            {
+                if merge_invocation_data(previous, next) {
+                    return;
+                }
+            }
+        }
+        self.events.push_back(InvocationEvent {
+            sequence: self.next_event_sequence,
+            kind,
+            data,
+            error,
+        });
+        self.next_event_sequence = self.next_event_sequence.saturating_add(1);
+        while self.events.len() > MAX_RETAINED_INVOCATION_EVENTS {
+            self.events.pop_front();
+        }
+    }
+}
+
 impl RuntimeCore {
     async fn invoke(
-        &self,
+        self: &Arc<Self>,
+        invocation_id: String,
+        input: InvocationInput,
+        cancellation: CancellationToken,
+    ) -> Result<InvocationOutput, RuntimeError> {
+        let endpoint = input.endpoint.clone();
+        let started = Instant::now();
+        let result = self
+            .invoke_provider(invocation_id.clone(), input, cancellation)
+            .await;
+        let created_at_ms = crate::unix_time_ms();
+        let trace = match &result {
+            Ok(output) => RuntimeTraceRecord {
+                id: format!("trace-{created_at_ms}-{invocation_id}"),
+                project_id: self.project_id.clone(),
+                invocation_id,
+                endpoint,
+                agent: Some(output.agent.clone()),
+                provider: Some(output.provider.clone()),
+                capability: Some(output.capability.clone()),
+                status: "completed".to_string(),
+                duration_ms: duration_ms(started.elapsed()),
+                created_at_ms,
+            },
+            Err(error) => RuntimeTraceRecord {
+                id: format!("trace-{created_at_ms}-{invocation_id}"),
+                project_id: self.project_id.clone(),
+                invocation_id,
+                endpoint,
+                agent: None,
+                provider: None,
+                capability: None,
+                status: match error {
+                    RuntimeError::Cancelled => "cancelled",
+                    _ => "error",
+                }
+                .to_string(),
+                duration_ms: duration_ms(started.elapsed()),
+                created_at_ms,
+            },
+        };
+        let _ = self.store.enqueue_trace(&trace);
+        result
+    }
+
+    async fn invoke_provider(
+        self: &Arc<Self>,
         invocation_id: String,
         input: InvocationInput,
         cancellation: CancellationToken,
@@ -715,7 +1112,8 @@ impl RuntimeCore {
             snapshot: snapshot.clone(),
         };
         let started = Instant::now();
-        let provider_call = provider.invoke(request, cancellation.clone());
+        let events = self.provider_event_sink(&InvocationHandle(invocation_id.clone()));
+        let provider_call = provider.invoke_with_events(request, cancellation.clone(), events);
         let response = tokio::select! {
             _ = cancellation.cancelled() => return Err(RuntimeError::Cancelled),
             response = tokio::time::timeout(Duration::from_millis(endpoint.timeout_ms), provider_call) => {
@@ -794,6 +1192,35 @@ impl RuntimeCore {
         if let Ok(mut invocations) = self.invocations.lock() {
             invocations.update(handle, status, output, error);
         }
+    }
+
+    fn provider_event_sink(self: &Arc<Self>, handle: &InvocationHandle) -> ProviderEventSink {
+        let core = Arc::clone(self);
+        let handle = handle.clone();
+        ProviderEventSink::new(move |data| {
+            if let Ok(mut invocations) = core.invocations.lock() {
+                invocations.push_output_delta(&handle, data);
+            }
+        })
+    }
+}
+
+fn merge_invocation_data(previous: &mut InvocationData, next: &InvocationData) -> bool {
+    match (previous, next) {
+        (
+            InvocationData::Json(Value::String(previous)),
+            InvocationData::Json(Value::String(next)),
+        ) if previous.len().saturating_add(next.len()) <= MAX_COALESCED_EVENT_BYTES => {
+            previous.push_str(next);
+            true
+        }
+        (InvocationData::Binary(previous), InvocationData::Binary(next))
+            if previous.len().saturating_add(next.len()) <= MAX_COALESCED_EVENT_BYTES =>
+        {
+            previous.extend_from_slice(next);
+            true
+        }
+        _ => false,
     }
 }
 
@@ -946,6 +1373,7 @@ impl VifuRuntime {
         let core = Arc::new(RuntimeCore {
             project_id,
             registry: RwLock::new(RuntimeRegistry::default()),
+            manifest: RwLock::new(None),
             store,
             sessions: RwLock::new(HashMap::new()),
             session_locks: Mutex::new(HashMap::new()),
@@ -1035,6 +1463,164 @@ impl VifuRuntime {
         Ok(())
     }
 
+    pub fn agent_definitions(&self) -> Result<Vec<AgentDefinition>, RuntimeError> {
+        let mut agents = self
+            .core
+            .registry
+            .read()
+            .map_err(|_| RuntimeError::Internal)?
+            .agents
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        agents.sort_by(|left, right| left.id.cmp(&right.id));
+        Ok(agents)
+    }
+
+    pub fn endpoint_definitions(&self) -> Result<Vec<EndpointDefinition>, RuntimeError> {
+        let mut endpoints = self
+            .core
+            .registry
+            .read()
+            .map_err(|_| RuntimeError::Internal)?
+            .endpoints
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        endpoints.sort_by(|left, right| left.name.cmp(&right.name));
+        Ok(endpoints)
+    }
+
+    /// Replaces the portable agent and endpoint graph with a validated manifest.
+    /// Provider implementations must be registered locally before activation.
+    pub fn apply_manifest(&self, manifest: RuntimeManifest) -> Result<(), RuntimeError> {
+        manifest.validate()?;
+        if manifest.project_id != self.core.project_id {
+            return Err(RuntimeError::InvalidDefinition(
+                "runtime manifest belongs to another project".to_string(),
+            ));
+        }
+        let mut registry = self
+            .core
+            .registry
+            .write()
+            .map_err(|_| RuntimeError::Internal)?;
+        for requirement in &manifest.providers {
+            let provider = registry
+                .providers
+                .get(&requirement.id)
+                .ok_or_else(|| RuntimeError::ProviderNotFound(requirement.id.clone()))?;
+            for capability in &requirement.capabilities {
+                if !provider.supports(capability) {
+                    return Err(RuntimeError::CapabilityUnavailable {
+                        provider: requirement.id.clone(),
+                        capability: capability.clone(),
+                    });
+                }
+            }
+        }
+        registry.agents = manifest
+            .agents
+            .iter()
+            .cloned()
+            .map(|agent| (agent.id.clone(), agent))
+            .collect();
+        registry.endpoints = manifest
+            .endpoints
+            .iter()
+            .cloned()
+            .map(|endpoint| (endpoint.name.clone(), endpoint))
+            .collect();
+        *self
+            .core
+            .manifest
+            .write()
+            .map_err(|_| RuntimeError::Internal)? = Some(manifest);
+        Ok(())
+    }
+
+    pub fn current_manifest(&self) -> Result<Option<RuntimeManifest>, RuntimeError> {
+        Ok(self
+            .core
+            .manifest
+            .read()
+            .map_err(|_| RuntimeError::Internal)?
+            .clone())
+    }
+
+    pub fn install_release(&self, release: &RuntimeRelease) -> Result<(), RuntimeError> {
+        release.validate()?;
+        if release.manifest.project_id != self.core.project_id {
+            return Err(RuntimeError::InvalidDefinition(
+                "runtime release belongs to another project".to_string(),
+            ));
+        }
+        self.core.store.save_release(release)
+    }
+
+    pub fn releases(&self) -> Result<Vec<RuntimeRelease>, RuntimeError> {
+        self.core.store.list_releases(&self.core.project_id)
+    }
+
+    pub fn active_release_version(&self) -> Result<Option<u64>, RuntimeError> {
+        self.core.store.active_release(&self.core.project_id)
+    }
+
+    pub fn activate_release(&self, version: u64) -> Result<RuntimeRelease, RuntimeError> {
+        let release = self
+            .core
+            .store
+            .load_release(&self.core.project_id, version)?
+            .ok_or_else(|| RuntimeError::store("runtime release was not found"))?;
+        self.apply_manifest(release.manifest.clone())?;
+        self.core
+            .store
+            .set_active_release(&self.core.project_id, version)?;
+        Ok(release)
+    }
+
+    pub fn restore_active_release(&self) -> Result<Option<RuntimeRelease>, RuntimeError> {
+        self.active_release_version()?
+            .map(|version| self.activate_release(version))
+            .transpose()
+    }
+
+    pub fn bootstrap_release(
+        &self,
+        manifest: RuntimeManifest,
+    ) -> Result<RuntimeRelease, RuntimeError> {
+        if let Some(active) = self.restore_active_release()? {
+            return Ok(active);
+        }
+        let release = RuntimeRelease::new(1, manifest)?;
+        self.install_release(&release)?;
+        self.activate_release(release.version)
+    }
+
+    pub fn save_local_provider_binding(
+        &self,
+        binding: &LocalProviderBinding,
+    ) -> Result<(), RuntimeError> {
+        validate_identifier("provider", &binding.provider_id)?;
+        self.core
+            .store
+            .save_local_provider_binding(&self.core.project_id, binding)
+    }
+
+    pub fn local_provider_bindings(&self) -> Result<Vec<LocalProviderBinding>, RuntimeError> {
+        self.core
+            .store
+            .local_provider_bindings(&self.core.project_id)
+    }
+
+    pub fn pending_traces(&self, limit: usize) -> Result<Vec<RuntimeTraceRecord>, RuntimeError> {
+        self.core.store.pending_traces(limit.min(1_000))
+    }
+
+    pub fn acknowledge_traces(&self, trace_ids: &[String]) -> Result<(), RuntimeError> {
+        self.core.store.acknowledge_traces(trace_ids)
+    }
+
     pub fn session(&self, session_id: impl Into<String>) -> Result<RuntimeSession, RuntimeError> {
         let session_id = session_id.into();
         validate_identifier("session", &session_id)?;
@@ -1097,6 +1683,18 @@ impl VifuRuntime {
             .get(&handle.0)
             .map(|entry| entry.poll.clone())
             .ok_or_else(|| RuntimeError::InvocationNotFound(handle.0.clone()))
+    }
+
+    /// Drains incremental events produced since the previous call.
+    pub fn drain_invocation_events(
+        &self,
+        handle: &InvocationHandle,
+    ) -> Result<Vec<InvocationEvent>, RuntimeError> {
+        self.core
+            .invocations
+            .lock()
+            .map_err(|_| RuntimeError::Internal)?
+            .drain_events(handle)
     }
 
     /// Returns the current poll state and removes it once it is terminal.
@@ -1341,6 +1939,38 @@ mod tests {
         }
     }
 
+    struct StreamingTestProvider;
+
+    impl AgentProvider for StreamingTestProvider {
+        fn supports(&self, capability: &str) -> bool {
+            capability == "chat"
+        }
+
+        fn invoke<'a>(
+            &'a self,
+            request: ProviderRequest,
+            cancellation: CancellationToken,
+        ) -> ProviderFuture<'a> {
+            self.invoke_with_events(request, cancellation, ProviderEventSink::new(|_data| {}))
+        }
+
+        fn invoke_with_events<'a>(
+            &'a self,
+            _request: ProviderRequest,
+            cancellation: CancellationToken,
+            events: ProviderEventSink,
+        ) -> ProviderFuture<'a> {
+            Box::pin(async move {
+                if cancellation.is_cancelled() {
+                    return Err(RuntimeError::Cancelled);
+                }
+                events.output_delta(InvocationData::Json(Value::String("Hello".to_string())));
+                events.output_delta(InvocationData::Json(Value::String(", world".to_string())));
+                Ok(ProviderResponse::json(json!({ "text": "Hello, world" })))
+            })
+        }
+    }
+
     fn configured_runtime(provider: Arc<dyn AgentProvider>) -> VifuRuntime {
         let runtime = VifuRuntime::new("test-project").expect("runtime should start");
         runtime
@@ -1569,6 +2199,72 @@ mod tests {
                 "capability": "chat",
                 "input": { "text": "hello" },
             }))
+        );
+    }
+
+    #[test]
+    fn game_loop_api_drains_ordered_streaming_events() {
+        let runtime = configured_runtime(Arc::new(StreamingTestProvider));
+        let handle = runtime
+            .start_invoke(InvocationInput::json("chat", json!({})))
+            .expect("invocation should start");
+        let deadline = Instant::now() + Duration::from_secs(1);
+        loop {
+            let poll = runtime
+                .poll_invocation(&handle)
+                .expect("invocation should remain pollable");
+            if poll.status == InvocationStatus::Completed {
+                break;
+            }
+            assert!(Instant::now() < deadline, "invocation did not complete");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+
+        let events = runtime
+            .drain_invocation_events(&handle)
+            .expect("events should be available");
+        assert_eq!(
+            events.iter().map(|event| event.kind).collect::<Vec<_>>(),
+            vec![
+                InvocationEventKind::Started,
+                InvocationEventKind::OutputDelta,
+                InvocationEventKind::Completed,
+            ]
+        );
+        assert_eq!(
+            events[1].data,
+            Some(InvocationData::Json(Value::String(
+                "Hello, world".to_string()
+            )))
+        );
+    }
+
+    #[test]
+    fn invocation_registry_ignores_output_after_terminal_event() {
+        let handle = InvocationHandle("late-output".to_string());
+        let mut registry = InvocationRegistry::default();
+        registry
+            .insert(handle.clone(), CancellationToken::default())
+            .expect("invocation should be registered");
+        registry.update(&handle, InvocationStatus::Running, None, None);
+        registry.update(
+            &handle,
+            InvocationStatus::Failed,
+            None,
+            Some("provider failed".to_string()),
+        );
+
+        registry.push_output_delta(
+            &handle,
+            InvocationData::Json(Value::String("too late".to_string())),
+        );
+
+        let events = registry
+            .drain_events(&handle)
+            .expect("events should remain available");
+        assert_eq!(
+            events.iter().map(|event| event.kind).collect::<Vec<_>>(),
+            vec![InvocationEventKind::Started, InvocationEventKind::Failed]
         );
     }
 

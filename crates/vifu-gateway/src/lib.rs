@@ -1,4 +1,6 @@
 pub mod config;
+pub mod control;
+pub mod embedded;
 pub mod gateway_frame;
 pub mod openclaw;
 pub mod openclaw_rpc;

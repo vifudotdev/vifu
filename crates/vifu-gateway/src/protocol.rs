@@ -21,6 +21,7 @@ pub const AGENT_GATEWAY_CANCEL_EVENT: &str = "agent.cancel";
 pub const AGENT_GATEWAY_HEARTBEAT_EVENT: &str = "gateway.heartbeat";
 pub const AGENT_GATEWAY_HEARTBEAT_ACK_EVENT: &str = "gateway.heartbeatAck";
 pub const AGENT_GATEWAY_ERROR_EVENT: &str = "gateway.error";
+pub const RUNTIME_CONFIG_CHANGED_EVENT: &str = "runtime.config.changed";
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -80,6 +81,9 @@ pub enum AgentGatewayCommand {
     },
     HeartbeatAck {
         session_id: Uuid,
+    },
+    RuntimeConfigChanged {
+        deployment_ids: Vec<Uuid>,
     },
 }
 
@@ -148,6 +152,12 @@ struct HeartbeatPayload {
 struct ErrorEventPayload {
     code: String,
     message: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RuntimeConfigChangedPayload {
+    deployment_ids: Vec<Uuid>,
 }
 
 pub fn to_gateway_frame(command: &AgentGatewayCommand) -> Result<GatewayFrame, String> {
@@ -272,6 +282,12 @@ pub fn to_gateway_frame(command: &AgentGatewayCommand) -> Result<GatewayFrame, S
             AGENT_GATEWAY_HEARTBEAT_ACK_EVENT,
             &HeartbeatPayload {
                 session_id: *session_id,
+            },
+        ),
+        AgentGatewayCommand::RuntimeConfigChanged { deployment_ids } => event_frame(
+            RUNTIME_CONFIG_CHANGED_EVENT,
+            &RuntimeConfigChangedPayload {
+                deployment_ids: deployment_ids.clone(),
             },
         ),
     }
@@ -400,6 +416,15 @@ fn from_event_frame(event: EventFrame) -> Result<AgentGatewayCommand, String> {
                 message: payload.message,
             })
         }
+        RUNTIME_CONFIG_CHANGED_EVENT => {
+            let payload = decode_required::<RuntimeConfigChangedPayload>(
+                event.payload,
+                "runtime.config.changed payload",
+            )?;
+            Ok(AgentGatewayCommand::RuntimeConfigChanged {
+                deployment_ids: payload.deployment_ids,
+            })
+        }
         _ => Err(format!("unsupported agent gateway event: {}", event.event)),
     }
 }
@@ -526,6 +551,17 @@ pub fn validate_command(command: &AgentGatewayCommand) -> Result<(), String> {
         }
         AgentGatewayCommand::Cancel { channel_id, .. } => validate_channel(*channel_id),
         AgentGatewayCommand::Heartbeat { .. } | AgentGatewayCommand::HeartbeatAck { .. } => Ok(()),
+        AgentGatewayCommand::RuntimeConfigChanged { deployment_ids } => {
+            if deployment_ids.is_empty() || deployment_ids.len() > 256 {
+                return Err("runtime configuration notification must name deployments".to_string());
+            }
+            let mut unique = std::collections::HashSet::with_capacity(deployment_ids.len());
+            if deployment_ids.iter().all(|id| unique.insert(*id)) {
+                Ok(())
+            } else {
+                Err("runtime configuration notification contains duplicates".to_string())
+            }
+        }
     }
 }
 
@@ -710,6 +746,18 @@ mod tests {
         assert_eq!(value["type"], "event");
         assert_eq!(value["event"], "gateway.heartbeat");
         assert_eq!(value["payload"]["sessionId"], session_id.to_string());
+
+        let deployment_id = Uuid::new_v4();
+        let changed = AgentGatewayCommand::RuntimeConfigChanged {
+            deployment_ids: vec![deployment_id],
+        };
+        let value = round_trip_command_over_gateway_frame(&changed);
+        assert_eq!(value["type"], "event");
+        assert_eq!(value["event"], "runtime.config.changed");
+        assert_eq!(
+            value["payload"]["deploymentIds"][0],
+            deployment_id.to_string()
+        );
     }
 
     #[test]

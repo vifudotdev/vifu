@@ -1,9 +1,9 @@
 use std::fs;
 use std::path::Path;
+use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use tokio::sync::watch;
-use uuid::Uuid;
 
 use vifu_gateway::{config, openclaw, relay, session};
 
@@ -40,10 +40,9 @@ pub async fn run(
         let providers = config.openclaw_providers().cloned().collect::<Vec<_>>();
         if providers.is_empty() {
             print_agent_provider_config(&config);
-            wait_for_provider_retry("No agent provider is configured.", &mut shutdown).await;
-            continue;
         }
-        let mut runtime_providers = Vec::new();
+        let has_configured_providers = !providers.is_empty();
+        let mut runtime_providers: Vec<Arc<dyn relay::AgentGatewayProvider>> = Vec::new();
         let mut agents = Vec::new();
         for provider in providers {
             let report = openclaw::probe(&provider.url).await;
@@ -83,13 +82,13 @@ pub async fn run(
                 );
             }
             agents.extend(discovered);
-            runtime_providers.push(vifu_gateway::relay::OpenClawRuntimeProvider {
-                id: provider.id,
-                endpoint: report.endpoint,
-                token: provider.token,
-            });
+            runtime_providers.push(Arc::new(relay::OpenClawGatewayProvider::new(
+                provider.id,
+                report.endpoint,
+                provider.token,
+            )));
         }
-        if runtime_providers.is_empty() {
+        if has_configured_providers && runtime_providers.is_empty() {
             wait_for_provider_retry(
                 "No configured OpenClaw provider is reachable.",
                 &mut shutdown,
@@ -105,13 +104,17 @@ pub async fn run(
         let mut session = load_or_create_session(&config)?;
         print_session(&session);
         let session_file = config.session_file();
+        let runtime_database_file = config.runtime_database_file();
         let runtime = relay::AgentGatewayRuntime {
             server_url: &config.server_url,
             agent_gateway_bootstrap_token: config.agent_gateway_bootstrap_token.as_deref(),
             enrollment_token: config.enrollment_token.take(),
+            allow_guest_bootstrap: true,
             providers: &runtime_providers,
             agents: &agents,
-            session_path: &session_file,
+            session_path: Some(&session_file),
+            runtime_database_path: &runtime_database_file,
+            embedded_runtime: None,
         };
         let provider_file = config.agent_providers_file.clone();
         let provider_snapshot = fs::read(&provider_file).unwrap_or_default();
@@ -318,6 +321,12 @@ fn print_session(session: &SessionSummary) {
         ),
         None => println!("Session: new ({})", session.gateway_id),
     }
+    if let Some(guest) = session.guest_project.as_ref() {
+        println!("Project: {}", guest.project_slug);
+        println!("Deployment: {}", guest.deployment);
+        println!("Endpoint path: {}", guest.endpoint_path);
+        println!("Guest access expires: {}", guest.expires_at);
+    }
 }
 
 fn load_or_create_session(config: &Config) -> Result<SessionSummary, String> {
@@ -330,10 +339,11 @@ fn load_or_create_session(config: &Config) -> Result<SessionSummary, String> {
         }
         SessionStatus::Missing => {
             let summary = SessionSummary {
-                gateway_id: format!("gateway-{}", Uuid::new_v4().simple()),
+                gateway_id: session::generate_gateway_id(),
                 gateway_credential: session::generate_gateway_credential(),
                 resume_session_id: None,
                 created_at_unix: now_unix_seconds()?,
+                guest_project: None,
             };
             session::write_session(&config.session_file(), &summary)?;
             Ok(summary)

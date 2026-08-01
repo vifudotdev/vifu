@@ -108,6 +108,8 @@ pub fn app(state: AppState) -> Router {
             "/v1/auth/exchange",
             post(api::exchange_deployment_credential),
         )
+        .route("/v1/guest/bootstrap", post(api::bootstrap_guest_project))
+        .route("/v1/guest/claim", post(api::claim_guest_project))
         .route("/v1/admin/verify", get(api::verify_admin))
         .route(
             "/v1/admin/project-ownership",
@@ -126,6 +128,35 @@ pub fn app(state: AppState) -> Router {
             get(api::get_project)
                 .patch(api::update_project)
                 .delete(api::delete_project),
+        )
+        .route(
+            "/v1/project/{slug}/deployments",
+            get(api::list_project_runtime_deployments).post(api::create_project_runtime_deployment),
+        )
+        .route(
+            "/v1/project/{slug}/deployments/{deployment}",
+            patch(api::update_project_runtime_deployment)
+                .delete(api::delete_project_runtime_deployment),
+        )
+        .route(
+            "/v1/project/{slug}/deployments/{deployment}/promote",
+            post(api::promote_project_runtime_deployment),
+        )
+        .route(
+            "/v1/project/{slug}/deployments/{deployment}/agent-gateway-enrollments",
+            post(api::create_runtime_deployment_agent_gateway_enrollment),
+        )
+        .route(
+            "/v1/project/{slug}/runtime-releases",
+            get(api::list_project_runtime_releases).post(api::publish_project_runtime_release),
+        )
+        .route(
+            "/v1/project/{slug}/runtime-releases/{version}",
+            get(api::get_project_runtime_release),
+        )
+        .route(
+            "/v1/project/{slug}/deployments/{deployment}/runtime-releases/{version}/activate",
+            post(api::activate_project_runtime_release),
         )
         .route(
             "/v1/runtime-extensions",
@@ -350,6 +381,18 @@ pub fn app(state: AppState) -> Router {
             post(api::register_agent_gateway),
         )
         .route("/v1/agent-gateways/enroll", post(api::enroll_agent_gateway))
+        .route(
+            "/v1/agent-gateway/runtime-config",
+            get(api::get_agent_gateway_runtime_config),
+        )
+        .route(
+            "/v1/agent-gateway/runtime-traces",
+            post(api::upload_agent_gateway_runtime_traces),
+        )
+        .route(
+            "/v1/agent-gateway/runtime-releases/bootstrap",
+            post(api::bootstrap_agent_gateway_runtime_release),
+        )
         .route(
             "/v1/project/{slug}/agent-gateway-enrollments",
             post(api::create_project_agent_gateway_enrollment),
@@ -696,6 +739,173 @@ mod tests {
                 .gateway_id,
             "gateway-account"
         );
+
+        let runtime_config = owner_app
+            .clone()
+            .oneshot(
+                Request::get("/v1/agent-gateway/runtime-config")
+                    .header(
+                        "authorization",
+                        "Bearer vifu_gw_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    )
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(runtime_config.status(), StatusCode::OK);
+        let body = to_bytes(runtime_config.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let runtime_config: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(runtime_config["gatewayId"], "gateway-account");
+        assert_eq!(runtime_config["deployments"].as_array().unwrap().len(), 1);
+        let deployment_id = runtime_config["deployments"][0]["deploymentId"]
+            .as_str()
+            .unwrap();
+        let project_id = crate::db::get_project_by_slug(&storage, slug)
+            .await
+            .unwrap()
+            .project
+            .id;
+        assert!(!crate::db::runtime_deployment_allows_remote_invocation(
+            &storage,
+            project_id,
+            "gateway-account",
+        )
+        .await
+        .unwrap());
+
+        let enabled_remote_invocation = owner_app
+            .clone()
+            .oneshot(
+                Request::patch(format!("/v1/project/{slug}/deployments/development"))
+                    .header("authorization", format!("Vifu {owner_credential}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"remoteInvocationEnabled":true}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(enabled_remote_invocation.status(), StatusCode::OK);
+        assert!(crate::db::runtime_deployment_allows_remote_invocation(
+            &storage,
+            project_id,
+            "gateway-account",
+        )
+        .await
+        .unwrap());
+
+        let release = owner_app
+            .clone()
+            .oneshot(
+                Request::post("/v1/agent-gateway/runtime-releases/bootstrap")
+                    .header(
+                        "authorization",
+                        "Bearer vifu_gw_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    )
+                    .header("content-type", "application/json")
+                    .body(Body::from(format!(
+                        r#"{{
+                            "deploymentId":"{deployment_id}",
+                            "manifest":{{
+                                "schemaVersion":1,
+                                "projectId":"{slug}",
+                                "providers":[{{
+                                    "id":"local-model",
+                                    "providerType":"native",
+                                    "capabilities":["chat"]
+                                }}],
+                                "agents":[{{
+                                    "id":"guide",
+                                    "name":"Guide",
+                                    "provider":"local-model",
+                                    "capabilities":["chat"]
+                                }}],
+                                "endpoints":[{{
+                                    "name":"guide",
+                                    "agent":"guide",
+                                    "capability":"chat",
+                                    "timeoutMs":30000
+                                }}],
+                                "metadata":{{}}
+                            }}
+                        }}"#
+                    )))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(release.status(), StatusCode::CREATED);
+
+        let runtime_config = owner_app
+            .clone()
+            .oneshot(
+                Request::get("/v1/agent-gateway/runtime-config")
+                    .header(
+                        "authorization",
+                        "Bearer vifu_gw_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    )
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = to_bytes(runtime_config.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let runtime_config: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(runtime_config["deployments"][0]["release"]["version"], 1);
+
+        let uploaded = owner_app
+            .clone()
+            .oneshot(
+                Request::post("/v1/agent-gateway/runtime-traces")
+                    .header(
+                        "authorization",
+                        "Bearer vifu_gw_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    )
+                    .header("content-type", "application/json")
+                    .body(Body::from(format!(
+                        r#"{{
+                            "deploymentId":"{deployment_id}",
+                            "traces":[{{
+                                "id":"trace-embedded-1",
+                                "projectId":"{slug}",
+                                "invocationId":"invoke-embedded-1",
+                                "endpoint":"guide",
+                                "agent":"guide",
+                                "provider":"local-model",
+                                "capability":"chat",
+                                "status":"completed",
+                                "durationMs":12,
+                                "createdAtMs":1
+                            }}]
+                        }}"#
+                    )))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(uploaded.status(), StatusCode::OK);
+        assert_eq!(
+            crate::db::list_traces(
+                &storage,
+                None,
+                Some(
+                    crate::db::get_project_by_slug(&storage, slug)
+                        .await
+                        .unwrap()
+                        .project
+                        .id,
+                ),
+                10,
+            )
+            .await
+            .unwrap()
+            .len(),
+            1
+        );
         crate::db::open_agent_gateway_session(
             &storage,
             "gateway-account",
@@ -763,6 +973,76 @@ mod tests {
             .unwrap();
         assert_eq!(retried.status(), StatusCode::OK);
 
+        let staging = owner_app
+            .clone()
+            .oneshot(
+                Request::post(format!("/v1/project/{slug}/deployments"))
+                    .header("authorization", format!("Vifu {owner_credential}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"name":"staging"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(staging.status(), StatusCode::CREATED);
+        let staging_enrollment = owner_app
+            .clone()
+            .oneshot(
+                Request::post(format!(
+                    "/v1/project/{slug}/deployments/staging/agent-gateway-enrollments"
+                ))
+                .header("authorization", format!("Vifu {owner_credential}"))
+                .body(Body::empty())
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = to_bytes(staging_enrollment.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let staging_enrollment: Value = serde_json::from_slice(&body).unwrap();
+        let staging_token = staging_enrollment["enrollmentToken"].as_str().unwrap();
+        let moved = owner_app
+            .clone()
+            .oneshot(
+                Request::post("/v1/agent-gateways/enroll")
+                    .header("authorization", format!("Bearer {staging_token}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"gatewayId":"gateway-account","credential":"vifu_gw_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(moved.status(), StatusCode::OK);
+        let runtime_config = owner_app
+            .clone()
+            .oneshot(
+                Request::get("/v1/agent-gateway/runtime-config")
+                    .header(
+                        "authorization",
+                        "Bearer vifu_gw_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    )
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = to_bytes(runtime_config.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let runtime_config: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(runtime_config["deployments"].as_array().unwrap().len(), 1);
+        assert_eq!(runtime_config["deployments"][0]["deployment"], "staging");
+        assert!(!crate::db::runtime_deployment_allows_remote_invocation(
+            &storage,
+            project_id,
+            "gateway-account",
+        )
+        .await
+        .unwrap());
+
         let replayed = owner_app
             .oneshot(
                 Request::post("/v1/agent-gateways/enroll")
@@ -771,6 +1051,141 @@ mod tests {
                     .body(Body::from(
                         r#"{"gatewayId":"gateway-replay","credential":"vifu_gw_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}"#,
                     ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(replayed.status(), StatusCode::UNAUTHORIZED);
+
+        match storage {
+            Storage::Postgres(pool) => pool.close().await,
+            Storage::Sqlite(pool) => pool.close().await,
+        }
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn guest_gateway_bootstrap_is_idempotent_and_claimable() {
+        let path = std::env::temp_dir().join(format!(
+            "vifu-guest-project-{}.sqlite",
+            uuid::Uuid::new_v4()
+        ));
+        let storage = crate::db::connect(&format!("sqlite://{}", path.display()), 5)
+            .await
+            .unwrap();
+        crate::db::migrate(&storage).await.unwrap();
+        let mut config = Config::from_env().unwrap();
+        config
+            .apply_guest_bootstrap(true, std::time::Duration::from_secs(7 * 24 * 60 * 60), 10)
+            .unwrap();
+        let (owner_state, owner_credential) = state_with_storage_access_token_auth(
+            config,
+            storage.clone(),
+            "user-guest-owner",
+            vec![Operation::ProjectRead, Operation::ProjectWrite],
+        )
+        .await;
+        let guest_app = app(owner_state);
+        let gateway_request = r#"{
+            "gatewayId":"gateway-guest",
+            "credential":"vifu_gw_cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+        }"#;
+
+        let created = guest_app
+            .clone()
+            .oneshot(
+                Request::post("/v1/guest/bootstrap")
+                    .header("content-type", "application/json")
+                    .body(Body::from(gateway_request))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(created.status(), StatusCode::CREATED);
+        let body = to_bytes(created.into_body(), 64 * 1024).await.unwrap();
+        let created: Value = serde_json::from_slice(&body).unwrap();
+        let project_id = created["project"]["id"].as_str().unwrap();
+        let project_slug = created["project"]["slug"].as_str().unwrap();
+        let api_key = created["apiKey"].as_str().unwrap();
+        let claim_token = created["claimToken"].as_str().unwrap();
+        assert!(api_key.starts_with("vifu_pk_"));
+        assert!(claim_token.starts_with("vifu_gc_"));
+        assert_eq!(created["deployment"]["name"], "development");
+
+        let repeated = guest_app
+            .clone()
+            .oneshot(
+                Request::post("/v1/guest/bootstrap")
+                    .header("content-type", "application/json")
+                    .body(Body::from(gateway_request))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(repeated.status(), StatusCode::OK);
+        let body = to_bytes(repeated.into_body(), 64 * 1024).await.unwrap();
+        let repeated: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(repeated["project"]["id"], project_id);
+        assert_eq!(repeated["apiKey"], api_key);
+        assert_eq!(repeated["claimToken"], claim_token);
+
+        let runtime_config = guest_app
+            .clone()
+            .oneshot(
+                Request::get("/v1/agent-gateway/runtime-config")
+                    .header(
+                        "authorization",
+                        "Bearer vifu_gw_cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                    )
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(runtime_config.status(), StatusCode::OK);
+        let body = to_bytes(runtime_config.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let runtime_config: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            runtime_config["deployments"][0]["projectSlug"],
+            project_slug
+        );
+
+        let claimed = guest_app
+            .clone()
+            .oneshot(
+                Request::post("/v1/guest/claim")
+                    .header("authorization", format!("Vifu {owner_credential}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(format!(r#"{{"claimToken":"{claim_token}"}}"#)))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(claimed.status(), StatusCode::OK);
+
+        let projects = guest_app
+            .clone()
+            .oneshot(
+                Request::get("/v1/projects")
+                    .header("authorization", format!("Vifu {owner_credential}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = to_bytes(projects.into_body(), 64 * 1024).await.unwrap();
+        let projects: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(projects["projects"].as_array().unwrap().len(), 1);
+        assert_eq!(projects["projects"][0]["id"], project_id);
+
+        let replayed = guest_app
+            .oneshot(
+                Request::post("/v1/guest/claim")
+                    .header("authorization", format!("Vifu {owner_credential}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(format!(r#"{{"claimToken":"{claim_token}"}}"#)))
                     .unwrap(),
             )
             .await

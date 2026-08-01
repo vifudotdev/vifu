@@ -23,26 +23,30 @@ use vifu_gateway::config::{
 use vifu_gateway::protocol::validate_identifier;
 use vifu_runtime::{
     AgentDefinition, AgentProvider, EndpointDefinition, HttpCapabilityProvider,
-    HttpCapabilityRoute, InvocationData, InvocationInput, RuntimeError, VifuRuntime,
+    HttpCapabilityRoute, InvocationData, InvocationInput, RuntimeError, RuntimeManifest,
+    RuntimeRelease, RuntimeTraceRecord, VifuRuntime,
 };
 
 use crate::auth::{
-    bearer_token, decrypt_secret_json, deployment_credential, encrypt_secret_json,
-    hash_agent_gateway_credential, hash_agent_gateway_enrollment, hash_api_key, is_secret_match,
-    Identity, Operation,
+    bearer_token, decrypt_secret_json, deployment_credential, derive_guest_claim_token,
+    derive_guest_project_key, encrypt_secret_json, hash_agent_gateway_credential,
+    hash_agent_gateway_enrollment, hash_api_key, hash_guest_claim_token, is_secret_match, Identity,
+    Operation,
 };
 use crate::config::DeploymentMode;
 use crate::db::{self, EndpointPatch, NewEndpoint, NewProject, ProfilePatch, ProjectPatch};
 use crate::error::ApiError;
 use crate::models::{
     slugify, validate_slug, AgentEndpoint, ApiKeyAgentScope, ApiKeyPermissions, ApiKeyRecord,
-    AssignProjectOwner, Capabilities, CreateApiKey, CreateBinding, CreateEndpoint, CreateProfile,
-    CreateProfileVersion, CreateProject, CreateProjectProvider, CreatedApiKey, CustomProvider,
+    AssignProjectOwner, BootstrapGatewayRuntimeRelease, Capabilities, ClaimGuestProject,
+    CreateApiKey, CreateBinding, CreateEndpoint, CreateProfile, CreateProfileVersion,
+    CreateProject, CreateProjectProvider, CreateRuntimeDeployment, CreatedApiKey, CustomProvider,
     CustomProviderSecret, EndpointRoute, ImportProjectAgent, ImportProjectProfile,
     ImportProjectProvider, ProfileCapabilityDraft, ProjectOwnership, ProviderAdapter,
-    ProviderAdapterField, ProviderConnection, ProviderConnectionSecret, RegisterAgentGateway,
-    SetProfileRollout, SyncProfileSource, TestProfile, UpdateApiKey, UpdateBinding, UpdateEndpoint,
-    UpdateProfile, UpdateProject, UpdateProjectProvider, UpsertProviderConnection,
+    ProviderAdapterField, ProviderConnection, ProviderConnectionSecret, PublishRuntimeRelease,
+    RegisterAgentGateway, RuntimeDeployment, RuntimeDeploymentView, SetProfileRollout,
+    SyncProfileSource, TestProfile, UpdateApiKey, UpdateBinding, UpdateEndpoint, UpdateProfile,
+    UpdateProject, UpdateProjectProvider, UpdateRuntimeDeployment, UpsertProviderConnection,
 };
 use crate::openclaw_device;
 use crate::relay::RelayAgentProvider;
@@ -65,6 +69,13 @@ struct StatusResponse {
     mode: DeploymentMode,
     capabilities: Capabilities,
     agent_gateways: usize,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct UploadRuntimeTraces {
+    deployment_id: Uuid,
+    traces: Vec<RuntimeTraceRecord>,
 }
 
 pub async fn health() -> Json<impl Serialize> {
@@ -94,6 +105,181 @@ pub async fn exchange_deployment_credential(
 ) -> Result<Json<impl Serialize>, ApiError> {
     let access_token = bearer_token(&headers).ok_or(ApiError::Unauthorized)?;
     Ok(Json(state.auth.exchange_access_token(access_token).await?))
+}
+
+pub async fn bootstrap_guest_project(
+    State(state): State<AppState>,
+    Json(input): Json<RegisterAgentGateway>,
+) -> Result<(StatusCode, Json<Value>), ApiError> {
+    if !state.config.guest_bootstrap_enabled {
+        return Err(ApiError::Forbidden);
+    }
+    let gateway_id = required_identifier("agent gateway id", &input.gateway_id)?;
+    let credential = validate_agent_gateway_credential(&input.credential)?;
+    db::prune_expired_guest_projects(&state.pool).await?;
+    if let Some((project, expires_at)) =
+        db::get_active_guest_project_for_gateway(&state.pool, gateway_id).await?
+    {
+        let response = guest_project_response(&state, project, expires_at, credential).await?;
+        return Ok((StatusCode::OK, Json(response)));
+    }
+    if db::count_active_guest_projects(&state.pool).await?
+        >= i64::from(state.config.guest_project_limit)
+    {
+        return Err(ApiError::Conflict(
+            "guest project capacity is temporarily unavailable".to_string(),
+        ));
+    }
+
+    let project_id = Uuid::new_v4();
+    let slug = guest_project_slug(gateway_id);
+    let project = db::create_project(
+        &state.pool,
+        NewProject {
+            id: project_id,
+            owner_user_id: None,
+            slug: &slug,
+            name: "Guest project",
+            description: None,
+            gateway_id,
+            binding_ids: &[],
+        },
+    )
+    .await?;
+    let expires_at = Utc::now()
+        + ChronoDuration::from_std(state.config.guest_project_ttl)
+            .map_err(|_| ApiError::Internal)?;
+    let claim_token = derive_guest_claim_token(credential, &state.config.api_key_pepper);
+    let claim_token_hash = hash_guest_claim_token(&claim_token, &state.config.api_key_pepper);
+    if let Err(error) = db::create_guest_project(
+        &state.pool,
+        db::NewGuestProject {
+            project_id,
+            gateway_id,
+            claim_token_hash: &claim_token_hash,
+            expires_at,
+        },
+    )
+    .await
+    {
+        let _ = db::delete_project(&state.pool, project_id).await;
+        if let Some((existing, existing_expires_at)) =
+            db::get_active_guest_project_for_gateway(&state.pool, gateway_id).await?
+        {
+            let response =
+                guest_project_response(&state, existing, existing_expires_at, credential).await?;
+            return Ok((StatusCode::OK, Json(response)));
+        }
+        return Err(error);
+    }
+    let response = guest_project_response(&state, project, expires_at, credential).await?;
+    Ok((StatusCode::CREATED, Json(response)))
+}
+
+pub async fn claim_guest_project(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<ClaimGuestProject>,
+) -> Result<Json<Value>, ApiError> {
+    let identity = deployment_identity(&state, &headers, Operation::ProjectWrite).await?;
+    let Identity::ActingUser { subject, .. } = identity else {
+        return Err(ApiError::Forbidden);
+    };
+    let claim_token = validate_guest_claim_token(&input.claim_token)?;
+    let claim_token_hash = hash_guest_claim_token(claim_token, &state.config.api_key_pepper);
+    let project = db::claim_guest_project(&state.pool, &claim_token_hash, &subject).await?;
+    Ok(Json(json!({ "project": project })))
+}
+
+async fn guest_project_response(
+    state: &AppState,
+    project: crate::models::ProjectWithBindings,
+    expires_at: chrono::DateTime<Utc>,
+    gateway_credential: &str,
+) -> Result<Value, ApiError> {
+    ensure_guest_gateway_credential(state, &project, gateway_credential).await?;
+    let project_key = ensure_guest_project_key(state, &project, gateway_credential).await?;
+    let deployment = db::list_runtime_deployments(&state.pool, project.project.id)
+        .await?
+        .into_iter()
+        .find(|deployment| deployment.is_primary)
+        .ok_or(ApiError::Internal)?;
+    Ok(json!({
+        "project": project,
+        "deployment": deployment,
+        "endpointPath": format!("/{}/v1", project.project.slug),
+        "apiKey": project_key,
+        "claimToken": derive_guest_claim_token(
+            gateway_credential,
+            &state.config.api_key_pepper,
+        ),
+        "expiresAt": expires_at,
+    }))
+}
+
+async fn ensure_guest_gateway_credential(
+    state: &AppState,
+    project: &crate::models::ProjectWithBindings,
+    credential: &str,
+) -> Result<(), ApiError> {
+    let prefix = credential.chars().take(20).collect::<String>();
+    let hash = hash_agent_gateway_credential(credential, &state.config.api_key_pepper);
+    db::register_agent_gateway_credential(
+        &state.pool,
+        &project.project.gateway_id,
+        None,
+        &prefix,
+        &hash,
+    )
+    .await?;
+    Ok(())
+}
+
+async fn ensure_guest_project_key(
+    state: &AppState,
+    project: &crate::models::ProjectWithBindings,
+    gateway_credential: &str,
+) -> Result<String, ApiError> {
+    let raw_key = derive_guest_project_key(gateway_credential, &state.config.api_key_pepper);
+    let key_prefix = raw_key.chars().take(18).collect::<String>();
+    let exists = db::list_api_keys(&state.pool)
+        .await?
+        .into_iter()
+        .any(|key| {
+            key.project_id == project.project.id
+                && key.key_prefix == key_prefix
+                && key.revoked_at.is_none()
+        });
+    if !exists {
+        let key_hash = hash_api_key(&raw_key, &state.config.api_key_pepper);
+        let created = db::create_api_key(
+            &state.pool,
+            db::NewApiKey {
+                id: Uuid::new_v4(),
+                project_id: project.project.id,
+                name: "Guest project key",
+                agent_scope: &ApiKeyAgentScope::All,
+                permissions: &ApiKeyPermissions::default(),
+                key_prefix: &key_prefix,
+                key_hash: &key_hash,
+            },
+        )
+        .await;
+        if let Err(error) = created {
+            let now_exists = db::list_api_keys(&state.pool)
+                .await?
+                .into_iter()
+                .any(|key| {
+                    key.project_id == project.project.id
+                        && key.key_prefix == key_prefix
+                        && key.revoked_at.is_none()
+                });
+            if !now_exists {
+                return Err(error);
+            }
+        }
+    }
+    Ok(raw_key)
 }
 
 pub async fn verify_admin(
@@ -269,6 +455,276 @@ pub async fn delete_project(
         .await?;
     db::delete_project(&state.pool, id).await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+pub async fn list_project_runtime_deployments(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(slug): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let project = authorized_project_by_slug(&state, &headers, &slug, ProjectAccess::Read).await?;
+    Ok(Json(json!({
+        "deployments": runtime_deployment_views(&state, project.project.id).await?
+    })))
+}
+
+pub async fn create_project_runtime_deployment(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(slug): Path<String>,
+    Json(input): Json<CreateRuntimeDeployment>,
+) -> Result<(StatusCode, Json<Value>), ApiError> {
+    let project = authorized_project_by_slug(&state, &headers, &slug, ProjectAccess::Write).await?;
+    let name = validate_explicit_slug(&input.name)?;
+    let trace_mode = validate_trace_mode(input.trace_mode.as_deref().unwrap_or("summary"))?;
+    let deployment = db::create_runtime_deployment(
+        &state.pool,
+        db::NewRuntimeDeployment {
+            id: Uuid::new_v4(),
+            project_id: project.project.id,
+            name: &name,
+            is_primary: false,
+            config_sync_enabled: input.config_sync_enabled.unwrap_or(true),
+            trace_mode,
+            remote_invocation_enabled: input.remote_invocation_enabled.unwrap_or(false),
+        },
+    )
+    .await?;
+    Ok((
+        StatusCode::CREATED,
+        Json(json!({
+            "deployment": runtime_deployment_view(&state, deployment).await?
+        })),
+    ))
+}
+
+pub async fn update_project_runtime_deployment(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((slug, deployment)): Path<(String, String)>,
+    Json(input): Json<UpdateRuntimeDeployment>,
+) -> Result<Json<Value>, ApiError> {
+    let project = authorized_project_by_slug(&state, &headers, &slug, ProjectAccess::Write).await?;
+    let deployment = validate_explicit_slug(&deployment)?;
+    let trace_mode = input
+        .trace_mode
+        .as_deref()
+        .map(validate_trace_mode)
+        .transpose()?;
+    let deployment = db::update_runtime_deployment(
+        &state.pool,
+        project.project.id,
+        &deployment,
+        db::RuntimeDeploymentPatch {
+            config_sync_enabled: input.config_sync_enabled,
+            trace_mode,
+            remote_invocation_enabled: input.remote_invocation_enabled,
+        },
+    )
+    .await?;
+    notify_runtime_deployments(&state, std::slice::from_ref(&deployment)).await?;
+    Ok(Json(json!({
+        "deployment": runtime_deployment_view(&state, deployment).await?
+    })))
+}
+
+pub async fn delete_project_runtime_deployment(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((slug, deployment)): Path<(String, String)>,
+) -> Result<StatusCode, ApiError> {
+    let project = authorized_project_by_slug(&state, &headers, &slug, ProjectAccess::Write).await?;
+    let deployment = validate_explicit_slug(&deployment)?;
+    let deployment =
+        db::get_runtime_deployment(&state.pool, project.project.id, &deployment).await?;
+    let gateway_ids = db::list_runtime_deployment_gateway_ids(&state.pool, deployment.id).await?;
+    db::delete_runtime_deployment(&state.pool, project.project.id, &deployment.name).await?;
+    for gateway_id in gateway_ids {
+        state
+            .relay
+            .notify_runtime_config(&gateway_id, vec![deployment.id])
+            .await;
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
+
+pub async fn promote_project_runtime_deployment(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((slug, deployment)): Path<(String, String)>,
+) -> Result<Json<Value>, ApiError> {
+    let project = authorized_project_by_slug(&state, &headers, &slug, ProjectAccess::Write).await?;
+    let deployment = validate_explicit_slug(&deployment)?;
+    let project_deployments = db::list_runtime_deployments(&state.pool, project.project.id).await?;
+    let deployment =
+        db::promote_runtime_deployment(&state.pool, project.project.id, &deployment).await?;
+    notify_runtime_deployments(&state, &project_deployments).await?;
+    Ok(Json(json!({
+        "deployment": runtime_deployment_view(&state, deployment).await?
+    })))
+}
+
+pub async fn list_project_runtime_releases(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(slug): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let project = authorized_project_by_slug(&state, &headers, &slug, ProjectAccess::Read).await?;
+    Ok(Json(json!({
+        "releases": db::list_project_runtime_releases(&state.pool, project.project.id).await?
+    })))
+}
+
+pub async fn get_project_runtime_release(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((slug, version)): Path<(String, i64)>,
+) -> Result<Json<Value>, ApiError> {
+    let project = authorized_project_by_slug(&state, &headers, &slug, ProjectAccess::Read).await?;
+    Ok(Json(json!({
+        "release": db::get_project_runtime_release(&state.pool, project.project.id, version).await?
+    })))
+}
+
+pub async fn publish_project_runtime_release(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(slug): Path<String>,
+    Json(input): Json<PublishRuntimeRelease>,
+) -> Result<(StatusCode, Json<Value>), ApiError> {
+    let project = db::get_project_by_slug(&state.pool, &slug).await?;
+    let identity = state
+        .auth
+        .authorize_project(
+            &headers,
+            Operation::ProjectWrite,
+            project.project.owner_user_id.as_deref(),
+        )
+        .await?;
+    let manifest = serde_json::from_value::<RuntimeManifest>(input.manifest)
+        .map_err(|error| ApiError::Invalid(format!("runtime manifest is invalid: {error}")))?;
+    manifest
+        .validate()
+        .map_err(|error| ApiError::Invalid(error.to_string()))?;
+    if manifest.project_id != project.project.slug {
+        return Err(ApiError::Invalid(
+            "runtime manifest projectId must match the project slug".to_string(),
+        ));
+    }
+    let releases = db::list_project_runtime_releases(&state.pool, project.project.id).await?;
+    let content_hash = manifest
+        .content_hash()
+        .map_err(|error| ApiError::Invalid(error.to_string()))?;
+    if let Some(existing) = releases
+        .iter()
+        .find(|release| release.content_hash == content_hash)
+    {
+        return Ok((StatusCode::OK, Json(json!({ "release": existing }))));
+    }
+    let version = releases
+        .first()
+        .map_or(1, |release| release.version.saturating_add(1));
+    let release = RuntimeRelease::new(
+        u64::try_from(version).map_err(|_| ApiError::Internal)?,
+        manifest,
+    )
+    .map_err(|error| ApiError::Invalid(error.to_string()))?;
+    let manifest = serde_json::to_value(&release.manifest).map_err(|_| ApiError::Internal)?;
+    let created_by = match &identity {
+        Identity::DeploymentAdmin => None,
+        Identity::ActingUser { subject, .. } => Some(subject.as_str()),
+    };
+    let release = db::create_project_runtime_release(
+        &state.pool,
+        db::NewProjectRuntimeRelease {
+            id: Uuid::new_v4(),
+            project_id: project.project.id,
+            version,
+            content_hash: &release.content_hash,
+            manifest: &manifest,
+            created_by,
+        },
+    )
+    .await?;
+    Ok((StatusCode::CREATED, Json(json!({ "release": release }))))
+}
+
+pub async fn activate_project_runtime_release(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((slug, deployment, version)): Path<(String, String, i64)>,
+) -> Result<Json<Value>, ApiError> {
+    let project = authorized_project_by_slug(&state, &headers, &slug, ProjectAccess::Write).await?;
+    let deployment = validate_explicit_slug(&deployment)?;
+    let deployment = db::activate_runtime_deployment_release(
+        &state.pool,
+        project.project.id,
+        &deployment,
+        version,
+    )
+    .await?;
+    notify_runtime_deployments(&state, std::slice::from_ref(&deployment)).await?;
+    Ok(Json(json!({
+        "deployment": runtime_deployment_view(&state, deployment).await?
+    })))
+}
+
+async fn runtime_deployment_views(
+    state: &AppState,
+    project_id: Uuid,
+) -> Result<Vec<RuntimeDeploymentView>, ApiError> {
+    let deployments = db::list_runtime_deployments(&state.pool, project_id).await?;
+    let mut views = Vec::with_capacity(deployments.len());
+    for deployment in deployments {
+        views.push(runtime_deployment_view(state, deployment).await?);
+    }
+    Ok(views)
+}
+
+async fn runtime_deployment_view(
+    state: &AppState,
+    deployment: RuntimeDeployment,
+) -> Result<RuntimeDeploymentView, ApiError> {
+    let gateway_ids = db::list_runtime_deployment_gateway_ids(&state.pool, deployment.id).await?;
+    Ok(RuntimeDeploymentView {
+        deployment,
+        gateway_ids,
+    })
+}
+
+async fn notify_runtime_deployments(
+    state: &AppState,
+    deployments: &[RuntimeDeployment],
+) -> Result<(), ApiError> {
+    let mut notifications = BTreeMap::<String, Vec<Uuid>>::new();
+    for deployment in deployments {
+        for gateway_id in
+            db::list_runtime_deployment_gateway_ids(&state.pool, deployment.id).await?
+        {
+            notifications
+                .entry(gateway_id)
+                .or_default()
+                .push(deployment.id);
+        }
+    }
+    for (gateway_id, mut deployment_ids) in notifications {
+        deployment_ids.sort_unstable();
+        deployment_ids.dedup();
+        state
+            .relay
+            .notify_runtime_config(&gateway_id, deployment_ids)
+            .await;
+    }
+    Ok(())
+}
+
+fn validate_trace_mode(value: &str) -> Result<&str, ApiError> {
+    match value {
+        "off" | "summary" | "full" => Ok(value),
+        _ => Err(ApiError::Invalid(
+            "traceMode must be off, summary, or full".to_string(),
+        )),
+    }
 }
 
 pub async fn list_profiles(
@@ -867,6 +1323,7 @@ pub async fn test_project_profile(
     let started_at = Instant::now();
     let result = invoke_profile_chat(
         &state,
+        project.project.id,
         &project_slug,
         &route,
         request_id,
@@ -1387,6 +1844,199 @@ pub async fn enroll_agent_gateway(
     ))
 }
 
+pub async fn get_agent_gateway_runtime_config(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    let gateway_id = authenticated_agent_gateway(&state, &headers).await?;
+    let deployments = db::list_runtime_deployments_for_gateway(&state.pool, &gateway_id).await?;
+    let mut configurations = Vec::with_capacity(deployments.len());
+    for deployment in deployments {
+        let project = db::get_project(&state.pool, deployment.project_id).await?;
+        let release = if deployment.config_sync_enabled {
+            match deployment.active_release_version {
+                Some(version) => Some(
+                    db::get_project_runtime_release(&state.pool, deployment.project_id, version)
+                        .await?,
+                ),
+                None => None,
+            }
+        } else {
+            None
+        };
+        configurations.push(json!({
+            "deploymentId": deployment.id,
+            "deployment": deployment.name,
+            "projectId": project.project.id,
+            "projectSlug": project.project.slug,
+            "projectName": project.project.name,
+            "isPrimary": deployment.is_primary,
+            "policies": {
+                "configSync": deployment.config_sync_enabled,
+                "traceMode": deployment.trace_mode,
+                "remoteInvocation": deployment.remote_invocation_enabled,
+            },
+            "release": release.map(|release| json!({
+                "version": release.version,
+                "contentHash": release.content_hash,
+                "manifest": release.manifest,
+            })),
+        }));
+    }
+    Ok(Json(json!({
+        "gatewayId": gateway_id,
+        "deployments": configurations,
+    })))
+}
+
+pub async fn upload_agent_gateway_runtime_traces(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<UploadRuntimeTraces>,
+) -> Result<Json<Value>, ApiError> {
+    let gateway_id = authenticated_agent_gateway(&state, &headers).await?;
+    if input.traces.is_empty() || input.traces.len() > 100 {
+        return Err(ApiError::Invalid(
+            "runtime trace batches must contain between 1 and 100 records".to_string(),
+        ));
+    }
+    let deployment = db::list_runtime_deployments_for_gateway(&state.pool, &gateway_id)
+        .await?
+        .into_iter()
+        .find(|deployment| deployment.id == input.deployment_id)
+        .ok_or(ApiError::Forbidden)?;
+    if deployment.trace_mode == "off" {
+        return Err(ApiError::Forbidden);
+    }
+    let project = db::get_project(&state.pool, deployment.project_id).await?;
+    let mut accepted = Vec::with_capacity(input.traces.len());
+    for trace in input.traces {
+        trace
+            .validate()
+            .map_err(|error| ApiError::Invalid(error.to_string()))?;
+        if trace.project_id != project.project.slug {
+            return Err(ApiError::Forbidden);
+        }
+        let created_at_ms = i64::try_from(trace.created_at_ms)
+            .map_err(|_| ApiError::Invalid("runtime trace timestamp is invalid".to_string()))?;
+        let created_at = chrono::DateTime::<Utc>::from_timestamp_millis(created_at_ms)
+            .ok_or_else(|| ApiError::Invalid("runtime trace timestamp is invalid".to_string()))?;
+        let latency_ms = i64::try_from(trace.duration_ms)
+            .map_err(|_| ApiError::Invalid("runtime trace duration is invalid".to_string()))?;
+        let request = json!({
+            "source": "embedded-runtime",
+            "gatewayId": gateway_id,
+            "deploymentId": deployment.id,
+            "traceId": trace.id,
+            "invocationId": trace.invocation_id,
+            "endpoint": trace.endpoint,
+            "agent": trace.agent,
+        });
+        let request_id = runtime_trace_uuid("request", &gateway_id, &trace.id);
+        db::create_uploaded_runtime_trace(
+            &state.pool,
+            db::NewUploadedRuntimeTrace {
+                id: runtime_trace_uuid("trace", &gateway_id, &trace.id),
+                request_id,
+                project_id: project.project.id,
+                operation: "runtime.invoke",
+                provider_key: trace.provider.as_deref(),
+                capability_kind: trace.capability.as_deref(),
+                status: &trace.status,
+                latency_ms,
+                request: &request,
+                created_at,
+            },
+        )
+        .await?;
+        accepted.push(trace.id);
+    }
+    Ok(Json(json!({
+        "acceptedTraceIds": accepted,
+    })))
+}
+
+pub async fn bootstrap_agent_gateway_runtime_release(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<BootstrapGatewayRuntimeRelease>,
+) -> Result<(StatusCode, Json<Value>), ApiError> {
+    let gateway_id = authenticated_agent_gateway(&state, &headers).await?;
+    let deployment = db::list_runtime_deployments_for_gateway(&state.pool, &gateway_id)
+        .await?
+        .into_iter()
+        .find(|deployment| deployment.id == input.deployment_id)
+        .ok_or(ApiError::Forbidden)?;
+    if !deployment.config_sync_enabled {
+        return Err(ApiError::Forbidden);
+    }
+    let project = db::get_project(&state.pool, deployment.project_id).await?;
+    let manifest = serde_json::from_value::<RuntimeManifest>(input.manifest)
+        .map_err(|error| ApiError::Invalid(format!("runtime manifest is invalid: {error}")))?;
+    manifest
+        .validate()
+        .map_err(|error| ApiError::Invalid(error.to_string()))?;
+    if manifest.project_id != project.project.slug {
+        return Err(ApiError::Invalid(
+            "runtime manifest projectId must match the project slug".to_string(),
+        ));
+    }
+    let content_hash = manifest
+        .content_hash()
+        .map_err(|error| ApiError::Invalid(error.to_string()))?;
+    let releases = db::list_project_runtime_releases(&state.pool, project.project.id).await?;
+    if let Some(existing) = releases
+        .iter()
+        .find(|release| release.content_hash == content_hash)
+    {
+        if deployment.active_release_version.is_none() {
+            let activated = db::activate_runtime_deployment_release(
+                &state.pool,
+                project.project.id,
+                &deployment.name,
+                existing.version,
+            )
+            .await?;
+            notify_runtime_deployments(&state, std::slice::from_ref(&activated)).await?;
+        } else if deployment.active_release_version != Some(existing.version) {
+            return Err(ApiError::Conflict(
+                "the deployment already uses another runtime release".to_string(),
+            ));
+        }
+        return Ok((StatusCode::OK, Json(json!({ "release": existing }))));
+    }
+    if !releases.is_empty() || deployment.active_release_version.is_some() {
+        return Err(ApiError::Conflict(
+            "only an empty deployment can import its first runtime release".to_string(),
+        ));
+    }
+
+    let release =
+        RuntimeRelease::new(1, manifest).map_err(|error| ApiError::Invalid(error.to_string()))?;
+    let manifest = serde_json::to_value(&release.manifest).map_err(|_| ApiError::Internal)?;
+    let created = db::create_project_runtime_release(
+        &state.pool,
+        db::NewProjectRuntimeRelease {
+            id: Uuid::new_v4(),
+            project_id: project.project.id,
+            version: 1,
+            content_hash: &release.content_hash,
+            manifest: &manifest,
+            created_by: Some(&gateway_id),
+        },
+    )
+    .await?;
+    let activated = db::activate_runtime_deployment_release(
+        &state.pool,
+        project.project.id,
+        &deployment.name,
+        created.version,
+    )
+    .await?;
+    notify_runtime_deployments(&state, std::slice::from_ref(&activated)).await?;
+    Ok((StatusCode::CREATED, Json(json!({ "release": created }))))
+}
+
 fn agent_gateway_registration_response(
     gateway_id: &str,
     registration: db::AgentGatewayRegistration,
@@ -1412,16 +2062,47 @@ pub async fn create_project_agent_gateway_enrollment(
     Path(slug): Path<String>,
 ) -> Result<(StatusCode, Json<Value>), ApiError> {
     let project = db::get_project_by_slug(&state.pool, &slug).await?;
+    let deployment = db::list_runtime_deployments(&state.pool, project.project.id)
+        .await?
+        .into_iter()
+        .find(|deployment| deployment.is_primary)
+        .ok_or(ApiError::NotFound)?;
+    create_agent_gateway_enrollment_for_deployment(&state, &headers, project, deployment).await
+}
+
+pub async fn create_runtime_deployment_agent_gateway_enrollment(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((slug, deployment)): Path<(String, String)>,
+) -> Result<(StatusCode, Json<Value>), ApiError> {
+    let project = db::get_project_by_slug(&state.pool, &slug).await?;
+    let deployment = validate_explicit_slug(&deployment)?;
+    let deployment =
+        db::get_runtime_deployment(&state.pool, project.project.id, &deployment).await?;
+    create_agent_gateway_enrollment_for_deployment(&state, &headers, project, deployment).await
+}
+
+async fn create_agent_gateway_enrollment_for_deployment(
+    state: &AppState,
+    headers: &HeaderMap,
+    project: crate::models::ProjectWithBindings,
+    deployment: RuntimeDeployment,
+) -> Result<(StatusCode, Json<Value>), ApiError> {
     let identity = state
         .auth
         .authorize_project(
-            &headers,
+            headers,
             Operation::ProjectWrite,
             project.project.owner_user_id.as_deref(),
         )
         .await?;
-    let Identity::ActingUser { subject, .. } = identity else {
-        return Err(ApiError::Forbidden);
+    let owner_user_id = match identity {
+        Identity::ActingUser { subject, .. } => subject,
+        Identity::DeploymentAdmin => project
+            .project
+            .owner_user_id
+            .clone()
+            .unwrap_or_else(|| "deployment-admin".to_string()),
     };
     let token = format!(
         "vifu_ge_{}{}",
@@ -1435,7 +2116,8 @@ pub async fn create_project_agent_gateway_enrollment(
         db::NewAgentGatewayEnrollment {
             id: Uuid::new_v4(),
             project_id: project.project.id,
-            owner_user_id: &subject,
+            owner_user_id: &owner_user_id,
+            deployment_id: deployment.id,
             token_hash: &token_hash,
             expires_at,
         },
@@ -1446,6 +2128,7 @@ pub async fn create_project_agent_gateway_enrollment(
         Json(json!({
             "enrollmentToken": token,
             "expiresAt": expires_at,
+            "deployment": deployment.name,
         })),
     ))
 }
@@ -1851,6 +2534,11 @@ pub async fn import_project_agent(
                 && agent.metadata.get("providerKey").and_then(Value::as_str) == Some(provider_key)
         })
         .ok_or(ApiError::NotFound)?;
+    let provider_type = agent
+        .metadata
+        .get("providerType")
+        .and_then(Value::as_str)
+        .unwrap_or("openclaw");
     let profile = if let Some((profile_id, archived, binding_id)) =
         db::find_project_profile_by_provider_resource(
             &state.pool,
@@ -1875,6 +2563,7 @@ pub async fn import_project_agent(
             agent_id,
             &agent.name,
             provider_key,
+            provider_type,
         )
         .await?;
         db::assign_project_binding(&state.pool, project.project.id, binding_id).await?;
@@ -3257,6 +3946,7 @@ async fn invoke_realtime_response(
     let started_at = Instant::now();
     let result = invoke_profile_chat(
         state,
+        session.project_id,
         project_slug,
         &route,
         request_id,
@@ -3577,6 +4267,7 @@ async fn create_profile_chat_completion(
     let started_at = Instant::now();
     match invoke_profile_chat(
         state,
+        project.project.id,
         &project.project.slug,
         &route,
         request_id,
@@ -3664,6 +4355,7 @@ pub(crate) async fn invoke_runtime_extension_profile(
             let request = runtime_agent_request(&route.profile_slug, input.input.clone());
             invoke_profile_chat(
                 state,
+                project.project.id,
                 &project.project.slug,
                 &route,
                 request_id,
@@ -3767,6 +4459,7 @@ fn runtime_profile_tool_is_available(config: &Value, tool: &str) -> bool {
 
 async fn invoke_profile_chat(
     state: &AppState,
+    project_id: Uuid,
     project_slug: &str,
     route: &crate::models::ProfileRoute,
     request_id: Uuid,
@@ -3774,8 +4467,10 @@ async fn invoke_profile_chat(
     timeout: Duration,
 ) -> Result<Value, ApiError> {
     let provider: Arc<dyn AgentProvider> = match route.provider_type.as_str() {
-        "openclaw" => {
-            if route.source.get("managed").and_then(Value::as_bool) == Some(false) {
+        "openclaw" | "vifu-runtime" => {
+            if route.provider_type == "openclaw"
+                && route.source.get("managed").and_then(Value::as_bool) == Some(false)
+            {
                 vifu_gateway::providers::apply_persona_to_chat_request(
                     &mut request,
                     &route.persona,
@@ -3783,14 +4478,24 @@ async fn invoke_profile_chat(
                 .map_err(ApiError::Invalid)?;
             }
             let gateway_id = profile_gateway_id(route).ok_or_else(|| {
-                ApiError::Invalid("OpenClaw capability is missing gatewayId".to_string())
+                ApiError::Invalid("Gateway capability is missing gatewayId".to_string())
             })?;
+            if route.provider_type == "vifu-runtime"
+                && !db::runtime_deployment_allows_remote_invocation(
+                    &state.pool,
+                    project_id,
+                    &gateway_id,
+                )
+                .await?
+            {
+                return Err(ApiError::Forbidden);
+            }
             let agent_id = route.resource_id.as_deref().ok_or_else(|| {
-                ApiError::Invalid("OpenClaw capability is missing resourceId".to_string())
+                ApiError::Invalid("Gateway capability is missing resourceId".to_string())
             })?;
             let mut binding_config = route.capability_config.clone();
             let binding_object = binding_config.as_object_mut().ok_or_else(|| {
-                ApiError::Invalid("OpenClaw capability config must be an object".to_string())
+                ApiError::Invalid("Gateway capability config must be an object".to_string())
             })?;
             binding_object.insert(
                 "providerKey".to_string(),
@@ -5026,6 +5731,11 @@ async fn reconcile_project_provider_agents(
             && agent.metadata.get("providerKey").and_then(Value::as_str) == Some(provider_key)
             && agent.status == "connected"
     }) {
+        let provider_type = agent
+            .metadata
+            .get("providerType")
+            .and_then(Value::as_str)
+            .unwrap_or("openclaw");
         match db::find_project_profile_by_provider_resource(
             &state.pool,
             project.project.id,
@@ -5061,6 +5771,7 @@ async fn reconcile_project_provider_agents(
                     &agent.id,
                     &agent.name,
                     provider_key,
+                    provider_type,
                 )
                 .await?;
                 added += 1;
@@ -5363,6 +6074,32 @@ async fn deployment_read(state: &AppState, headers: &HeaderMap) -> Result<(), Ap
         .map(|_| ())
 }
 
+async fn authenticated_agent_gateway(
+    state: &AppState,
+    headers: &HeaderMap,
+) -> Result<String, ApiError> {
+    let credential = bearer_token(headers).ok_or(ApiError::Unauthorized)?;
+    validate_agent_gateway_credential(credential)?;
+    let credential_hash = hash_agent_gateway_credential(credential, &state.config.api_key_pepper);
+    db::authenticate_agent_gateway_credential(&state.pool, &credential_hash).await
+}
+
+fn runtime_trace_uuid(kind: &str, gateway_id: &str, trace_id: &str) -> Uuid {
+    let mut hasher = Sha256::new();
+    hasher.update(b"vifu-runtime-trace-v1\0");
+    hasher.update(kind.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(gateway_id.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(trace_id.as_bytes());
+    let digest = hasher.finalize();
+    let mut bytes = [0_u8; 16];
+    bytes.copy_from_slice(&digest[..16]);
+    bytes[6] = (bytes[6] & 0x0f) | 0x50;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    Uuid::from_bytes(bytes)
+}
+
 fn require_agent_gateway_bootstrap(state: &AppState, headers: &HeaderMap) -> Result<(), ApiError> {
     let token = bearer_token(headers).ok_or(ApiError::Unauthorized)?;
     if is_secret_match(token, &state.config.agent_gateway_bootstrap_token) {
@@ -5416,6 +6153,27 @@ fn validate_agent_gateway_enrollment_token(value: &str) -> Result<&str, ApiError
         return Err(ApiError::Unauthorized);
     }
     Ok(value)
+}
+
+fn validate_guest_claim_token(value: &str) -> Result<&str, ApiError> {
+    let value = value.trim();
+    let secret = value
+        .strip_prefix("vifu_gc_")
+        .ok_or(ApiError::Unauthorized)?;
+    if value.len() != 72 || !secret.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(ApiError::Unauthorized);
+    }
+    Ok(value)
+}
+
+fn guest_project_slug(gateway_id: &str) -> String {
+    let digest = Sha256::digest(gateway_id.as_bytes());
+    let mut suffix = String::with_capacity(16);
+    for byte in &digest[..8] {
+        use std::fmt::Write;
+        let _ = write!(&mut suffix, "{byte:02x}");
+    }
+    format!("guest-{suffix}")
 }
 
 fn profile_slug(explicit: Option<&str>, name: &str) -> Result<String, ApiError> {

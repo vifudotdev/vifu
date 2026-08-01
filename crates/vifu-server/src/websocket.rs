@@ -196,6 +196,11 @@ async fn reconcile_project_agents(
         else {
             continue;
         };
+        let provider_type = agent
+            .metadata
+            .get("providerType")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("openclaw");
         for (project_id, _) in db::list_projects_for_provider_key(&state.pool, provider_key).await?
         {
             match db::find_project_profile_by_provider_resource(
@@ -223,6 +228,7 @@ async fn reconcile_project_agents(
                         &agent.id,
                         &agent.name,
                         provider_key,
+                        provider_type,
                     )
                     .await?;
                 }

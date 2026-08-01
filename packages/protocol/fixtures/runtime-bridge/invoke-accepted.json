@@ -1,0 +1,8 @@
+{
+  "type": "res",
+  "id": "invoke-1",
+  "ok": true,
+  "payload": {
+    "handle": "bridge-project:1"
+  }
+}

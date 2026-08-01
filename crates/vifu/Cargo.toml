@@ -27,5 +27,5 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "syn
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 uuid = { version = "1", features = ["serde", "v4"] }
-vifu-gateway = { version = "0.1.1", path = "../vifu-gateway", default-features = false }
+vifu-gateway = { version = "0.1.1", path = "../vifu-gateway", default-features = false, features = ["sqlite"] }
 vifu-server = { version = "0.1.1", path = "../vifu-server" }

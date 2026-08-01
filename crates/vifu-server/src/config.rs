@@ -29,6 +29,9 @@ pub struct Config {
     pub provider_registry_file: Option<PathBuf>,
     pub runtime_extensions: Vec<RuntimeExtensionDefinition>,
     pub access_token_authority: Option<AccessTokenAuthorityConfig>,
+    pub guest_bootstrap_enabled: bool,
+    pub guest_project_ttl: Duration,
+    pub guest_project_limit: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -84,6 +87,24 @@ impl Config {
             authority.validate()?;
         }
         self.access_token_authority = access_token_authority;
+        Ok(())
+    }
+
+    pub fn apply_guest_bootstrap(
+        &mut self,
+        enabled: bool,
+        ttl: Duration,
+        project_limit: u32,
+    ) -> Result<(), String> {
+        if !(Duration::from_secs(60 * 60)..=Duration::from_secs(30 * 24 * 60 * 60)).contains(&ttl) {
+            return Err("guest project TTL must be between 1 hour and 30 days".to_string());
+        }
+        if !(1..=1_000_000).contains(&project_limit) {
+            return Err("guest project limit must be between 1 and 1000000".to_string());
+        }
+        self.guest_bootstrap_enabled = enabled;
+        self.guest_project_ttl = ttl;
+        self.guest_project_limit = project_limit;
         Ok(())
     }
 
@@ -167,6 +188,9 @@ impl Config {
             provider_registry_file,
             runtime_extensions: Vec::new(),
             access_token_authority,
+            guest_bootstrap_enabled: false,
+            guest_project_ttl: Duration::from_secs(7 * 24 * 60 * 60),
+            guest_project_limit: 10_000,
         })
     }
 }

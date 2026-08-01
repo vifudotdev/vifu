@@ -107,6 +107,10 @@ impl Config {
             .join(format!("{:016x}", stable_server_hash(&self.server_url)))
     }
 
+    pub fn runtime_database_file(&self) -> PathBuf {
+        self.home_dir.join("runtime.sqlite")
+    }
+
     pub fn openclaw_provider(&self) -> Option<&AgentProviderConfig> {
         self.agent_providers
             .iter()

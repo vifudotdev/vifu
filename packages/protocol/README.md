@@ -1,20 +1,26 @@
 # @vifu/protocol
 
-Shared TypeScript definitions for Vifu gateway protocol messages.
+Shared TypeScript definitions for Vifu transport-neutral protocol messages.
 
-Vifu uses a small JSON frame model for gateway transports:
+Vifu uses a small JSON frame model across embedded and network transports:
 
 - `type: "req"` with `id`, `method`, and optional `params`
 - `type: "res"` with `id`, `ok`, and optional `payload` or `error`
 - `type: "event"` with `event` and optional `payload`
 
-This package also defines the current Vifu Agent Gateway method, event, and
-payload shapes. Product APIs such as endpoint invocation are HTTP contracts and
-are intentionally kept outside this gateway frame package.
+This package defines two contracts on that frame model:
+
+- Runtime Bridge methods and events used by native hosts, Godot, Unity, Unreal,
+  and other application adapters;
+- Agent Gateway methods and events used to connect remote provider resources to
+  Vifu Server.
+
+Runtime Bridge frames can cross an in-process FFI boundary or a WebSocket
+without changing application behavior. Product-facing Server endpoints remain
+HTTP contracts and are intentionally kept outside this package.
 
 ## Contract Testing
 
-The JSON files in `fixtures/gateway-frame/` are the shared protocol contract for
-TypeScript and Rust. Both `@vifu/protocol` tests and `vifu-gateway` tests parse the
-same fixture directory, so adding or changing a gateway frame fixture must keep
-both language implementations compatible.
+The JSON files in `fixtures/gateway-frame/` and `fixtures/runtime-bridge/` are
+shared protocol contracts. TypeScript and Rust tests parse these fixtures so a
+frame change must keep both language implementations compatible.
