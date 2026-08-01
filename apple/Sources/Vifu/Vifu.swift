@@ -441,6 +441,22 @@ fileprivate struct FfiConverterUInt16: FfiConverterPrimitive {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterUInt32: FfiConverterPrimitive {
+    typealias FfiType = UInt32
+    typealias SwiftType = UInt32
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> UInt32 {
+        return try lift(readInt(&buf))
+    }
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterUInt64: FfiConverterPrimitive {
     typealias FfiType = UInt64
     typealias SwiftType = UInt64
@@ -516,11 +532,177 @@ fileprivate struct FfiConverterData: FfiConverterRustBuffer {
 
 
 
+public protocol VifuEmbeddedGatewayProtocol: AnyObject, Sendable {
+
+    /**
+     * Starts the optional network Gateway. The credential remains in memory.
+     */
+    func start(gatewayCredential: String, enrollmentToken: String?) throws
+
+    func status() throws  -> VifuEmbeddedGatewayStatus
+
+    func stop() throws
+
+}
+open class VifuEmbeddedGateway: VifuEmbeddedGatewayProtocol, @unchecked Sendable {
+    fileprivate let handle: UInt64
+
+    /// Used to instantiate a [FFIObject] without an actual handle, for fakes in tests, mostly.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public struct NoHandle {
+        public init() {}
+    }
+
+    // TODO: We'd like this to be `private` but for Swifty reasons,
+    // we can't implement `FfiConverter` without making this `required` and we can't
+    // make it `required` without making it `public`.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    required public init(unsafeFromHandle handle: UInt64) {
+        self.handle = handle
+    }
+
+    // This constructor can be used to instantiate a fake object.
+    // - Parameter noHandle: Placeholder value so we can have a constructor separate from the default empty one that may be implemented for classes extending [FFIObject].
+    //
+    // - Warning:
+    //     Any object instantiated with this constructor cannot be passed to an actual Rust-backed object. Since there isn't a backing handle the FFI lower functions will crash.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public init(noHandle: NoHandle) {
+        self.handle = 0
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public func uniffiCloneHandle() -> UInt64 {
+        return try! rustCall { uniffi_vifu_mobile_ffi_fn_clone_vifuembeddedgateway(self.handle, $0) }
+    }
+public convenience init(runtime: VifuEmbeddedRuntime, config: VifuEmbeddedGatewayConfig)throws  {
+    let handle =
+        try rustCallWithError(FfiConverterTypeVifuRuntimeError_lift) {
+    uniffi_vifu_mobile_ffi_fn_constructor_vifuembeddedgateway_new(
+        FfiConverterTypeVifuEmbeddedRuntime_lower(runtime),
+        FfiConverterTypeVifuEmbeddedGatewayConfig_lower(config),$0
+    )
+}
+    self.init(unsafeFromHandle: handle)
+}
+
+    deinit {
+        try! rustCall { uniffi_vifu_mobile_ffi_fn_free_vifuembeddedgateway(handle, $0) }
+    }
+
+
+
+
+    /**
+     * Starts the optional network Gateway. The credential remains in memory.
+     */
+open func start(gatewayCredential: String, enrollmentToken: String?)throws   {try rustCallWithError(FfiConverterTypeVifuRuntimeError_lift) {
+    uniffi_vifu_mobile_ffi_fn_method_vifuembeddedgateway_start(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(gatewayCredential),
+        FfiConverterOptionString.lower(enrollmentToken),$0
+    )
+}
+}
+
+open func status()throws  -> VifuEmbeddedGatewayStatus  {
+    return try  FfiConverterTypeVifuEmbeddedGatewayStatus_lift(try rustCallWithError(FfiConverterTypeVifuRuntimeError_lift) {
+    uniffi_vifu_mobile_ffi_fn_method_vifuembeddedgateway_status(
+            self.uniffiCloneHandle(),$0
+    )
+})
+}
+
+open func stop()throws   {try rustCallWithError(FfiConverterTypeVifuRuntimeError_lift) {
+    uniffi_vifu_mobile_ffi_fn_method_vifuembeddedgateway_stop(
+            self.uniffiCloneHandle(),$0
+    )
+}
+}
+
+
+
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeVifuEmbeddedGateway: FfiConverter {
+    typealias FfiType = UInt64
+    typealias SwiftType = VifuEmbeddedGateway
+
+    public static func lift(_ handle: UInt64) throws -> VifuEmbeddedGateway {
+        return VifuEmbeddedGateway(unsafeFromHandle: handle)
+    }
+
+    public static func lower(_ value: VifuEmbeddedGateway) -> UInt64 {
+        return value.uniffiCloneHandle()
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> VifuEmbeddedGateway {
+        let handle: UInt64 = try readInt(&buf)
+        return try lift(handle)
+    }
+
+    public static func write(_ value: VifuEmbeddedGateway, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeVifuEmbeddedGateway_lift(_ handle: UInt64) throws -> VifuEmbeddedGateway {
+    return try FfiConverterTypeVifuEmbeddedGateway.lift(handle)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeVifuEmbeddedGateway_lower(_ value: VifuEmbeddedGateway) -> UInt64 {
+    return FfiConverterTypeVifuEmbeddedGateway.lower(value)
+}
+
+
+
+
+
+
 public protocol VifuEmbeddedRuntimeProtocol: AnyObject, Sendable {
+
+    func acknowledgeRuntimeTraces(traceIds: [String]) throws
+
+    func activateRuntimeRelease(version: UInt64) throws  -> String
+
+    func bootstrapRuntimeRelease(manifestJson: String) throws  -> UInt64
 
     func cancelInvocation(handle: String) throws
 
+    func currentRuntimeManifest() throws  -> String?
+
+    func drainBridgeFrames() throws  -> [String]
+
+    func drainInvocationEvents(handle: String) throws  -> [VifuInvocationEvent]
+
     func exportSnapshot() throws  -> Data
+
+    func handleBridgeFrame(encodedFrame: String) throws  -> [String]
+
+    func installRuntimeRelease(version: UInt64, manifestJson: String) throws  -> String
+
+    func localProviderBindings() throws  -> String
+
+    func pendingRuntimeTraces(limit: UInt32) throws  -> String
 
     func pollInvocation(handle: String) throws  -> VifuInvocationPoll
 
@@ -528,9 +710,15 @@ public protocol VifuEmbeddedRuntimeProtocol: AnyObject, Sendable {
 
     func registerEndpoint(name: String, agentId: String, capability: String, timeoutMs: UInt64) throws
 
+    func registerLlamaProvider(providerId: String, config: VifuLlamaProviderConfig) throws
+
     func registerProvider(providerId: String, provider: VifuAgentProvider) throws
 
+    func restoreActiveRuntimeRelease() throws  -> UInt64?
+
     func restoreSnapshot(snapshot: Data) throws
+
+    func saveLocalProviderBinding(providerId: String, configurationJson: String) throws
 
     func startInvoke(endpoint: String, sessionId: String, data: VifuInvocationData, metadataJson: String) throws  -> String
 
@@ -591,7 +779,45 @@ public convenience init(projectId: String)throws  {
     }
 
 
+    /**
+     * Opens an embedded runtime whose project state survives app restarts.
+     */
+public static func `open`(projectId: String, databasePath: String)throws  -> VifuEmbeddedRuntime  {
+    return try  FfiConverterTypeVifuEmbeddedRuntime_lift(try rustCallWithError(FfiConverterTypeVifuRuntimeError_lift) {
+    uniffi_vifu_mobile_ffi_fn_constructor_vifuembeddedruntime_open(
+        FfiConverterString.lower(projectId),
+        FfiConverterString.lower(databasePath),$0
+    )
+})
+}
 
+
+
+open func acknowledgeRuntimeTraces(traceIds: [String])throws   {try rustCallWithError(FfiConverterTypeVifuRuntimeError_lift) {
+    uniffi_vifu_mobile_ffi_fn_method_vifuembeddedruntime_acknowledge_runtime_traces(
+            self.uniffiCloneHandle(),
+        FfiConverterSequenceString.lower(traceIds),$0
+    )
+}
+}
+
+open func activateRuntimeRelease(version: UInt64)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeVifuRuntimeError_lift) {
+    uniffi_vifu_mobile_ffi_fn_method_vifuembeddedruntime_activate_runtime_release(
+            self.uniffiCloneHandle(),
+        FfiConverterUInt64.lower(version),$0
+    )
+})
+}
+
+open func bootstrapRuntimeRelease(manifestJson: String)throws  -> UInt64  {
+    return try  FfiConverterUInt64.lift(try rustCallWithError(FfiConverterTypeVifuRuntimeError_lift) {
+    uniffi_vifu_mobile_ffi_fn_method_vifuembeddedruntime_bootstrap_runtime_release(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(manifestJson),$0
+    )
+})
+}
 
 open func cancelInvocation(handle: String)throws   {try rustCallWithError(FfiConverterTypeVifuRuntimeError_lift) {
     uniffi_vifu_mobile_ffi_fn_method_vifuembeddedruntime_cancel_invocation(
@@ -601,10 +827,71 @@ open func cancelInvocation(handle: String)throws   {try rustCallWithError(FfiCon
 }
 }
 
+open func currentRuntimeManifest()throws  -> String?  {
+    return try  FfiConverterOptionString.lift(try rustCallWithError(FfiConverterTypeVifuRuntimeError_lift) {
+    uniffi_vifu_mobile_ffi_fn_method_vifuembeddedruntime_current_runtime_manifest(
+            self.uniffiCloneHandle(),$0
+    )
+})
+}
+
+open func drainBridgeFrames()throws  -> [String]  {
+    return try  FfiConverterSequenceString.lift(try rustCallWithError(FfiConverterTypeVifuRuntimeError_lift) {
+    uniffi_vifu_mobile_ffi_fn_method_vifuembeddedruntime_drain_bridge_frames(
+            self.uniffiCloneHandle(),$0
+    )
+})
+}
+
+open func drainInvocationEvents(handle: String)throws  -> [VifuInvocationEvent]  {
+    return try  FfiConverterSequenceTypeVifuInvocationEvent.lift(try rustCallWithError(FfiConverterTypeVifuRuntimeError_lift) {
+    uniffi_vifu_mobile_ffi_fn_method_vifuembeddedruntime_drain_invocation_events(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(handle),$0
+    )
+})
+}
+
 open func exportSnapshot()throws  -> Data  {
     return try  FfiConverterData.lift(try rustCallWithError(FfiConverterTypeVifuRuntimeError_lift) {
     uniffi_vifu_mobile_ffi_fn_method_vifuembeddedruntime_export_snapshot(
             self.uniffiCloneHandle(),$0
+    )
+})
+}
+
+open func handleBridgeFrame(encodedFrame: String)throws  -> [String]  {
+    return try  FfiConverterSequenceString.lift(try rustCallWithError(FfiConverterTypeVifuRuntimeError_lift) {
+    uniffi_vifu_mobile_ffi_fn_method_vifuembeddedruntime_handle_bridge_frame(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(encodedFrame),$0
+    )
+})
+}
+
+open func installRuntimeRelease(version: UInt64, manifestJson: String)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeVifuRuntimeError_lift) {
+    uniffi_vifu_mobile_ffi_fn_method_vifuembeddedruntime_install_runtime_release(
+            self.uniffiCloneHandle(),
+        FfiConverterUInt64.lower(version),
+        FfiConverterString.lower(manifestJson),$0
+    )
+})
+}
+
+open func localProviderBindings()throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeVifuRuntimeError_lift) {
+    uniffi_vifu_mobile_ffi_fn_method_vifuembeddedruntime_local_provider_bindings(
+            self.uniffiCloneHandle(),$0
+    )
+})
+}
+
+open func pendingRuntimeTraces(limit: UInt32)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeVifuRuntimeError_lift) {
+    uniffi_vifu_mobile_ffi_fn_method_vifuembeddedruntime_pending_runtime_traces(
+            self.uniffiCloneHandle(),
+        FfiConverterUInt32.lower(limit),$0
     )
 })
 }
@@ -641,6 +928,15 @@ open func registerEndpoint(name: String, agentId: String, capability: String, ti
 }
 }
 
+open func registerLlamaProvider(providerId: String, config: VifuLlamaProviderConfig)throws   {try rustCallWithError(FfiConverterTypeVifuRuntimeError_lift) {
+    uniffi_vifu_mobile_ffi_fn_method_vifuembeddedruntime_register_llama_provider(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(providerId),
+        FfiConverterTypeVifuLlamaProviderConfig_lower(config),$0
+    )
+}
+}
+
 open func registerProvider(providerId: String, provider: VifuAgentProvider)throws   {try rustCallWithError(FfiConverterTypeVifuRuntimeError_lift) {
     uniffi_vifu_mobile_ffi_fn_method_vifuembeddedruntime_register_provider(
             self.uniffiCloneHandle(),
@@ -650,10 +946,27 @@ open func registerProvider(providerId: String, provider: VifuAgentProvider)throw
 }
 }
 
+open func restoreActiveRuntimeRelease()throws  -> UInt64?  {
+    return try  FfiConverterOptionUInt64.lift(try rustCallWithError(FfiConverterTypeVifuRuntimeError_lift) {
+    uniffi_vifu_mobile_ffi_fn_method_vifuembeddedruntime_restore_active_runtime_release(
+            self.uniffiCloneHandle(),$0
+    )
+})
+}
+
 open func restoreSnapshot(snapshot: Data)throws   {try rustCallWithError(FfiConverterTypeVifuRuntimeError_lift) {
     uniffi_vifu_mobile_ffi_fn_method_vifuembeddedruntime_restore_snapshot(
             self.uniffiCloneHandle(),
         FfiConverterData.lower(snapshot),$0
+    )
+}
+}
+
+open func saveLocalProviderBinding(providerId: String, configurationJson: String)throws   {try rustCallWithError(FfiConverterTypeVifuRuntimeError_lift) {
+    uniffi_vifu_mobile_ffi_fn_method_vifuembeddedruntime_save_local_provider_binding(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(providerId),
+        FfiConverterString.lower(configurationJson),$0
     )
 }
 }
@@ -725,6 +1038,226 @@ public func FfiConverterTypeVifuEmbeddedRuntime_lower(_ value: VifuEmbeddedRunti
 }
 
 
+
+
+public struct VifuEmbeddedGatewayConfig: Equatable, Hashable {
+    public var serverUrl: String
+    public var gatewayId: String
+    public var runtimeDatabasePath: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(serverUrl: String, gatewayId: String, runtimeDatabasePath: String) {
+        self.serverUrl = serverUrl
+        self.gatewayId = gatewayId
+        self.runtimeDatabasePath = runtimeDatabasePath
+    }
+
+
+}
+
+#if compiler(>=6)
+extension VifuEmbeddedGatewayConfig: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeVifuEmbeddedGatewayConfig: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> VifuEmbeddedGatewayConfig {
+        return
+            try VifuEmbeddedGatewayConfig(
+                serverUrl: FfiConverterString.read(from: &buf),
+                gatewayId: FfiConverterString.read(from: &buf),
+                runtimeDatabasePath: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: VifuEmbeddedGatewayConfig, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.serverUrl, into: &buf)
+        FfiConverterString.write(value.gatewayId, into: &buf)
+        FfiConverterString.write(value.runtimeDatabasePath, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeVifuEmbeddedGatewayConfig_lift(_ buf: RustBuffer) throws -> VifuEmbeddedGatewayConfig {
+    return try FfiConverterTypeVifuEmbeddedGatewayConfig.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeVifuEmbeddedGatewayConfig_lower(_ value: VifuEmbeddedGatewayConfig) -> RustBuffer {
+    return FfiConverterTypeVifuEmbeddedGatewayConfig.lower(value)
+}
+
+
+public struct VifuEmbeddedGatewayStatus: Equatable, Hashable {
+    public var state: VifuEmbeddedGatewayState
+    public var lastError: String?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(state: VifuEmbeddedGatewayState, lastError: String?) {
+        self.state = state
+        self.lastError = lastError
+    }
+
+
+}
+
+#if compiler(>=6)
+extension VifuEmbeddedGatewayStatus: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeVifuEmbeddedGatewayStatus: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> VifuEmbeddedGatewayStatus {
+        return
+            try VifuEmbeddedGatewayStatus(
+                state: FfiConverterTypeVifuEmbeddedGatewayState.read(from: &buf),
+                lastError: FfiConverterOptionString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: VifuEmbeddedGatewayStatus, into buf: inout [UInt8]) {
+        FfiConverterTypeVifuEmbeddedGatewayState.write(value.state, into: &buf)
+        FfiConverterOptionString.write(value.lastError, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeVifuEmbeddedGatewayStatus_lift(_ buf: RustBuffer) throws -> VifuEmbeddedGatewayStatus {
+    return try FfiConverterTypeVifuEmbeddedGatewayStatus.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeVifuEmbeddedGatewayStatus_lower(_ value: VifuEmbeddedGatewayStatus) -> RustBuffer {
+    return FfiConverterTypeVifuEmbeddedGatewayStatus.lower(value)
+}
+
+
+public struct VifuGeneratedGatewayIdentity: Equatable, Hashable {
+    public var gatewayId: String
+    public var credential: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(gatewayId: String, credential: String) {
+        self.gatewayId = gatewayId
+        self.credential = credential
+    }
+
+
+}
+
+#if compiler(>=6)
+extension VifuGeneratedGatewayIdentity: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeVifuGeneratedGatewayIdentity: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> VifuGeneratedGatewayIdentity {
+        return
+            try VifuGeneratedGatewayIdentity(
+                gatewayId: FfiConverterString.read(from: &buf),
+                credential: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: VifuGeneratedGatewayIdentity, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.gatewayId, into: &buf)
+        FfiConverterString.write(value.credential, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeVifuGeneratedGatewayIdentity_lift(_ buf: RustBuffer) throws -> VifuGeneratedGatewayIdentity {
+    return try FfiConverterTypeVifuGeneratedGatewayIdentity.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeVifuGeneratedGatewayIdentity_lower(_ value: VifuGeneratedGatewayIdentity) -> RustBuffer {
+    return FfiConverterTypeVifuGeneratedGatewayIdentity.lower(value)
+}
+
+
+public struct VifuInvocationEvent: Equatable, Hashable {
+    public var sequence: UInt64
+    public var kind: VifuInvocationEventKind
+    public var data: VifuInvocationData?
+    public var error: String?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(sequence: UInt64, kind: VifuInvocationEventKind, data: VifuInvocationData?, error: String?) {
+        self.sequence = sequence
+        self.kind = kind
+        self.data = data
+        self.error = error
+    }
+
+
+}
+
+#if compiler(>=6)
+extension VifuInvocationEvent: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeVifuInvocationEvent: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> VifuInvocationEvent {
+        return
+            try VifuInvocationEvent(
+                sequence: FfiConverterUInt64.read(from: &buf),
+                kind: FfiConverterTypeVifuInvocationEventKind.read(from: &buf),
+                data: FfiConverterOptionTypeVifuInvocationData.read(from: &buf),
+                error: FfiConverterOptionString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: VifuInvocationEvent, into buf: inout [UInt8]) {
+        FfiConverterUInt64.write(value.sequence, into: &buf)
+        FfiConverterTypeVifuInvocationEventKind.write(value.kind, into: &buf)
+        FfiConverterOptionTypeVifuInvocationData.write(value.data, into: &buf)
+        FfiConverterOptionString.write(value.error, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeVifuInvocationEvent_lift(_ buf: RustBuffer) throws -> VifuInvocationEvent {
+    return try FfiConverterTypeVifuInvocationEvent.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeVifuInvocationEvent_lower(_ value: VifuInvocationEvent) -> RustBuffer {
+    return FfiConverterTypeVifuInvocationEvent.lower(value)
+}
 
 
 public struct VifuInvocationPoll: Equatable, Hashable {
@@ -876,6 +1409,66 @@ public func FfiConverterTypeVifuInvocationResult_lift(_ buf: RustBuffer) throws 
 #endif
 public func FfiConverterTypeVifuInvocationResult_lower(_ value: VifuInvocationResult) -> RustBuffer {
     return FfiConverterTypeVifuInvocationResult.lower(value)
+}
+
+
+public struct VifuLlamaProviderConfig: Equatable, Hashable {
+    public var modelPath: String
+    public var contextSize: UInt32
+    public var gpuLayers: UInt32
+    public var defaultMaxTokens: UInt32
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(modelPath: String, contextSize: UInt32, gpuLayers: UInt32, defaultMaxTokens: UInt32) {
+        self.modelPath = modelPath
+        self.contextSize = contextSize
+        self.gpuLayers = gpuLayers
+        self.defaultMaxTokens = defaultMaxTokens
+    }
+
+
+}
+
+#if compiler(>=6)
+extension VifuLlamaProviderConfig: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeVifuLlamaProviderConfig: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> VifuLlamaProviderConfig {
+        return
+            try VifuLlamaProviderConfig(
+                modelPath: FfiConverterString.read(from: &buf),
+                contextSize: FfiConverterUInt32.read(from: &buf),
+                gpuLayers: FfiConverterUInt32.read(from: &buf),
+                defaultMaxTokens: FfiConverterUInt32.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: VifuLlamaProviderConfig, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.modelPath, into: &buf)
+        FfiConverterUInt32.write(value.contextSize, into: &buf)
+        FfiConverterUInt32.write(value.gpuLayers, into: &buf)
+        FfiConverterUInt32.write(value.defaultMaxTokens, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeVifuLlamaProviderConfig_lift(_ buf: RustBuffer) throws -> VifuLlamaProviderConfig {
+    return try FfiConverterTypeVifuLlamaProviderConfig.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeVifuLlamaProviderConfig_lower(_ value: VifuLlamaProviderConfig) -> RustBuffer {
+    return FfiConverterTypeVifuLlamaProviderConfig.lower(value)
 }
 
 
@@ -1177,6 +1770,78 @@ public func FfiConverterTypeVifuRuntimeConfig_lower(_ value: VifuRuntimeConfig) 
 // Note that we don't yet support `indirect` for enums.
 // See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
 
+public enum VifuEmbeddedGatewayState: Equatable, Hashable {
+
+    case stopped
+    case running
+    case failed
+
+
+
+}
+
+#if compiler(>=6)
+extension VifuEmbeddedGatewayState: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeVifuEmbeddedGatewayState: FfiConverterRustBuffer {
+    typealias SwiftType = VifuEmbeddedGatewayState
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> VifuEmbeddedGatewayState {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        case 1: return .stopped
+
+        case 2: return .running
+
+        case 3: return .failed
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: VifuEmbeddedGatewayState, into buf: inout [UInt8]) {
+        switch value {
+
+
+        case .stopped:
+            writeInt(&buf, Int32(1))
+
+
+        case .running:
+            writeInt(&buf, Int32(2))
+
+
+        case .failed:
+            writeInt(&buf, Int32(3))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeVifuEmbeddedGatewayState_lift(_ buf: RustBuffer) throws -> VifuEmbeddedGatewayState {
+    return try FfiConverterTypeVifuEmbeddedGatewayState.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeVifuEmbeddedGatewayState_lower(_ value: VifuEmbeddedGatewayState) -> RustBuffer {
+    return FfiConverterTypeVifuEmbeddedGatewayState.lower(value)
+}
+
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+
 public enum VifuInvocationData: Equatable, Hashable {
 
     case json(json: String
@@ -1242,6 +1907,92 @@ public func FfiConverterTypeVifuInvocationData_lift(_ buf: RustBuffer) throws ->
 #endif
 public func FfiConverterTypeVifuInvocationData_lower(_ value: VifuInvocationData) -> RustBuffer {
     return FfiConverterTypeVifuInvocationData.lower(value)
+}
+
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+
+public enum VifuInvocationEventKind: Equatable, Hashable {
+
+    case started
+    case outputDelta
+    case completed
+    case failed
+    case cancelled
+
+
+
+}
+
+#if compiler(>=6)
+extension VifuInvocationEventKind: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeVifuInvocationEventKind: FfiConverterRustBuffer {
+    typealias SwiftType = VifuInvocationEventKind
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> VifuInvocationEventKind {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        case 1: return .started
+
+        case 2: return .outputDelta
+
+        case 3: return .completed
+
+        case 4: return .failed
+
+        case 5: return .cancelled
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: VifuInvocationEventKind, into buf: inout [UInt8]) {
+        switch value {
+
+
+        case .started:
+            writeInt(&buf, Int32(1))
+
+
+        case .outputDelta:
+            writeInt(&buf, Int32(2))
+
+
+        case .completed:
+            writeInt(&buf, Int32(3))
+
+
+        case .failed:
+            writeInt(&buf, Int32(4))
+
+
+        case .cancelled:
+            writeInt(&buf, Int32(5))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeVifuInvocationEventKind_lift(_ buf: RustBuffer) throws -> VifuInvocationEventKind {
+    return try FfiConverterTypeVifuInvocationEventKind.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeVifuInvocationEventKind_lower(_ value: VifuInvocationEventKind) -> RustBuffer {
+    return FfiConverterTypeVifuInvocationEventKind.lower(value)
 }
 
 
@@ -1611,6 +2362,30 @@ public func FfiConverterCallbackInterfaceVifuAgentProvider_lower(_ v: VifuAgentP
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionUInt64: FfiConverterRustBuffer {
+    typealias SwiftType = UInt64?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterUInt64.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterUInt64.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterOptionString: FfiConverterRustBuffer {
     typealias SwiftType = String?
 
@@ -1659,6 +2434,30 @@ fileprivate struct FfiConverterOptionTypeVifuInvocationResult: FfiConverterRustB
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionTypeVifuInvocationData: FfiConverterRustBuffer {
+    typealias SwiftType = VifuInvocationData?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeVifuInvocationData.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeVifuInvocationData.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceString: FfiConverterRustBuffer {
     typealias SwiftType = [String]
 
@@ -1680,9 +2479,40 @@ fileprivate struct FfiConverterSequenceString: FfiConverterRustBuffer {
         return seq
     }
 }
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeVifuInvocationEvent: FfiConverterRustBuffer {
+    typealias SwiftType = [VifuInvocationEvent]
+
+    public static func write(_ value: [VifuInvocationEvent], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeVifuInvocationEvent.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [VifuInvocationEvent] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [VifuInvocationEvent]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeVifuInvocationEvent.read(from: &buf))
+        }
+        return seq
+    }
+}
 public func defaultVifuRuntimeConfig() -> VifuRuntimeConfig  {
     return try!  FfiConverterTypeVifuRuntimeConfig_lift(try! rustCall() {
     uniffi_vifu_mobile_ffi_fn_func_default_vifu_runtime_config($0
+    )
+})
+}
+public func generateVifuGatewayIdentity() -> VifuGeneratedGatewayIdentity  {
+    return try!  FfiConverterTypeVifuGeneratedGatewayIdentity_lift(try! rustCall() {
+    uniffi_vifu_mobile_ffi_fn_func_generate_vifu_gateway_identity($0
     )
 })
 }
@@ -1726,6 +2556,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_vifu_mobile_ffi_checksum_func_default_vifu_runtime_config() != 26688) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_vifu_mobile_ffi_checksum_func_generate_vifu_gateway_identity() != 46793) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_vifu_mobile_ffi_checksum_func_parse_vifu_openclaw_endpoint() != 65405) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -1735,10 +2568,49 @@ private let initializationResult: InitializationResult = {
     if (uniffi_vifu_mobile_ffi_checksum_func_vifu_agent_gateway_websocket_url() != 29614) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_vifu_mobile_ffi_checksum_method_vifuembeddedgateway_start() != 64091) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_vifu_mobile_ffi_checksum_method_vifuembeddedgateway_status() != 52520) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_vifu_mobile_ffi_checksum_method_vifuembeddedgateway_stop() != 62439) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_vifu_mobile_ffi_checksum_method_vifuembeddedruntime_acknowledge_runtime_traces() != 8803) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_vifu_mobile_ffi_checksum_method_vifuembeddedruntime_activate_runtime_release() != 51362) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_vifu_mobile_ffi_checksum_method_vifuembeddedruntime_bootstrap_runtime_release() != 52776) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_vifu_mobile_ffi_checksum_method_vifuembeddedruntime_cancel_invocation() != 5302) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_vifu_mobile_ffi_checksum_method_vifuembeddedruntime_current_runtime_manifest() != 45698) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_vifu_mobile_ffi_checksum_method_vifuembeddedruntime_drain_bridge_frames() != 57941) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_vifu_mobile_ffi_checksum_method_vifuembeddedruntime_drain_invocation_events() != 43162) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_vifu_mobile_ffi_checksum_method_vifuembeddedruntime_export_snapshot() != 20482) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_vifu_mobile_ffi_checksum_method_vifuembeddedruntime_handle_bridge_frame() != 51400) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_vifu_mobile_ffi_checksum_method_vifuembeddedruntime_install_runtime_release() != 55784) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_vifu_mobile_ffi_checksum_method_vifuembeddedruntime_local_provider_bindings() != 43550) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_vifu_mobile_ffi_checksum_method_vifuembeddedruntime_pending_runtime_traces() != 51270) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_vifu_mobile_ffi_checksum_method_vifuembeddedruntime_poll_invocation() != 43945) {
@@ -1750,10 +2622,19 @@ private let initializationResult: InitializationResult = {
     if (uniffi_vifu_mobile_ffi_checksum_method_vifuembeddedruntime_register_endpoint() != 40639) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_vifu_mobile_ffi_checksum_method_vifuembeddedruntime_register_llama_provider() != 64019) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_vifu_mobile_ffi_checksum_method_vifuembeddedruntime_register_provider() != 20943) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_vifu_mobile_ffi_checksum_method_vifuembeddedruntime_restore_active_runtime_release() != 9118) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_vifu_mobile_ffi_checksum_method_vifuembeddedruntime_restore_snapshot() != 27682) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_vifu_mobile_ffi_checksum_method_vifuembeddedruntime_save_local_provider_binding() != 26812) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_vifu_mobile_ffi_checksum_method_vifuembeddedruntime_start_invoke() != 3212) {
@@ -1762,7 +2643,13 @@ private let initializationResult: InitializationResult = {
     if (uniffi_vifu_mobile_ffi_checksum_method_vifuembeddedruntime_take_invocation() != 12713) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_vifu_mobile_ffi_checksum_constructor_vifuembeddedgateway_new() != 10979) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_vifu_mobile_ffi_checksum_constructor_vifuembeddedruntime_new() != 679) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_vifu_mobile_ffi_checksum_constructor_vifuembeddedruntime_open() != 13814) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_vifu_mobile_ffi_checksum_method_vifuagentprovider_invoke() != 55210) {

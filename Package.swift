@@ -3,7 +3,14 @@
 import Foundation
 import PackageDescription
 
-let localArtifact = ProcessInfo.processInfo.environment["VIFU_SWIFT_LOCAL_ARTIFACT"]
+let generatedLocalArtifact = "Frameworks/VifuMobileFFI.xcframework"
+let configuredLocalArtifact = ProcessInfo.processInfo.environment["VIFU_SWIFT_LOCAL_ARTIFACT"]
+let packageRoot = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+let generatedLocalArtifactURL = packageRoot.appendingPathComponent(generatedLocalArtifact)
+let localArtifact = configuredLocalArtifact
+    ?? (FileManager.default.fileExists(atPath: generatedLocalArtifactURL.path)
+        ? generatedLocalArtifact
+        : nil)
 let ffiTarget: Target
 
 if let localArtifact {
@@ -35,7 +42,14 @@ let package = Package(
         .target(
             name: "Vifu",
             dependencies: ["VifuMobileFFI"],
-            path: "apple/Sources/Vifu"
+            path: "apple/Sources/Vifu",
+            linkerSettings: [
+                .linkedLibrary("c++"),
+                .linkedFramework("Accelerate"),
+                .linkedFramework("Metal"),
+                .linkedFramework("MetalKit"),
+                .linkedFramework("Security"),
+            ]
         ),
         .testTarget(
             name: "VifuTests",

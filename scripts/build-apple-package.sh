@@ -5,17 +5,21 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TARGET_DIR="${CARGO_TARGET_DIR:-$REPO_ROOT/target/vifu-apple}"
 DIST_DIR="${VIFU_APPLE_DIST_DIR:-$REPO_ROOT/target/vifu-apple-dist}"
+LOCAL_XCFRAMEWORK="$REPO_ROOT/Frameworks/VifuMobileFFI.xcframework"
 SWIFT_SOURCE="$REPO_ROOT/apple/Sources/Vifu/Vifu.swift"
 FFI_CRATE="vifu-mobile-ffi"
 FFI_LIBRARY="libvifu_mobile_ffi.a"
+FFI_FEATURES="${VIFU_APPLE_FFI_FEATURES:-local-llama}"
 UPDATE_BINDINGS=false
+MACOS_ONLY=false
 
 usage() {
     cat <<'EOF'
-Usage: scripts/build-apple-package.sh [--update-bindings]
+Usage: scripts/build-apple-package.sh [--update-bindings] [--macos-only]
 
 Builds VifuMobileFFI.xcframework for iOS, iOS Simulator, and macOS.
 The optional flag refreshes the tracked UniFFI Swift wrapper.
+Use --macos-only for a smaller local macOS development artifact.
 EOF
 }
 
@@ -23,6 +27,9 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         --update-bindings)
             UPDATE_BINDINGS=true
+            ;;
+        --macos-only)
+            MACOS_ONLY=true
             ;;
         -h|--help)
             usage
@@ -36,13 +43,17 @@ while [[ $# -gt 0 ]]; do
     shift
 done
 
-required_targets=(
-    aarch64-apple-ios
-    aarch64-apple-ios-sim
-    x86_64-apple-ios
-    aarch64-apple-darwin
-    x86_64-apple-darwin
-)
+if [[ "$MACOS_ONLY" == "true" ]]; then
+    required_targets=(aarch64-apple-darwin)
+else
+    required_targets=(
+        aarch64-apple-ios
+        aarch64-apple-ios-sim
+        x86_64-apple-ios
+        aarch64-apple-darwin
+        x86_64-apple-darwin
+    )
+fi
 
 if [[ "$UPDATE_BINDINGS" != "true" ]]; then
     installed_targets="$(rustup target list --installed)"
@@ -64,6 +75,7 @@ trap 'rm -rf "$work_dir"' EXIT
 export CARGO_TARGET_DIR="$TARGET_DIR"
 export IPHONEOS_DEPLOYMENT_TARGET="${IPHONEOS_DEPLOYMENT_TARGET:-17.0}"
 export MACOSX_DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET:-14.0}"
+export GGML_CCACHE="${GGML_CCACHE:-OFF}"
 
 if [[ "$UPDATE_BINDINGS" != "true" ]]; then
     for target in "${required_targets[@]}"; do
@@ -72,6 +84,7 @@ if [[ "$UPDATE_BINDINGS" != "true" ]]; then
             --locked \
             --release \
             -p "$FFI_CRATE" \
+            --features "$FFI_FEATURES" \
             --target "$target"
     done
 fi
@@ -81,11 +94,13 @@ mkdir -p "$bindings_dir"
 cargo build \
     --manifest-path "$REPO_ROOT/Cargo.toml" \
     --locked \
-    -p "$FFI_CRATE"
+    -p "$FFI_CRATE" \
+    --features "$FFI_FEATURES"
 cargo build \
     --manifest-path "$REPO_ROOT/Cargo.toml" \
     --locked \
     -p "$FFI_CRATE" \
+    --features "$FFI_FEATURES" \
     --bin uniffi-bindgen
 env -u CARGO_TARGET_DIR "$TARGET_DIR/debug/uniffi-bindgen" generate \
     --library "$TARGET_DIR/debug/libvifu_mobile_ffi.dylib" \
@@ -114,34 +129,48 @@ mkdir -p "$headers_dir"
 cp "$generated_header" "$headers_dir/vifu_mobile_ffiFFI.h"
 cp "$generated_modulemap" "$headers_dir/module.modulemap"
 
-device_dir="$work_dir/ios-device"
-simulator_dir="$work_dir/ios-simulator"
 macos_dir="$work_dir/macos"
-mkdir -p "$device_dir" "$simulator_dir" "$macos_dir"
+mkdir -p "$macos_dir"
 
-cp \
-    "$TARGET_DIR/aarch64-apple-ios/release/$FFI_LIBRARY" \
-    "$device_dir/libVifuMobileFFI.a"
-lipo -create \
-    "$TARGET_DIR/aarch64-apple-ios-sim/release/$FFI_LIBRARY" \
-    "$TARGET_DIR/x86_64-apple-ios/release/$FFI_LIBRARY" \
-    -output "$simulator_dir/libVifuMobileFFI.a"
-lipo -create \
-    "$TARGET_DIR/aarch64-apple-darwin/release/$FFI_LIBRARY" \
-    "$TARGET_DIR/x86_64-apple-darwin/release/$FFI_LIBRARY" \
-    -output "$macos_dir/libVifuMobileFFI.a"
+if [[ "$MACOS_ONLY" == "true" ]]; then
+    cp \
+        "$TARGET_DIR/aarch64-apple-darwin/release/$FFI_LIBRARY" \
+        "$macos_dir/libVifuMobileFFI.a"
+else
+    device_dir="$work_dir/ios-device"
+    simulator_dir="$work_dir/ios-simulator"
+    mkdir -p "$device_dir" "$simulator_dir"
+    cp \
+        "$TARGET_DIR/aarch64-apple-ios/release/$FFI_LIBRARY" \
+        "$device_dir/libVifuMobileFFI.a"
+    lipo -create \
+        "$TARGET_DIR/aarch64-apple-ios-sim/release/$FFI_LIBRARY" \
+        "$TARGET_DIR/x86_64-apple-ios/release/$FFI_LIBRARY" \
+        -output "$simulator_dir/libVifuMobileFFI.a"
+    lipo -create \
+        "$TARGET_DIR/aarch64-apple-darwin/release/$FFI_LIBRARY" \
+        "$TARGET_DIR/x86_64-apple-darwin/release/$FFI_LIBRARY" \
+        -output "$macos_dir/libVifuMobileFFI.a"
+fi
 
 rm -rf "$DIST_DIR"
 mkdir -p "$DIST_DIR"
 xcframework="$DIST_DIR/VifuMobileFFI.xcframework"
-xcodebuild -create-xcframework \
-    -library "$device_dir/libVifuMobileFFI.a" -headers "$headers_dir" \
-    -library "$simulator_dir/libVifuMobileFFI.a" -headers "$headers_dir" \
-    -library "$macos_dir/libVifuMobileFFI.a" -headers "$headers_dir" \
-    -output "$xcframework"
+if [[ "$MACOS_ONLY" == "true" ]]; then
+    xcodebuild -create-xcframework \
+        -library "$macos_dir/libVifuMobileFFI.a" -headers "$headers_dir" \
+        -output "$xcframework"
+else
+    xcodebuild -create-xcframework \
+        -library "$device_dir/libVifuMobileFFI.a" -headers "$headers_dir" \
+        -library "$simulator_dir/libVifuMobileFFI.a" -headers "$headers_dir" \
+        -library "$macos_dir/libVifuMobileFFI.a" -headers "$headers_dir" \
+        -output "$xcframework"
+fi
 
 # xcodebuild may emit AvailableLibraries in a different order between runs.
 # Normalize the plist so SwiftPM receives a reproducible archive checksum.
+if [[ "$MACOS_ONLY" != "true" ]]; then
 cat > "$xcframework/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -209,6 +238,7 @@ cat > "$xcframework/Info.plist" <<'PLIST'
 </dict>
 </plist>
 PLIST
+fi
 
 # Stable metadata keeps the SwiftPM checksum reproducible for the same inputs.
 find "$xcframework" -exec touch -t 2001010000 {} +
@@ -225,6 +255,9 @@ printf '%s  %s\n' \
     "$checksum" \
     "VifuMobileFFI.xcframework.zip" \
     > "$DIST_DIR/VifuMobileFFI.xcframework.zip.sha256"
-printf 'Apple artifact: %s\nSwiftPM checksum: %s\n' \
+mkdir -p "$(dirname "$LOCAL_XCFRAMEWORK")" "$LOCAL_XCFRAMEWORK"
+rsync --archive --delete "$xcframework/" "$LOCAL_XCFRAMEWORK/"
+printf 'Apple artifact: %s\nLocal SwiftPM artifact: %s\nSwiftPM checksum: %s\n' \
     "$DIST_DIR/VifuMobileFFI.xcframework.zip" \
+    "$LOCAL_XCFRAMEWORK" \
     "$checksum"

@@ -17,3 +17,5 @@ test-results/
 !.env.example
 .vifu/
 .serena/
+.swiftpm/
+.build/
