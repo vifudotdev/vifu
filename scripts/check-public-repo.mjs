@@ -1,20 +1,7 @@
-import { readdir, readFile } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import { spawnSync } from "node:child_process";
 import path from "node:path";
 
-const ignoredDirectories = new Set([
-  ".git",
-  ".next",
-  ".next-e2e",
-  ".serena",
-  ".vifu",
-  "dist",
-  "node_modules",
-  "playwright-report",
-  "target",
-  "test-results",
-]);
-const ignoredFiles = new Set(["release.bun.lock"]);
 const checks = [
   ["provider access key", /(?:AKIA|ASIA)[0-9A-Z]{16}/],
   ["source-control token", /(?:github_pat_|gh[pousr]_)[A-Za-z0-9_]+/],
@@ -49,7 +36,10 @@ const generatedOutputPattern = new RegExp(
   ].join("|")})(/|$)`,
 );
 
-for (const file of await sourceFiles(".")) {
+const sourceFiles = git(["ls-files", "--cached", "--others", "--exclude-standard", "-z"])
+  .split("\0")
+  .filter(Boolean);
+for (const file of sourceFiles) {
   const normalized = path.normalize(file);
   if (normalized === path.normalize("AGENTS.md") || normalized === scannerPath) continue;
   const contents = await readFile(file, "utf8").catch(() => "");
@@ -135,18 +125,4 @@ function git(args) {
     throw new Error(`git ${args.join(" ")} failed: ${result.stderr.trim()}`);
   }
   return result.stdout;
-}
-
-async function sourceFiles(root) {
-  const files = [];
-  for (const entry of await readdir(root, { withFileTypes: true })) {
-    if (entry.isDirectory() && ignoredDirectories.has(entry.name)) continue;
-    if (!entry.isDirectory() && ignoredFiles.has(entry.name)) continue;
-    if (!entry.isDirectory() && (entry.name === ".env" || (entry.name.startsWith(".env.") && entry.name !== ".env.example"))) continue;
-    if (!entry.isDirectory() && entry.name.endsWith(".tsbuildinfo")) continue;
-    const entryPath = path.join(root, entry.name);
-    if (entry.isDirectory()) files.push(...await sourceFiles(entryPath));
-    else files.push(entryPath);
-  }
-  return files;
 }

@@ -127,6 +127,26 @@ Agent Gateway is a Server transport, so it connects to a running Vifu Server.
 The embedded Runtime is independently usable: a host registers its provider
 implementations directly and owns its snapshot storage.
 
+Server organizes runtime configuration with four resources:
+
+```text
+Project
+  +-- Deployment: development (primary)
+  |     +-- active Runtime Release
+  |     +-- paired Gateway(s)
+  |     +-- sync, trace, and remote-call policies
+  +-- Deployment: staging
+        +-- active Runtime Release
+        +-- paired Gateway(s)
+```
+
+A **Project** is the stable application boundary. A **Deployment** is a named
+runtime environment for that project. A **Runtime Release** is an immutable,
+portable manifest of providers, agents, and endpoints; activating an earlier
+release rolls a deployment back without changing the project endpoint. A
+**Gateway** connects the provider resources available on one device or network
+to a selected deployment.
+
 Applications call a project-scoped, OpenAI-compatible endpoint:
 
 ```http
@@ -151,7 +171,8 @@ stack.
 applications. It supplies:
 
 - dynamic provider, agent, and named endpoint registration;
-- async invocation and non-blocking start/poll/cancel APIs for game loops;
+- async invocation and non-blocking start/poll/cancel APIs with ordered output
+  events for game loops;
 - independent session state with host-provided storage;
 - portable project snapshot export and restore;
 - a deterministic runtime schedule;

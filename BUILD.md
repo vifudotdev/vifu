@@ -139,6 +139,10 @@ The root `Package.swift` is the public SwiftPM manifest. It combines the tracked
 UniFFI Swift wrapper with `VifuMobileFFI.xcframework` from a version-matched
 GitHub release.
 
+For local development, the build script also installs the generated artifact at
+`Frameworks/VifuMobileFFI.xcframework`; the manifest selects that copy when it
+exists. `VIFU_SWIFT_LOCAL_ARTIFACT` can point SwiftPM at another generated copy.
+
 ```bash
 rustup target add \
   aarch64-apple-ios \

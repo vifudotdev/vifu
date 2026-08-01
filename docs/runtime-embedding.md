@@ -46,6 +46,16 @@ The Swift source API is generated from the same UniFFI contract used by the
 Rust mobile adapter. The package downloads a checksum-verified XCFramework
 containing device, simulator, and macOS libraries.
 
+Open a SQLite-backed Runtime when project configuration and session state must
+survive application restarts:
+
+```swift
+let runtime = try VifuEmbeddedRuntime.open(
+    projectId: "my-application",
+    databasePath: runtimeDatabaseURL.path
+)
+```
+
 ## Register An Agent
 
 Providers are dynamic Rust implementations, not vendor Cargo features. The
@@ -140,6 +150,116 @@ runtime.cancel_invocation(&handle)?;
 
 iOS and Android hosts use the equivalent `VifuEmbeddedRuntime` UniFFI object and
 implement `VifuAgentProvider` as a native callback.
+
+## Connect An Embedded Runtime To Vifu Server
+
+Network access is optional. The application continues to invoke its embedded
+Runtime directly when no Gateway is running. To pair the same Runtime with a
+Server deployment:
+
+1. Create a one-time Gateway enrollment in the project's **Deployments** page.
+2. Generate a device identity and keep it in the Apple Keychain.
+3. Start `VifuEmbeddedGateway` with that identity and the enrollment token.
+
+```swift
+let generated = generateVifuGatewayIdentity()
+let identity = VifuGatewayIdentity(generated: generated)
+let identityStore = VifuGatewayIdentityStore()
+try identityStore.save(identity, for: "my-application")
+
+let gateway = try VifuEmbeddedGateway(
+    runtime: runtime,
+    config: VifuEmbeddedGatewayConfig(
+        serverUrl: "https://runtime.example.com",
+        gatewayId: identity.gatewayId,
+        runtimeDatabasePath: runtimeDatabaseURL.path
+    )
+)
+try gateway.start(identity: identity, enrollmentToken: enrollmentToken)
+```
+
+The enrollment token is consumed once. Later starts load the same device
+identity from Keychain and omit the token. Rust keeps the credential in memory;
+it is not written to the Runtime SQLite database or portable manifest.
+
+The first connection to an empty deployment imports the embedded manifest as
+release 1. Later release activation, configuration sync, trace upload, and
+remote invocation follow the deployment policies selected in the Dashboard.
+Remote invocation is disabled by default, while configuration sync and summary
+trace upload are enabled.
+
+When native UI and an embedded game engine share one Runtime, use
+`VifuRuntimeBridgeSession` as the host-facing bridge. Attach one
+`VifuRuntimeBridgeConnection` to route engine `runtime.*` requests into the
+embedded Runtime. Application-defined frames remain available to the host, and
+each subscriber receives the same Runtime events without competing for a
+single stream.
+
+## Stream Provider Output
+
+Providers that produce incremental output override `invoke_with_events` and
+emit each text fragment through the supplied event sink:
+
+```rust
+fn invoke_with_events<'a>(
+    &'a self,
+    request: ProviderRequest,
+    cancellation: CancellationToken,
+    events: ProviderEventSink,
+) -> ProviderFuture<'a> {
+    Box::pin(async move {
+        events.output_delta(InvocationData::Json(json!("Hello ")));
+        events.output_delta(InvocationData::Json(json!("world")));
+        Ok(ProviderResponse::json(json!({ "text": "Hello world" })))
+    })
+}
+```
+
+Direct embedded hosts can call `drain_invocation_events` with an invocation
+handle. Runtime Bridge clients receive the same ordered events as encoded
+frames. Each invocation emits `started`, zero or more `outputDelta` events, and
+one terminal event. The Runtime bounds each invocation queue and coalesces
+adjacent output deltas so a fast provider cannot grow host memory without
+limit.
+
+## Connect A Game Engine
+
+`RuntimeBridge` exposes the Runtime through transport-neutral `req`, `res`, and
+`event` frames. Engine integrations only move encoded frames; they do not
+reimplement invocation, session, provider, or cancellation behavior.
+
+```text
+Godot / Unity / Unreal
+          |
+    engine adapter
+          |
+      transport
+          |
+ Runtime Bridge session
+      /           \
+ embedded       application
+ Runtime         messages
+```
+
+Use `VifuInProcessBridgeTransport` when Vifu is embedded in the same
+application. A WebSocket transport can implement the same
+`VifuRuntimeBridgeTransport` protocol when the engine and Runtime are separate
+processes or devices. Both shapes preserve the same frame contract, so moving
+execution does not require rewriting game logic.
+
+The initial Godot frame adapter is in `integrations/godot/apple/`. It only
+connects `GlobalState` signals to `VifuInProcessBridgeTransport` and attaches
+to an already-started `GodotInstance`; the host application retains Godot's
+creation, rendering, frame-loop, restart, and destruction lifecycle. Runtime
+routing belongs to `VifuRuntimeBridgeSession`, while application-specific
+message decoding stays in the host. Unity and Unreal adapters can implement the
+same small frame transport against their native plugin systems.
+
+The optional `vifu-provider-llama` crate implements this contract for local
+GGUF models through llama.cpp. Apple applications can enable the same provider
+through the `local-llama` feature of `vifu-mobile-ffi`. The provider crate's
+[`chat` example](../crates/vifu-provider-llama/examples/chat.rs) demonstrates
+the same runtime registration and invocation path.
 
 ## Persist State
 

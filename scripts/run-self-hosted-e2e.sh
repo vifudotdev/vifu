@@ -254,12 +254,14 @@ services:
       - vifu_runtime_state:/gateway-state
     command: ["sh", "-c", "cp /run/vifu/providers.json /server-state/providers.json && cp /run/vifu/providers.json /gateway-state/providers.json && chmod 0644 /server-state/providers.json /gateway-state/providers.json"]
   backend:
+    image: ${compose_project}-runtime:local
     depends_on:
       runtime-state:
         condition: service_completed_successfully
     environment:
       VIFU_REQUEST_TIMEOUT_MS: "500"
   agent-gateway:
+    image: ${compose_project}-runtime:local
     configs:
       - source: e2e_agent_providers
         target: /home/vifu/.vifu/providers.json
@@ -284,12 +286,14 @@ services:
       - vifu_runtime_state:/gateway-state
     command: ["sh", "-c", "cp /run/vifu/providers.json /server-state/providers.json && cp /run/vifu/providers.json /gateway-state/providers.json && chmod 0644 /server-state/providers.json /gateway-state/providers.json"]
   backend:
+    image: ${compose_project}-runtime:local
     depends_on:
       runtime-state:
         condition: service_completed_successfully
     environment:
       VIFU_REQUEST_TIMEOUT_MS: "500"
   agent-gateway:
+    image: ${compose_project}-runtime:local
     depends_on:
       openclaw-mock:
         condition: service_healthy

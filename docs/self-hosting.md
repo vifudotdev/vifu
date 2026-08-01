@@ -35,20 +35,30 @@ shared only between those managed roles.
 
 A Gateway running outside the managed deployment enrolls into a project once:
 
-1. The project owner exchanges their access token for a short-lived Vifu
-   deployment credential through `POST /v1/auth/exchange`.
-2. The owner uses that credential to call
-   `POST /v1/project/{slug}/agent-gateway-enrollments`.
-3. The Gateway receives the returned one-time token through
-   `VIFU_AGENT_GATEWAY_ENROLLMENT_TOKEN` or
-   `VIFU_AGENT_GATEWAY_ENROLLMENT_TOKEN_FILE` on its first start.
-4. Gateway consumes the token, registers its own long-lived credential, and
-   stores that credential in a session file scoped to the Server URL.
+1. Open the project in the Console and select **Deployments**.
+2. Create or select a deployment, then choose **Pair gateway**.
+3. Set that Server URL in the Gateway's `~/.vifu/config.json`.
+4. Provide the displayed one-time token on the Gateway's next start through
+   `VIFU_AGENT_GATEWAY_ENROLLMENT_TOKEN_FILE`.
+
+For example, point the file variable at a private temporary file containing
+only the token, start `vifu`, then remove the file after enrollment succeeds.
+The token is consumed by Server and is not copied into `config.json`.
 
 Enrollment tokens expire after five minutes, can be used once, and are never
 written to the persistent runtime configuration. Issuing a new unused token for
-the project revokes the previous unused token. A Gateway that has enrolled can
-connect again using its stored credential.
+the deployment revokes the previous unused token. A Gateway that has enrolled
+can reconnect using the credential in its Server-scoped local session file.
+
+Each project starts with a `development` deployment. More deployments can use
+different Gateways and active Runtime Releases while keeping the same project
+contract. The primary deployment serves the existing project endpoint.
+
+When a Server operator enables guest bootstrap, an unpaired Gateway can receive
+a temporary project, deployment, project key, and claim token on first
+connection. Claiming the project from the Console transfers it to the signed-in
+owner without replacing the Gateway identity. Guest projects expire according
+to the Server's configured lifetime.
 
 Agent Gateway is a Server transport: it requires a reachable Vifu Server.
 Applications that embed `VifuRuntime` register their providers directly as
