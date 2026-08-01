@@ -6170,6 +6170,410 @@ button:disabled {
   outline-offset: 2px;
 }
 
+.deployment-workbench {
+  display: grid;
+  gap: 20px;
+  min-width: 0;
+}
+
+.deployment-toolbar,
+.deployment-toolbar form,
+.deployment-summary,
+.deployment-card header,
+.deployment-card header > div,
+.deployment-card footer,
+.release-workbench > header,
+.release-list article,
+.release-list article > div,
+.release-targets,
+.enrollment-panel,
+.enrollment-panel > div,
+.guest-project-claim,
+.guest-project-claim form {
+  display: flex;
+  align-items: center;
+}
+
+.deployment-toolbar,
+.release-workbench > header,
+.release-list article {
+  justify-content: space-between;
+}
+
+.deployment-toolbar {
+  gap: 16px;
+  min-height: 42px;
+}
+
+.deployment-toolbar form {
+  gap: 8px;
+}
+
+.deployment-toolbar label,
+.deployment-policy-form label {
+  display: grid;
+  gap: 5px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.deployment-toolbar label span,
+.deployment-policy-form label > span {
+  font-weight: 600;
+}
+
+.deployment-toolbar input {
+  width: min(220px, 38vw);
+}
+
+.deployment-summary {
+  gap: 18px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.deployment-summary strong {
+  color: var(--text);
+}
+
+.deployment-message {
+  width: fit-content;
+}
+
+.deployment-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 350px), 1fr));
+  gap: 12px;
+}
+
+.deployment-card {
+  display: grid;
+  gap: 14px;
+  min-width: 0;
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface);
+}
+
+.deployment-card header,
+.deployment-card footer {
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.deployment-card header > div {
+  min-width: 0;
+  gap: 10px;
+}
+
+.deployment-card header > div > div {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.deployment-card header small {
+  color: var(--muted);
+}
+
+.deployment-icon {
+  display: grid;
+  width: 32px;
+  height: 32px;
+  flex: 0 0 auto;
+  place-items: center;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+}
+
+.deployment-icon svg,
+.deployment-primary svg,
+.release-targets svg {
+  width: 14px;
+  height: 14px;
+}
+
+.deployment-primary {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--text);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.deployment-card dl {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  margin: 0;
+  border-block: 1px solid var(--line);
+}
+
+.deployment-card dl div {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  padding: 10px 8px;
+  border-right: 1px solid var(--line);
+}
+
+.deployment-card dl div:last-child {
+  border-right: 0;
+}
+
+.deployment-card dt {
+  color: var(--muted);
+  font-size: 10px;
+  text-transform: uppercase;
+}
+
+.deployment-card dd {
+  overflow: hidden;
+  margin: 0;
+  font-size: 12px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  text-transform: capitalize;
+  white-space: nowrap;
+}
+
+.deployment-gateways {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.deployment-gateways code {
+  overflow: hidden;
+  max-width: 100%;
+  padding: 3px 6px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  color: var(--muted);
+  font-size: 10px;
+  text-overflow: ellipsis;
+}
+
+.deployment-policy-form {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr)) minmax(120px, 1fr) auto;
+  gap: 10px;
+  align-items: end;
+}
+
+.deployment-policy-form label:has(input[type="checkbox"]) {
+  display: flex;
+  min-height: 34px;
+  flex-direction: row;
+  align-items: center;
+  gap: 7px;
+}
+
+.deployment-policy-form select {
+  min-height: 34px;
+}
+
+.release-workbench {
+  display: grid;
+  gap: 14px;
+  padding-top: 20px;
+  border-top: 1px solid var(--line);
+}
+
+.release-workbench > header {
+  gap: 16px;
+}
+
+.release-workbench h2,
+.release-workbench p {
+  margin: 0;
+}
+
+.release-workbench h2 {
+  font-size: 16px;
+}
+
+.release-workbench p {
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.release-workbench > textarea {
+  width: 100%;
+  min-height: 260px;
+  resize: vertical;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.release-list {
+  display: grid;
+  border-top: 1px solid var(--line);
+}
+
+.release-list article {
+  gap: 18px;
+  min-width: 0;
+  padding: 11px 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.release-list article > div:first-child {
+  min-width: 0;
+  gap: 10px;
+}
+
+.release-list code,
+.release-list time {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.release-targets {
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.release-targets span,
+.release-targets button {
+  display: inline-flex;
+  min-height: 28px;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 8px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.release-targets button:hover {
+  color: var(--text);
+  background: var(--surface-muted);
+}
+
+.deployment-empty {
+  padding: 18px 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.enrollment-panel {
+  display: grid;
+  grid-template-columns: minmax(170px, .6fr) minmax(0, 1fr) auto;
+  gap: 14px;
+  padding: 14px;
+  border: 1px solid var(--text);
+  border-radius: 6px;
+}
+
+.enrollment-panel > div {
+  gap: 8px;
+}
+
+.enrollment-panel > div:first-child {
+  display: grid;
+  gap: 3px;
+}
+
+.enrollment-panel p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.enrollment-panel code {
+  overflow: hidden;
+  padding: 8px;
+  background: var(--surface-muted);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.guest-project-claim {
+  gap: 14px;
+  margin-top: 28px;
+  padding-top: 18px;
+  border-top: 1px solid var(--line);
+}
+
+.guest-project-claim > div {
+  flex: 1;
+}
+
+.guest-project-claim p {
+  margin: 3px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.guest-project-claim form {
+  gap: 8px;
+}
+
+.guest-project-claim input {
+  width: min(320px, 36vw);
+}
+
+@media (max-width: 900px) {
+  .deployment-policy-form {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .enrollment-panel {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .release-list article,
+  .guest-project-claim {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .release-targets {
+    justify-content: flex-start;
+  }
+}
+
+@media (max-width: 560px) {
+  .deployment-toolbar,
+  .deployment-toolbar form,
+  .release-workbench > header,
+  .guest-project-claim form {
+    width: 100%;
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .deployment-toolbar input,
+  .guest-project-claim input {
+    width: 100%;
+  }
+
+  .deployment-summary {
+    justify-content: space-between;
+  }
+
+  .deployment-card dl,
+  .deployment-policy-form {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .deployment-card dl div:nth-child(2) {
+    border-right: 0;
+  }
+
+  .deployment-card dl div:nth-child(-n + 2) {
+    border-bottom: 1px solid var(--line);
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   .react-flow__edge.animated path {
     animation: none !important;

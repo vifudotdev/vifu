@@ -9,6 +9,7 @@ const VIEWS = new Set<DashboardSection>([
   "overview",
   "agents",
   "providers",
+  "deployments",
   "api",
   "logs",
   "settings",

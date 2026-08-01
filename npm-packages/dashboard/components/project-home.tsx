@@ -1,13 +1,21 @@
 "use client";
 
 import Link from "next/link";
-import { FolderKanban, Plus, Search } from "lucide-react";
-import { useMemo, useState } from "react";
+import { FolderKanban, Link2, Plus, Search } from "lucide-react";
+import { useRouter } from "next/navigation";
+import { useMemo, useState, type FormEvent } from "react";
+import { runtimeBrowserRequest } from "../lib/runtime-browser-client";
 import type { RuntimeProject } from "../lib/runtime-types";
 import { DismissibleDetails } from "./dismissible-details";
 import { ProjectCreateForm } from "./runtime-actions";
 
-export function ProjectHome({ projects }: { projects: RuntimeProject[] }) {
+export function ProjectHome({
+  projects,
+  allowGuestClaim = false,
+}: {
+  projects: RuntimeProject[];
+  allowGuestClaim?: boolean;
+}) {
   const [query, setQuery] = useState("");
   const normalizedQuery = query.trim().toLocaleLowerCase();
   const visibleProjects = useMemo(() => {
@@ -77,7 +85,42 @@ export function ProjectHome({ projects }: { projects: RuntimeProject[] }) {
           <ProjectCreateForm />
         </section>
       )}
+      {allowGuestClaim ? <GuestProjectClaim /> : null}
     </div>
+  );
+}
+
+function GuestProjectClaim() {
+  const router = useRouter();
+  const [claimToken, setClaimToken] = useState("");
+  const [pending, setPending] = useState(false);
+  const [message, setMessage] = useState<string | null>(null);
+
+  async function claim(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setPending(true);
+    setMessage(null);
+    try {
+      await runtimeBrowserRequest("guest/claim", "POST", { claimToken: claimToken.trim() });
+      setClaimToken("");
+      router.refresh();
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Could not claim the project.");
+    } finally {
+      setPending(false);
+    }
+  }
+
+  return (
+    <section className="guest-project-claim">
+      <span className="project-home-card-icon"><Link2 aria-hidden="true" /></span>
+      <div><strong>Claim a local project</strong><p>Attach a project created by the Vifu CLI to this account.</p></div>
+      <form onSubmit={claim}>
+        <input value={claimToken} onChange={(event) => setClaimToken(event.target.value)} required placeholder="Claim token" aria-label="Claim token" />
+        <button className="secondary-button" disabled={pending} type="submit">{pending ? "Claiming" : "Claim"}</button>
+      </form>
+      {message ? <span className="inline-error" role="alert">{message}</span> : null}
+    </section>
   );
 }
 

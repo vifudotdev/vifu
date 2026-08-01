@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { AuthorityError, resolveAuthority } from "../../../../lib/authority";
 import { VifuHttpError } from "../../../../lib/deployment-client";
+import { forwardRuntimeResponse } from "../../../../lib/runtime-proxy";
 
 const ALLOWED_ROOTS = new Set([
   "chat",
@@ -17,6 +18,7 @@ const ALLOWED_ROOTS = new Set([
   "runtime-extensions",
   "traces",
   "status",
+  "guest",
 ]);
 const MAX_BODY_BYTES = 1024 * 1024;
 
@@ -61,15 +63,11 @@ async function proxyRuntimeRequest(
     const headers = new Headers();
     const contentType = request.headers.get("content-type");
     if (contentType) headers.set("content-type", contentType);
-    const response = await authority.deployment.request<unknown>(
+    const response = await authority.deployment.rawRequest(
       `${runtimePath}${query}`,
       { method, body, headers },
     );
-    return response === undefined
-      ? new Response(null, { status: 204 })
-      : NextResponse.json(response, {
-        status: method === "POST" && !["commands", "completions", "rpc", "test", "discover-agents", "restore", "revoke"].includes(path.at(-1) ?? "") ? 201 : 200,
-      });
+    return forwardRuntimeResponse(response);
   } catch (error) {
     if (error instanceof AuthorityError || error instanceof VifuHttpError) {
       return errorResponse(error.status, "RUNTIME_REQUEST_FAILED", error.message);
@@ -101,6 +99,7 @@ function isAllowedPath(path: string[]): boolean {
   if (path[0] === "models") return path.length === 1;
   if (path[0] === "provider-adapters") return path.length === 1;
   if (path[0] === "provider-catalog") return path.length === 1;
+  if (path[0] === "guest") return path.length === 2 && path[1] === "claim";
   if (path[0] === "project") {
     if (path.length < 3) return false;
     if (path[2] === "providers") {
@@ -109,6 +108,16 @@ function isAllowedPath(path: string[]): boolean {
         || (path.length === 5 && path[4] === "test");
     }
     if (path[2] === "agent-candidates") return path.length === 3;
+    if (path[2] === "deployments") {
+      if (path.length === 3 || path.length === 4) return true;
+      if (path.length === 5) {
+        return path[4] === "promote" || path[4] === "agent-gateway-enrollments";
+      }
+      return path.length === 7
+        && path[4] === "runtime-releases"
+        && path[6] === "activate";
+    }
+    if (path[2] === "runtime-releases") return path.length === 3 || path.length === 4;
     if (["bindings", "endpoints"].includes(path[2] ?? "")) {
       return path.length === 3 || path.length === 4;
     }

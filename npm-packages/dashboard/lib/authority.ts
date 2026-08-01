@@ -43,7 +43,7 @@ async function loadRuntimeStatus(apiBaseUrl: string): Promise<DeploymentStatus> 
 
 export async function loadRuntimeSnapshot(authority: AuthorityAdapter, projectSlug?: string): Promise<RuntimeSnapshot> {
   const { capabilities } = authority.status;
-  const [projects, profiles, bindings, endpoints, apiKeys, agentGateways, availableAgents, providerAdapters, traces] = await Promise.all([
+  const [projects, profiles, bindings, endpoints, apiKeys, agentGateways, availableAgents, providerAdapters, traces, deployments, releases] = await Promise.all([
     capabilities.projects ? authority.deployment.projects() : Promise.resolve([]),
     capabilities.profiles && projectSlug ? authority.deployment.projectProfiles(projectSlug) : Promise.resolve([]),
     capabilities.bindings && projectSlug ? authority.deployment.projectBindings(projectSlug) : Promise.resolve([]),
@@ -53,8 +53,10 @@ export async function loadRuntimeSnapshot(authority: AuthorityAdapter, projectSl
     capabilities.agentGateways && projectSlug ? authority.deployment.projectAvailableAgents(projectSlug) : Promise.resolve([]),
     capabilities.providerConnections ? authority.deployment.providerAdapters() : Promise.resolve([]),
     capabilities.traces && projectSlug ? authority.deployment.projectTraces(projectSlug) : Promise.resolve([]),
+    projectSlug ? authority.deployment.projectDeployments(projectSlug) : Promise.resolve([]),
+    projectSlug ? authority.deployment.projectRuntimeReleases(projectSlug) : Promise.resolve([]),
   ]);
-  return { projects, profiles, bindings, endpoints, apiKeys, agentGateways, availableAgents, providerAdapters, traces };
+  return { projects, profiles, bindings, endpoints, apiKeys, agentGateways, availableAgents, providerAdapters, traces, deployments, releases };
 }
 
 export class AuthorityError extends Error {

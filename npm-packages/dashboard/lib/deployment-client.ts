@@ -12,8 +12,10 @@ import type {
   ProviderCatalog,
   ProviderAdapter,
   ProjectProvider,
+  ProjectRuntimeRelease,
   RuntimeStatus,
   RuntimeProject,
+  RuntimeDeployment,
 } from "./runtime-types";
 
 export type VifuFetch = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
@@ -112,6 +114,18 @@ export class DeploymentClient {
 
   async projectTraces(slug: string): Promise<EndpointTrace[]> {
     return (await this.request<{ traces: EndpointTrace[] }>(`/v1/project/${encodeURIComponent(slug)}/traces?limit=100`)).traces ?? [];
+  }
+
+  async projectDeployments(slug: string): Promise<RuntimeDeployment[]> {
+    return (await this.request<{ deployments: RuntimeDeployment[] }>(
+      `/v1/project/${encodeURIComponent(slug)}/deployments`,
+    )).deployments ?? [];
+  }
+
+  async projectRuntimeReleases(slug: string): Promise<ProjectRuntimeRelease[]> {
+    return (await this.request<{ releases: ProjectRuntimeRelease[] }>(
+      `/v1/project/${encodeURIComponent(slug)}/runtime-releases`,
+    )).releases ?? [];
   }
 
   async request<T>(path: string, init: RequestInit = {}, publicRequest = false): Promise<T> {

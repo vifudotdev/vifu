@@ -1,4 +1,4 @@
-export type DeploymentMode = "local" | "self-hosted";
+export type DeploymentMode = "local" | "self-hosted" | "cloud";
 
 export type ServerCapabilities = {
   projects: boolean;
@@ -26,6 +26,39 @@ export type RuntimeProject = {
   bindingIds: string[];
   createdAt: string;
   updatedAt: string;
+};
+
+export type RuntimeManifest = {
+  schemaVersion: number;
+  projectId: string;
+  providers: Array<Record<string, unknown>>;
+  agents: Array<Record<string, unknown>>;
+  endpoints: Array<Record<string, unknown>>;
+  metadata: Record<string, unknown>;
+};
+
+export type RuntimeDeployment = {
+  id: string;
+  projectId: string;
+  name: string;
+  isPrimary: boolean;
+  configSyncEnabled: boolean;
+  traceMode: "off" | "summary" | "full";
+  remoteInvocationEnabled: boolean;
+  activeReleaseVersion: number | null;
+  gatewayIds: string[];
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type ProjectRuntimeRelease = {
+  id: string;
+  projectId: string;
+  version: number;
+  contentHash: string;
+  manifest: RuntimeManifest;
+  createdBy: string | null;
+  createdAt: string;
 };
 
 export type ProviderAdapterField = {
@@ -278,4 +311,6 @@ export type RuntimeSnapshot = {
   availableAgents: AvailableAgent[];
   providerAdapters: ProviderAdapter[];
   traces: EndpointTrace[];
+  deployments: RuntimeDeployment[];
+  releases: ProjectRuntimeRelease[];
 };

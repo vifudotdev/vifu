@@ -7,6 +7,7 @@ import {
   KeyRound,
   LayoutDashboard,
   LogOut,
+  Network,
   Plug,
   ScrollText,
   Settings,
@@ -31,11 +32,13 @@ import {
 } from "./runtime-actions";
 import { RuntimeAgentsView } from "./runtime-agents";
 import { RuntimeProvidersView } from "./runtime-providers";
+import { RuntimeDeploymentsView } from "./runtime-deployments";
 
 export type DashboardSection =
   | "overview"
   | "agents"
   | "providers"
+  | "deployments"
   | "api"
   | "logs"
   | "settings";
@@ -51,6 +54,7 @@ const PROJECT_NAVIGATION: NavigationItem[] = [
   { id: "overview", label: "Overview", icon: LayoutDashboard },
   { id: "agents", label: "Agents", icon: Bot, capability: "profiles" },
   { id: "providers", label: "Providers", icon: Plug, capability: "providerConnections" },
+  { id: "deployments", label: "Deployments", icon: Network },
   { id: "api", label: "API", icon: KeyRound, capability: "apiKeys" },
   { id: "logs", label: "Logs", icon: ScrollText, capability: "traces" },
   { id: "settings", label: "Settings", icon: Settings },
@@ -60,6 +64,7 @@ const SECTION_TITLES: Record<DashboardSection, string> = {
   overview: "Overview",
   agents: "Agents",
   providers: "Providers",
+  deployments: "Deployments",
   api: "API Integrations",
   logs: "Logs",
   settings: "Settings",
@@ -131,7 +136,10 @@ export function RuntimeConsole({
           </div>
         </>
       ) : (
-        <ProjectHome projects={data.runtime.projects} />
+        <ProjectHome
+          projects={data.runtime.projects}
+          allowGuestClaim={data.authority.status.mode === "cloud"}
+        />
       )}
     </AppLayout>
   );
@@ -193,6 +201,15 @@ function ProjectSectionView({
         catalog={data.providerCatalog}
         providers={data.projectProviders}
         availableAgents={data.runtime.availableAgents}
+      />
+    );
+  }
+  if (section === "deployments") {
+    return (
+      <RuntimeDeploymentsView
+        project={project}
+        deployments={data.runtime.deployments}
+        releases={data.runtime.releases}
       />
     );
   }
