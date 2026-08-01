@@ -3,9 +3,15 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+#[cfg(feature = "local-llama")]
+use std::time::Instant;
+
 use tokio::sync::watch;
 
 use vifu_gateway::{config, openclaw, relay, session};
+
+#[cfg(feature = "local-llama")]
+use vifu_provider_llama::{LlamaProvider, LlamaProviderConfig};
 
 use config::{AgentProviderConfig, Config};
 use openclaw::ProbeStatus;
@@ -37,14 +43,27 @@ pub async fn run(
         let mut config = options.load_config()?;
         ensure_home_dir(&config)?;
         print_server_config(&config)?;
-        let providers = config.openclaw_providers().cloned().collect::<Vec<_>>();
-        if providers.is_empty() {
+        let openclaw_providers = config.openclaw_providers().cloned().collect::<Vec<_>>();
+        let llama_providers = config.llama_providers().cloned().collect::<Vec<_>>();
+        if config.agent_providers.is_empty() {
             print_agent_provider_config(&config);
         }
-        let has_configured_providers = !providers.is_empty();
+        let has_configured_providers =
+            !openclaw_providers.is_empty() || !llama_providers.is_empty();
         let mut runtime_providers: Vec<Arc<dyn relay::AgentGatewayProvider>> = Vec::new();
         let mut agents = Vec::new();
-        for provider in providers {
+        for provider in llama_providers {
+            let (runtime_provider, agent) = load_llama_provider(
+                provider,
+                config
+                    .agent_providers_file
+                    .parent()
+                    .unwrap_or_else(|| Path::new(".")),
+            )?;
+            runtime_providers.push(runtime_provider);
+            agents.push(agent);
+        }
+        for provider in openclaw_providers {
             let report = openclaw::probe(&provider.url).await;
             print_openclaw_report(&provider, &report);
             if !matches!(report.status, ProbeStatus::Online) {
@@ -89,11 +108,8 @@ pub async fn run(
             )));
         }
         if has_configured_providers && runtime_providers.is_empty() {
-            wait_for_provider_retry(
-                "No configured OpenClaw provider is reachable.",
-                &mut shutdown,
-            )
-            .await;
+            wait_for_provider_retry("No configured Agent Provider is reachable.", &mut shutdown)
+                .await;
             continue;
         }
         println!(
@@ -164,6 +180,7 @@ async fn wait_for_shutdown(shutdown: &mut watch::Receiver<bool>) {
 pub async fn status(config: &Config) -> Result<(), String> {
     println!("Vifu Agent Gateway status");
     println!("State: {}", config.home_dir.display());
+    print_llama_provider_status(config)?;
     print_agent_provider_status(config).await;
     print_server_config(config)?;
     print_stored_session(config);
@@ -173,6 +190,7 @@ pub async fn status(config: &Config) -> Result<(), String> {
 pub async fn doctor(config: &Config) -> Result<(), String> {
     println!("Vifu Agent Gateway doctor");
     println!("State directory: {}", config.home_dir.display());
+    print_llama_provider_status(config)?;
     let providers = print_agent_provider_status(config).await;
     print_server_config(config)?;
     print_stored_session(config);
@@ -274,6 +292,91 @@ fn print_agent_provider_config(config: &Config) {
             config.agent_providers.len()
         );
     }
+}
+
+#[cfg(feature = "local-llama")]
+fn load_llama_provider(
+    provider: AgentProviderConfig,
+    base_dir: &Path,
+) -> Result<
+    (
+        Arc<dyn relay::AgentGatewayProvider>,
+        vifu_gateway::protocol::AgentDescriptor,
+    ),
+    String,
+> {
+    let llama_config = LlamaProviderConfig::from_provider_config(&provider.config, base_dir)
+        .map_err(|error| format!("llama provider {}: {error}", provider.id))?;
+    println!("Llama provider {}: loading local model", provider.id);
+    let started = Instant::now();
+    let llama = LlamaProvider::load(llama_config)
+        .map_err(|error| format!("llama provider {}: {error}", provider.id))?;
+    let runtime_provider =
+        relay::InProcessGatewayProvider::new(provider.id.clone(), Arc::new(llama))?;
+    let name = provider.name.unwrap_or_else(|| provider.id.clone());
+    let agent = vifu_gateway::protocol::AgentDescriptor {
+        id: provider.id.clone(),
+        name,
+        metadata: serde_json::json!({
+            "providerKey": provider.id,
+            "providerType": "vifu-runtime",
+            "localProviderType": "llama",
+            "capabilities": ["chat"],
+        }),
+    };
+    println!(
+        "Llama provider {}: ready in {}ms",
+        agent.id,
+        started.elapsed().as_millis()
+    );
+    Ok((Arc::new(runtime_provider), agent))
+}
+
+#[cfg(not(feature = "local-llama"))]
+fn load_llama_provider(
+    provider: AgentProviderConfig,
+    _base_dir: &Path,
+) -> Result<
+    (
+        Arc<dyn relay::AgentGatewayProvider>,
+        vifu_gateway::protocol::AgentDescriptor,
+    ),
+    String,
+> {
+    Err(format!(
+        "llama provider {} requires a Vifu build with the local-llama feature",
+        provider.id
+    ))
+}
+
+#[cfg(feature = "local-llama")]
+fn print_llama_provider_status(config: &Config) -> Result<(), String> {
+    let base_dir = config
+        .agent_providers_file
+        .parent()
+        .unwrap_or_else(|| Path::new("."));
+    for provider in config.llama_providers() {
+        let llama = LlamaProviderConfig::from_provider_config(&provider.config, base_dir)
+            .map_err(|error| format!("llama provider {}: {error}", provider.id))?;
+        let status = if llama.model_path.is_file() {
+            "model file ready"
+        } else {
+            "model file missing"
+        };
+        println!("Llama provider {}: {status}", provider.id);
+    }
+    Ok(())
+}
+
+#[cfg(not(feature = "local-llama"))]
+fn print_llama_provider_status(config: &Config) -> Result<(), String> {
+    for provider in config.llama_providers() {
+        println!(
+            "Llama provider {}: unavailable in this Vifu build",
+            provider.id
+        );
+    }
+    Ok(())
 }
 
 fn print_openclaw_report(provider: &AgentProviderConfig, report: &openclaw::ProbeReport) {

@@ -4463,6 +4463,22 @@ fn runtime_profile_tool_is_available(config: &Value, tool: &str) -> bool {
         })
 }
 
+fn gateway_binding_config(
+    mut capability_config: Value,
+    provider_key: &str,
+    persona: &Value,
+) -> Result<Value, ApiError> {
+    let binding = capability_config.as_object_mut().ok_or_else(|| {
+        ApiError::Invalid("Gateway capability config must be an object".to_string())
+    })?;
+    binding.insert(
+        "providerKey".to_string(),
+        Value::String(provider_key.to_string()),
+    );
+    binding.insert("persona".to_string(), persona.clone());
+    Ok(capability_config)
+}
+
 async fn invoke_profile_chat(
     state: &AppState,
     project_id: Uuid,
@@ -4499,14 +4515,11 @@ async fn invoke_profile_chat(
             let agent_id = route.resource_id.as_deref().ok_or_else(|| {
                 ApiError::Invalid("Gateway capability is missing resourceId".to_string())
             })?;
-            let mut binding_config = route.capability_config.clone();
-            let binding_object = binding_config.as_object_mut().ok_or_else(|| {
-                ApiError::Invalid("Gateway capability config must be an object".to_string())
-            })?;
-            binding_object.insert(
-                "providerKey".to_string(),
-                Value::String(route.provider_key.clone()),
-            );
+            let binding_config = gateway_binding_config(
+                route.capability_config.clone(),
+                &route.provider_key,
+                &route.persona,
+            )?;
             let endpoint_route = EndpointRoute {
                 endpoint_id: route.capability_id,
                 endpoint_slug: route.profile_slug.clone(),
@@ -5368,7 +5381,7 @@ fn save_file_provider_connection(
     let key = required_identifier("provider key", provider_key)?.to_string();
     let provider_type = required_identifier("provider type", &input.provider_type)?.to_string();
     let name = optional_text("provider name", input.name.as_deref(), 128)?.map(str::to_string);
-    let base_url = required_text("provider base URL", &input.base_url, 2048)?.to_string();
+    let base_url = validated_provider_base_url(&provider_type, &input.base_url)?;
     if provider_type == "openclaw" {
         vifu_gateway::openclaw::parse_endpoint(&base_url).map_err(ApiError::Invalid)?;
     }
@@ -5411,7 +5424,7 @@ fn file_provider_connection(
     let name = optional_text("provider name", provider.name.as_deref(), 128)?
         .unwrap_or(&key)
         .to_string();
-    let base_url = required_text("provider base URL", &provider.url, 2048)?.to_string();
+    let base_url = validated_provider_base_url(&provider_type, &provider.url)?;
     let now = Utc::now();
     Ok(ProviderConnection {
         id: deterministic_provider_connection_id(project_id, &key),
@@ -5643,11 +5656,6 @@ fn prepare_project_provider(
     } else {
         base_override
     };
-    if effective_base.is_empty() {
-        return Err(ApiError::Invalid(
-            "provider base URL is required".to_string(),
-        ));
-    }
     let effective_config = merge_json_objects(&source.config, &config)?;
     let mut prepared = prepare_provider_connection(
         state,
@@ -5848,6 +5856,7 @@ async fn probe_runtime_provider(
                 });
             probe_result(result)
         }
+        "llama" => ("online", None),
         _ => (
             "unsupported",
             Some(format!("unsupported provider type {provider_type}")),
@@ -5871,7 +5880,7 @@ fn prepare_provider_connection(
     let name = optional_text("provider name", source.name, 128)?
         .unwrap_or(&key)
         .to_string();
-    let base_url = required_text("provider base URL", source.base_url, 2048)?.to_string();
+    let base_url = validated_provider_base_url(&provider_type, source.base_url)?;
     if provider_type == "openclaw" {
         vifu_gateway::openclaw::parse_endpoint(&base_url).map_err(ApiError::Invalid)?;
     }
@@ -5893,6 +5902,13 @@ fn prepare_provider_connection(
         secret_keys,
         display_secret,
     })
+}
+
+fn validated_provider_base_url(provider_type: &str, value: &str) -> Result<String, ApiError> {
+    if provider_type == "llama" && value.trim().is_empty() {
+        return Ok(String::new());
+    }
+    Ok(required_text("provider base URL", value, 2048)?.to_string())
 }
 
 async fn save_provider_connection(
@@ -6426,8 +6442,9 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        api_error_trace_status, merge_json_objects, patch_text, profile_slug, project_slug,
-        validate_profile_version_input, validate_timeout,
+        api_error_trace_status, file_provider_connection, gateway_binding_config,
+        merge_json_objects, patch_text, profile_slug, project_slug, validate_profile_version_input,
+        validate_timeout,
     };
     use crate::error::ApiError;
     use crate::models::ProfileCapabilityDraft;
@@ -6475,6 +6492,40 @@ mod tests {
         .unwrap();
 
         assert_eq!(merged, json!({ "model": "project-model", "timeout": 10 }));
+    }
+
+    #[test]
+    fn file_llama_provider_accepts_an_empty_base_url() {
+        let provider = file_provider_connection(
+            uuid::Uuid::nil(),
+            vifu_gateway::config::AgentProviderDefinition {
+                key: "local-qwen".to_string(),
+                name: Some("Local Qwen".to_string()),
+                provider_type: "llama".to_string(),
+                url: String::new(),
+                enabled: Some(true),
+                auth: vifu_gateway::config::AgentProviderAuthDefinition::default(),
+                config: json!({ "modelPath": "models/qwen.gguf" }),
+            },
+        )
+        .unwrap();
+
+        assert!(provider.base_url.is_empty());
+    }
+
+    #[test]
+    fn gateway_binding_carries_the_profile_persona() {
+        let binding = gateway_binding_config(
+            json!({ "temperature": 0 }),
+            "local-qwen",
+            &json!({ "instructions": "Choose one safe action." }),
+        )
+        .unwrap();
+
+        assert_eq!(
+            binding["persona"]["instructions"],
+            "Choose one safe action."
+        );
     }
 
     #[test]

@@ -46,12 +46,28 @@ impl fmt::Debug for Config {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct AgentProviderConfig {
     pub id: String,
+    pub name: Option<String>,
     pub provider_type: String,
     pub url: String,
     pub token: Option<String>,
+    pub config: Value,
+}
+
+impl fmt::Debug for AgentProviderConfig {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AgentProviderConfig")
+            .field("id", &self.id)
+            .field("name", &self.name)
+            .field("provider_type", &self.provider_type)
+            .field("url", &self.url)
+            .field("token", &self.token.as_ref().map(|_| "[REDACTED]"))
+            .field("config", &"[REDACTED]")
+            .finish()
+    }
 }
 
 impl Config {
@@ -122,6 +138,12 @@ impl Config {
             .iter()
             .filter(|provider| provider.provider_type == "openclaw")
     }
+
+    pub fn llama_providers(&self) -> impl Iterator<Item = &AgentProviderConfig> {
+        self.agent_providers
+            .iter()
+            .filter(|provider| provider.provider_type == "llama")
+    }
 }
 
 fn validate_enrollment_token(token: &str) -> Result<(), String> {
@@ -173,6 +195,7 @@ pub struct AgentProviderDefinition {
     pub name: Option<String>,
     #[serde(rename = "type")]
     pub provider_type: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub url: String,
     #[serde(default)]
     pub enabled: Option<bool>,
@@ -280,7 +303,12 @@ pub fn write_private_file(path: &Path, contents: &str) -> Result<(), String> {
 
 fn load_agent_providers(home_dir: &Path) -> Result<(PathBuf, Vec<AgentProviderConfig>), String> {
     let path = ensure_provider_registry_file(home_dir)?;
-    let file = read_provider_registry_file(&path)?;
+    let providers = load_provider_registry_file(&path)?;
+    Ok((path, providers))
+}
+
+pub fn load_provider_registry_file(path: &Path) -> Result<Vec<AgentProviderConfig>, String> {
+    let file = read_provider_registry_file(path)?;
     let mut providers = Vec::new();
     for provider in file.providers {
         if provider.enabled == Some(false) {
@@ -288,7 +316,7 @@ fn load_agent_providers(home_dir: &Path) -> Result<(PathBuf, Vec<AgentProviderCo
         }
         providers.push(resolve_agent_provider(provider)?);
     }
-    Ok((path, providers))
+    Ok(providers)
 }
 
 fn resolve_agent_provider(
@@ -298,15 +326,26 @@ fn resolve_agent_provider(
     crate::protocol::validate_identifier("agent provider type", &provider.provider_type)?;
     let provider_type = provider.provider_type.trim().to_ascii_lowercase();
     let url = provider.url.trim().to_string();
-    if url.is_empty() {
+    if provider_type != "llama" && url.is_empty() {
         return Err(format!("agent provider {} url is required", provider.key));
+    }
+    if !provider.config.is_object() {
+        return Err(format!(
+            "agent provider {} config must be an object",
+            provider.key
+        ));
     }
     let token = resolve_provider_token(&provider.key, &provider.auth)?;
     Ok(AgentProviderConfig {
         id: provider.key,
+        name: provider
+            .name
+            .map(|name| name.trim().to_string())
+            .filter(|name| !name.is_empty()),
         provider_type,
         url,
         token,
+        config: provider.config,
     })
 }
 
@@ -564,6 +603,59 @@ mod tests {
         assert_eq!(provider.url, DEFAULT_OPENCLAW_URL);
         assert_eq!(provider.token.as_deref(), Some("openclaw-provider-token"));
 
+        restore_env(
+            "VIFU_AGENT_GATEWAY_BOOTSTRAP_TOKEN_FILE",
+            previous_token_file,
+        );
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn loads_in_process_provider_without_a_url() {
+        let _guard = env_lock().lock().unwrap();
+        let previous_token_file = std::env::var_os("VIFU_AGENT_GATEWAY_BOOTSTRAP_TOKEN_FILE");
+        let dir = unique_directory("vifu-gateway-in-process-provider");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("providers.json"),
+            r#"{"providers":[{"key":"local-qwen","type":"llama","config":{"modelPath":"models/qwen.gguf","contextSize":4096}}]}"#,
+        )
+        .unwrap();
+        std::env::remove_var("VIFU_AGENT_GATEWAY_BOOTSTRAP_TOKEN_FILE");
+
+        let config =
+            Config::load_from_home_dir(dir.clone(), DEFAULT_SERVER_URL.to_string(), None).unwrap();
+
+        assert_eq!(config.agent_providers[0].id, "local-qwen");
+        assert!(config.agent_providers[0].url.is_empty());
+        assert_eq!(
+            config.agent_providers[0].config,
+            json!({ "modelPath": "models/qwen.gguf", "contextSize": 4096 })
+        );
+        restore_env(
+            "VIFU_AGENT_GATEWAY_BOOTSTRAP_TOKEN_FILE",
+            previous_token_file,
+        );
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn external_provider_still_requires_a_url() {
+        let _guard = env_lock().lock().unwrap();
+        let previous_token_file = std::env::var_os("VIFU_AGENT_GATEWAY_BOOTSTRAP_TOKEN_FILE");
+        let dir = unique_directory("vifu-gateway-external-provider-url");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("providers.json"),
+            r#"{"providers":[{"key":"openclaw-local","type":"openclaw"}]}"#,
+        )
+        .unwrap();
+        std::env::remove_var("VIFU_AGENT_GATEWAY_BOOTSTRAP_TOKEN_FILE");
+
+        let error = Config::load_from_home_dir(dir.clone(), DEFAULT_SERVER_URL.to_string(), None)
+            .unwrap_err();
+
+        assert!(error.contains("agent provider openclaw-local url is required"));
         restore_env(
             "VIFU_AGENT_GATEWAY_BOOTSTRAP_TOKEN_FILE",
             previous_token_file,

@@ -7,7 +7,13 @@ use crate::runtime_config::LoadedRuntimeConfig;
 
 pub async fn execute(options: Options) -> Result<(), String> {
     init_tracing();
-    match options.command {
+    let Options {
+        command,
+        config_profile,
+        config_overrides,
+    } = options;
+    let load_config = || LoadedRuntimeConfig::load(config_profile.as_deref(), &config_overrides);
+    match command {
         Command::Help => {
             print!("{}", help_text());
             Ok(())
@@ -16,11 +22,11 @@ pub async fn execute(options: Options) -> Result<(), String> {
             println!("vifu {}", env!("CARGO_PKG_VERSION"));
             Ok(())
         }
-        Command::Start => start(LoadedRuntimeConfig::load()?).await,
-        Command::Status => status(LoadedRuntimeConfig::load()?).await,
-        Command::Doctor => doctor(LoadedRuntimeConfig::load()?).await,
-        Command::Logout => gateway_logout(LoadedRuntimeConfig::load()?),
-        Command::Reset => gateway_reset(LoadedRuntimeConfig::load()?),
+        Command::Start => start(load_config()?).await,
+        Command::Status => status(load_config()?).await,
+        Command::Doctor => doctor(load_config()?).await,
+        Command::Logout => gateway_logout(load_config()?),
+        Command::Reset => gateway_reset(load_config()?),
     }
 }
 
@@ -39,6 +45,9 @@ async fn start(config: LoadedRuntimeConfig) -> Result<(), String> {
 async fn status(config: LoadedRuntimeConfig) -> Result<(), String> {
     println!("Vifu runtime");
     println!("Configuration: {}", config.path.display());
+    if let Some(profile) = config.profile.as_ref() {
+        println!("Profile: {profile}");
+    }
     println!("Server: {}", role_status(config.config.server.is_some()));
     println!(
         "Agent Gateway: {}",
@@ -54,6 +63,9 @@ async fn status(config: LoadedRuntimeConfig) -> Result<(), String> {
 async fn doctor(config: LoadedRuntimeConfig) -> Result<(), String> {
     println!("Vifu runtime doctor");
     println!("Configuration: {}", config.path.display());
+    if let Some(profile) = config.profile.as_ref() {
+        println!("Profile: {profile}");
+    }
     if config.config.gateway.is_some() {
         let gateway = config.gateway_options()?.load_config()?;
         gateway::doctor(&gateway).await?;

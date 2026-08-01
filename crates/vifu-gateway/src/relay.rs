@@ -22,7 +22,10 @@ use crate::openclaw::{self, Endpoint};
 use crate::protocol::{self, AgentDescriptor, AgentGatewayCommand};
 use crate::session::{self, GuestProjectSummary, SessionSummary};
 
-use vifu_runtime::VifuRuntime;
+use vifu_runtime::{
+    AgentDefinition, AgentProvider, CancellationToken, InvocationData, ProviderRequest,
+    RuntimeSnapshot, VifuRuntime,
+};
 #[cfg(feature = "sqlite")]
 use vifu_runtime::{RuntimeStore, SqliteRuntimeStore};
 
@@ -96,6 +99,95 @@ impl AgentGatewayProvider for OpenClawGatewayProvider {
             timeout,
         ))
     }
+}
+
+pub struct InProcessGatewayProvider {
+    id: String,
+    provider: Arc<dyn AgentProvider>,
+}
+
+impl InProcessGatewayProvider {
+    pub fn new(id: impl Into<String>, provider: Arc<dyn AgentProvider>) -> Result<Self, String> {
+        if !provider.supports("chat") {
+            return Err("in-process provider must support chat".to_string());
+        }
+        Ok(Self {
+            id: id.into(),
+            provider,
+        })
+    }
+}
+
+impl AgentGatewayProvider for InProcessGatewayProvider {
+    fn id(&self) -> &str {
+        &self.id
+    }
+
+    fn provider_type(&self) -> &str {
+        "vifu-runtime"
+    }
+
+    fn invoke<'a>(
+        &'a self,
+        agent_id: &'a str,
+        binding: &'a serde_json::Value,
+        input: &'a serde_json::Value,
+        timeout: Duration,
+    ) -> Pin<Box<dyn Future<Output = Result<serde_json::Value, String>> + Send + 'a>> {
+        Box::pin(async move {
+            let cancellation = CancellationToken::default();
+            let request = ProviderRequest {
+                project_id: binding_text(binding, "projectId")
+                    .unwrap_or("gateway")
+                    .to_string(),
+                endpoint: binding_text(binding, "endpoint")
+                    .unwrap_or(agent_id)
+                    .to_string(),
+                session_id: binding_text(binding, "sessionId")
+                    .unwrap_or("gateway-session")
+                    .to_string(),
+                agent: AgentDefinition {
+                    id: agent_id.to_string(),
+                    name: binding_text(binding, "agentName")
+                        .unwrap_or(agent_id)
+                        .to_string(),
+                    provider: self.id.clone(),
+                    capabilities: vec!["chat".to_string()],
+                    metadata: binding
+                        .get("persona")
+                        .filter(|value| value.is_object())
+                        .cloned()
+                        .unwrap_or_else(|| serde_json::json!({})),
+                },
+                capability: "chat".to_string(),
+                data: InvocationData::Json(input.clone()),
+                metadata: serde_json::json!({ "source": "agent-gateway" }),
+                snapshot: RuntimeSnapshot::default(),
+            };
+            let invocation = self.provider.invoke(request, cancellation.clone());
+            let response = match tokio::time::timeout(timeout, invocation).await {
+                Ok(response) => response.map_err(|error| error.public_message())?,
+                Err(_) => {
+                    cancellation.cancel();
+                    return Err("in-process provider request timed out".to_string());
+                }
+            };
+            match response.data {
+                InvocationData::Json(value) => Ok(value),
+                InvocationData::Binary(_) => {
+                    Err("in-process chat provider returned binary data".to_string())
+                }
+            }
+        })
+    }
+}
+
+fn binding_text<'a>(binding: &'a serde_json::Value, name: &str) -> Option<&'a str> {
+    binding
+        .get(name)
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
 }
 
 pub async fn run_agent_gateway(
@@ -916,12 +1008,14 @@ fn sanitize_error(value: &str) -> String {
 mod tests {
     use serde_json::json;
     use std::sync::Arc;
+    use std::time::Duration;
     use uuid::Uuid;
 
     use super::{
         agent_gateway_websocket_url, decode_command, encode_command,
         is_credential_rejection_status, resolve_provider, sanitize_error,
-        should_sync_before_connect, AgentGatewayProvider, OpenClawGatewayProvider,
+        should_sync_before_connect, AgentGatewayProvider, InProcessGatewayProvider,
+        OpenClawGatewayProvider,
     };
     use crate::gateway_frame;
     use crate::openclaw::Endpoint;
@@ -929,6 +1023,25 @@ mod tests {
         AgentGatewayCommand, AGENT_GATEWAY_HEARTBEAT_EVENT, AGENT_GATEWAY_HELLO_METHOD,
         AGENT_GATEWAY_HELLO_REQUEST_ID, VERSION,
     };
+    use vifu_runtime::{
+        AgentProvider, CancellationToken, ProviderFuture, ProviderRequest, ProviderResponse,
+    };
+
+    struct PersonaProvider;
+
+    impl AgentProvider for PersonaProvider {
+        fn supports(&self, capability: &str) -> bool {
+            capability == "chat"
+        }
+
+        fn invoke<'a>(
+            &'a self,
+            request: ProviderRequest,
+            _cancellation: CancellationToken,
+        ) -> ProviderFuture<'a> {
+            Box::pin(async move { Ok(ProviderResponse::json(request.agent.metadata)) })
+        }
+    }
 
     #[test]
     fn routes_calls_to_the_provider_named_by_the_binding() {
@@ -955,6 +1068,24 @@ mod tests {
             .expect("story provider must resolve");
         assert_eq!(selected.id(), "story");
         assert!(resolve_provider(&providers, &json!({})).is_none());
+    }
+
+    #[tokio::test]
+    async fn in_process_provider_receives_the_profile_persona() {
+        let provider =
+            InProcessGatewayProvider::new("local-qwen", Arc::new(PersonaProvider)).unwrap();
+
+        let output = provider
+            .invoke(
+                "local-qwen",
+                &json!({ "persona": { "instructions": "Choose one safe action." } }),
+                &json!({ "messages": [{ "role": "user", "content": "Act" }] }),
+                Duration::from_secs(1),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(output["instructions"], "Choose one safe action.");
     }
 
     #[test]

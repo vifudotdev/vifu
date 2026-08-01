@@ -1,15 +1,14 @@
 //! UniFFI facade for embedding Vifu Runtime and Gateway utilities in native clients.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::{Arc, Mutex, RwLock};
-use std::thread::JoinHandle;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::{Arc, RwLock};
 
 use serde_json::Value;
-use vifu_gateway::embedded::EmbeddedRuntimeGatewayProvider;
-use vifu_gateway::protocol::{self, AgentDescriptor};
-use vifu_gateway::relay::{self, AgentGatewayProvider, AgentGatewayRuntime};
-use vifu_gateway::session::{self, SessionSummary};
+use vifu_gateway::embedded::{
+    EmbeddedRuntimeGateway, EmbeddedRuntimeGatewayConfig, EmbeddedRuntimeGatewayState,
+};
+use vifu_gateway::relay;
+use vifu_gateway::session;
 use vifu_gateway::{config, openclaw};
 #[cfg(feature = "local-llama")]
 use vifu_provider_llama::{LlamaProvider, LlamaProviderConfig};
@@ -395,6 +394,7 @@ impl VifuEmbeddedRuntime {
                 context_size: config.context_size,
                 gpu_layers: config.gpu_layers,
                 default_max_tokens: config.default_max_tokens,
+                max_concurrency: 1,
             })
             .map_err(|error| VifuRuntimeError::InvalidConfig {
                 message: error.to_string(),
@@ -661,61 +661,6 @@ impl VifuEmbeddedRuntime {
         manifest.metadata = serde_json::json!({ "source": "embedded-runtime" });
         Ok(self.runtime.bootstrap_release(manifest)?.manifest)
     }
-
-    fn gateway_agents(&self, manifest: &RuntimeManifest) -> Vec<AgentDescriptor> {
-        let provider_types = self.provider_types.read().ok();
-        manifest
-            .agents
-            .iter()
-            .map(|agent| {
-                let mut metadata = agent.metadata.as_object().cloned().unwrap_or_default();
-                metadata.insert(
-                    "providerKey".to_string(),
-                    Value::String(agent.provider.clone()),
-                );
-                metadata.insert(
-                    "providerType".to_string(),
-                    Value::String("vifu-runtime".to_string()),
-                );
-                if let Some(provider_type) = provider_types
-                    .as_ref()
-                    .and_then(|types| types.get(&agent.provider))
-                {
-                    metadata.insert(
-                        "localProviderType".to_string(),
-                        Value::String(provider_type.clone()),
-                    );
-                }
-                metadata.insert(
-                    "capabilities".to_string(),
-                    serde_json::json!(agent.capabilities),
-                );
-                AgentDescriptor {
-                    id: agent.id.clone(),
-                    name: agent.name.clone(),
-                    metadata: Value::Object(metadata),
-                }
-            })
-            .collect()
-    }
-
-    fn gateway_providers(&self) -> Result<Vec<Arc<dyn AgentGatewayProvider>>, VifuRuntimeError> {
-        let providers = self
-            .provider_types
-            .read()
-            .map_err(|_| VifuRuntimeError::Runtime {
-                message: "embedded provider registry is unavailable".to_string(),
-            })?
-            .keys()
-            .map(|provider_id| {
-                Arc::new(EmbeddedRuntimeGatewayProvider::new(
-                    provider_id.clone(),
-                    self.runtime.clone(),
-                )) as Arc<dyn AgentGatewayProvider>
-            })
-            .collect();
-        Ok(providers)
-    }
 }
 
 #[derive(Debug, Clone, uniffi::Record)]
@@ -752,17 +697,10 @@ pub struct VifuEmbeddedGatewayStatus {
     pub last_error: Option<String>,
 }
 
-struct EmbeddedGatewayTask {
-    shutdown: tokio::sync::oneshot::Sender<()>,
-    thread: JoinHandle<()>,
-}
-
 #[derive(uniffi::Object)]
 pub struct VifuEmbeddedGateway {
     runtime: Arc<VifuEmbeddedRuntime>,
-    config: VifuEmbeddedGatewayConfig,
-    task: Mutex<Option<EmbeddedGatewayTask>>,
-    status: Arc<Mutex<VifuEmbeddedGatewayStatus>>,
+    gateway: EmbeddedRuntimeGateway,
 }
 
 #[uniffi::export]
@@ -772,24 +710,16 @@ impl VifuEmbeddedGateway {
         runtime: Arc<VifuEmbeddedRuntime>,
         config: VifuEmbeddedGatewayConfig,
     ) -> Result<Arc<Self>, VifuRuntimeError> {
-        relay::agent_gateway_websocket_url(&config.server_url)
-            .map_err(|message| VifuRuntimeError::InvalidConfig { message })?;
-        protocol::validate_identifier("agent gateway id", &config.gateway_id)
-            .map_err(|message| VifuRuntimeError::InvalidConfig { message })?;
-        if config.runtime_database_path.trim().is_empty() {
-            return Err(VifuRuntimeError::InvalidConfig {
-                message: "runtime database path is required".to_string(),
-            });
-        }
-        Ok(Arc::new(Self {
-            runtime,
-            config,
-            task: Mutex::new(None),
-            status: Arc::new(Mutex::new(VifuEmbeddedGatewayStatus {
-                state: VifuEmbeddedGatewayState::Stopped,
-                last_error: None,
-            })),
-        }))
+        let gateway = EmbeddedRuntimeGateway::new(
+            runtime.runtime.clone(),
+            EmbeddedRuntimeGatewayConfig::new(
+                config.server_url,
+                config.gateway_id,
+                config.runtime_database_path,
+            ),
+        )
+        .map_err(|message| VifuRuntimeError::InvalidConfig { message })?;
+        Ok(Arc::new(Self { runtime, gateway }))
     }
 
     /// Starts the optional network Gateway. The credential remains in memory.
@@ -798,133 +728,33 @@ impl VifuEmbeddedGateway {
         gateway_credential: String,
         enrollment_token: Option<String>,
     ) -> Result<(), VifuRuntimeError> {
-        session::validate_gateway_credential(&gateway_credential)
-            .map_err(|message| VifuRuntimeError::InvalidConfig { message })?;
-        let manifest = self.runtime.prepare_gateway_release()?;
-        let providers = self.runtime.gateway_providers()?;
-        let agents = self.runtime.gateway_agents(&manifest);
-        let mut task = self.task.lock().map_err(|_| VifuRuntimeError::Runtime {
-            message: "embedded gateway lifecycle is unavailable".to_string(),
-        })?;
-        if task.as_ref().is_some_and(|task| !task.thread.is_finished()) {
-            return Ok(());
-        }
-        if let Some(finished) = task.take() {
-            let _ = finished.thread.join();
-        }
-
-        let server_url = self.config.server_url.clone();
-        let gateway_id = self.config.gateway_id.clone();
-        let runtime_database_path = self.config.runtime_database_path.clone();
-        let embedded_runtime = self.runtime.runtime.clone();
-        let status = Arc::clone(&self.status);
-        let (shutdown, shutdown_receiver) = tokio::sync::oneshot::channel();
-        set_gateway_status(&status, VifuEmbeddedGatewayState::Running, None)?;
-        let thread = std::thread::Builder::new()
-            .name("vifu-embedded-gateway".to_string())
-            .spawn(move || {
-                let result = tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                    .map_err(|error| error.to_string())
-                    .and_then(|tokio| {
-                        let mut session = SessionSummary {
-                            gateway_id,
-                            gateway_credential,
-                            resume_session_id: None,
-                            created_at_unix: SystemTime::now()
-                                .duration_since(UNIX_EPOCH)
-                                .map(|duration| duration.as_secs())
-                                .unwrap_or(1),
-                            guest_project: None,
-                        };
-                        tokio.block_on(async {
-                            let gateway = AgentGatewayRuntime {
-                                server_url: &server_url,
-                                agent_gateway_bootstrap_token: None,
-                                enrollment_token,
-                                allow_guest_bootstrap: false,
-                                providers: &providers,
-                                agents: &agents,
-                                session_path: None,
-                                runtime_database_path: runtime_database_path.as_ref(),
-                                embedded_runtime: Some(&embedded_runtime),
-                            };
-                            tokio::select! {
-                                result = relay::run_agent_gateway(gateway, &mut session) => result,
-                                _ = shutdown_receiver => Ok(()),
-                            }
-                        })
-                    });
-                match result {
-                    Ok(()) => {
-                        let _ =
-                            set_gateway_status(&status, VifuEmbeddedGatewayState::Stopped, None);
-                    }
-                    Err(error) => {
-                        let _ = set_gateway_status(
-                            &status,
-                            VifuEmbeddedGatewayState::Failed,
-                            Some(error),
-                        );
-                    }
-                }
-            })
-            .map_err(|error| VifuRuntimeError::Runtime {
-                message: error.to_string(),
-            })?;
-        *task = Some(EmbeddedGatewayTask { shutdown, thread });
-        Ok(())
+        self.runtime.prepare_gateway_release()?;
+        self.gateway
+            .start(gateway_credential, enrollment_token)
+            .map_err(Into::into)
     }
 
     pub fn stop(&self) -> Result<(), VifuRuntimeError> {
-        self.stop_inner()
+        self.gateway.stop().map_err(Into::into)
     }
 
     pub fn status(&self) -> Result<VifuEmbeddedGatewayStatus, VifuRuntimeError> {
-        self.status
-            .lock()
-            .map(|status| status.clone())
-            .map_err(|_| VifuRuntimeError::Runtime {
-                message: "embedded gateway status is unavailable".to_string(),
-            })
+        let status = self.gateway.status()?;
+        Ok(VifuEmbeddedGatewayStatus {
+            state: status.state.into(),
+            last_error: status.last_error,
+        })
     }
 }
 
-impl VifuEmbeddedGateway {
-    fn stop_inner(&self) -> Result<(), VifuRuntimeError> {
-        let task = self
-            .task
-            .lock()
-            .map_err(|_| VifuRuntimeError::Runtime {
-                message: "embedded gateway lifecycle is unavailable".to_string(),
-            })?
-            .take();
-        if let Some(task) = task {
-            let _ = task.shutdown.send(());
-            task.thread.join().map_err(|_| VifuRuntimeError::Runtime {
-                message: "embedded gateway worker stopped unexpectedly".to_string(),
-            })?;
+impl From<EmbeddedRuntimeGatewayState> for VifuEmbeddedGatewayState {
+    fn from(state: EmbeddedRuntimeGatewayState) -> Self {
+        match state {
+            EmbeddedRuntimeGatewayState::Stopped => Self::Stopped,
+            EmbeddedRuntimeGatewayState::Running => Self::Running,
+            EmbeddedRuntimeGatewayState::Failed => Self::Failed,
         }
-        set_gateway_status(&self.status, VifuEmbeddedGatewayState::Stopped, None)
     }
-}
-
-impl Drop for VifuEmbeddedGateway {
-    fn drop(&mut self) {
-        let _ = self.stop_inner();
-    }
-}
-
-fn set_gateway_status(
-    status: &Mutex<VifuEmbeddedGatewayStatus>,
-    state: VifuEmbeddedGatewayState,
-    last_error: Option<String>,
-) -> Result<(), VifuRuntimeError> {
-    *status.lock().map_err(|_| VifuRuntimeError::Runtime {
-        message: "embedded gateway status is unavailable".to_string(),
-    })? = VifuEmbeddedGatewayStatus { state, last_error };
-    Ok(())
 }
 
 impl From<InvocationData> for VifuInvocationData {
@@ -1077,10 +907,6 @@ mod tests {
         assert_eq!(manifest.providers[0].provider_type, "native");
         assert_eq!(manifest.agents[0].id, "guide");
         assert_eq!(manifest.endpoints[0].name, "guide");
-
-        let descriptors = runtime.gateway_agents(&manifest);
-        assert_eq!(descriptors[0].metadata["providerKey"], "native");
-        assert_eq!(descriptors[0].metadata["providerType"], "vifu-runtime");
     }
 
     #[test]

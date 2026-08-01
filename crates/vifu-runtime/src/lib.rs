@@ -1,4 +1,4 @@
-//! Small, stateful runtime primitives for embedding Vifu in Rust applications.
+//! Embeddable, stateful Agent Runtime primitives for Rust applications.
 //!
 //! Add application behavior as Bevy plugins, dispatch [`RuntimeCommand`] values,
 //! and let the host execute the resulting effects.

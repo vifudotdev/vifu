@@ -1120,6 +1120,33 @@ pub async fn update_project(
     } else {
         current.binding_ids
     };
+    if let Some(gateway_id) = patch.gateway_id {
+        let primary_deployment_id = sqlx::query_scalar::<_, Uuid>(
+            "SELECT id FROM runtime_deployments
+             WHERE project_id = $1 AND is_primary = 1",
+        )
+        .bind(id)
+        .fetch_optional(&mut *transaction)
+        .await?;
+        if let Some(deployment_id) = primary_deployment_id {
+            sqlx::query(
+                "DELETE FROM runtime_deployment_gateways
+                 WHERE deployment_id = $1 AND gateway_id = $2",
+            )
+            .bind(deployment_id)
+            .bind(&current.project.gateway_id)
+            .execute(&mut *transaction)
+            .await?;
+            sqlx::query(
+                "INSERT INTO runtime_deployment_gateways(deployment_id, gateway_id)
+                 VALUES ($1, $2) ON CONFLICT DO NOTHING",
+            )
+            .bind(deployment_id)
+            .bind(gateway_id)
+            .execute(&mut *transaction)
+            .await?;
+        }
+    }
     transaction.commit().await?;
     Ok(ProjectWithBindings {
         project,
@@ -3806,19 +3833,12 @@ pub async fn get_trace_project_id(
     pool: &SqlitePool,
     trace_id: Uuid,
 ) -> Result<Option<Uuid>, ApiError> {
-    let project_id: Option<String> =
-        sqlx::query_scalar("SELECT project_id FROM endpoint_traces WHERE id = ?")
-            .bind(trace_id.to_string())
-            .fetch_optional(pool)
-            .await
-            .map_err(ApiError::Database)?
-            .ok_or(ApiError::NotFound)?;
-    project_id
-        .map(|value| {
-            Uuid::parse_str(&value)
-                .map_err(|_| ApiError::Invalid("stored trace project ID is invalid".to_string()))
-        })
-        .transpose()
+    sqlx::query_scalar("SELECT project_id FROM endpoint_traces WHERE id = ?")
+        .bind(trace_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(ApiError::Database)?
+        .ok_or(ApiError::NotFound)
 }
 
 async fn delete_by_id(pool: &SqlitePool, table: &str, id: Uuid) -> Result<(), ApiError> {

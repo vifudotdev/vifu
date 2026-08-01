@@ -3592,6 +3592,7 @@ dependencies = [
  "tracing-subscriber",
  "uuid",
  "vifu-gateway",
+ "vifu-provider-llama",
  "vifu-server",
 ]
 
@@ -3634,6 +3635,7 @@ dependencies = [
  "serde_json",
  "thiserror",
  "tokio",
+ "vifu-gateway",
  "vifu-runtime",
 ]
 

@@ -254,6 +254,51 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn sqlite_project_gateway_update_moves_the_primary_deployment_assignment() {
+        let (storage, path) = sqlite_storage().await;
+        let project_id = Uuid::new_v4();
+        create_project(
+            &storage,
+            NewProject {
+                id: project_id,
+                owner_user_id: None,
+                slug: "gateway-move",
+                name: "Gateway move",
+                description: None,
+                gateway_id: "gateway-old",
+                binding_ids: &[],
+            },
+        )
+        .await
+        .expect("project should be created");
+        let deployment_id = primary_deployment_id(&storage, project_id).await;
+
+        update_project(
+            &storage,
+            project_id,
+            ProjectPatch {
+                slug: None,
+                name: None,
+                description_changed: false,
+                description: None,
+                gateway_id: Some("gateway-new"),
+                enabled: None,
+                binding_ids: None,
+            },
+        )
+        .await
+        .expect("project Gateway should update");
+
+        assert_eq!(
+            list_runtime_deployment_gateway_ids(&storage, deployment_id)
+                .await
+                .expect("deployment Gateways should list"),
+            vec!["gateway-new"]
+        );
+        close_and_remove(storage, &path).await;
+    }
+
+    #[tokio::test]
     async fn sqlite_supports_the_runtime_resource_lifecycle() {
         let (storage, path) = sqlite_storage().await;
         let project_id = Uuid::new_v4();
@@ -595,6 +640,19 @@ mod tests {
             list_traces(&storage, None, Some(project_id), 10)
                 .await
                 .expect("traces should list")
+                .len(),
+            1
+        );
+        assert_eq!(
+            get_trace_project_id(&storage, trace_id)
+                .await
+                .expect("trace project should resolve"),
+            Some(project_id)
+        );
+        assert_eq!(
+            list_trace_spans(&storage, trace_id)
+                .await
+                .expect("trace spans should list")
                 .len(),
             1
         );

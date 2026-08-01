@@ -20,7 +20,7 @@ serde_json.workspace = true
 thiserror.workspace = true
 tokio = { version = "1", features = ["rt"] }
 uniffi.workspace = true
-vifu-gateway = { path = "../vifu-gateway" }
+vifu-gateway = { path = "../vifu-gateway", features = ["sqlite"] }
 vifu-provider-llama = { path = "../vifu-provider-llama", optional = true }
 vifu-runtime = { path = "../vifu-runtime", features = ["sqlite"] }
 
