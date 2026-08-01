@@ -2,6 +2,14 @@
 
 All notable changes to Vifu are documented here.
 
+## 0.1.6 - 2026-08-01
+
+- Added anonymous Gateway bootstrap for servers that enable temporary projects.
+- Reconciled discovered agents into projects assigned to their Gateway so a
+  newly issued endpoint is immediately usable.
+- Kept guest bootstrap responses compatible across Server and Gateway versions
+  and deferred runtime sync until initial registration completes.
+
 ## 0.1.5 - 2026-08-01
 
 - Added portable Runtime deployments and release selection across the Server,
