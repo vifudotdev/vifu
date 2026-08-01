@@ -2,6 +2,16 @@
 
 All notable changes to Vifu are documented here.
 
+## 0.1.5 - 2026-08-01
+
+- Added portable Runtime deployments and release selection across the Server,
+  Agent Gateway, and Dashboard.
+- Added the shared Runtime Bridge for embedded Apple hosts and in-process game
+  engine communication.
+- Added durable Gateway enrollment, reconnect, resume, and deployment state
+  coverage to the self-hosted end-to-end gate.
+- Updated the Apple package for the current UniFFI bridge API.
+
 ## 0.1.4 - 2026-07-30
 
 - Made `cargo install vifu` and `cargo run -p vifu` build the complete
