@@ -6,6 +6,16 @@ according to `~/.vifu/config.json`.
 
 ## Install the binary
 
+The fastest path is a prebuilt archive from the
+[latest Vifu release](https://github.com/vifudotdev/vifu/releases/latest).
+Download the archive for your platform, extract it, then run:
+
+```bash
+./vifu
+```
+
+If you already use Cargo:
+
 ```bash
 cargo install vifu
 vifu

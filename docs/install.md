@@ -1,10 +1,34 @@
-# Install From Source
+# Install Vifu
 
-## Requirements
+## Download A Release
+
+Download the archive for your platform from the
+[latest release](https://github.com/vifudotdev/vifu/releases/latest).
+
+- macOS and Linux archives use `.tar.gz`.
+- Windows archives use `.zip`.
+
+Extract the archive, then start the local Server and Agent Gateway:
+
+```bash
+./vifu
+```
+
+On Windows:
+
+```powershell
+.\vifu.exe
+```
+
+## Build From Source
+
+Use Cargo only when you want to build from source.
+
+### Requirements
 
 - Rust from `rust-toolchain.toml`
 
-## Run Vifu
+### Run Vifu
 
 ```bash
 cd crates/vifu
@@ -16,8 +40,10 @@ The first run creates `~/.vifu/config.json` and
 Server and Agent Gateway roles. Runtime and Gateway state is stored in
 `~/.vifu/runtime.sqlite`; local Server data is stored separately in
 `~/.vifu/vifu.sqlite`.
-Add `llama` or `local-whisper` entries to `providers.json` to load local models
-in the same process; see [Agent Providers](../providers/README.md).
+Add `llama` or `local-whisper` entries to the runtime Provider registry to load
+local models in the same process. The Console edits the same registry in local
+mode, and project provider records only bind provider keys to projects; see
+[Agent Providers](../providers/README.md).
 
 ## Run The Console
 
@@ -42,8 +68,8 @@ and traces. It reads runtime authority on the server side.
 
 ## Stop
 
-Stop a source process with `Ctrl-C`. Stop the Console stack while preserving
-its PostgreSQL volume with:
+Stop a release or source process with `Ctrl-C`. Stop the Console stack while
+preserving its PostgreSQL volume with:
 
 ```bash
 docker compose down

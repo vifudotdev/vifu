@@ -5,16 +5,27 @@ products. Product code owns domain state, UI, safety, and allowed actions;
 Vifu owns provider connections, agent identity, Project Settings, sessions,
 stable endpoints, Gateway transport, and traces.
 
-## Get Started
+## Start
 
-- [Install from source](install.md)
+- [Install Vifu](install.md)
 - [Self-host with Docker](self-hosting.md)
-- [Embed the runtime](runtime-embedding.md)
+- [Project Settings](project-settings.md)
+
+## Operate
+
+- [Provider integrations](../providers/README.md)
+- [Local llama Provider](../providers/llama/README.md)
+- [Local Whisper Provider](../providers/local-whisper/README.md)
+- [Security](../SECURITY.md)
+
+## Embed
+
+- [Embed the Runtime](runtime-embedding.md)
+- [Runtime API](https://docs.rs/vifu-runtime)
+- [Gateway crate](../crates/vifu-gateway/README.md)
 
 ## Reference
 
 - [Runtime configuration example](../config/runtime.example.json)
 - [Positioning and related projects](comparison.md)
-- [Provider integrations](../providers/README.md)
 - [Build and test](../BUILD.md)
-- [Security](../SECURITY.md)
