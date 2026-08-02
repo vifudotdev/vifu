@@ -6115,12 +6115,16 @@ fn collect_session_agent_providers(
             .get("providerType")
             .and_then(Value::as_str)
             .unwrap_or("vifu-runtime");
+        let provider_name = metadata
+            .get("providerName")
+            .and_then(Value::as_str)
+            .unwrap_or(provider_key);
         upsert_available_provider(
             providers,
             session,
             provider_key,
             provider_type,
-            provider_key,
+            provider_name,
             metadata.get("localProviderType").and_then(Value::as_str),
             provider_capabilities(&metadata),
         )?;

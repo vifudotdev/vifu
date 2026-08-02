@@ -357,9 +357,10 @@ fn load_openai_compatible_provider(
     let input_modalities = provider_input_modalities(&provider.config, includes_chat)?;
     let agent = vifu_gateway::protocol::AgentDescriptor {
         id: provider.id.clone(),
-        name,
+        name: name.clone(),
         metadata: serde_json::json!({
             "providerKey": provider.id,
+            "providerName": name,
             "providerType": "vifu-runtime",
             "localProviderType": "openai-compatible",
             "capabilities": capabilities,
@@ -828,8 +829,8 @@ mod tests {
     #[test]
     fn openai_compatible_provider_is_exposed_through_gateway_runtime() {
         let provider = AgentProviderConfig {
-            id: "cloudflare-ai-proxy".to_string(),
-            name: Some("Cloudflare AI Proxy".to_string()),
+            id: "openai-compatible-test-proxy".to_string(),
+            name: Some("OpenAI Compatible Test Proxy".to_string()),
             provider_type: "openai-compatible".to_string(),
             url: "https://provider.example.com/openai/v1".to_string(),
             token: None,
@@ -842,11 +843,18 @@ mod tests {
 
         let (runtime_provider, agent) = load_openai_compatible_provider(provider).unwrap();
 
-        assert_eq!(runtime_provider.id(), "cloudflare-ai-proxy");
+        assert_eq!(runtime_provider.id(), "openai-compatible-test-proxy");
         assert_eq!(runtime_provider.provider_type(), "vifu-runtime");
-        assert_eq!(agent.id, "cloudflare-ai-proxy");
-        assert_eq!(agent.name, "Cloudflare AI Proxy");
-        assert_eq!(agent.metadata["providerKey"], "cloudflare-ai-proxy");
+        assert_eq!(agent.id, "openai-compatible-test-proxy");
+        assert_eq!(agent.name, "OpenAI Compatible Test Proxy");
+        assert_eq!(
+            agent.metadata["providerKey"],
+            "openai-compatible-test-proxy"
+        );
+        assert_eq!(
+            agent.metadata["providerName"],
+            "OpenAI Compatible Test Proxy"
+        );
         assert_eq!(agent.metadata["providerType"], "vifu-runtime");
         assert_eq!(agent.metadata["localProviderType"], "openai-compatible");
         assert_eq!(agent.metadata["capabilities"], json!(["chat", "embedding"]));

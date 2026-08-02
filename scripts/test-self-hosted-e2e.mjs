@@ -5,6 +5,9 @@ const dashboardBaseUrl = (process.env.VIFU_E2E_DASHBOARD_URL || "http://127.0.0.
 const adminKey = process.env.VIFU_E2E_ADMIN_KEY || process.env.VIFU_ADMIN_KEY || "";
 const statePath = process.env.VIFU_E2E_STATE_PATH || "/tmp/vifu-self-hosted-e2e.json";
 const openClawMockUrl = process.env.VIFU_E2E_OPENCLAW_MOCK_URL?.replace(/\/+$/, "") || null;
+const openAiMockUrl = process.env.VIFU_E2E_OPENAI_MOCK_URL?.replace(/\/+$/, "") || null;
+const openAiProviderBaseUrl = process.env.VIFU_E2E_OPENAI_PROVIDER_BASE_URL?.replace(/\/+$/, "") || null;
+const openAiProviderToken = process.env.VIFU_E2E_OPENAI_PROVIDER_TOKEN || "";
 const expectTimeout = process.env.VIFU_E2E_EXPECT_TIMEOUT === "1";
 const command = process.argv[2] || "setup";
 let runtimeCredential = adminKey;
@@ -100,15 +103,31 @@ async function setup() {
     ? agentGateway.agents?.find((item) => item.id === expectedMockAgent)
     : agentGateway.agents?.[0];
   assert(agent?.id, "The Agent Gateway did not report an agent");
-  const secondaryAgent = agentGateway.agents?.find((item) => item.id && item.id !== agent.id) ?? null;
-  const projectAgentIds = secondaryAgent ? [agent.id, secondaryAgent.id] : [agent.id];
   const providerKey = agent.metadata?.providerKey;
   assert(providerKey, "The Agent Gateway did not identify the source provider");
+  const secondaryAgent = agentGateway.agents?.find((item) =>
+    item.id
+      && item.id !== agent.id
+      && item.metadata?.providerKey === providerKey
+  ) ?? null;
+  const projectAgentIds = secondaryAgent ? [agent.id, secondaryAgent.id] : [agent.id];
   const providerCatalog = await request("/v1/provider-catalog");
   assert(
     providerCatalog.custom?.some((provider) => provider.providerKey === providerKey),
     "The Agent Gateway provider is missing from the provider catalog",
   );
+  if (openAiProviderBaseUrl) {
+    assert(
+      providerCatalog.custom?.some((provider) =>
+        provider.providerKey === "openai-compatible-e2e"
+          && provider.providerType === "vifu-runtime"
+          && provider.config?.localProviderType === "openai-compatible"
+          && provider.config?.capabilities?.includes("chat")
+          && provider.config?.capabilities?.includes("embedding")
+      ),
+      "The providers.json OpenAI-compatible provider is missing from the provider catalog",
+    );
+  }
 
   const project = await createProjectWithProvider({
     name: `E2E Project ${suffix}`,
@@ -167,8 +186,11 @@ async function setup() {
 
   const projectKey = (await request("/v1/api-keys", {
     method: "POST",
-    body: projectKeyBody(project.id, "E2E project key"),
+    body: projectKeyBody(project.id, "E2E project key", { transcriptions: "access" }),
   })).apiKey;
+  const providerWorkflow = openAiProviderBaseUrl
+    ? await exerciseOpenAiCompatibleProjectFlow({ project, projectKey, suffix })
+    : null;
 
   const editableKey = (await request("/v1/api-keys", {
     method: "POST",
@@ -303,7 +325,11 @@ async function setup() {
 
   const visibleModels = await request(`/${project.slug}/v1/models`, {}, projectKey.key);
   const visibleModelIds = new Set(visibleModels.data?.map((model) => model.id) ?? []);
-  const expectedModelIds = [profile.slug, secondaryProfile?.slug].filter(Boolean);
+  const expectedModelIds = [
+    profile.slug,
+    secondaryProfile?.slug,
+    ...(providerWorkflow?.modelSlugs ?? []),
+  ].filter(Boolean);
   assert(
     visibleModelIds.size === expectedModelIds.length
       && expectedModelIds.every((modelId) => visibleModelIds.has(modelId)),
@@ -380,10 +406,21 @@ async function setup() {
     scopeTargetProjectId: scopeTargetProject.id,
     endpointIds: allEndpoints.map((endpoint) => endpoint.id),
     bindingIds: [binding.id, secondaryBinding?.id].filter(Boolean),
-    profileIds: [profile.id, secondaryProfile?.id].filter(Boolean),
+    profileIds: [
+      profile.id,
+      secondaryProfile?.id,
+      ...(providerWorkflow?.profileIds ?? []),
+    ].filter(Boolean),
     gatewayId: agentGateway.gatewayId,
     sessionId: agentGateway.sessionId,
-    requestIds: calls.map(completionRequestId),
+    requestIds: [
+      ...calls.map(completionRequestId),
+      ...(providerWorkflow?.requestIds ?? []),
+    ],
+    openAiProviderKey: providerWorkflow?.projectProviderKey ?? null,
+    openAiAvailableProviderKey: providerWorkflow?.availableProviderKey ?? null,
+    openAiProfileSlug: providerWorkflow?.directProfileSlug ?? null,
+    openAiModelSlugs: providerWorkflow?.modelSlugs ?? [],
     authCookieValue: loginCookie.cookieValue,
   };
   await writeFile(statePath, `${JSON.stringify(state, null, 2)}\n`, { mode: 0o600 });
@@ -421,6 +458,25 @@ async function verify() {
   assert(state.endpointIds.every((id) => endpoints.endpoints.some((item) => item.id === id)), "Endpoints were not persisted");
   assert(state.requestIds.every((id) => traces.traces.some((item) => item.requestId === id)), "Traces were not persisted");
   assert(traces.traces.some((item) => item.projectId === state.projectId), "Project endpoint traces were not persisted");
+  if (state.openAiProviderKey) {
+    const providers = (await request(`/v1/project/${state.projectSlug}/providers`)).providers ?? [];
+    assert(
+      providers.some((item) => item.providerKey === state.openAiProviderKey && item.status === "online"),
+      "Project OpenAI-compatible provider was not persisted as online",
+    );
+    assert(
+      providers.some((item) => item.providerKey === state.openAiAvailableProviderKey && item.sourceKind === "custom"),
+      "Attached providers.json provider was not persisted",
+    );
+    assert(
+      state.openAiModelSlugs.every((slug) => profiles.profiles.some((item) => item.slug === slug)),
+      "OpenAI-compatible provider profiles were not persisted",
+    );
+    assert(
+      traces.traces.some((item) => item.projectId === state.projectId && item.providerKey === state.openAiProviderKey),
+      "OpenAI-compatible provider traces were not persisted",
+    );
+  }
   const resumed = agentGateways.agentGateways.find((item) => item.gatewayId === state.gatewayId && item.status === "connected");
   assert(resumed, "Agent Gateway did not reconnect");
   assert(resumed.sessionId === state.sessionId, "Agent Gateway did not resume its session");
@@ -579,6 +635,169 @@ async function createProjectWithProvider({ name, slug, gatewayId, providerKey, m
   return (await request(`/v1/projects/${created.id}`)).project;
 }
 
+async function exerciseOpenAiCompatibleProjectFlow({ project, projectKey, suffix }) {
+  assert(openAiProviderBaseUrl, "VIFU_E2E_OPENAI_PROVIDER_BASE_URL is required for OpenAI-compatible E2E");
+  const projectCatalog = await request(`/v1/project/${project.slug}/provider-catalog`);
+  const availableOpenAi = projectCatalog.custom?.find((provider) => provider.providerKey === "openai-compatible-e2e");
+  const availableOpenAiAlt = projectCatalog.custom?.find((provider) => provider.providerKey === "openai-compatible-e2e-alt");
+  assert(availableOpenAi, "Project provider catalog did not include the providers.json OpenAI-compatible provider");
+  assert(availableOpenAiAlt, "Project provider catalog did not include the second providers.json OpenAI-compatible provider");
+  assert(availableOpenAi.providerType === "vifu-runtime", "providers.json OpenAI-compatible provider must be exposed as vifu-runtime");
+  assert(
+    availableOpenAi.config?.localProviderType === "openai-compatible",
+    "providers.json OpenAI-compatible provider lost its local provider type",
+  );
+  assert(
+    availableOpenAi.config?.capabilities?.includes("chat")
+      && availableOpenAi.config?.capabilities?.includes("embedding"),
+    "providers.json OpenAI-compatible provider did not report chat and embedding capabilities",
+  );
+
+  const profilesBeforeAttach = new Set(((await request(`/v1/project/${project.slug}/profiles`)).profiles ?? [])
+    .map((profile) => profile.id));
+  const attachedAvailable = await request(`/v1/project/${project.slug}/providers`, {
+    method: "POST",
+    body: {
+      source: { kind: "custom", key: "openai-compatible-e2e" },
+    },
+  });
+  assert(attachedAvailable.provider?.sourceKind === "custom", "Available provider attach did not preserve sourceKind=custom");
+  assert(attachedAvailable.provider?.sourceKey === "openai-compatible-e2e", "Available provider attach used the wrong source key");
+  assert(attachedAvailable.provider?.status === "online", "Available providers.json provider was not online after attach");
+  assert(attachedAvailable.addedAgents >= 1, "Available providers.json provider did not add its discovered agent");
+  const profilesAfterAttach = ((await request(`/v1/project/${project.slug}/profiles`)).profiles ?? [])
+    .filter((profile) => !profilesBeforeAttach.has(profile.id));
+
+  const offlineProvider = await request(`/v1/project/${project.slug}/providers`, {
+    method: "POST",
+    body: {
+      source: { kind: "registry", key: "openai-compatible" },
+      name: "E2E Offline OpenAI-compatible Provider",
+      baseUrl: "http://127.0.0.1:1/v1",
+      config: {},
+      secrets: {},
+    },
+  });
+  assert(offlineProvider.provider?.status === "offline", "Unreachable OpenAI-compatible provider was not marked offline");
+  assert(offlineProvider.message, "Unreachable OpenAI-compatible provider did not return a health message");
+  await request(`/v1/project/${project.slug}/providers/${offlineProvider.provider.providerKey}`, { method: "DELETE" });
+
+  const projectProvider = await request(`/v1/project/${project.slug}/providers`, {
+    method: "POST",
+    body: {
+      source: { kind: "registry", key: "openai-compatible" },
+      name: "E2E OpenAI Project Provider",
+      baseUrl: openAiProviderBaseUrl,
+      config: {},
+      secrets: openAiProviderToken ? { token: openAiProviderToken } : {},
+    },
+  });
+  assert(projectProvider.provider?.sourceKind === "registry", "Project provider did not preserve sourceKind=registry");
+  assert(projectProvider.provider?.providerType === "openai-compatible", "Project provider used the wrong provider type");
+  assert(projectProvider.provider?.status === "online", "Project OpenAI-compatible provider was not online");
+  if (openAiProviderToken) {
+    assert(
+      projectProvider.provider.secretKeys?.includes("token"),
+      "Project OpenAI-compatible provider did not persist the configured token key",
+    );
+  }
+  const testedProvider = await request(
+    `/v1/project/${project.slug}/providers/${projectProvider.provider.providerKey}/test`,
+    { method: "POST", body: {} },
+  );
+  assert(testedProvider.provider?.status === "online", "Project OpenAI-compatible provider test did not report online");
+
+  const directProfile = (await request("/v1/profiles", {
+    method: "POST",
+    body: openAiProfileBody({
+      projectId: project.id,
+      slug: `openai-compatible-e2e-${suffix}`,
+      providerKey: projectProvider.provider.providerKey,
+    }),
+  })).profile;
+
+  const imageChat = await request(`/${project.slug}/v1/chat/completions`, {
+    method: "POST",
+    body: imageChatCompletionBody(directProfile, "describe the test image"),
+  }, projectKey.key);
+  assert(
+    completionContent(imageChat).includes("image=true"),
+    "OpenAI-compatible chat did not forward image content",
+  );
+
+  const embedding = await request(`/${project.slug}/v1/embeddings`, {
+    method: "POST",
+    body: {
+      model: directProfile.slug,
+      input: ["parsnip", "watering can"],
+    },
+  }, projectKey.key);
+  assert(
+    embedding.data?.length === 2
+      && Array.isArray(embedding.data[0]?.embedding)
+      && embedding.data[0].embedding.length === 4,
+    "OpenAI-compatible embedding endpoint did not return embeddings",
+  );
+
+  const transcription = await transcriptionRequest(
+    `/${project.slug}/v1/audio/transcriptions`,
+    directProfile.slug,
+    projectKey.key,
+  );
+  assert(
+    transcription.text === "mock transcription from OpenAI-compatible provider",
+    "OpenAI-compatible transcription endpoint did not return provider text",
+  );
+
+  if (openAiMockUrl) {
+    const metrics = await fetch(`${openAiMockUrl}/metrics`).then((response) => response.json());
+    assert(metrics.modelsRequests >= 2, "OpenAI-compatible provider health checks did not call /v1/models");
+    assert(metrics.chatImageRequests >= 1, "OpenAI-compatible provider did not receive an image chat request");
+    assert(metrics.embeddingRequests >= 1, "OpenAI-compatible provider did not receive an embedding request");
+    assert(metrics.transcriptionRequests >= 1, "OpenAI-compatible provider did not receive a transcription request");
+    assert(metrics.unauthorizedRequests === 0, "OpenAI-compatible mock saw unauthorized requests");
+  }
+
+  const traces = (await request("/v1/traces?limit=500")).traces ?? [];
+  const imageChatRequestId = completionRequestId(imageChat);
+  assert(
+    traces.some((trace) =>
+      trace.requestId === imageChatRequestId
+        && trace.projectId === project.id
+        && trace.providerKey === projectProvider.provider.providerKey
+        && trace.capabilityKind === "chat"
+        && trace.status === "completed"
+    ),
+    "OpenAI-compatible image chat trace was not persisted",
+  );
+  for (const capability of ["embedding", "transcription"]) {
+    assert(
+      traces.some((trace) =>
+        trace.projectId === project.id
+          && trace.providerKey === projectProvider.provider.providerKey
+          && trace.capabilityKind === capability
+          && trace.status === "completed"
+      ),
+      `OpenAI-compatible ${capability} trace was not persisted`,
+    );
+  }
+
+  return {
+    availableProviderKey: attachedAvailable.provider.providerKey,
+    projectProviderKey: projectProvider.provider.providerKey,
+    directProfileSlug: directProfile.slug,
+    modelSlugs: [
+      directProfile.slug,
+      ...profilesAfterAttach.map((profile) => profile.slug),
+    ],
+    profileIds: [
+      directProfile.id,
+      ...profilesAfterAttach.map((profile) => profile.id),
+    ],
+    requestIds: [imageChatRequestId],
+  };
+}
+
 async function request(path, init = {}, credential = runtimeCredential) {
   const response = await rawRequest(path, init, credential);
   const responseBody = await response.text();
@@ -628,6 +847,24 @@ function rawRequest(path, init = {}, credential = runtimeCredential) {
   return fetch(`${apiBaseUrl}${path}`, { ...init, headers, body });
 }
 
+async function transcriptionRequest(path, model, credential = runtimeCredential) {
+  const form = new FormData();
+  form.set("model", model);
+  form.set("file", new Blob([testWavBytes()], { type: "audio/wav" }), "vifu-e2e.wav");
+  const headers = new Headers({ accept: "application/json" });
+  if (credential) headers.set("authorization", `Bearer ${credential}`);
+  const response = await fetch(`${apiBaseUrl}${path}`, {
+    method: "POST",
+    headers,
+    body: form,
+  });
+  const payload = await response.json().catch(() => null);
+  if (!response.ok) {
+    throw new Error(`POST ${path}: ${payload?.error?.message || `HTTP ${response.status}`}`);
+  }
+  return payload ?? {};
+}
+
 function chatCompletionBody(endpoint, message) {
   return {
     model: endpoint.slug,
@@ -636,18 +873,84 @@ function chatCompletionBody(endpoint, message) {
   };
 }
 
-function projectKeyBody(projectId, name) {
+function imageChatCompletionBody(profile, message) {
+  return {
+    model: profile.slug,
+    messages: [{
+      role: "user",
+      content: [
+        { type: "text", text: message },
+        {
+          type: "image_url",
+          image_url: {
+            url: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=",
+          },
+        },
+      ],
+    }],
+    stream: false,
+  };
+}
+
+function openAiProfileBody({ projectId, slug, providerKey }) {
+  return {
+    projectId,
+    name: "E2E OpenAI-compatible Agent",
+    slug,
+    description: "Exercises project-level OpenAI-compatible chat, image, embedding, and transcription.",
+    persona: { files: {} },
+    runtime: {},
+    presentation: {},
+    source: {
+      type: "openai-compatible",
+      providerKey,
+      managed: false,
+    },
+    capabilities: [
+      profileCapability("chat", providerKey, "vifu-e2e-chat"),
+      profileCapability("embedding", providerKey, "vifu-e2e-embedding"),
+      profileCapability("transcription", providerKey, "vifu-e2e-transcription"),
+    ],
+    changeSummary: "Created by self-hosted Docker E2E",
+  };
+}
+
+function profileCapability(kind, providerKey, resourceId) {
+  return {
+    kind,
+    providerType: "openai-compatible",
+    providerKey,
+    resourceId,
+    config: {},
+    inputSchema: {},
+    outputSchema: {},
+  };
+}
+
+function testWavBytes() {
+  return new Uint8Array([
+    0x52, 0x49, 0x46, 0x46, 0x24, 0x00, 0x00, 0x00,
+    0x57, 0x41, 0x56, 0x45, 0x66, 0x6d, 0x74, 0x20,
+    0x10, 0x00, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00,
+    0x40, 0x1f, 0x00, 0x00, 0x80, 0x3e, 0x00, 0x00,
+    0x02, 0x00, 0x10, 0x00, 0x64, 0x61, 0x74, 0x61,
+    0x00, 0x00, 0x00, 0x00,
+  ]);
+}
+
+function projectKeyBody(projectId, name, permissionOverrides = {}) {
   return {
     projectId,
     name,
     agentScope: { mode: "all" },
-    permissions: apiKeyPermissions(),
+    permissions: apiKeyPermissions(permissionOverrides),
   };
 }
 
 function apiKeyPermissions(overrides = {}) {
   return {
     chatCompletions: "access",
+    embeddings: "access",
     speech: "none",
     transcriptions: "none",
     realtime: "none",

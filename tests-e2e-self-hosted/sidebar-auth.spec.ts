@@ -1,4 +1,5 @@
 import { expect, test } from "@playwright/test";
+import { readFile } from "node:fs/promises";
 
 test("session remains valid across sidebar navigation on the bind address", async ({ context, page }) => {
   const adminKey = process.env.VIFU_SELF_HOSTED_E2E_ADMIN_KEY;
@@ -58,6 +59,23 @@ test("session remains valid across sidebar navigation on the bind address", asyn
     await page.getByRole("link", { name: label, exact: true }).click();
     await expect(page).toHaveURL(new RegExp(`/project/[^/]+/${path}$`));
     await expect(page.getByRole("heading", { level: 1, name: heading })).toBeVisible();
+  }
+
+  const statePath = process.env.VIFU_SELF_HOSTED_E2E_STATE_PATH;
+  if (statePath) {
+    const state = JSON.parse(await readFile(statePath, "utf8"));
+    if (state.openAiProviderKey) {
+      await page.goto(`/project/${state.projectSlug}/providers`);
+      await expect(page.getByRole("heading", { level: 1, name: "Providers" })).toBeVisible();
+      await expect(page.getByText("OpenAI Compatible E2E", { exact: true })).toBeVisible();
+      await expect(page.getByText("E2E OpenAI Project Provider", { exact: true })).toBeVisible();
+      await page.getByRole("button", { name: "Add provider" }).click();
+      const providerDialog = page.getByRole("dialog");
+      await expect(providerDialog.getByRole("heading", { name: "Choose a provider" })).toBeVisible();
+      await expect(providerDialog.getByText("Available providers", { exact: true })).toBeVisible();
+      await expect(providerDialog.getByRole("button", { name: /OpenAI Compatible E2E Alt/ })).toBeVisible();
+      await providerDialog.getByRole("button", { name: "Close" }).click();
+    }
   }
 
   await page.getByRole("link", { name: "API", exact: true }).click();

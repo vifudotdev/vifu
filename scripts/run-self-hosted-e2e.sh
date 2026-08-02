@@ -123,15 +123,21 @@ elif [ "$use_existing_openclaw" = "1" ]; then
 else
   openclaw_port="$(free_port "${server_port:-}" "${dashboard_port:-}")"
 fi
+enable_openai_mock="${VIFU_E2E_ENABLE_OPENAI_MOCK:-1}"
+openai_mock_port="${VIFU_E2E_OPENAI_MOCK_PORT:-$(free_port "${server_port:-}" "${dashboard_port:-}" "$openclaw_port")}"
 agent_gateway_log="$state_dir/agent-gateway.log"
 mock_log="$state_dir/openclaw.log"
+openai_mock_log="$state_dir/openai-compatible.log"
 state_path="$state_dir/state.json"
 mock_pid=""
+openai_mock_pid=""
 agent_gateway_pid=""
 openclaw_provider_token="${OPENCLAW_GATEWAY_TOKEN:-}"
 if [ "$use_existing_openclaw" != "1" ]; then
   openclaw_provider_token="${openclaw_provider_token:-$(rand_hex 32)}"
 fi
+openai_provider_token="${VIFU_E2E_OPENAI_PROVIDER_TOKEN:-}"
+openai_provider_token="${openai_provider_token:-$(rand_hex 32)}"
 
 compose() {
   if [ -n "$compose_project" ]; then
@@ -166,6 +172,7 @@ agent_gateway_ready() {
 cleanup_processes() {
   if [ -n "$agent_gateway_pid" ]; then kill "$agent_gateway_pid" 2>/dev/null || true; fi
   if [ -n "$mock_pid" ]; then kill "$mock_pid" 2>/dev/null || true; fi
+  if [ -n "$openai_mock_pid" ]; then kill "$openai_mock_pid" 2>/dev/null || true; fi
 }
 
 on_failure() {
@@ -175,7 +182,9 @@ on_failure() {
     tail -n 100 "$agent_gateway_log" 2>/dev/null || true
     printf '%s\n' "--- OpenClaw mock log ---"
     tail -n 100 "$mock_log" 2>/dev/null || true
-    compose logs --no-color --tail=100 agent-gateway pairing-agent-gateway backend dashboard postgres openclaw-mock runtime-state || true
+    printf '%s\n' "--- OpenAI-compatible mock log ---"
+    tail -n 100 "$openai_mock_log" 2>/dev/null || true
+    compose logs --no-color --tail=100 agent-gateway pairing-agent-gateway backend dashboard postgres openclaw-mock openai-compatible-mock runtime-state || true
   fi
   cleanup_processes
   if [ "$managed_stack" = "1" ]; then compose down --volumes --remove-orphans --rmi local >/dev/null 2>&1 || true; fi
@@ -192,6 +201,13 @@ if [ "$use_existing_openclaw" != "1" ] && [ "$managed_stack" != "1" ]; then
   node scripts/mock-openclaw.mjs >"$mock_log" 2>&1 &
   mock_pid=$!
 fi
+if [ "$enable_openai_mock" = "1" ] && [ "$managed_stack" != "1" ]; then
+  OPENAI_COMPATIBLE_MOCK_HOST="127.0.0.1" \
+  OPENAI_COMPATIBLE_MOCK_PORT="$openai_mock_port" \
+  OPENAI_COMPATIBLE_MOCK_TOKEN="$openai_provider_token" \
+  node scripts/mock-openai-compatible.mjs >"$openai_mock_log" 2>&1 &
+  openai_mock_pid=$!
+fi
 
 if [ "$use_existing_openclaw" = "1" ] || [ "$managed_stack" != "1" ]; then
   openclaw_health_host="127.0.0.1"
@@ -202,6 +218,18 @@ if [ "$use_existing_openclaw" = "1" ] || [ "$managed_stack" != "1" ]; then
   until curl --fail --silent "http://$openclaw_health_host:$openclaw_port/health" >/dev/null; do
     if [ -n "$mock_pid" ] && ! kill -0 "$mock_pid" 2>/dev/null; then
       cat "$mock_log" >&2
+      exit 1
+    fi
+    attempt=$((attempt + 1))
+    if [ "$attempt" -ge 30 ]; then exit 1; fi
+    sleep 1
+  done
+fi
+if [ "$enable_openai_mock" = "1" ] && [ "$managed_stack" != "1" ]; then
+  attempt=0
+  until curl --fail --silent "http://127.0.0.1:$openai_mock_port/health" >/dev/null; do
+    if [ -n "$openai_mock_pid" ] && ! kill -0 "$openai_mock_pid" 2>/dev/null; then
+      cat "$openai_mock_log" >&2
       exit 1
     fi
     attempt=$((attempt + 1))
@@ -223,6 +251,14 @@ if [ "$managed_stack" = "1" ]; then
     provider_url="http://openclaw-mock:18789"
   fi
 fi
+openai_gateway_provider_url="${VIFU_E2E_OPENAI_PROVIDER_BASE_URL:-}"
+if [ "$enable_openai_mock" = "1" ] && [ -z "$openai_gateway_provider_url" ]; then
+  if [ "$managed_stack" = "1" ]; then
+    openai_gateway_provider_url="http://openai-compatible-mock:18901/v1"
+  else
+    openai_gateway_provider_url="http://127.0.0.1:$openai_mock_port/v1"
+  fi
+fi
 {
   printf '%s\n' '{'
   printf '%s\n' '  "providers": ['
@@ -237,6 +273,32 @@ fi
     printf '%s\n' ''
   fi
   printf '%s\n' '    }'
+  if [ "$enable_openai_mock" = "1" ] || [ -n "$openai_gateway_provider_url" ]; then
+    printf '%s\n' '    ,{'
+    printf '%s\n' '      "key": "openai-compatible-e2e",'
+    printf '%s\n' '      "name": "OpenAI Compatible E2E",'
+    printf '%s\n' '      "type": "openai-compatible",'
+    printf '%s\n' "      \"url\": \"$(json_escape "$openai_gateway_provider_url")\","
+    printf '%s\n' "      \"auth\": { \"token\": \"$(json_escape "$openai_provider_token")\" },"
+    printf '%s\n' '      "config": {'
+    printf '%s\n' '        "chatModel": "vifu-e2e-chat",'
+    printf '%s\n' '        "embeddingModel": "vifu-e2e-embedding",'
+    printf '%s\n' '        "inputModalities": ["text", "image"]'
+    printf '%s\n' '      }'
+    printf '%s\n' '    },'
+    printf '%s\n' '    {'
+    printf '%s\n' '      "key": "openai-compatible-e2e-alt",'
+    printf '%s\n' '      "name": "OpenAI Compatible E2E Alt",'
+    printf '%s\n' '      "type": "openai-compatible",'
+    printf '%s\n' "      \"url\": \"$(json_escape "$openai_gateway_provider_url")\","
+    printf '%s\n' "      \"auth\": { \"token\": \"$(json_escape "$openai_provider_token")\" },"
+    printf '%s\n' '      "config": {'
+    printf '%s\n' '        "chatModel": "vifu-e2e-chat-alt",'
+    printf '%s\n' '        "embeddingModel": "vifu-e2e-embedding",'
+    printf '%s\n' '        "inputModalities": ["text", "image"]'
+    printf '%s\n' '      }'
+    printf '%s\n' '    }'
+  fi
   printf '%s\n' '  ]'
   printf '%s\n' '}'
 } > "$gateway_home/providers.json"
@@ -288,6 +350,9 @@ services:
       VIFU_REQUEST_TIMEOUT_MS: "500"
   agent-gateway:
     image: ${compose_project}-runtime:local
+    depends_on:
+      openai-compatible-mock:
+        condition: service_healthy
     configs:
       - source: e2e_agent_providers
         target: /home/vifu/.vifu/providers.json
@@ -300,6 +365,8 @@ services:
         condition: service_healthy
       runtime-state:
         condition: service_completed_successfully
+      openai-compatible-mock:
+        condition: service_healthy
     configs:
       - source: e2e_agent_providers
         target: /home/vifu/.vifu/providers.json
@@ -311,6 +378,26 @@ services:
       - vifu_pairing_runtime_state:/home/vifu/.vifu
     extra_hosts:
       - "host.docker.internal:host-gateway"
+  openai-compatible-mock:
+    build:
+      context: .
+      dockerfile_inline: |
+        FROM node:22-bookworm-slim
+        WORKDIR /app
+        COPY scripts/mock-openai-compatible.mjs /app/mock-openai-compatible.mjs
+    working_dir: /app
+    environment:
+      OPENAI_COMPATIBLE_MOCK_HOST: 0.0.0.0
+      OPENAI_COMPATIBLE_MOCK_PORT: "18901"
+      OPENAI_COMPATIBLE_MOCK_TOKEN: "$openai_provider_token"
+    command: ["node", "/app/mock-openai-compatible.mjs"]
+    ports:
+      - "$docker_bind_host:$openai_mock_port:18901"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:18901/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 1s
+      timeout: 3s
+      retries: 20
 
 volumes:
   vifu_pairing_runtime_state:
@@ -355,6 +442,8 @@ services:
     depends_on:
       openclaw-mock:
         condition: service_healthy
+      openai-compatible-mock:
+        condition: service_healthy
     configs:
       - source: e2e_agent_providers
         target: /home/vifu/.vifu/providers.json
@@ -368,6 +457,8 @@ services:
       runtime-state:
         condition: service_completed_successfully
       openclaw-mock:
+        condition: service_healthy
+      openai-compatible-mock:
         condition: service_healthy
     configs:
       - source: e2e_agent_providers
@@ -400,6 +491,26 @@ services:
       interval: 1s
       timeout: 3s
       retries: 20
+  openai-compatible-mock:
+    build:
+      context: .
+      dockerfile_inline: |
+        FROM node:22-bookworm-slim
+        WORKDIR /app
+        COPY scripts/mock-openai-compatible.mjs /app/mock-openai-compatible.mjs
+    working_dir: /app
+    environment:
+      OPENAI_COMPATIBLE_MOCK_HOST: 0.0.0.0
+      OPENAI_COMPATIBLE_MOCK_PORT: "18901"
+      OPENAI_COMPATIBLE_MOCK_TOKEN: "$openai_provider_token"
+    command: ["node", "/app/mock-openai-compatible.mjs"]
+    ports:
+      - "$docker_bind_host:$openai_mock_port:18901"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:18901/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 1s
+      timeout: 3s
+      retries: 20
 
 volumes:
   vifu_pairing_runtime_state:
@@ -418,6 +529,8 @@ else
   agent_gateway_pid=$!
 fi
 
+openai_mock_url="http://$docker_access_host:$openai_mock_port"
+
 attempt=0
 until agent_gateway_ready; do
   attempt=$((attempt + 1))
@@ -427,11 +540,17 @@ done
 
 if [ "$use_existing_openclaw" = "1" ]; then
   VIFU_E2E_EXPECT_TIMEOUT="$managed_stack" \
+  VIFU_E2E_OPENAI_MOCK_URL="$openai_mock_url" \
+  VIFU_E2E_OPENAI_PROVIDER_BASE_URL="$openai_gateway_provider_url" \
+  VIFU_E2E_OPENAI_PROVIDER_TOKEN="$openai_provider_token" \
   VIFU_E2E_STATE_PATH="$state_path" \
   node scripts/test-self-hosted-e2e.mjs setup
 else
   VIFU_E2E_EXPECT_TIMEOUT="$managed_stack" \
   VIFU_E2E_OPENCLAW_MOCK_URL="http://$docker_access_host:$openclaw_port" \
+  VIFU_E2E_OPENAI_MOCK_URL="$openai_mock_url" \
+  VIFU_E2E_OPENAI_PROVIDER_BASE_URL="$openai_gateway_provider_url" \
+  VIFU_E2E_OPENAI_PROVIDER_TOKEN="$openai_provider_token" \
   VIFU_E2E_STATE_PATH="$state_path" \
   node scripts/test-self-hosted-e2e.mjs setup
 fi
@@ -467,12 +586,14 @@ done
 VIFU_E2E_STATE_PATH="$state_path" node scripts/test-self-hosted-e2e.mjs verify
 VIFU_SELF_HOSTED_E2E_DASHBOARD_URL="http://$docker_access_host:$browser_dashboard_port" \
 VIFU_SELF_HOSTED_E2E_ADMIN_KEY="$VIFU_ADMIN_KEY" \
+VIFU_SELF_HOSTED_E2E_STATE_PATH="$state_path" \
 npx playwright test --config playwright.self-hosted.config.ts
 VIFU_E2E_STATE_PATH="$state_path" node scripts/test-self-hosted-e2e.mjs cleanup
 
 cleanup_processes
 agent_gateway_pid=""
 mock_pid=""
+openai_mock_pid=""
 if [ "$managed_stack" = "1" ]; then compose down --volumes --remove-orphans --rmi local >/dev/null; fi
 rm -rf -- "$state_dir"
 trap - EXIT INT TERM
