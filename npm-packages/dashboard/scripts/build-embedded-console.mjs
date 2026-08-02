@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -22,15 +22,17 @@ run("bun", [
   "--outdir",
   assetsDir,
   "--entry-naming",
-  "[name].[ext]",
+  "[name]-[hash].[ext]",
   "--asset-naming",
   "[name]-[hash].[ext]",
 ]);
 
 cpSync(path.join(packageRoot, "public/brand"), path.join(outputRoot, "brand"), { recursive: true });
 
-const stylesheet = existsSync(path.join(assetsDir, "main.css"))
-  ? '<link rel="stylesheet" href="/console/assets/main.css">'
+const scriptName = findBuiltAsset(".js", true);
+const stylesheetName = findBuiltAsset(".css", false);
+const stylesheet = stylesheetName
+  ? `<link rel="stylesheet" href="/console/assets/${stylesheetName}">`
   : "";
 
 writeFileSync(
@@ -46,15 +48,24 @@ writeFileSync(
     "</head>",
     "<body>",
     '<div id="root"></div>',
-    '<script type="module" src="/console/assets/main.js"></script>',
+    `<script type="module" src="/console/assets/${scriptName}"></script>`,
     "</body>",
     "</html>",
   ].filter(Boolean).join("\n"),
 );
 
 const html = readFileSync(path.join(outputRoot, "index.html"), "utf8");
-if (!html.includes("/console/assets/main.js")) {
+if (!html.includes(`/console/assets/${scriptName}`)) {
   throw new Error("Embedded console index did not reference the JavaScript bundle.");
+}
+
+function findBuiltAsset(extension, required) {
+  const matches = readdirSync(assetsDir)
+    .filter((name) => name.startsWith("main-") && name.endsWith(extension))
+    .sort();
+  if (matches.length === 1) return matches[0];
+  if (!required && matches.length === 0) return null;
+  throw new Error(`Expected exactly one embedded console ${extension} asset, found ${matches.length}.`);
 }
 
 function run(command, args) {
