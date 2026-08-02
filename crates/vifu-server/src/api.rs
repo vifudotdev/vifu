@@ -2329,8 +2329,17 @@ pub async fn list_provider_catalog(
     headers: HeaderMap,
 ) -> Result<Json<Value>, ApiError> {
     deployment_admin(&state, &headers, Operation::DeploymentRead).await?;
+    let custom = if let Some(path) = active_provider_registry_file(&state) {
+        read_provider_registry(&path)?
+            .providers
+            .into_iter()
+            .map(file_custom_provider)
+            .collect::<Result<Vec<_>, _>>()?
+    } else {
+        db::list_custom_providers(&state.pool).await?
+    };
     Ok(Json(
-        json!({ "registry": provider_adapters(), "custom": provider_catalog_custom_providers(&state).await? }),
+        json!({ "registry": provider_adapters(), "custom": custom }),
     ))
 }
 
@@ -2342,7 +2351,7 @@ pub async fn list_project_provider_catalog(
     authorized_project_by_slug(&state, &headers, &slug, ProjectAccess::Read).await?;
     Ok(Json(json!({
         "registry": provider_adapters(),
-        "custom": provider_catalog_custom_providers(&state).await?,
+        "custom": [],
     })))
 }
 
@@ -2390,26 +2399,23 @@ pub async fn create_project_provider(
     let mut source =
         resolve_project_provider_source(&state, &input.source.kind, &input.source.key).await?;
     let provider_key = if source.kind == "registry" {
-        let path = require_provider_registry_file(&state)?;
         let key = unique_custom_provider_key(&state, &format!("{}-{}", slug, source.key)).await?;
         let base_url = input
             .base_url
             .as_deref()
             .map(str::trim)
             .filter(|value| !value.is_empty())
-            .unwrap_or("");
-        save_file_provider_connection(
-            &path,
-            Uuid::nil(),
+            .ok_or_else(|| ApiError::Invalid("provider base URL is required".to_string()))?;
+        upsert_custom_provider_source(
+            &state,
             &key,
-            UpsertProviderConnection {
-                name: Some(input.name.clone().unwrap_or_else(|| source.name.clone())),
-                provider_type: source.provider_type.clone(),
-                base_url: base_url.to_string(),
-                config: input.config.clone(),
-                secrets: input.secrets.clone(),
-            },
-        )?;
+            input.name.as_deref().unwrap_or(&source.name),
+            &source.provider_type,
+            base_url,
+            input.config.clone(),
+            input.secrets.clone(),
+        )
+        .await?;
         source = resolve_project_provider_source(&state, "custom", &key).await?;
         key
     } else {
@@ -2423,11 +2429,19 @@ pub async fn create_project_provider(
             Err(error) => return Err(error),
         }
     };
-    let prepared = prepare_project_provider_assignment(
+    let inherited = source.key == provider_key && input.source.kind == "registry";
+    let prepared = prepare_project_provider(
         &state,
         &provider_key,
         input.name.as_deref().unwrap_or(&source.name),
-        &source.provider_type,
+        &source,
+        if inherited {
+            None
+        } else {
+            input.base_url.as_deref()
+        },
+        if inherited { json!({}) } else { input.config },
+        if inherited { json!({}) } else { input.secrets },
     )?;
     let connection =
         save_provider_connection(&state, &slug, &source.kind, &source.key, prepared).await?;
@@ -2450,31 +2464,49 @@ pub async fn import_project_provider(
     Json(input): Json<ImportProjectProvider>,
 ) -> Result<(StatusCode, Json<Value>), ApiError> {
     authorized_project_by_slug(&state, &headers, &slug, ProjectAccess::Write).await?;
-    let path = require_provider_registry_file(&state)?;
     let provider_key = required_identifier("provider key", &input.provider_key)?;
     let provider_type = required_identifier("provider type", &input.provider_type)?;
     let name = required_text("provider name", &input.name, 128)?;
+    let base_url = required_text("provider base URL", &input.base_url, 2048)?;
     let adapter = provider_adapters()
         .into_iter()
         .find(|adapter| adapter.id == provider_type)
         .ok_or_else(|| ApiError::Invalid(format!("unsupported provider type {provider_type}")))?;
-    save_file_provider_connection(
-        &path,
-        Uuid::nil(),
+    let source = ProjectProviderSource {
+        kind: "registry".to_string(),
+        key: adapter.id.clone(),
+        name: adapter.name,
+        provider_type: adapter.id.clone(),
+        base_url: String::new(),
+        config: json!({}),
+    };
+    let prepared = prepare_project_provider(
+        &state,
         provider_key,
-        UpsertProviderConnection {
-            name: Some(name.to_string()),
-            provider_type: adapter.id.clone(),
-            base_url: input.base_url.clone(),
-            config: input.config,
-            secrets: json!({}),
-        },
+        name,
+        &source,
+        Some(base_url),
+        input.config,
+        json!({}),
     )?;
-    let source = resolve_project_provider_source(&state, "custom", provider_key).await?;
-    let prepared =
-        prepare_project_provider_assignment(&state, provider_key, name, &source.provider_type)?;
-    let connection =
-        save_provider_connection(&state, &slug, "custom", provider_key, prepared).await?;
+    let connection = db::upsert_provider_connection(
+        &state.pool,
+        &slug,
+        db::NewProviderConnection {
+            provider_key: &prepared.key,
+            source_kind: "registry",
+            source_key: &adapter.id,
+            name: &prepared.name,
+            provider_type: &prepared.provider_type,
+            base_url: &prepared.base_url,
+            config: &prepared.config,
+            encrypted_secret_json: &prepared.encrypted_secret_json,
+            secret_keys: &prepared.secret_keys,
+            display_secret: prepared.display_secret.as_deref(),
+            status: "needs_configuration",
+        },
+    )
+    .await?;
     Ok((
         StatusCode::CREATED,
         Json(json!({
@@ -2495,76 +2527,6 @@ pub async fn update_project_provider(
         db::get_provider_connection_secret_by_key(&state.pool, &slug, provider_key).await?;
     let source =
         resolve_project_provider_source(&state, &current.source_kind, &current.source_key).await?;
-    if let Some(path) = active_provider_registry_file(&state) {
-        let source_key = if current.source_kind == "custom" {
-            current.source_key.clone()
-        } else {
-            current.provider_key.clone()
-        };
-        let provider_type = if current.source_kind == "custom" {
-            source.provider_type.clone()
-        } else {
-            current.provider_type.clone()
-        };
-        let base_url = input
-            .base_url
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .unwrap_or_else(|| {
-                if source.base_url.trim().is_empty() {
-                    current.base_url.trim()
-                } else {
-                    source.base_url.trim()
-                }
-            })
-            .to_string();
-        let source_config = if current.source_kind == "custom" {
-            source.config.clone()
-        } else {
-            current.config.clone()
-        };
-        let config = match input.config.as_ref() {
-            Some(config) => merge_json_objects(&source_config, config)?,
-            None => source_config,
-        };
-        let secrets = if current.source_kind == "custom" {
-            input.secrets.clone().unwrap_or_else(|| json!({}))
-        } else {
-            let current_secrets = decrypted_provider_secrets(&state, &current)?;
-            match input.secrets.as_ref() {
-                Some(secrets) if !is_json_object_empty(secrets) => {
-                    merge_json_objects(&current_secrets, secrets)?
-                }
-                Some(_) | None => current_secrets,
-            }
-        };
-        let updated = save_file_provider_connection(
-            &path,
-            Uuid::nil(),
-            &source_key,
-            UpsertProviderConnection {
-                name: Some(input.name.clone().unwrap_or_else(|| source.name.clone())),
-                provider_type,
-                base_url,
-                config,
-                secrets,
-            },
-        )?;
-        let prepared = prepare_project_provider_assignment(
-            &state,
-            &current.provider_key,
-            input.name.as_deref().unwrap_or(&updated.name),
-            &updated.provider_type,
-        )?;
-        let connection =
-            save_provider_connection(&state, &slug, "custom", &source_key, prepared).await?;
-        let (provider, message, added_agents) =
-            refresh_project_provider(&state, &slug, connection).await?;
-        return Ok(Json(
-            json!({ "provider": provider, "message": message, "addedAgents": added_agents }),
-        ));
-    }
     let current_secrets = decrypted_provider_secrets(&state, &current)?;
     let secrets = match input.secrets {
         Some(secrets) if !is_json_object_empty(&secrets) => {
@@ -5968,16 +5930,6 @@ async fn resolve_runtime_provider(
 ) -> Result<ResolvedRuntimeProvider, ApiError> {
     let connection =
         db::get_provider_connection_secret_by_key(&state.pool, project_slug, provider_key).await?;
-    if let Some(provider) = registry_provider_definition(
-        state,
-        if connection.source_kind == "custom" {
-            &connection.source_key
-        } else {
-            &connection.provider_key
-        },
-    )? {
-        return resolved_runtime_provider_from_definition(provider);
-    }
     let overrides = decrypted_provider_secrets(state, &connection)?;
     let (provider_type, base_url, config, secrets) = if connection.source_kind == "custom" {
         let source =
@@ -6010,36 +5962,6 @@ async fn resolve_runtime_provider(
         base_url,
         token: provider_token(&secrets)?,
         config,
-    })
-}
-
-fn registry_provider_definition(
-    state: &AppState,
-    provider_key: &str,
-) -> Result<Option<AgentProviderDefinition>, ApiError> {
-    let Some(path) = active_provider_registry_file(state) else {
-        return Ok(None);
-    };
-    Ok(read_provider_registry(&path)?
-        .providers
-        .into_iter()
-        .find(|provider| provider.key == provider_key))
-}
-
-fn resolved_runtime_provider_from_definition(
-    definition: AgentProviderDefinition,
-) -> Result<ResolvedRuntimeProvider, ApiError> {
-    let provider_type =
-        required_identifier("provider type", &definition.provider_type)?.to_ascii_lowercase();
-    let base_url = validated_provider_base_url(&provider_type, &definition.url)?;
-    let token = vifu_gateway::config::resolve_provider_token(&definition.key, &definition.auth)
-        .map_err(ApiError::Invalid)?;
-    validate_json_object("config", &definition.config, 64 * 1024)?;
-    Ok(ResolvedRuntimeProvider {
-        provider_type,
-        base_url,
-        token,
-        config: definition.config,
     })
 }
 
@@ -6092,9 +6014,9 @@ fn provider_adapters() -> Vec<ProviderAdapter> {
             id: "elevenlabs".to_string(),
             category: "cloud".to_string(),
             name: "ElevenLabs".to_string(),
-            description: "Use ElevenLabs voices through a runtime-registered provider.".to_string(),
+            description: "Use ElevenLabs voices for speech synthesis.".to_string(),
             capabilities: vec!["speech".to_string()],
-            execution_modes: vec!["runtime".to_string()],
+            execution_modes: vec!["server".to_string()],
             supports_discovery: false,
             fields: vec![
                 ProviderAdapterField {
@@ -6117,9 +6039,14 @@ fn provider_adapters() -> Vec<ProviderAdapter> {
             id: "openai-compatible".to_string(),
             category: "custom".to_string(),
             name: "OpenAI-compatible".to_string(),
-            description: "Register any provider that implements the OpenAI HTTP API.".to_string(),
-            capabilities: vec!["chat".to_string(), "embedding".to_string()],
-            execution_modes: vec!["gateway".to_string()],
+            description: "Connect any provider that implements the OpenAI HTTP API.".to_string(),
+            capabilities: vec![
+                "chat".to_string(),
+                "embedding".to_string(),
+                "transcription".to_string(),
+                "realtime".to_string(),
+            ],
+            execution_modes: vec!["server".to_string()],
             supports_discovery: false,
             fields: vec![
                 ProviderAdapterField {
@@ -6136,20 +6063,6 @@ fn provider_adapters() -> Vec<ProviderAdapter> {
                     required: false,
                     secret: true,
                 },
-                ProviderAdapterField {
-                    key: "chatModel".to_string(),
-                    label: "Chat model".to_string(),
-                    kind: "text".to_string(),
-                    required: false,
-                    secret: false,
-                },
-                ProviderAdapterField {
-                    key: "embeddingModel".to_string(),
-                    label: "Embedding model".to_string(),
-                    kind: "text".to_string(),
-                    required: false,
-                    secret: false,
-                },
             ],
         },
     ]
@@ -6157,27 +6070,6 @@ fn provider_adapters() -> Vec<ProviderAdapter> {
 
 fn active_provider_registry_file(state: &AppState) -> Option<std::path::PathBuf> {
     state.config.provider_registry_file.clone()
-}
-
-fn require_provider_registry_file(state: &AppState) -> Result<std::path::PathBuf, ApiError> {
-    active_provider_registry_file(state).ok_or_else(|| {
-        ApiError::Invalid(
-            "provider runtime settings must be configured in the runtime provider registry; no providers.json is available to this server".to_string(),
-        )
-    })
-}
-
-async fn provider_catalog_custom_providers(
-    state: &AppState,
-) -> Result<Vec<CustomProvider>, ApiError> {
-    if let Some(path) = active_provider_registry_file(state) {
-        return read_provider_registry(&path)?
-            .providers
-            .into_iter()
-            .map(file_custom_provider)
-            .collect::<Result<Vec<_>, _>>();
-    }
-    db::list_custom_providers(&state.pool).await
 }
 
 async fn custom_provider(state: &AppState, provider_key: &str) -> Result<CustomProvider, ApiError> {
@@ -6435,6 +6327,45 @@ async fn unique_custom_provider_key(state: &AppState, requested: &str) -> Result
     ))
 }
 
+async fn upsert_custom_provider_source(
+    state: &AppState,
+    provider_key: &str,
+    name: &str,
+    provider_type: &str,
+    base_url: &str,
+    config: Value,
+    secrets: Value,
+) -> Result<(), ApiError> {
+    if let Some(path) = active_provider_registry_file(state) {
+        save_file_provider_connection(
+            &path,
+            Uuid::nil(),
+            provider_key,
+            UpsertProviderConnection {
+                name: Some(name.to_string()),
+                provider_type: provider_type.to_string(),
+                base_url: base_url.to_string(),
+                config,
+                secrets,
+            },
+        )?;
+        return Ok(());
+    }
+    let prepared = prepare_provider_connection(
+        state,
+        PreparedProviderSource {
+            key: provider_key,
+            name: Some(name),
+            provider_type,
+            base_url,
+            config,
+            secrets,
+        },
+    )?;
+    save_custom_provider(state, prepared).await?;
+    Ok(())
+}
+
 fn prepare_project_provider(
     state: &AppState,
     provider_key: &str,
@@ -6470,44 +6401,6 @@ fn prepare_project_provider(
     };
     prepared.config = config;
     Ok(prepared)
-}
-
-fn prepare_project_provider_assignment(
-    state: &AppState,
-    provider_key: &str,
-    name: &str,
-    provider_type: &str,
-) -> Result<PreparedProviderInput, ApiError> {
-    prepare_project_provider_assignment_with_secret_key(
-        &state.config.provider_secret_key,
-        provider_key,
-        name,
-        provider_type,
-    )
-}
-
-fn prepare_project_provider_assignment_with_secret_key(
-    provider_secret_key: &str,
-    provider_key: &str,
-    name: &str,
-    provider_type: &str,
-) -> Result<PreparedProviderInput, ApiError> {
-    let key = required_identifier("provider key", provider_key)?.to_string();
-    let provider_type = required_identifier("provider type", provider_type)?.to_string();
-    let name = optional_text("provider name", Some(name), 128)?
-        .unwrap_or(&key)
-        .to_string();
-    let encrypted_secret_json = encrypt_secret_json("{}", provider_secret_key)?;
-    Ok(PreparedProviderInput {
-        key,
-        name,
-        provider_type,
-        base_url: String::new(),
-        config: json!({}),
-        encrypted_secret_json,
-        secret_keys: Vec::new(),
-        display_secret: None,
-    })
 }
 
 fn merge_json_objects(base: &Value, overrides: &Value) -> Result<Value, ApiError> {
@@ -6635,7 +6528,6 @@ async fn refresh_project_provider(
 ) -> Result<(ProviderConnection, Option<String>, usize), ApiError> {
     let resolved = resolve_runtime_provider(state, project_slug, &connection.provider_key).await?;
     let (status, message) = probe_runtime_provider(
-        &state.config.provider_home_dir,
         &resolved.provider_type,
         &resolved.base_url,
         resolved.token.as_deref(),
@@ -6653,7 +6545,6 @@ async fn refresh_project_provider(
 }
 
 async fn probe_runtime_provider(
-    provider_home_dir: &FsPath,
     provider_type: &str,
     base_url: &str,
     token: Option<&str>,
@@ -6678,18 +6569,17 @@ async fn probe_runtime_provider(
         }
         "local-whisper" => {
             let model = config.get("model").and_then(Value::as_str).unwrap_or("");
-            let result =
-                vifu_gateway::providers::resolve_local_model_path(provider_home_dir, model)
-                    .and_then(|path| {
-                        if path.is_file() {
-                            Ok(())
-                        } else {
-                            Err(format!(
-                                "Whisper model {model} is not installed in {}",
-                                provider_home_dir.join("models").display()
-                            ))
-                        }
-                    });
+            let result = vifu_gateway::config::default_home_dir()
+                .and_then(|home| vifu_gateway::providers::resolve_local_model_path(&home, model))
+                .and_then(|path| {
+                    if path.is_file() {
+                        Ok(())
+                    } else {
+                        Err(format!(
+                            "Whisper model {model} is not installed in ~/.vifu/models"
+                        ))
+                    }
+                });
             probe_result(result)
         }
         "llama" => ("online", None),
@@ -6761,6 +6651,29 @@ async fn save_provider_connection(
             provider_key: &input.key,
             source_kind,
             source_key,
+            name: &input.name,
+            provider_type: &input.provider_type,
+            base_url: &input.base_url,
+            config: &input.config,
+            encrypted_secret_json: &input.encrypted_secret_json,
+            secret_keys: &input.secret_keys,
+            display_secret: input.display_secret.as_deref(),
+            status: "configured",
+        },
+    )
+    .await
+}
+
+async fn save_custom_provider(
+    state: &AppState,
+    input: PreparedProviderInput,
+) -> Result<CustomProvider, ApiError> {
+    db::upsert_custom_provider(
+        &state.pool,
+        db::NewProviderConnection {
+            provider_key: &input.key,
+            source_kind: "custom",
+            source_key: &input.key,
             name: &input.name,
             provider_type: &input.provider_type,
             base_url: &input.base_url,
@@ -7257,8 +7170,7 @@ mod tests {
     use super::{
         api_error_trace_status, chat_request_summary, chat_trace_request,
         embedding_request_summary, embedding_response, file_provider_connection,
-        gateway_binding_config, merge_json_objects, patch_text,
-        prepare_project_provider_assignment_with_secret_key, profile_slug, project_slug,
+        gateway_binding_config, merge_json_objects, patch_text, profile_slug, project_slug,
         validate_chat_completion_request, validate_embedding_request,
         validate_profile_version_input, validate_timeout,
     };
@@ -7308,25 +7220,6 @@ mod tests {
         .unwrap();
 
         assert_eq!(merged, json!({ "model": "project-model", "timeout": 10 }));
-    }
-
-    #[test]
-    fn project_provider_assignment_does_not_store_runtime_settings() {
-        let assignment = prepare_project_provider_assignment_with_secret_key(
-            "vifu-local-provider-secret-key",
-            "local-qwen",
-            "Local Qwen",
-            "openai-compatible",
-        )
-        .unwrap();
-
-        assert_eq!(assignment.key, "local-qwen");
-        assert_eq!(assignment.name, "Local Qwen");
-        assert_eq!(assignment.provider_type, "openai-compatible");
-        assert!(assignment.base_url.is_empty());
-        assert_eq!(assignment.config, json!({}));
-        assert!(assignment.secret_keys.is_empty());
-        assert!(assignment.display_secret.is_none());
     }
 
     #[test]

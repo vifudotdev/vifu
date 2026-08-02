@@ -128,10 +128,6 @@ The same registry also supports Local Whisper for speech-to-text. Add a
 endpoints bind to the resulting `transcription` capability instead of storing
 device-local model paths in Server settings.
 
-The local Console edits the same Provider registry used by the runtime. Project
-records bind provider keys to agents and endpoints; provider URLs, model paths,
-and credentials stay in the registry where the Provider runs.
-
 The Provider keeps the model resident, streams text fragments into the Runtime,
 reports token counts, and supports strict JSON Schema output. Apple builds
 enable Metal; `gpuLayers: 0` provides a CPU control path.

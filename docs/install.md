@@ -16,10 +16,8 @@ The first run creates `~/.vifu/config.json` and
 Server and Agent Gateway roles. Runtime and Gateway state is stored in
 `~/.vifu/runtime.sqlite`; local Server data is stored separately in
 `~/.vifu/vifu.sqlite`.
-Add `llama` or `local-whisper` entries to the runtime Provider registry to load
-local models in the same process. The Console edits the same registry in local
-mode, and project provider records only bind provider keys to projects; see
-[Agent Providers](../providers/README.md).
+Add `llama` or `local-whisper` entries to `providers.json` to load local models
+in the same process; see [Agent Providers](../providers/README.md).
 
 ## Run The Console
 
