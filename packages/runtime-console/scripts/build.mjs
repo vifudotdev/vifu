@@ -5,10 +5,18 @@ import { fileURLToPath } from "node:url";
 
 const packageRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const distRoot = path.join(packageRoot, "dist");
+const tsc = path.resolve(
+  packageRoot,
+  "..",
+  "..",
+  "node_modules",
+  ".bin",
+  process.platform === "win32" ? "tsc.cmd" : "tsc",
+);
 
 rmSync(distRoot, { recursive: true, force: true });
 rmSync(path.join(packageRoot, "tsconfig.tsbuildinfo"), { force: true });
-execFileSync("tsc", ["-p", "tsconfig.json"], {
+execFileSync(tsc, ["-p", "tsconfig.json"], {
   cwd: packageRoot,
   stdio: "inherit",
 });

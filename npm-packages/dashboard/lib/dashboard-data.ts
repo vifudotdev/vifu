@@ -1,4 +1,5 @@
-import { loadRuntimeSnapshot, resolveAuthority, type AuthorityAdapter } from "./authority";
+import type { RuntimeConsoleData } from "@vifu/runtime-console";
+import { loadRuntimeSnapshot, resolveAuthority } from "./authority";
 import type {
   AgentProfileDetail,
   ProviderCatalog,
@@ -7,8 +8,7 @@ import type {
   RuntimeSnapshot,
 } from "./runtime-types";
 
-export type DashboardData = {
-  authority: AuthorityAdapter;
+export type DashboardData = RuntimeConsoleData & {
   runtime: RuntimeSnapshot;
   profileDetails: AgentProfileDetail[];
   projectProviders: ProjectProvider[];
@@ -36,7 +36,11 @@ export async function loadDashboardData(
     ? await Promise.all(runtime.profiles.map((profile) => authority.deployment.projectProfile(projectSlug, profile.id)))
     : [];
   return {
-    authority,
+    authority: {
+      kind: authority.kind,
+      status: authority.status,
+      displayName: authority.displayName,
+    },
     runtime,
     profileDetails,
     projectProviders,
