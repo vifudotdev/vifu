@@ -2,7 +2,6 @@
 
 import { FolderKanban, Link2, Plus, Search } from "lucide-react";
 import { useMemo, useState, type FormEvent } from "react";
-import { runtimeBrowserRequest } from "../browser-client";
 import { RuntimeLink, useRuntimeConsoleHost, useRuntimeConsoleRouter } from "../host";
 import type { RuntimeProject } from "../types";
 import { DismissibleDetails } from "./dismissible-details";
@@ -91,6 +90,7 @@ export function ProjectHome({
 }
 
 function GuestProjectClaim() {
+  const host = useRuntimeConsoleHost();
   const router = useRuntimeConsoleRouter();
   const [claimToken, setClaimToken] = useState("");
   const [pending, setPending] = useState(false);
@@ -101,7 +101,7 @@ function GuestProjectClaim() {
     setPending(true);
     setMessage(null);
     try {
-      await runtimeBrowserRequest("guest/claim", "POST", { claimToken: claimToken.trim() });
+      await host.request("guest/claim", "POST", { claimToken: claimToken.trim() });
       setClaimToken("");
       router.refresh();
     } catch (error) {

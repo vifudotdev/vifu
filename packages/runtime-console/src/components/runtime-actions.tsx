@@ -11,7 +11,6 @@ import type {
   AvailableAgent,
   RuntimeProject,
 } from "../types";
-import { runtimeBrowserRequest } from "../browser-client";
 import { useRuntimeConsoleHost, useRuntimeConsoleRouter } from "../host";
 
 type ActionState = { tone: "error" | "success"; message: string } | null;
@@ -36,7 +35,7 @@ export function ProjectCreateForm({
     setCreatedSlug(null);
     const form = new FormData(event.currentTarget);
     try {
-      const payload = await runtimeRequest<{ project?: { slug?: string } }>("projects", "POST", {
+      const payload = await host.request<{ project?: { slug?: string } }>("projects", "POST", {
         name: value(form, "name"),
         description: optionalValue(form, "description"),
       });
@@ -250,6 +249,7 @@ export function DeleteResourceButton({
   label: string;
   redirectTo?: string;
 }) {
+  const host = useRuntimeConsoleHost();
   const router = useRuntimeConsoleRouter();
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -259,7 +259,7 @@ export function DeleteResourceButton({
     setPending(true);
     setError(null);
     try {
-      await runtimeRequest(path, "DELETE");
+      await host.request(path, "DELETE");
       if (redirectTo) router.push(redirectTo);
       router.refresh();
     } catch (nextError) {
@@ -280,6 +280,7 @@ export function DeleteResourceButton({
 }
 
 export function RevokeApiKeyButton({ projectSlug, id, name }: { projectSlug: string; id: string; name: string }) {
+  const host = useRuntimeConsoleHost();
   const router = useRuntimeConsoleRouter();
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -289,7 +290,7 @@ export function RevokeApiKeyButton({ projectSlug, id, name }: { projectSlug: str
     setPending(true);
     setError(null);
     try {
-      await runtimeRequest(`project/${projectSlug}/api-keys/${id}/revoke`, "POST");
+      await host.request(`project/${projectSlug}/api-keys/${id}/revoke`, "POST");
       router.refresh();
     } catch (nextError) {
       setError(errorMessage(nextError));
@@ -309,6 +310,7 @@ export function RevokeApiKeyButton({ projectSlug, id, name }: { projectSlug: str
 }
 
 export function DeleteApiKeyButton({ projectSlug, id, name }: { projectSlug: string; id: string; name: string }) {
+  const host = useRuntimeConsoleHost();
   const router = useRuntimeConsoleRouter();
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -318,7 +320,7 @@ export function DeleteApiKeyButton({ projectSlug, id, name }: { projectSlug: str
     setPending(true);
     setError(null);
     try {
-      await runtimeRequest(`project/${projectSlug}/api-keys/${id}`, "DELETE");
+      await host.request(`project/${projectSlug}/api-keys/${id}`, "DELETE");
       router.refresh();
     } catch (nextError) {
       setError(errorMessage(nextError));
@@ -338,6 +340,7 @@ export function DeleteApiKeyButton({ projectSlug, id, name }: { projectSlug: str
 }
 
 export function ChatCompletionForm({ endpoint }: { endpoint: AgentEndpoint }) {
+  const host = useRuntimeConsoleHost();
   const [pending, setPending] = useState(false);
   const [result, setResult] = useState<string | null>(null);
   const [state, setState] = useState<ActionState>(null);
@@ -349,7 +352,7 @@ export function ChatCompletionForm({ endpoint }: { endpoint: AgentEndpoint }) {
     setResult(null);
     const form = new FormData(event.currentTarget);
     try {
-      const payload = await runtimeRequest("chat/completions", "POST", {
+      const payload = await host.request("chat/completions", "POST", {
         model: endpoint.slug,
         messages: [{ role: "user", content: value(form, "message") }],
         stream: false,
@@ -392,6 +395,7 @@ function RuntimeForm({
   compact?: boolean;
   children: ReactNode;
 }) {
+  const host = useRuntimeConsoleHost();
   const router = useRuntimeConsoleRouter();
   const [pending, setPending] = useState(false);
   const [state, setState] = useState<ActionState>(null);
@@ -402,7 +406,7 @@ function RuntimeForm({
     setPending(true);
     setState(null);
     try {
-      await runtimeRequest(path, method, payload(new FormData(formElement)));
+      await host.request(path, method, payload(new FormData(formElement)));
       setState({ tone: "success", message: successMessage });
       if (method === "POST") formElement.reset();
       router.refresh();
@@ -430,10 +434,6 @@ function Field({ label, wide = false, children }: { label: string; wide?: boolea
 
 function ActionMessage({ state }: { state: ActionState }) {
   return state ? <span className={`action-message ${state.tone}`} role={state.tone === "error" ? "alert" : "status"}>{state.message}</span> : null;
-}
-
-async function runtimeRequest<T = unknown>(path: string, method: string, body?: unknown): Promise<T> {
-  return runtimeBrowserRequest(path, method as "GET" | "POST" | "PUT" | "PATCH" | "DELETE", body);
 }
 
 function value(form: FormData, name: string): string {

@@ -15,8 +15,7 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
-import { runtimeBrowserRequest } from "../browser-client";
-import { useRuntimeConsoleRouter } from "../host";
+import { useRuntimeConsoleHost, useRuntimeConsoleRouter } from "../host";
 import type {
   AvailableAgent,
   CustomProvider,
@@ -109,6 +108,7 @@ function ProjectProviderCard({
   online: boolean;
   onConfigure: () => void;
 }) {
+  const host = useRuntimeConsoleHost();
   const router = useRuntimeConsoleRouter();
   const [pending, setPending] = useState(false);
   const [confirming, setConfirming] = useState(false);
@@ -118,7 +118,7 @@ function ProjectProviderCard({
     setPending(true);
     setError(null);
     try {
-      await runtimeRequest(`project/${project.slug}/providers/${provider.providerKey}`, "DELETE");
+      await host.request(`project/${project.slug}/providers/${provider.providerKey}`, "DELETE");
       router.refresh();
     } catch (nextError) {
       setError(errorMessage(nextError));
@@ -175,6 +175,7 @@ function ProviderDialog({
   provider?: ProjectProvider;
   onClose: () => void;
 }) {
+  const host = useRuntimeConsoleHost();
   const router = useRuntimeConsoleRouter();
   const dialogRef = useRef<HTMLDialogElement>(null);
   const choices = useMemo(() => catalogChoices(catalog).filter((item) => (
@@ -207,7 +208,7 @@ function ProviderDialog({
     setError(null);
     setNotice(null);
     try {
-      const result = await runtimeRequest<{ message?: string; addedAgents?: number }>(
+      const result = await host.request<{ message?: string; addedAgents?: number }>(
         provider ? `project/${project.slug}/providers/${provider.providerKey}` : `project/${project.slug}/providers`,
         provider ? "PATCH" : "POST",
         body,
@@ -229,7 +230,7 @@ function ProviderDialog({
     setError(null);
     setNotice(null);
     try {
-      const result = await runtimeRequest<{ message?: string; addedAgents?: number }>(
+      const result = await host.request<{ message?: string; addedAgents?: number }>(
         `project/${project.slug}/providers/${provider.providerKey}/test`,
         "POST",
         {},
@@ -421,10 +422,6 @@ function providerOnline(provider: ProjectProvider, agents: AvailableAgent[]): bo
 function capabilitySummary(capabilities: string[]): string {
   if (capabilities.length === 0) return "Custom provider";
   return capabilities.slice(0, 3).map((value) => value === "chat" ? "Conversation" : titleCase(value)).join(" · ");
-}
-
-async function runtimeRequest<T = unknown>(path: string, method: string, body?: unknown): Promise<T> {
-  return runtimeBrowserRequest(path, method as "GET" | "POST" | "PUT" | "PATCH" | "DELETE", body);
 }
 
 function errorMessage(error: unknown): string {

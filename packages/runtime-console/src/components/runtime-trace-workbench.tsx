@@ -5,7 +5,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties } from "react";
 import { Group as PanelGroup, Panel, Separator as PanelResizeHandle } from "react-resizable-panels";
 import { List } from "react-window";
-import { runtimeBrowserRequest } from "../browser-client";
+import { useRuntimeConsoleHost } from "../host";
 import type { EndpointTrace, TraceSpan } from "../types";
 
 const MAX_LOGS = 100;
@@ -28,6 +28,7 @@ type RuntimeTraceSpansResponse = {
 };
 
 export function RuntimeTraceWorkbench({ projectId, projectSlug, traces: initialTraces }: RuntimeTraceWorkbenchProps) {
+  const { request } = useRuntimeConsoleHost();
   const [traces, setTraces] = useState(() => sortTraces(initialTraces).slice(0, MAX_LOGS));
   const [pausedTraces, setPausedTraces] = useState<EndpointTrace[]>([]);
   const [paused, setPaused] = useState(false);
@@ -60,7 +61,7 @@ export function RuntimeTraceWorkbench({ projectId, projectSlug, traces: initialT
 
     async function poll() {
       try {
-        const payload = await runtimeBrowserRequest<RuntimeTraceResponse>(
+        const payload = await request<RuntimeTraceResponse>(
           `project/${encodeURIComponent(projectSlug)}/traces?limit=100`,
           "GET",
           undefined,
@@ -91,7 +92,7 @@ export function RuntimeTraceWorkbench({ projectId, projectSlug, traces: initialT
       controller.abort();
       window.clearInterval(timer);
     };
-  }, [paused, projectId, projectSlug]);
+  }, [paused, projectId, projectSlug, request]);
 
   const agentOptions = useMemo(() => {
     return Array.from(new Set([...traces, ...pausedTraces].map(traceAgentLabel))).sort((a, b) => a.localeCompare(b));
@@ -125,7 +126,7 @@ export function RuntimeTraceWorkbench({ projectId, projectSlug, traces: initialT
     setSpansLoading(true);
     void (async () => {
       try {
-        const payload = await runtimeBrowserRequest<RuntimeTraceSpansResponse>(
+        const payload = await request<RuntimeTraceSpansResponse>(
           `project/${encodeURIComponent(projectSlug)}/traces/${encodeURIComponent(selectedTraceId)}/spans`,
           "GET",
           undefined,
@@ -139,7 +140,7 @@ export function RuntimeTraceWorkbench({ projectId, projectSlug, traces: initialT
       }
     })();
     return () => controller.abort();
-  }, [projectSlug, selectedTraceId]);
+  }, [projectSlug, request, selectedTraceId]);
 
   const selectTrace = useCallback((trace: EndpointTrace) => {
     setSelectedTraceId(trace.id);

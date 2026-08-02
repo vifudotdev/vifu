@@ -14,8 +14,7 @@ import {
   Unplug,
 } from "lucide-react";
 import { useMemo, useState, type ChangeEvent, type FormEvent } from "react";
-import { runtimeBrowserRequest } from "../browser-client";
-import { useRuntimeConsoleRouter } from "../host";
+import { useRuntimeConsoleHost, useRuntimeConsoleRouter } from "../host";
 import type {
   ProjectSettings,
   ProjectRuntimeRelease,
@@ -38,6 +37,7 @@ export function RuntimeDeploymentsView({
   deployments: RuntimeDeployment[];
   releases: ProjectRuntimeRelease[];
 }) {
+  const host = useRuntimeConsoleHost();
   const router = useRuntimeConsoleRouter();
   const latestRelease = useMemo(
     () => [...releases].sort((left, right) => right.version - left.version)[0],
@@ -73,7 +73,7 @@ export function RuntimeDeploymentsView({
     const name = String(data.get("name") ?? "").trim();
     const created = await action(
       "create",
-      () => runtimeBrowserRequest(`project/${project.slug}/deployments`, "POST", {
+      () => host.request(`project/${project.slug}/deployments`, "POST", {
         name,
         configSyncEnabled: true,
         traceMode: "summary",
@@ -94,7 +94,7 @@ export function RuntimeDeploymentsView({
     }
     const result = await action(
       "import-settings",
-      () => runtimeBrowserRequest<{ release: ProjectRuntimeRelease }>(
+      () => host.request<{ release: ProjectRuntimeRelease }>(
         `project/${project.slug}/runtime-releases`,
         "POST",
         { settings },
@@ -137,7 +137,7 @@ export function RuntimeDeploymentsView({
   async function pairGateway(deployment: RuntimeDeployment) {
     const result = await action(
       `pair-${deployment.id}`,
-      () => runtimeBrowserRequest<Enrollment>(
+      () => host.request<Enrollment>(
         `project/${project.slug}/deployments/${deployment.name}/agent-gateway-enrollments`,
         "POST",
       ),
@@ -149,7 +149,7 @@ export function RuntimeDeploymentsView({
   async function activate(deployment: RuntimeDeployment, version: number) {
     await action(
       `activate-${deployment.id}-${version}`,
-      () => runtimeBrowserRequest(
+      () => host.request(
         `project/${project.slug}/deployments/${deployment.name}/runtime-releases/${version}/activate`,
         "POST",
       ),
@@ -160,7 +160,7 @@ export function RuntimeDeploymentsView({
   async function detachGateway(deployment: RuntimeDeployment, gatewayId: string) {
     await action(
       `detach-${deployment.id}-${gatewayId}`,
-      () => runtimeBrowserRequest(
+      () => host.request(
         `project/${project.slug}/deployments/${deployment.name}/agent-gateways/${gatewayId}`,
         "DELETE",
       ),
@@ -172,7 +172,7 @@ export function RuntimeDeploymentsView({
     if (!window.confirm("Revoke this Gateway? It will disconnect and require approval before it can reconnect.")) return;
     await action(
       `revoke-${gatewayId}`,
-      () => runtimeBrowserRequest(`agent-gateways/${gatewayId}/revoke`, "POST"),
+      () => host.request(`agent-gateways/${gatewayId}/revoke`, "POST"),
       "Gateway access revoked.",
     );
   }
@@ -182,7 +182,7 @@ export function RuntimeDeploymentsView({
     const data = new FormData(event.currentTarget);
     await action(
       `settings-${deployment.id}`,
-      () => runtimeBrowserRequest(
+      () => host.request(
         `project/${project.slug}/deployments/${deployment.name}`,
         "PATCH",
         {
@@ -198,7 +198,7 @@ export function RuntimeDeploymentsView({
   async function promote(deployment: RuntimeDeployment) {
     await action(
       `promote-${deployment.id}`,
-      () => runtimeBrowserRequest(
+      () => host.request(
         `project/${project.slug}/deployments/${deployment.name}/promote`,
         "POST",
       ),

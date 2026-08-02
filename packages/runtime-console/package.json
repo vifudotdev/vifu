@@ -7,21 +7,29 @@
   "module": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "sideEffects": [
-    "./dist/styles.css"
+    "./dist/styles.css",
+    "./src/styles.css"
   ],
   "exports": {
     ".": {
+      "@vifu/source": "./src/index.ts",
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
     },
     "./react": {
+      "@vifu/source": "./src/react.ts",
       "types": "./dist/react.d.ts",
       "import": "./dist/react.js"
     },
-    "./styles.css": "./dist/styles.css"
+    "./styles.css": {
+      "@vifu/source": "./src/styles.css",
+      "default": "./dist/styles.css"
+    },
+    "./package.json": "./package.json"
   },
   "files": [
     "dist",
+    "src",
     "README.md"
   ],
   "scripts": {

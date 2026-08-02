@@ -13,7 +13,6 @@ import {
   Terminal,
   X,
 } from "lucide-react";
-import { runtimeBrowserRequest } from "../browser-client";
 import { RuntimeLink, useRuntimeConsoleHost, useRuntimeConsoleRouter } from "../host";
 import type {
   AgentProfile,
@@ -344,6 +343,7 @@ function CreateApiKeyDialog({
   exampleModel: string;
   projectBaseUrl: string;
 }) {
+  const host = useRuntimeConsoleHost();
   const router = useRuntimeConsoleRouter();
   const dialogRef = useRef<HTMLDialogElement>(null);
   const [name, setName] = useState("");
@@ -360,7 +360,7 @@ function CreateApiKeyDialog({
     setPending(true);
     setError(null);
     try {
-      const payload = await runtimeRequest<{ apiKey?: { key?: string } }>(`project/${project.slug}/api-keys`, "POST", {
+      const payload = await host.request<{ apiKey?: { key?: string } }>(`project/${project.slug}/api-keys`, "POST", {
         projectId: project.id,
         name: name.trim() || readableDefaultKeyName(),
         agentScope: agentScopePayload(scopeMode, selectedProfileIds),
@@ -468,6 +468,7 @@ function EditApiKeyDialog({
   apiKey: ApiKeyRecord;
   agentOptions: ApiKeyAgentOption[];
 }) {
+  const host = useRuntimeConsoleHost();
   const router = useRuntimeConsoleRouter();
   const dialogRef = useRef<HTMLDialogElement>(null);
   const [name, setName] = useState(apiKey.name);
@@ -495,7 +496,7 @@ function EditApiKeyDialog({
     setPending(true);
     setError(null);
     try {
-      await runtimeRequest(`project/${projectSlug}/api-keys/${apiKey.id}`, "PATCH", {
+      await host.request(`project/${projectSlug}/api-keys/${apiKey.id}`, "PATCH", {
         name: name.trim(),
         agentScope: agentScopePayload(scopeMode, selectedProfileIds),
         permissions,
@@ -868,8 +869,4 @@ function formatDate(value: string): string {
     year: "numeric",
     timeZone: "UTC",
   }).format(date);
-}
-
-async function runtimeRequest<T>(path: string, method: string, body?: unknown): Promise<T> {
-  return runtimeBrowserRequest(path, method as "GET" | "POST" | "PUT" | "PATCH" | "DELETE", body);
 }

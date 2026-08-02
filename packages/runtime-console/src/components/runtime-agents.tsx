@@ -2,8 +2,7 @@
 
 import { Bot, ChevronRight, Plus, Search, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
-import { runtimeBrowserRequest } from "../browser-client";
-import { useRuntimeConsoleRouter } from "../host";
+import { useRuntimeConsoleHost, useRuntimeConsoleRouter } from "../host";
 import type {
   AgentBinding,
   AgentProfile,
@@ -161,6 +160,7 @@ function AddAgentDialog({
   adapters: ProviderAdapter[];
   onClose: () => void;
 }) {
+  const host = useRuntimeConsoleHost();
   const router = useRuntimeConsoleRouter();
   const dialogRef = useRef<HTMLDialogElement>(null);
   const creatableProviders = providers.filter((provider) => !adapters.find((adapter) => adapter.id === provider.providerType)?.supportsDiscovery);
@@ -199,9 +199,9 @@ function AddAgentDialog({
     setError(null);
     try {
       if (selected.profileId) {
-        await runtimeRequest(`project/${project.slug}/agents/${selected.profileId}/restore`, "POST", {});
+        await host.request(`project/${project.slug}/agents/${selected.profileId}/restore`, "POST", {});
       } else {
-        await runtimeRequest(`project/${project.slug}/agents/import`, "POST", {
+        await host.request(`project/${project.slug}/agents/import`, "POST", {
           gatewayId: selected.gatewayId,
           agentId: selected.id,
           providerKey: selected.providerKey,
@@ -226,7 +226,7 @@ function AddAgentDialog({
     setPending(true);
     setError(null);
     try {
-      await runtimeRequest(`project/${project.slug}/profiles`, "POST", {
+      await host.request(`project/${project.slug}/profiles`, "POST", {
         name,
         description: description || undefined,
         persona: { files: {} },
@@ -320,10 +320,6 @@ function AddAgentDialog({
       </div>
     </dialog>
   );
-}
-
-async function runtimeRequest<T = unknown>(path: string, method: string, body?: unknown): Promise<T> {
-  return runtimeBrowserRequest(path, method as "GET" | "POST" | "PUT" | "PATCH" | "DELETE", body);
 }
 
 function errorMessage(error: unknown): string {

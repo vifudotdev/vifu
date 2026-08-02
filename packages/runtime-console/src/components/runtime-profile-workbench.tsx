@@ -19,7 +19,6 @@ import {
   X,
 } from "lucide-react";
 import { useCallback, useEffect, useRef, useState, type ChangeEvent } from "react";
-import { runtimeBrowserRequest } from "../browser-client";
 import { useRuntimeConsoleHost, useRuntimeConsoleRouter } from "../host";
 import type {
   AgentProfile,
@@ -106,6 +105,7 @@ export function RuntimeProfileWorkbench({
   const [confirmingRemoval, setConfirmingRemoval] = useState(false);
   const [message, setMessage] = useState<{ tone: "error" | "success"; text: string } | null>(null);
   const host = useRuntimeConsoleHost();
+  const { request } = host;
   const router = useRuntimeConsoleRouter();
   const importRef = useRef<HTMLInputElement>(null);
 
@@ -113,7 +113,7 @@ export function RuntimeProfileWorkbench({
     setLoading(true);
     setMessage(null);
     try {
-      const next = await runtimeRequest<AgentProfileDetail>(
+      const next = await request<AgentProfileDetail>(
         `project/${project.slug}/profiles/${profile.id}`,
         "GET",
       );
@@ -130,7 +130,7 @@ export function RuntimeProfileWorkbench({
     } finally {
       setLoading(false);
     }
-  }, [profile.id, project.slug]);
+  }, [profile.id, project.slug, request]);
 
   useEffect(() => {
     void load();
@@ -145,7 +145,7 @@ export function RuntimeProfileWorkbench({
     setPending("save-version");
     setMessage(null);
     try {
-      const payload = await runtimeRequest<ProfileVersionWithCapabilities>(
+      const payload = await request<ProfileVersionWithCapabilities>(
         `project/${project.slug}/profiles/${profile.id}/versions`,
         "POST",
         { ...draft, changeSummary: changeSummary.trim() || undefined },
@@ -166,7 +166,7 @@ export function RuntimeProfileWorkbench({
     setPending("sync-source");
     setMessage(null);
     try {
-      const payload = await runtimeRequest<{ version?: ProfileVersionWithCapabilities }>(
+      const payload = await request<{ version?: ProfileVersionWithCapabilities }>(
         `project/${project.slug}/profiles/${profile.id}/source/sync`,
         "POST",
         { changeSummary: "Synced from provider" },
@@ -187,7 +187,7 @@ export function RuntimeProfileWorkbench({
     setPending(`activate:${versionId}`);
     setMessage(null);
     try {
-      await runtimeRequest(
+      await request(
         `project/${project.slug}/profiles/${profile.id}/versions/${versionId}/activate`,
         "POST",
         {},
@@ -206,7 +206,7 @@ export function RuntimeProfileWorkbench({
     setPending(`archive:${versionId}`);
     setMessage(null);
     try {
-      await runtimeRequest(
+      await request(
         `project/${project.slug}/profiles/${profile.id}/versions/${versionId}/archive`,
         "POST",
         {},
@@ -230,7 +230,7 @@ export function RuntimeProfileWorkbench({
     setPending("profile");
     setMessage(null);
     try {
-      await runtimeRequest(
+      await request(
         `project/${project.slug}/profiles/${profile.id}`,
         "PATCH",
         { name: name.trim(), description: description.trim() },
@@ -249,7 +249,7 @@ export function RuntimeProfileWorkbench({
     setPending("delete-profile");
     setMessage(null);
     try {
-      await runtimeRequest(`project/${project.slug}/profiles/${profile.id}`, "DELETE");
+      await request(`project/${project.slug}/profiles/${profile.id}`, "DELETE");
       router.refresh();
       onClose();
     } catch (error) {
@@ -761,6 +761,7 @@ function TestPanel({
   versions: ProfileVersionWithCapabilities[];
   baseVersionId: string | null;
 }) {
+  const { request } = useRuntimeConsoleHost();
   const defaultVersion = baseVersionId ?? profile.activeVersionId ?? versions[0]?.version.id ?? "";
   const [versionId, setVersionId] = useState(defaultVersion);
   const [compareVersionId, setCompareVersionId] = useState("");
@@ -780,7 +781,7 @@ function TestPanel({
     const versionIds = compareVersionId && compareVersionId !== versionId
       ? [versionId, compareVersionId]
       : [versionId];
-    const settled = await Promise.allSettled(versionIds.map((targetVersionId) => runtimeRequest<TestResult>(
+    const settled = await Promise.allSettled(versionIds.map((targetVersionId) => request<TestResult>(
       `project/${project.slug}/profiles/${profile.id}/test`,
       "POST",
       {
@@ -1014,10 +1015,6 @@ function downloadJson(name: string, payload: unknown) {
   link.download = name;
   link.click();
   URL.revokeObjectURL(url);
-}
-
-async function runtimeRequest<T = unknown>(path: string, method: string, body?: unknown): Promise<T> {
-  return runtimeBrowserRequest(path, method as "GET" | "POST" | "PUT" | "PATCH" | "DELETE", body);
 }
 
 function errorMessage(error: unknown): string {
