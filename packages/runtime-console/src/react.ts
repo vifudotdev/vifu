@@ -1,3 +1,5 @@
+"use client";
+
 export * from "./data";
 export * from "./types";
 export * from "./components/console-shell";
