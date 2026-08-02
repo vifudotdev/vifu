@@ -1,10 +1,11 @@
 import Foundation
+import VifuRuntimeBridge
 
 /// Coordinates one embedded Runtime Bridge across multiple in-process clients.
 ///
 /// Game-engine adapters and native UI code can share this connection without
 /// competing to drain the Runtime's streaming event queue.
-public actor VifuRuntimeBridgeConnection {
+public actor VifuRuntimeBridgeConnection: VifuRuntimeBridgeRuntimeConnection {
     private let runtime: VifuEmbeddedRuntime
     private var subscribers: [UUID: AsyncStream<String>.Continuation] = [:]
     private var eventPump: Task<Void, Never>?

@@ -1,5 +1,6 @@
 import XCTest
 @testable import Vifu
+@testable import VifuRuntimeBridge
 
 final class VifuSmokeTests: XCTestCase {
     func testEmbeddedRuntimeLinksAndExportsState() throws {
@@ -66,10 +67,9 @@ final class VifuSmokeTests: XCTestCase {
 
         let transport = TestBridgeTransport()
         let session = VifuRuntimeBridgeSession(transport: transport)
-        try await session.start()
+        let applicationFrames = try await session.startFrames()
         await session.attachRuntime(VifuRuntimeBridgeConnection(runtime: runtime))
 
-        let applicationFrames = await session.frames()
         let applicationFrameReceived = expectation(
             description: "application frame reaches the host"
         )
@@ -127,8 +127,7 @@ final class VifuSmokeTests: XCTestCase {
     func testRuntimeBridgeSessionPreservesRuntimeRequestsWithoutLocalRuntime() async throws {
         let transport = TestBridgeTransport()
         let session = VifuRuntimeBridgeSession(transport: transport)
-        try await session.start()
-        let applicationFrames = await session.frames()
+        let applicationFrames = try await session.startFrames()
         let forwarded = expectation(
             description: "host can route runtime request to a remote runtime"
         )
@@ -145,6 +144,26 @@ final class VifuSmokeTests: XCTestCase {
         )
 
         await fulfillment(of: [forwarded], timeout: 1)
+        task.cancel()
+        await session.stop()
+    }
+
+    func testRuntimeBridgeSessionSubscribesBeforeReceivingStartupFrames() async throws {
+        let startupFrame = #"{"type":"event","event":"stage.ready","payload":{}}"#
+        let transport = TestBridgeTransport(frameOnConnect: startupFrame)
+        let session = VifuRuntimeBridgeSession(transport: transport)
+
+        let applicationFrames = try await session.startFrames()
+        let received = expectation(description: "startup frame reaches the host")
+        let task = Task {
+            for await frame in applicationFrames {
+                guard frame == startupFrame else { continue }
+                received.fulfill()
+                return
+            }
+        }
+
+        await fulfillment(of: [received], timeout: 1)
         task.cancel()
         await session.stop()
     }
@@ -170,8 +189,10 @@ private actor TestBridgeTransport: VifuRuntimeBridgeTransport {
 
     private let incomingContinuation: AsyncStream<String>.Continuation
     private let sentContinuation: AsyncStream<String>.Continuation
+    private let frameOnConnect: String?
 
-    init() {
+    init(frameOnConnect: String? = nil) {
+        self.frameOnConnect = frameOnConnect
         let incomingPair = AsyncStream<String>.makeStream()
         incoming = incomingPair.stream
         incomingContinuation = incomingPair.continuation
@@ -181,7 +202,11 @@ private actor TestBridgeTransport: VifuRuntimeBridgeTransport {
         sentContinuation = sentPair.continuation
     }
 
-    func connect() async throws {}
+    func connect() async throws {
+        if let frameOnConnect {
+            incomingContinuation.yield(frameOnConnect)
+        }
+    }
 
     func send(_ encodedFrame: String) async throws {
         sentContinuation.yield(encodedFrame)

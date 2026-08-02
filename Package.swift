@@ -7,8 +7,24 @@ let generatedLocalArtifact = "Frameworks/VifuMobileFFI.xcframework"
 let configuredLocalArtifact = ProcessInfo.processInfo.environment["VIFU_SWIFT_LOCAL_ARTIFACT"]
 let packageRoot = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
 let generatedLocalArtifactURL = packageRoot.appendingPathComponent(generatedLocalArtifact)
+
+func supportsAllApplePlatforms(_ artifactURL: URL) -> Bool {
+    let infoURL = artifactURL.appendingPathComponent("Info.plist")
+    guard
+        let data = try? Data(contentsOf: infoURL),
+        let plist = try? PropertyListSerialization.propertyList(from: data, format: nil),
+        let info = plist as? [String: Any],
+        let libraries = info["AvailableLibraries"] as? [[String: Any]]
+    else {
+        return false
+    }
+    let platforms = Set(libraries.compactMap { $0["SupportedPlatform"] as? String })
+    return platforms.isSuperset(of: ["ios", "macos"])
+}
+
 let localArtifact = configuredLocalArtifact
     ?? (FileManager.default.fileExists(atPath: generatedLocalArtifactURL.path)
+        && supportsAllApplePlatforms(generatedLocalArtifactURL)
         ? generatedLocalArtifact
         : nil)
 let ffiTarget: Target
@@ -37,11 +53,15 @@ let package = Package(
             name: "Vifu",
             targets: ["Vifu"]
         ),
+        .library(
+            name: "VifuRuntimeBridge",
+            targets: ["VifuRuntimeBridge"]
+        ),
     ],
     targets: [
         .target(
             name: "Vifu",
-            dependencies: ["VifuMobileFFI"],
+            dependencies: ["VifuMobileFFI", "VifuRuntimeBridge"],
             path: "apple/Sources/Vifu",
             linkerSettings: [
                 .linkedLibrary("c++"),
@@ -51,9 +71,13 @@ let package = Package(
                 .linkedFramework("Security"),
             ]
         ),
+        .target(
+            name: "VifuRuntimeBridge",
+            path: "apple/Sources/VifuRuntimeBridge"
+        ),
         .testTarget(
             name: "VifuTests",
-            dependencies: ["Vifu"],
+            dependencies: ["Vifu", "VifuRuntimeBridge"],
             path: "apple/Tests/VifuTests"
         ),
         ffiTarget,

@@ -1,5 +1,5 @@
 import Foundation
-import Vifu
+import VifuRuntimeBridge
 @preconcurrency import SwiftGodot
 @preconcurrency import SwiftGodotKit
 

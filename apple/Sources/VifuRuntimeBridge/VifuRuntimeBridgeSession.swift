@@ -13,6 +13,15 @@ public protocol VifuRuntimeBridgeTransport: Actor {
     func disconnect() async
 }
 
+/// Handles Runtime Bridge requests for an attached runtime.
+///
+/// The transport package owns only this protocol. Embedded and remote runtime
+/// products can implement it without making hosts link a specific FFI binary.
+public protocol VifuRuntimeBridgeRuntimeConnection: Actor {
+    func handle(_ encodedFrame: String) throws -> [String]
+    func frames() -> AsyncStream<String>
+}
+
 /// A transport for two runtimes hosted in the same process.
 ///
 /// The engine integration installs the outbound sender when its runtime is
@@ -66,13 +75,24 @@ public actor VifuInProcessBridgeTransport: VifuRuntimeBridgeTransport {
 /// broadcast to application subscribers without being interpreted by Vifu.
 public actor VifuRuntimeBridgeSession {
     private let transport: any VifuRuntimeBridgeTransport
-    private var runtimeConnection: VifuRuntimeBridgeConnection?
+    private var runtimeConnection: (any VifuRuntimeBridgeRuntimeConnection)?
     private var transportTask: Task<Void, Never>?
     private var runtimeFramesTask: Task<Void, Never>?
     private var subscribers: [UUID: AsyncStream<String>.Continuation] = [:]
 
     public init(transport: any VifuRuntimeBridgeTransport) {
         self.transport = transport
+    }
+
+    /// Subscribes to application frames before the transport begins receiving.
+    ///
+    /// Hosts should prefer this entry point during startup so a frame emitted
+    /// immediately after `connect()` cannot be broadcast before a subscriber
+    /// exists.
+    public func startFrames() async throws -> AsyncStream<String> {
+        let applicationFrames = frames()
+        try await start()
+        return applicationFrames
     }
 
     public func start() async throws {
@@ -96,8 +116,7 @@ public actor VifuRuntimeBridgeSession {
         await transport.disconnect()
     }
 
-    public func attachRuntime(_ connection: VifuRuntimeBridgeConnection) {
-        guard runtimeConnection !== connection else { return }
+    public func attachRuntime(_ connection: any VifuRuntimeBridgeRuntimeConnection) {
         runtimeFramesTask?.cancel()
         runtimeConnection = connection
         runtimeFramesTask = Task { [weak self] in
