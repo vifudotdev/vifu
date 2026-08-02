@@ -198,10 +198,10 @@ struct EmbeddedGatewayTask {
     thread: JoinHandle<()>,
 }
 
-/// Runs Agent Gateway beside a manifest-configured [`VifuRuntime`].
+/// Runs Agent Gateway beside a [`VifuRuntime`] configured from Project Settings.
 ///
 /// The runtime and all locally registered providers remain in process. Starting
-/// the gateway only makes the manifest's agents discoverable through the
+/// the gateway only makes the configured agents discoverable through the
 /// configured Vifu Server.
 pub struct EmbeddedRuntimeGateway {
     runtime: VifuRuntime,
@@ -475,7 +475,7 @@ fn runtime_manifest(runtime: &VifuRuntime) -> Result<RuntimeManifest, String> {
         .map_err(|error| error.public_message())?
         .map(|release| release.manifest)
         .ok_or_else(|| {
-            "embedded gateway requires an applied runtime manifest or active release".to_string()
+            "embedded gateway requires applied Project Settings or an active release".to_string()
         })
 }
 
@@ -699,7 +699,7 @@ mod tests {
         let runtime = runtime();
         assert_eq!(
             runtime_manifest(&runtime).unwrap_err(),
-            "embedded gateway requires an applied runtime manifest or active release"
+            "embedded gateway requires applied Project Settings or an active release"
         );
     }
 

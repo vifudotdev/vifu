@@ -28,8 +28,8 @@ pub use bridge::{
     VIFU_RUNTIME_BRIDGE_PROTOCOL_VERSION,
 };
 pub use manifest::{
-    LocalProviderBinding, ProviderRequirement, RuntimeManifest, RuntimeRelease, RuntimeTraceRecord,
-    RUNTIME_MANIFEST_SCHEMA_VERSION,
+    LocalProviderBinding, ProjectSettings, ProviderRequirement, RuntimeManifest, RuntimeRelease,
+    RuntimeTraceRecord, RUNTIME_MANIFEST_SCHEMA_VERSION,
 };
 pub use protocol::{
     decode_protocol_frame, encode_protocol_frame, ErrorShape, EventFrame, EventFrameType,
@@ -65,11 +65,11 @@ pub mod prelude {
         EffectRequestQueue, EffectResult, EffectResultQueue, EndpointDefinition, HeadlessRuntime,
         HttpCapabilityProvider, HttpCapabilityRoute, InvocationData, InvocationEvent,
         InvocationEventKind, InvocationHandle, InvocationInput, InvocationOutput, InvocationPoll,
-        InvocationStatus, InvocationTraceEvent, MemoryRuntimeStore, ProviderEventSink,
-        ProviderFuture, ProviderRequest, ProviderRequirement, ProviderResponse, RuntimeAdvance,
-        RuntimeBridge, RuntimeBridgeError, RuntimeCommand, RuntimeCommandQueue, RuntimeError,
-        RuntimeEvent, RuntimeEventQueue, RuntimeManifest, RuntimeRelease, RuntimeSchedule,
-        RuntimeSession, RuntimeSnapshot, RuntimeState, RuntimeStore, RuntimeTraceRecord,
-        VifuRuntime, VifuRuntimePlugin,
+        InvocationStatus, InvocationTraceEvent, MemoryRuntimeStore, ProjectSettings,
+        ProviderEventSink, ProviderFuture, ProviderRequest, ProviderRequirement, ProviderResponse,
+        RuntimeAdvance, RuntimeBridge, RuntimeBridgeError, RuntimeCommand, RuntimeCommandQueue,
+        RuntimeError, RuntimeEvent, RuntimeEventQueue, RuntimeManifest, RuntimeRelease,
+        RuntimeSchedule, RuntimeSession, RuntimeSnapshot, RuntimeState, RuntimeStore,
+        RuntimeTraceRecord, VifuRuntime, VifuRuntimePlugin,
     };
 }

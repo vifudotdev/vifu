@@ -55,6 +55,13 @@ pub struct RuntimeManifest {
     pub metadata: Value,
 }
 
+/// Portable provider, agent, and endpoint settings for one Vifu project.
+///
+/// The runtime stores project settings as releases when a store is available.
+/// JSON is an import/export artifact for backup, migration, and embedded hosts;
+/// it is not live runtime configuration.
+pub type ProjectSettings = RuntimeManifest;
+
 impl RuntimeManifest {
     pub fn new(project_id: impl Into<String>) -> Self {
         Self {

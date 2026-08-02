@@ -28,7 +28,7 @@ export type RuntimeProject = {
   updatedAt: string;
 };
 
-export type RuntimeManifest = {
+export type ProjectSettings = {
   schemaVersion: number;
   projectId: string;
   providers: Array<Record<string, unknown>>;
@@ -36,6 +36,8 @@ export type RuntimeManifest = {
   endpoints: Array<Record<string, unknown>>;
   metadata: Record<string, unknown>;
 };
+
+export type RuntimeManifest = ProjectSettings;
 
 export type RuntimeDeployment = {
   id: string;
@@ -56,7 +58,7 @@ export type ProjectRuntimeRelease = {
   projectId: string;
   version: number;
   contentHash: string;
-  manifest: RuntimeManifest;
+  manifest: ProjectSettings;
   createdBy: string | null;
   createdAt: string;
 };

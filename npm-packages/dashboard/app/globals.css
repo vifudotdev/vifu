@@ -6266,6 +6266,7 @@ button:disabled {
 .deployment-card header > div,
 .deployment-card footer,
 .release-workbench > header,
+.settings-artifact-actions,
 .release-list article,
 .release-list article > div,
 .release-targets,
@@ -6486,6 +6487,24 @@ button:disabled {
   gap: 16px;
 }
 
+.settings-artifact-actions {
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.settings-file-button {
+  position: relative;
+  overflow: hidden;
+}
+
+.settings-file-button input {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+
 .release-workbench h2,
 .release-workbench p {
   margin: 0;
@@ -6646,6 +6665,7 @@ button:disabled {
   .deployment-toolbar,
   .deployment-toolbar form,
   .release-workbench > header,
+  .settings-artifact-actions,
   .guest-project-claim form {
     width: 100%;
     align-items: stretch;

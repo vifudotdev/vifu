@@ -145,15 +145,19 @@ pub struct ProjectRuntimeRelease {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct PublishRuntimeRelease {
-    pub manifest: Value,
+pub struct ImportProjectSettings {
+    #[serde(alias = "manifest")]
+    pub settings: Value,
 }
+
+pub type PublishRuntimeRelease = ImportProjectSettings;
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct BootstrapGatewayRuntimeRelease {
     pub deployment_id: Uuid,
-    pub manifest: Value,
+    #[serde(alias = "manifest")]
+    pub settings: Value,
 }
 
 #[derive(Debug, Clone, Serialize, FromRow)]
@@ -1013,7 +1017,13 @@ fn default_chat_capability() -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{slugify, validate_slug, ApiKeyPermissions, EndpointPermission};
+    use serde_json::json;
+    use uuid::Uuid;
+
+    use super::{
+        slugify, validate_slug, ApiKeyPermissions, BootstrapGatewayRuntimeRelease,
+        EndpointPermission, ImportProjectSettings,
+    };
 
     #[test]
     fn creates_stable_slugs() {
@@ -1041,5 +1051,59 @@ mod tests {
         .unwrap();
 
         assert_eq!(permissions.embeddings, EndpointPermission::None);
+    }
+
+    #[test]
+    fn import_project_settings_accepts_settings_payload() {
+        let input: ImportProjectSettings = serde_json::from_value(json!({
+            "settings": {
+                "schemaVersion": 1,
+                "projectId": "project",
+                "providers": [],
+                "agents": [],
+                "endpoints": [],
+                "metadata": {}
+            }
+        }))
+        .unwrap();
+
+        assert_eq!(input.settings["projectId"], "project");
+    }
+
+    #[test]
+    fn import_project_settings_accepts_manifest_alias() {
+        let input: ImportProjectSettings = serde_json::from_value(json!({
+            "manifest": {
+                "schemaVersion": 1,
+                "projectId": "project",
+                "providers": [],
+                "agents": [],
+                "endpoints": [],
+                "metadata": {}
+            }
+        }))
+        .unwrap();
+
+        assert_eq!(input.settings["projectId"], "project");
+    }
+
+    #[test]
+    fn gateway_bootstrap_accepts_manifest_alias() {
+        let deployment_id = Uuid::new_v4();
+        let input: BootstrapGatewayRuntimeRelease = serde_json::from_value(json!({
+            "deploymentId": deployment_id,
+            "manifest": {
+                "schemaVersion": 1,
+                "projectId": "project",
+                "providers": [],
+                "agents": [],
+                "endpoints": [],
+                "metadata": {}
+            }
+        }))
+        .unwrap();
+
+        assert_eq!(input.deployment_id, deployment_id);
+        assert_eq!(input.settings["projectId"], "project");
     }
 }

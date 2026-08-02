@@ -23,7 +23,7 @@ use vifu_gateway::config::{
 use vifu_gateway::protocol::{validate_identifier, MAX_INVOCATION_BODY_BYTES};
 use vifu_runtime::{
     AgentDefinition, AgentProvider, EndpointDefinition, HttpCapabilityProvider,
-    HttpCapabilityRoute, InvocationData, InvocationInput, RuntimeError, RuntimeManifest,
+    HttpCapabilityRoute, InvocationData, InvocationInput, ProjectSettings, RuntimeError,
     RuntimeRelease, RuntimeTraceRecord, VifuRuntime,
 };
 
@@ -42,8 +42,8 @@ use crate::models::{
     CreateApiKey, CreateBinding, CreateEndpoint, CreateProfile, CreateProfileVersion,
     CreateProject, CreateProjectProvider, CreateRuntimeDeployment, CreatedApiKey, CustomProvider,
     CustomProviderSecret, EndpointRoute, ImportProjectAgent, ImportProjectProfile,
-    ImportProjectProvider, ProfileCapabilityDraft, ProjectOwnership, ProviderAdapter,
-    ProviderAdapterField, ProviderConnection, ProviderConnectionSecret, PublishRuntimeRelease,
+    ImportProjectProvider, ImportProjectSettings, ProfileCapabilityDraft, ProjectOwnership,
+    ProviderAdapter, ProviderAdapterField, ProviderConnection, ProviderConnectionSecret,
     RegisterAgentGateway, RuntimeDeployment, RuntimeDeploymentView, SetProfileRollout,
     SyncProfileSource, TestProfile, UpdateApiKey, UpdateBinding, UpdateEndpoint, UpdateProfile,
     UpdateProject, UpdateProjectProvider, UpdateRuntimeDeployment, UpsertProviderConnection,
@@ -593,7 +593,7 @@ pub async fn publish_project_runtime_release(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(slug): Path<String>,
-    Json(input): Json<PublishRuntimeRelease>,
+    Json(input): Json<ImportProjectSettings>,
 ) -> Result<(StatusCode, Json<Value>), ApiError> {
     let project = db::get_project_by_slug(&state.pool, &slug).await?;
     let identity = state
@@ -604,14 +604,14 @@ pub async fn publish_project_runtime_release(
             project.project.owner_user_id.as_deref(),
         )
         .await?;
-    let manifest = serde_json::from_value::<RuntimeManifest>(input.manifest)
-        .map_err(|error| ApiError::Invalid(format!("runtime manifest is invalid: {error}")))?;
+    let manifest = serde_json::from_value::<ProjectSettings>(input.settings)
+        .map_err(|error| ApiError::Invalid(format!("project settings are invalid: {error}")))?;
     manifest
         .validate()
         .map_err(|error| ApiError::Invalid(error.to_string()))?;
     if manifest.project_id != project.project.slug {
         return Err(ApiError::Invalid(
-            "runtime manifest projectId must match the project slug".to_string(),
+            "project settings projectId must match the project slug".to_string(),
         ));
     }
     let releases = db::list_project_runtime_releases(&state.pool, project.project.id).await?;
@@ -1976,14 +1976,14 @@ pub async fn bootstrap_agent_gateway_runtime_release(
         return Err(ApiError::Forbidden);
     }
     let project = db::get_project(&state.pool, deployment.project_id).await?;
-    let manifest = serde_json::from_value::<RuntimeManifest>(input.manifest)
-        .map_err(|error| ApiError::Invalid(format!("runtime manifest is invalid: {error}")))?;
+    let manifest = serde_json::from_value::<ProjectSettings>(input.settings)
+        .map_err(|error| ApiError::Invalid(format!("project settings are invalid: {error}")))?;
     manifest
         .validate()
         .map_err(|error| ApiError::Invalid(error.to_string()))?;
     if manifest.project_id != project.project.slug {
         return Err(ApiError::Invalid(
-            "runtime manifest projectId must match the project slug".to_string(),
+            "project settings projectId must match the project slug".to_string(),
         ));
     }
     let content_hash = manifest

@@ -41,8 +41,8 @@ Add the library:
 vifu-runtime = "0.1"
 ```
 
-Register a provider once, apply the product manifest, and invoke a named
-endpoint from an application session:
+Register a provider once, apply project settings, and invoke a named endpoint
+from an application session:
 
 ```rust
 use std::sync::Arc;
@@ -63,7 +63,29 @@ provider.add_route(
 
 let runtime = VifuRuntime::new("my-product")?;
 runtime.register_provider("models", Arc::new(provider))?;
-runtime.apply_manifest(RuntimeManifest::from_json(include_bytes!("vifu.json"))?)?;
+
+let mut settings = ProjectSettings::new("my-product");
+settings.providers = vec![ProviderRequirement {
+    id: "models".into(),
+    provider_type: "openai-compatible".into(),
+    capabilities: vec!["chat".into()],
+    settings: json!({}),
+    resources: Default::default(),
+}];
+settings.agents = vec![AgentDefinition {
+    id: "guide".into(),
+    name: "Town Guide".into(),
+    provider: "models".into(),
+    capabilities: vec!["chat".into()],
+    metadata: json!({}),
+}];
+settings.endpoints = vec![EndpointDefinition {
+    name: "town-guide".into(),
+    agent: "guide".into(),
+    capability: "chat".into(),
+    timeout_ms: 30000,
+}];
+runtime.apply_project_settings(settings)?;
 
 let output = runtime
     .session("player-42")?
@@ -76,32 +98,10 @@ let output = runtime
     .await?;
 ```
 
-`vifu.json` is portable product configuration. Credentials and device paths
-stay in the host:
-
-```json
-{
-  "schemaVersion": 1,
-  "projectId": "my-product",
-  "providers": [{
-    "id": "models",
-    "providerType": "openai-compatible",
-    "capabilities": ["chat"]
-  }],
-  "agents": [{
-    "id": "guide",
-    "name": "Town Guide",
-    "provider": "models",
-    "capabilities": ["chat"]
-  }],
-  "endpoints": [{
-    "name": "town-guide",
-    "agent": "guide",
-    "capability": "chat",
-    "timeoutMs": 30000
-  }]
-}
-```
+Project settings are the portable provider, agent, and endpoint graph. The
+Dashboard stores them in the database and can import or export JSON snapshots
+for backup, migration, and embedded targets. Credentials and device paths stay
+in the host.
 
 The same Runtime has async, start/poll/cancel, ordered output events, snapshots,
 and the transport-neutral `vifu.runtime-bridge/1` protocol. See
@@ -161,8 +161,8 @@ generation ends before producing valid JSON. Responses retain native
 
 ## Connect embedded agents to the Console
 
-The reusable `EmbeddedRuntimeGateway` runs beside any manifest-configured
-`VifuRuntime`:
+The reusable `EmbeddedRuntimeGateway` runs beside any `VifuRuntime` configured
+from Project Settings:
 
 ```rust
 use vifu_gateway::embedded::{
@@ -185,7 +185,7 @@ gateway.start(identity, device_token, enrollment_token)?;
 
 The Machine private key is stable host identity; the Server returns a
 server-scoped Device Token after authorization. One authenticated Gateway
-connection publishes the manifest's agents, carries
+connection publishes the configured agents, carries
 remote invocations, synchronizes releases, and uploads safe trace summaries.
 The Console operates projects, deployments, provider bindings, keys, connected
 Gateways, available agents, and traces.

@@ -2,7 +2,7 @@
 
 Vifu is an Agent Runtime in Rust for embedding and operating agents inside
 products. Product code owns domain state, UI, safety, and allowed actions;
-Vifu owns provider connections, agent identity, versioned manifests, sessions,
+Vifu owns provider connections, agent identity, Project Settings, sessions,
 stable endpoints, Gateway transport, and traces.
 
 ## Get Started

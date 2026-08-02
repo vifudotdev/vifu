@@ -29,7 +29,7 @@ backend used by Vifu's current local provider.
 
 - **Product-shaped API:** applications invoke named capabilities, not a
   framework graph or assistant channel.
-- **One local-to-operated path:** the same manifest-configured Runtime can be
+- **One local-to-operated path:** the same Runtime configured from Project Settings can be
   called in process and exposed through `EmbeddedRuntimeGateway`.
 - **Thin host integration:** Rust and Swift call the Runtime directly; engine
   adapters carry `vifu.runtime-bridge/1` frames.

@@ -4,6 +4,7 @@ import {
   Check,
   Clipboard,
   CloudUpload,
+  Download,
   Link2,
   Plus,
   RotateCcw,
@@ -12,13 +13,13 @@ import {
   Star,
   Unplug,
 } from "lucide-react";
-import { useMemo, useState, type FormEvent } from "react";
+import { useMemo, useState, type ChangeEvent, type FormEvent } from "react";
 import { useRouter } from "next/navigation";
 import { runtimeBrowserRequest } from "../lib/runtime-browser-client";
 import type {
+  ProjectSettings,
   ProjectRuntimeRelease,
   RuntimeDeployment,
-  RuntimeManifest,
   RuntimeProject,
 } from "../lib/runtime-types";
 
@@ -42,10 +43,8 @@ export function RuntimeDeploymentsView({
     () => [...releases].sort((left, right) => right.version - left.version)[0],
     [releases],
   );
-  const [manifestSource, setManifestSource] = useState(() => JSON.stringify(
-    latestRelease?.manifest ?? emptyManifest(project.slug),
-    null,
-    2,
+  const [settingsSource, setSettingsSource] = useState(() => formatProjectSettings(
+    latestRelease?.manifest ?? emptyProjectSettings(project.slug),
   ));
   const [enrollment, setEnrollment] = useState<Enrollment | null>(null);
   const [pending, setPending] = useState<string | null>(null);
@@ -85,23 +84,54 @@ export function RuntimeDeploymentsView({
     if (created) form.reset();
   }
 
-  async function publishRelease() {
-    let manifest: RuntimeManifest;
+  async function importProjectSettings() {
+    let settings: ProjectSettings;
     try {
-      manifest = JSON.parse(manifestSource) as RuntimeManifest;
+      settings = JSON.parse(settingsSource) as ProjectSettings;
     } catch {
-      setMessage({ tone: "error", text: "The runtime manifest is not valid JSON." });
+      setMessage({ tone: "error", text: "Project settings JSON is not valid." });
       return;
     }
-    await action(
-      "publish",
+    const result = await action(
+      "import-settings",
       () => runtimeBrowserRequest<{ release: ProjectRuntimeRelease }>(
         `project/${project.slug}/runtime-releases`,
         "POST",
-        { manifest },
+        { settings },
       ),
-      "Runtime release published.",
+      "Project settings imported.",
     );
+    if (result?.release) setSettingsSource(formatProjectSettings(result.release.manifest));
+  }
+
+  function exportProjectSettings() {
+    const settings = latestRelease?.manifest;
+    if (!settings) {
+      setMessage({ tone: "error", text: "There are no saved project settings to export." });
+      return;
+    }
+    const blob = new Blob([formatProjectSettings(settings)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = `${project.slug}.project-settings.vifu.json`;
+    document.body.append(anchor);
+    anchor.click();
+    anchor.remove();
+    window.setTimeout(() => URL.revokeObjectURL(url), 0);
+    setMessage({ tone: "success", text: "Project settings exported." });
+  }
+
+  async function loadProjectSettingsFile(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.currentTarget.files?.[0];
+    event.currentTarget.value = "";
+    if (!file) return;
+    try {
+      setSettingsSource(await file.text());
+      setMessage({ tone: "success", text: "Project settings file loaded." });
+    } catch {
+      setMessage({ tone: "error", text: "Project settings file could not be read." });
+    }
   }
 
   async function pairGateway(deployment: RuntimeDeployment) {
@@ -123,7 +153,7 @@ export function RuntimeDeploymentsView({
         `project/${project.slug}/deployments/${deployment.name}/runtime-releases/${version}/activate`,
         "POST",
       ),
-      `${deployment.name} now uses release ${version}.`,
+      `${deployment.name} now uses settings version ${version}.`,
     );
   }
 
@@ -187,7 +217,7 @@ export function RuntimeDeploymentsView({
         </form>
         <div className="deployment-summary">
           <span><strong>{deployments.length}</strong> environments</span>
-          <span><strong>{releases.length}</strong> releases</span>
+          <span><strong>{releases.length}</strong> settings versions</span>
         </div>
       </section>
 
@@ -204,7 +234,7 @@ export function RuntimeDeploymentsView({
               {deployment.isPrimary ? <span className="deployment-primary"><Star aria-hidden="true" />Primary</span> : null}
             </header>
             <dl>
-              <div><dt>Release</dt><dd>{deployment.activeReleaseVersion ? `v${deployment.activeReleaseVersion}` : "Not published"}</dd></div>
+              <div><dt>Settings</dt><dd>{deployment.activeReleaseVersion ? `v${deployment.activeReleaseVersion}` : "Not set"}</dd></div>
               <div><dt>Config</dt><dd>{deployment.configSyncEnabled ? "Synced" : "Local"}</dd></div>
               <div><dt>Traces</dt><dd>{deployment.traceMode}</dd></div>
               <div><dt>Remote calls</dt><dd>{deployment.remoteInvocationEnabled ? "Allowed" : "Blocked"}</dd></div>
@@ -221,7 +251,7 @@ export function RuntimeDeploymentsView({
               </div>
             ) : null}
             <form className="deployment-policy-form" onSubmit={(event) => updatePolicies(deployment, event)}>
-              <label><input type="checkbox" name="configSyncEnabled" defaultChecked={deployment.configSyncEnabled} />Sync releases</label>
+              <label><input type="checkbox" name="configSyncEnabled" defaultChecked={deployment.configSyncEnabled} />Sync settings</label>
               <label><input type="checkbox" name="remoteInvocationEnabled" defaultChecked={deployment.remoteInvocationEnabled} />Allow remote calls</label>
               <label><span>Trace upload</span><select name="traceMode" defaultValue={deployment.traceMode === "full" ? "summary" : deployment.traceMode}><option value="off">Off</option><option value="summary">Summary</option></select></label>
               <button className="icon-text-button" type="submit" disabled={pending === `settings-${deployment.id}`}><Check aria-hidden="true" />Save</button>
@@ -237,12 +267,22 @@ export function RuntimeDeploymentsView({
       {enrollment ? <EnrollmentPanel enrollment={enrollment} onClose={() => setEnrollment(null)} /> : null}
 
       <section className="release-workbench">
-        <header><div><h2>Runtime releases</h2><p>Publish one portable manifest, then choose the version used by each deployment.</p></div><button className="primary-button" type="button" onClick={publishRelease} disabled={pending === "publish"}><CloudUpload aria-hidden="true" />{pending === "publish" ? "Publishing" : "Publish release"}</button></header>
-        <textarea value={manifestSource} onChange={(event) => setManifestSource(event.target.value)} spellCheck={false} aria-label="Runtime manifest JSON" />
+        <header>
+          <div><h2>Project settings</h2><p>Database-backed provider, agent, and endpoint settings.</p></div>
+          <div className="settings-artifact-actions">
+            <label className="secondary-button settings-file-button">
+              <CloudUpload aria-hidden="true" />Load JSON
+              <input type="file" accept="application/json,.json" onChange={loadProjectSettingsFile} />
+            </label>
+            <button className="secondary-button" type="button" onClick={exportProjectSettings} disabled={!latestRelease}><Download aria-hidden="true" />Export</button>
+            <button className="primary-button" type="button" onClick={importProjectSettings} disabled={pending === "import-settings"}><CloudUpload aria-hidden="true" />{pending === "import-settings" ? "Importing" : "Import"}</button>
+          </div>
+        </header>
+        <textarea value={settingsSource} onChange={(event) => setSettingsSource(event.target.value)} spellCheck={false} aria-label="Project settings JSON" />
         <div className="release-list">
           {releases.length > 0 ? releases.map((release) => (
             <article key={release.id}>
-              <div><strong>Release {release.version}</strong><code>{shortHash(release.contentHash)}</code><time dateTime={release.createdAt}>{formatDate(release.createdAt)}</time></div>
+              <div><strong>Settings version {release.version}</strong><code>{shortHash(release.contentHash)}</code><time dateTime={release.createdAt}>{formatDate(release.createdAt)}</time></div>
               <div className="release-targets">
                 {deployments.map((deployment) => deployment.activeReleaseVersion === release.version ? (
                   <span key={deployment.id}><Check aria-hidden="true" />{deployment.name}</span>
@@ -251,7 +291,7 @@ export function RuntimeDeploymentsView({
                 ))}
               </div>
             </article>
-          )) : <div className="deployment-empty">Connect an embedded runtime to import the first release, or publish a manifest here.</div>}
+          )) : <div className="deployment-empty">No saved project settings yet.</div>}
         </div>
       </section>
     </div>
@@ -280,8 +320,12 @@ function EnrollmentPanel({ enrollment, onClose }: { enrollment: Enrollment; onCl
   );
 }
 
-function emptyManifest(projectId: string): RuntimeManifest {
+function emptyProjectSettings(projectId: string): ProjectSettings {
   return { schemaVersion: 1, projectId, providers: [], agents: [], endpoints: [], metadata: {} };
+}
+
+function formatProjectSettings(settings: ProjectSettings): string {
+  return `${JSON.stringify(settings, null, 2)}\n`;
 }
 
 function shortHash(value: string): string {

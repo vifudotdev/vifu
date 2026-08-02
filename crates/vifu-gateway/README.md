@@ -4,7 +4,7 @@ Provider, protocol, relay, and session implementation used by the
 [`vifu`](https://crates.io/crates/vifu) application.
 
 Rust products can use `EmbeddedRuntimeGateway` to expose the agents in a
-manifest-configured `VifuRuntime` through Vifu Server while continuing to call
+`VifuRuntime` configured from Project Settings through Vifu Server while continuing to call
 the same Runtime directly in process. Enable the `sqlite` feature when the host
 needs Runtime and Gateway session state in one SQLite database.
 

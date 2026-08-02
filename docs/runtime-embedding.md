@@ -192,10 +192,10 @@ if let updated = try gateway.status().authorization {
 
 The enrollment token is consumed once. Later starts load the same Machine
 identity and server-specific Device Token from Keychain and omit the token.
-Neither secret is written to `runtime.sqlite` or the portable manifest. Runtime
-state, Gateway resume state, and private guest project registration capabilities
-share the SQLite file. The application must keep that file inside its protected
-application data directory.
+Neither secret is written to `runtime.sqlite` or portable project settings.
+Runtime state, Gateway resume state, and private guest project registration
+capabilities share the SQLite file. The application must keep that file inside
+its protected application data directory.
 
 Rust hosts use the lifecycle implementation from `vifu-gateway` directly:
 
@@ -218,15 +218,15 @@ let identity = MachineIdentity::from_encoded_private_key(&machine_private_key)?;
 gateway.start(identity, device_token, enrollment_token)?;
 ```
 
-`start` requires an applied manifest or active release. It derives advertised
-Agent/provider descriptors from that manifest and runs the reconnecting Gateway
-on its own worker thread. Custom Rust hosts must keep the Machine private key and
-latest Device Token in their credential store. `status` reports
+`start` requires applied Project Settings or an active release. It derives
+advertised Agent/provider descriptors from those settings and runs the
+reconnecting Gateway on its own worker thread. Custom Rust hosts must keep the
+Machine private key and latest Device Token in their credential store. `status` reports
 `Stopped`, `Running`, or `Failed`; `stop` cancels the network loop and joins the
 worker.
 
-The first connection to an empty deployment imports the embedded manifest as
-release 1. Later release activation, configuration sync, trace upload, and
+The first connection to an empty deployment imports the active Project Settings
+as release 1. Later release activation, configuration sync, trace upload, and
 remote invocation follow the deployment policies selected in the Dashboard.
 Remote invocation is disabled by default, while configuration sync and summary
 trace upload are enabled.

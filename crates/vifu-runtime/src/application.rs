@@ -12,8 +12,8 @@ use serde_json::{json, Value};
 use tokio::sync::{mpsc, Notify};
 
 use crate::{
-    EffectRequest, EffectResult, LocalProviderBinding, RuntimeManifest, RuntimeRelease,
-    RuntimeSnapshot, RuntimeTraceRecord,
+    EffectRequest, EffectResult, LocalProviderBinding, ProjectSettings, RuntimeManifest,
+    RuntimeRelease, RuntimeSnapshot, RuntimeTraceRecord,
 };
 
 const SNAPSHOT_VERSION: u32 = 1;
@@ -1497,7 +1497,7 @@ impl VifuRuntime {
         manifest.validate()?;
         if manifest.project_id != self.core.project_id {
             return Err(RuntimeError::InvalidDefinition(
-                "runtime manifest belongs to another project".to_string(),
+                "project settings belong to another project".to_string(),
             ));
         }
         let mut registry = self
@@ -1539,6 +1539,10 @@ impl VifuRuntime {
         Ok(())
     }
 
+    pub fn apply_project_settings(&self, settings: ProjectSettings) -> Result<(), RuntimeError> {
+        self.apply_manifest(settings)
+    }
+
     pub fn current_manifest(&self) -> Result<Option<RuntimeManifest>, RuntimeError> {
         Ok(self
             .core
@@ -1546,6 +1550,10 @@ impl VifuRuntime {
             .read()
             .map_err(|_| RuntimeError::Internal)?
             .clone())
+    }
+
+    pub fn current_project_settings(&self) -> Result<Option<ProjectSettings>, RuntimeError> {
+        self.current_manifest()
     }
 
     pub fn install_release(&self, release: &RuntimeRelease) -> Result<(), RuntimeError> {
@@ -1595,6 +1603,13 @@ impl VifuRuntime {
         let release = RuntimeRelease::new(1, manifest)?;
         self.install_release(&release)?;
         self.activate_release(release.version)
+    }
+
+    pub fn bootstrap_project_settings(
+        &self,
+        settings: ProjectSettings,
+    ) -> Result<RuntimeRelease, RuntimeError> {
+        self.bootstrap_release(settings)
     }
 
     pub fn save_local_provider_binding(
