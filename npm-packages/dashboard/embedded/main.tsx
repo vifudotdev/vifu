@@ -7,7 +7,7 @@ import "@fontsource/ibm-plex-sans/600.css";
 import "@fontsource/ibm-plex-sans/700.css";
 import "@vifu/runtime-console/styles.css";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState, type MouseEvent } from "react";
 import { createRoot } from "react-dom/client";
 import {
   RuntimeConsole,
@@ -29,6 +29,7 @@ import {
   type ProjectProvider,
   type RuntimeDeployment,
   type RuntimeConsoleData,
+  type RuntimeConsoleLinkProps,
   type RuntimeProject,
   type RuntimeSnapshot,
   type RuntimeStatus,
@@ -40,6 +41,7 @@ import {
 } from "@vifu/runtime-console";
 
 const CONSOLE_BASE = "/console";
+const CONSOLE_ROUTE_CHANGE_EVENT = "vifu-console-route-change";
 const SECTION_IDS = new Set<DashboardSection>([
   "overview",
   "agents",
@@ -83,6 +85,7 @@ function EmbeddedRuntimeConsole() {
   }, [refreshVersion, route.projectSlug]);
 
   const host = useMemo(() => ({
+    Link: EmbeddedLink,
     router: {
       push: (href: string) => setRoute(routeFromHref(href)),
       refresh: () => setRefreshVersion((value) => value + 1),
@@ -141,19 +144,84 @@ function useRoute(): [ConsoleRoute, (route: ConsoleRoute) => void] {
 
   useEffect(() => {
     const onPopState = () => setRouteState(readRoute(window.location.pathname));
+    const onConsoleRouteChange = () => setRouteState(readRoute(window.location.pathname));
     window.addEventListener("popstate", onPopState);
-    return () => window.removeEventListener("popstate", onPopState);
+    window.addEventListener(CONSOLE_ROUTE_CHANGE_EVENT, onConsoleRouteChange);
+    return () => {
+      window.removeEventListener("popstate", onPopState);
+      window.removeEventListener(CONSOLE_ROUTE_CHANGE_EVENT, onConsoleRouteChange);
+    };
   }, []);
 
   const setRoute = useCallback((nextRoute: ConsoleRoute) => {
-    const href = routeHref(nextRoute);
-    if (href !== window.location.pathname) {
-      window.history.pushState(null, "", href);
-    }
+    pushBrowserRoute(nextRoute);
     setRouteState(nextRoute);
   }, []);
 
   return [route, setRoute];
+}
+
+function EmbeddedLink({
+  download,
+  href,
+  onClick,
+  prefetch: _prefetch,
+  target,
+  ...props
+}: RuntimeConsoleLinkProps) {
+  return (
+    <a
+      {...props}
+      download={download}
+      href={href}
+      onClick={(event) => {
+        onClick?.(event);
+        if (!shouldHandleConsoleLink(event, href, target, download)) return;
+        event.preventDefault();
+        navigateBrowserHref(href);
+      }}
+      target={target}
+    />
+  );
+}
+
+function shouldHandleConsoleLink(
+  event: MouseEvent<HTMLAnchorElement>,
+  href: string,
+  target: RuntimeConsoleLinkProps["target"],
+  download: RuntimeConsoleLinkProps["download"],
+): boolean {
+  if (
+    event.defaultPrevented ||
+    event.button !== 0 ||
+    event.altKey ||
+    event.ctrlKey ||
+    event.metaKey ||
+    event.shiftKey ||
+    download !== undefined ||
+    (target && target !== "_self")
+  ) {
+    return false;
+  }
+
+  const url = new URL(href, window.location.origin);
+  return url.origin === window.location.origin && isConsolePath(url.pathname);
+}
+
+function isConsolePath(pathname: string): boolean {
+  return pathname === CONSOLE_BASE || pathname.startsWith(`${CONSOLE_BASE}/`);
+}
+
+function navigateBrowserHref(href: string) {
+  pushBrowserRoute(routeFromHref(href));
+  window.dispatchEvent(new Event(CONSOLE_ROUTE_CHANGE_EVENT));
+}
+
+function pushBrowserRoute(route: ConsoleRoute) {
+  const href = routeHref(route);
+  if (href !== window.location.pathname) {
+    window.history.pushState(null, "", href);
+  }
 }
 
 function routeFromHref(href: string): ConsoleRoute {
