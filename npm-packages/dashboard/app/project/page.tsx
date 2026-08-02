@@ -1,4 +1,4 @@
-import { RuntimeConsole } from "../../components/runtime-console";
+import { RuntimeConsole } from "../../components/runtime-console-host";
 import { configuredBrowserApiBaseUrl } from "../../lib/config";
 import { loadDashboardData } from "../../lib/dashboard-data";
 

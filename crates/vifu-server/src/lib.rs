@@ -1,6 +1,7 @@
 pub mod api;
 pub mod auth;
 pub mod config;
+pub mod console;
 pub mod db;
 pub mod error;
 pub mod models;
@@ -116,6 +117,17 @@ pub fn app(state: AppState) -> Router {
 
     Router::new()
         .route("/health", get(api::health))
+        .route(
+            "/console/api/runtime/{*path}",
+            get(console::proxy_runtime_request)
+                .post(console::proxy_runtime_request)
+                .put(console::proxy_runtime_request)
+                .patch(console::proxy_runtime_request)
+                .delete(console::proxy_runtime_request),
+        )
+        .route("/console", get(console::serve_console_asset))
+        .route("/console/", get(console::serve_console_asset))
+        .route("/console/{*path}", get(console::serve_console_asset))
         .route("/v1/status", get(api::status))
         .route(
             "/v1/auth/exchange",

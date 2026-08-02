@@ -1,0 +1,47 @@
+{
+  "name": "@vifu/runtime-console",
+  "version": "0.1.0",
+  "description": "Host-neutral Vifu runtime console UI and browser contracts.",
+  "type": "module",
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "sideEffects": [
+    "./dist/styles.css"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./react": {
+      "types": "./dist/react.d.ts",
+      "import": "./dist/react.js"
+    },
+    "./styles.css": "./dist/styles.css"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run"
+  },
+  "peerDependencies": {
+    "react": ">=18.0.0",
+    "react-dom": ">=18.0.0"
+  },
+  "dependencies": {
+    "lucide-react": "^0.468.0",
+    "react-resizable-panels": "^4.12.2",
+    "react-window": "^2.2.7"
+  },
+  "devDependencies": {
+    "@types/react": "^19.2.6",
+    "@types/react-dom": "^19.2.3",
+    "typescript": "^5.9.3",
+    "vitest": "^3.2.4"
+  }
+}

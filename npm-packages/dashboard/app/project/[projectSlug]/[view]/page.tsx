@@ -1,5 +1,5 @@
 import { notFound } from "next/navigation";
-import { RuntimeConsole, type DashboardSection } from "../../../../components/runtime-console";
+import { RuntimeConsole, type DashboardSection } from "../../../../components/runtime-console-host";
 import { configuredBrowserApiBaseUrl } from "../../../../lib/config";
 import { loadDashboardData } from "../../../../lib/dashboard-data";
 

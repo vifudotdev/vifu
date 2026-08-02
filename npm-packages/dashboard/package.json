@@ -7,11 +7,13 @@
     "dev": "next dev -H 0.0.0.0 -p 6791",
     "dev:e2e": "VIFU_E2E=1 next dev -H 127.0.0.1 -p 6792",
     "build": "next build",
+    "build:embedded": "node scripts/build-embedded-console.mjs",
     "typecheck": "next typegen && tsc --noEmit"
   },
   "dependencies": {
     "@fontsource/ibm-plex-mono": "^5.2.7",
     "@fontsource/ibm-plex-sans": "^5.2.7",
+    "@vifu/runtime-console": "workspace:*",
     "lucide-react": "^0.468.0",
     "next": "^16.0.0",
     "react": "^19.2.0",

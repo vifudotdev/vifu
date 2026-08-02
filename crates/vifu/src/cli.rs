@@ -12,6 +12,7 @@ pub struct Options {
     pub command: Command,
     pub config_profile: Option<String>,
     pub config_overrides: Vec<String>,
+    pub open_browser: bool,
 }
 
 impl Options {
@@ -23,6 +24,7 @@ impl Options {
         let mut command = Command::Start;
         let mut config_profile = None;
         let mut config_overrides = Vec::new();
+        let mut open_browser = true;
 
         let mut args = args.into_iter().map(Into::into);
         let _program_name = args.next();
@@ -33,6 +35,7 @@ impl Options {
                 "-V" | "--version" => command = Command::Version,
                 "--status" => command = Command::Status,
                 "--doctor" => command = Command::Doctor,
+                "--no-browser" => open_browser = false,
                 "-p" | "--profile" => {
                     let value = args
                         .next()
@@ -68,6 +71,7 @@ impl Options {
             command,
             config_profile,
             config_overrides,
+            open_browser,
         })
     }
 }
@@ -104,6 +108,7 @@ Configuration:
                          parsed as JSON, or used as strings when unquoted.
 
 Options:
+  --no-browser           Print the local Console URL without opening a browser
   -h, --help             Show help
   -V, --version          Show version
 "
@@ -119,12 +124,20 @@ mod tests {
         assert_eq!(options.command, Command::Start);
         assert!(options.config_profile.is_none());
         assert!(options.config_overrides.is_empty());
+        assert!(options.open_browser);
     }
 
     #[test]
     fn parses_status_flag() {
         let options = Options::parse(["vifu", "--status"]).unwrap();
         assert_eq!(options.command, Command::Status);
+    }
+
+    #[test]
+    fn parses_no_browser_flag() {
+        let options = Options::parse(["vifu", "--no-browser"]).unwrap();
+        assert_eq!(options.command, Command::Start);
+        assert!(!options.open_browser);
     }
 
     #[test]

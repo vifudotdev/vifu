@@ -15,6 +15,7 @@
       "dependencies": {
         "@fontsource/ibm-plex-mono": "^5.2.7",
         "@fontsource/ibm-plex-sans": "^5.2.7",
+        "@vifu/runtime-console": "workspace:*",
         "lucide-react": "^0.468.0",
         "next": "^16.0.0",
         "react": "^19.2.0",
@@ -32,6 +33,25 @@
     "packages/protocol": {
       "name": "@vifu/protocol",
       "version": "0.1.0",
+    },
+    "packages/runtime-console": {
+      "name": "@vifu/runtime-console",
+      "version": "0.1.0",
+      "dependencies": {
+        "lucide-react": "^0.468.0",
+        "react-resizable-panels": "^4.12.2",
+        "react-window": "^2.2.7",
+      },
+      "devDependencies": {
+        "@types/react": "^19.2.6",
+        "@types/react-dom": "^19.2.3",
+        "typescript": "^5.9.3",
+        "vitest": "^3.2.4",
+      },
+      "peerDependencies": {
+        "react": ">=18.0.0",
+        "react-dom": ">=18.0.0",
+      },
     },
   },
   "packages": {
@@ -234,6 +254,8 @@
     "@vifu/dashboard": ["@vifu/dashboard@workspace:npm-packages/dashboard"],
 
     "@vifu/protocol": ["@vifu/protocol@workspace:packages/protocol"],
+
+    "@vifu/runtime-console": ["@vifu/runtime-console@workspace:packages/runtime-console"],
 
     "@vitest/expect": ["@vitest/expect@3.2.7", "", { "dependencies": { "@types/chai": "^5.2.2", "@vitest/spy": "3.2.7", "@vitest/utils": "3.2.7", "chai": "^5.2.0", "tinyrainbow": "^2.0.0" } }, "sha512-E8eBXaKibuvH2pSZErOjdVb5vF4PbKYcrnluBTYxEk1l/VhhwZg1kZQsdtjq+CsF5CFydf2Rdkz7jDHKSisi3w=="],
 

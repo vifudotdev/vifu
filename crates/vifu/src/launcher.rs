@@ -1,5 +1,10 @@
+use std::io::IsTerminal;
+use std::process::Command as ProcessCommand;
+use std::time::Duration;
+
 use tokio::sync::watch;
 use tracing_subscriber::EnvFilter;
+use vifu_server::config::{Config as ServerConfig, DeploymentMode};
 
 use crate::cli::{help_text, Command, Options};
 use crate::gateway;
@@ -11,6 +16,7 @@ pub async fn execute(options: Options) -> Result<(), String> {
         command,
         config_profile,
         config_overrides,
+        open_browser,
     } = options;
     let load_config = || LoadedRuntimeConfig::load(config_profile.as_deref(), &config_overrides);
     match command {
@@ -22,19 +28,19 @@ pub async fn execute(options: Options) -> Result<(), String> {
             println!("vifu {}", env!("CARGO_PKG_VERSION"));
             Ok(())
         }
-        Command::Start => start(load_config()?).await,
+        Command::Start => start(load_config()?, open_browser).await,
         Command::Status => status(load_config()?).await,
         Command::Doctor => doctor(load_config()?).await,
     }
 }
 
-async fn start(config: LoadedRuntimeConfig) -> Result<(), String> {
+async fn start(config: LoadedRuntimeConfig, open_browser: bool) -> Result<(), String> {
     match (
         config.config.server.is_some(),
         config.config.gateway.is_some(),
     ) {
-        (true, true) => run_combined(config).await,
-        (true, false) => run_server_only(config).await,
+        (true, true) => run_combined(config, open_browser).await,
+        (true, false) => run_server_only(config, open_browser).await,
         (false, true) => run_gateway_only(config).await,
         (false, false) => unreachable!("runtime configuration validates roles"),
     }
@@ -87,14 +93,16 @@ fn role_status(enabled: bool) -> &'static str {
     }
 }
 
-async fn run_combined(config: LoadedRuntimeConfig) -> Result<(), String> {
+async fn run_combined(config: LoadedRuntimeConfig, open_browser: bool) -> Result<(), String> {
     let server_config = config.server_config()?;
+    let console_url = local_console_url(&server_config);
     let gateway_options = config.gateway_options()?;
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let mut server = tokio::spawn(vifu_server::serve(
         server_config,
         wait_for_shutdown(shutdown_rx.clone()),
     ));
+    announce_console(console_url, open_browser);
     let mut gateway = tokio::spawn(gateway::run(gateway_options, shutdown_rx));
     let outcome = tokio::select! {
         () = shutdown_signal() => CombinedRuntimeOutcome::Shutdown,
@@ -119,13 +127,15 @@ async fn run_combined(config: LoadedRuntimeConfig) -> Result<(), String> {
     }
 }
 
-async fn run_server_only(config: LoadedRuntimeConfig) -> Result<(), String> {
+async fn run_server_only(config: LoadedRuntimeConfig, open_browser: bool) -> Result<(), String> {
     let server_config = config.server_config()?;
+    let console_url = local_console_url(&server_config);
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let mut server = tokio::spawn(vifu_server::serve(
         server_config,
         wait_for_shutdown(shutdown_rx),
     ));
+    announce_console(console_url, open_browser);
     let outcome = tokio::select! {
         () = shutdown_signal() => SingleRuntimeOutcome::Shutdown,
         result = &mut server => SingleRuntimeOutcome::Role(result),
@@ -178,6 +188,49 @@ fn join_result(
         Ok(Err(error)) => Err(format!("{role} failed: {error}")),
         Err(error) => Err(format!("{role} task failed: {error}")),
     }
+}
+
+fn local_console_url(config: &ServerConfig) -> Option<String> {
+    (config.deployment_mode == DeploymentMode::Local && config.addr.ip().is_loopback())
+        .then(|| format!("http://{}/console", config.addr))
+}
+
+fn announce_console(console_url: Option<String>, open_browser: bool) {
+    let Some(url) = console_url else {
+        return;
+    };
+    println!("Vifu Console: {url}");
+    if open_browser && should_open_browser() {
+        tokio::spawn(open_console_when_ready(url));
+    }
+}
+
+fn should_open_browser() -> bool {
+    std::io::stdout().is_terminal() && std::env::var_os("CI").is_none()
+}
+
+async fn open_console_when_ready(url: String) {
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    if let Err(error) = open_browser(&url) {
+        eprintln!("Could not open Vifu Console automatically: {error}");
+    }
+}
+
+fn open_browser(url: &str) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    let command = ProcessCommand::new("open").arg(url).spawn();
+
+    #[cfg(target_os = "windows")]
+    let command = ProcessCommand::new("cmd")
+        .args(["/C", "start", "", url])
+        .spawn();
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let command = ProcessCommand::new("xdg-open").arg(url).spawn();
+
+    command
+        .map(|_| ())
+        .map_err(|error| format!("failed to launch browser for {url}: {error}"))
 }
 
 async fn wait_for_shutdown(mut shutdown: watch::Receiver<bool>) {
