@@ -40,8 +40,8 @@ import {
   runtimeBrowserUpload,
 } from "@vifu/runtime-console";
 
-const CONSOLE_BASE = "/console";
 const CONSOLE_ROUTE_CHANGE_EVENT = "vifu-console-route-change";
+const RUNTIME_API_BASE = "/api/runtime";
 const SECTION_IDS = new Set<DashboardSection>([
   "overview",
   "agents",
@@ -53,7 +53,7 @@ const SECTION_IDS = new Set<DashboardSection>([
 ]);
 
 if (typeof window !== "undefined") {
-  window.__VIFU_RUNTIME_CONSOLE_API_BASE__ = `${CONSOLE_BASE}/api/runtime`;
+  window.__VIFU_RUNTIME_CONSOLE_API_BASE__ = RUNTIME_API_BASE;
 }
 
 type ConsoleRoute = {
@@ -92,14 +92,14 @@ function EmbeddedRuntimeConsole() {
     },
     request: runtimeBrowserRequest,
     upload: runtimeBrowserUpload,
-    projectRootHref: () => `${CONSOLE_BASE}/project`,
-    projectHref: (projectSlug: string) => `${CONSOLE_BASE}/project/${encodeURIComponent(projectSlug)}`,
-    projectSectionHref: (projectSlug: string, section: string) => `${CONSOLE_BASE}/project/${encodeURIComponent(projectSlug)}/${encodeURIComponent(section)}`,
+    projectRootHref: () => "/project",
+    projectHref: (projectSlug: string) => `/project/${encodeURIComponent(projectSlug)}`,
+    projectSectionHref: (projectSlug: string, section: string) => `/project/${encodeURIComponent(projectSlug)}/${encodeURIComponent(section)}`,
     logoutAction: undefined,
     brand: {
       label: "Vifu Console",
-      lockupSrc: `${CONSOLE_BASE}/brand/vifu-lockup.png`,
-      iconSrc: `${CONSOLE_BASE}/brand/vifu-icon-512.png`,
+      lockupSrc: "/brand/vifu-lockup.png",
+      iconSrc: "/brand/vifu-icon-512.png",
     },
   }), [setRoute]);
 
@@ -209,7 +209,7 @@ function shouldHandleConsoleLink(
 }
 
 function isConsolePath(pathname: string): boolean {
-  return pathname === CONSOLE_BASE || pathname.startsWith(`${CONSOLE_BASE}/`);
+  return pathname === "/" || pathname === "/project" || pathname.startsWith("/project/");
 }
 
 function navigateBrowserHref(href: string) {
@@ -229,10 +229,7 @@ function routeFromHref(href: string): ConsoleRoute {
 }
 
 function readRoute(pathname: string): ConsoleRoute {
-  const relative = pathname.startsWith(CONSOLE_BASE)
-    ? pathname.slice(CONSOLE_BASE.length)
-    : pathname;
-  const parts = relative.split("/").filter(Boolean);
+  const parts = pathname.split("/").filter(Boolean);
   if (parts[0] !== "project") return { section: "overview" };
   const projectSlug = parts[1] ? decodeURIComponent(parts[1]) : undefined;
   const section = SECTION_IDS.has(parts[2] as DashboardSection)
@@ -242,9 +239,9 @@ function readRoute(pathname: string): ConsoleRoute {
 }
 
 function routeHref(route: ConsoleRoute): string {
-  if (!route.projectSlug) return `${CONSOLE_BASE}/project`;
-  if (route.section === "overview") return `${CONSOLE_BASE}/project/${encodeURIComponent(route.projectSlug)}`;
-  return `${CONSOLE_BASE}/project/${encodeURIComponent(route.projectSlug)}/${encodeURIComponent(route.section)}`;
+  if (!route.projectSlug) return "/project";
+  if (route.section === "overview") return `/project/${encodeURIComponent(route.projectSlug)}`;
+  return `/project/${encodeURIComponent(route.projectSlug)}/${encodeURIComponent(route.section)}`;
 }
 
 async function loadEmbeddedDashboardData(

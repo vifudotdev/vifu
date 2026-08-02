@@ -192,7 +192,7 @@ fn join_result(
 
 fn local_console_url(config: &ServerConfig) -> Option<String> {
     (config.deployment_mode == DeploymentMode::Local && config.addr.ip().is_loopback())
-        .then(|| format!("http://{}/console", config.addr))
+        .then(|| format!("http://{}", config.addr))
 }
 
 fn announce_console(console_url: Option<String>, open_browser: bool) {

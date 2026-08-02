@@ -26,7 +26,7 @@ it, then start the local Server and Agent Gateway:
 ```
 
 Open the Console URL printed by the process, normally
-`http://127.0.0.1:6790/console`.
+`http://127.0.0.1:6790`.
 
 For the PostgreSQL self-host Console stack:
 

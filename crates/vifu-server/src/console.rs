@@ -91,10 +91,10 @@ fn asset_for_path(path: &str) -> Option<&'static ConsoleAsset> {
 
 fn asset_path_for_uri(uri: &Uri) -> Option<&str> {
     let path = uri.path();
-    if path == "/console" || path == "/console/" {
+    let requested = path.strip_prefix('/')?.trim_end_matches('/');
+    if requested.is_empty() {
         return Some("index.html");
     }
-    let requested = path.strip_prefix("/console/")?;
     if !valid_asset_path(requested) {
         return None;
     }
@@ -104,11 +104,12 @@ fn asset_path_for_uri(uri: &Uri) -> Option<&str> {
     if requested.contains('.') {
         return None;
     }
-    Some("index.html")
+    let first_segment = requested.split('/').next()?;
+    (first_segment == "project").then_some("index.html")
 }
 
 fn runtime_path_for_uri(uri: &Uri) -> Option<&str> {
-    let path = uri.path().strip_prefix("/console/api/runtime/")?;
+    let path = uri.path().strip_prefix("/api/runtime/")?;
     (!path.is_empty()).then_some(path)
 }
 
@@ -225,15 +226,27 @@ mod tests {
 
     #[test]
     fn console_history_routes_serve_index() {
-        let uri: Uri = "/console/project/demo/agents".parse().unwrap();
+        let uri: Uri = "/".parse().unwrap();
+        assert_eq!(asset_path_for_uri(&uri), Some("index.html"));
+
+        let uri: Uri = "/project/demo/agents".parse().unwrap();
+        assert_eq!(asset_path_for_uri(&uri), Some("index.html"));
+
+        let uri: Uri = "/project/demo/agents/".parse().unwrap();
         assert_eq!(asset_path_for_uri(&uri), Some("index.html"));
     }
 
     #[test]
     fn console_asset_paths_block_parent_segments() {
-        let uri: Uri = "/console/assets/../main.js".parse().unwrap();
+        let uri: Uri = "/assets/../main.js".parse().unwrap();
         assert_eq!(asset_path_for_uri(&uri), None);
         assert!(!valid_runtime_path("../status"));
+    }
+
+    #[test]
+    fn console_path_is_not_reserved_for_embedded_ui() {
+        let uri: Uri = "/console".parse().unwrap();
+        assert_eq!(asset_path_for_uri(&uri), None);
     }
 
     #[test]

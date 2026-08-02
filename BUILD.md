@@ -32,8 +32,7 @@ The first `cargo run` creates `~/.vifu/config.json` and
 `~/.vifu/providers.json`, starts both roles on loopback, and creates
 `~/.vifu/runtime.sqlite` for Runtime and Gateway state plus
 `~/.vifu/vifu.sqlite` for local Server data. The server listens on
-`http://127.0.0.1:6790` and serves the embedded Console at
-`http://127.0.0.1:6790/console`.
+`http://127.0.0.1:6790` and serves the embedded Console from the same root.
 
 `bun run build:console` compiles the shared React Console into
 `target/vifu-console-assets/`. Cargo embeds the files already present in that

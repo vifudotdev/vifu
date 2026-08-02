@@ -32,7 +32,7 @@ cpSync(path.join(packageRoot, "public/brand"), path.join(outputRoot, "brand"), {
 const scriptName = findBuiltAsset(".js", true);
 const stylesheetName = findBuiltAsset(".css", false);
 const stylesheet = stylesheetName
-  ? `<link rel="stylesheet" href="/console/assets/${stylesheetName}">`
+  ? `<link rel="stylesheet" href="/assets/${stylesheetName}">`
   : "";
 
 writeFileSync(
@@ -48,14 +48,14 @@ writeFileSync(
     "</head>",
     "<body>",
     '<div id="root"></div>',
-    `<script type="module" src="/console/assets/${scriptName}"></script>`,
+    `<script type="module" src="/assets/${scriptName}"></script>`,
     "</body>",
     "</html>",
   ].filter(Boolean).join("\n"),
 );
 
 const html = readFileSync(path.join(outputRoot, "index.html"), "utf8");
-if (!html.includes(`/console/assets/${scriptName}`)) {
+if (!html.includes(`/assets/${scriptName}`)) {
   throw new Error("Embedded console index did not reference the JavaScript bundle.");
 }
 

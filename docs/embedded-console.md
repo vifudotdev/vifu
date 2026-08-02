@@ -11,7 +11,7 @@ The binary prints the Console URL at startup. With the default local address it
 is:
 
 ```text
-http://127.0.0.1:6790/console
+http://127.0.0.1:6790
 ```
 
 The Docker self-host Console remains the operations Console for a PostgreSQL
@@ -37,12 +37,12 @@ target/vifu-console-assets/
 crates/vifu-server/build.rs
         |
         v
-vifu binary -> /console
+vifu binary -> /
 ```
 
 Rust does not render React. It embeds the generated HTML, JavaScript, CSS, and
-brand assets, serves them under `/console`, and proxies
-`/console/api/runtime/*` to the local Server API with server-side authority.
+brand assets, serves the Console from `/`, and proxies `/api/runtime/*` to the
+local Server API with server-side authority.
 The browser executes the React bundle and calls the Runtime API through that
 same-origin proxy.
 
@@ -52,16 +52,16 @@ is one executable.
 
 ## Navigation And Caching
 
-The embedded Console is a single-page application. Internal `/console/...`
-links update browser history and React route state instead of reloading the
-HTML shell. Modified clicks, downloads, external URLs, and new-tab targets keep
+The embedded Console is a single-page application. Internal `/project/...`
+links update browser history and React route state instead of reloading the HTML
+shell. Modified clicks, downloads, external URLs, and new-tab targets keep
 normal browser behavior.
 
 Generated JavaScript and CSS use hashed filenames:
 
 ```text
-/console/assets/main-<hash>.js
-/console/assets/main-<hash>.css
+/assets/main-<hash>.js
+/assets/main-<hash>.css
 ```
 
 Those files are served with long-lived cache headers. `index.html` is served

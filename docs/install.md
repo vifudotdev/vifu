@@ -18,7 +18,7 @@ The same process serves the local Console. Open the URL printed at startup,
 normally:
 
 ```text
-http://127.0.0.1:6790/console
+http://127.0.0.1:6790
 ```
 
 On Windows:

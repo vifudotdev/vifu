@@ -118,16 +118,19 @@ pub fn app(state: AppState) -> Router {
     Router::new()
         .route("/health", get(api::health))
         .route(
-            "/console/api/runtime/{*path}",
+            "/api/runtime/{*path}",
             get(console::proxy_runtime_request)
                 .post(console::proxy_runtime_request)
                 .put(console::proxy_runtime_request)
                 .patch(console::proxy_runtime_request)
                 .delete(console::proxy_runtime_request),
         )
-        .route("/console", get(console::serve_console_asset))
-        .route("/console/", get(console::serve_console_asset))
-        .route("/console/{*path}", get(console::serve_console_asset))
+        .route("/", get(console::serve_console_asset))
+        .route("/project", get(console::serve_console_asset))
+        .route("/project/", get(console::serve_console_asset))
+        .route("/project/{*path}", get(console::serve_console_asset))
+        .route("/assets/{*path}", get(console::serve_console_asset))
+        .route("/brand/{*path}", get(console::serve_console_asset))
         .route("/v1/status", get(api::status))
         .route(
             "/v1/auth/exchange",
@@ -466,7 +469,7 @@ mod tests {
     use std::sync::Arc;
 
     use axum::body::{to_bytes, Body};
-    use axum::http::{Request, StatusCode};
+    use axum::http::{header::CONTENT_TYPE, Request, StatusCode};
     use axum::response::Response;
     use axum::routing::get;
     use serde_json::{json, Value};
@@ -478,7 +481,7 @@ mod tests {
     use crate::auth::{
         AccessTokenAuth, AccessTokenAuthFuture, ApplicationAuth, Identity, Operation,
     };
-    use crate::config::Config;
+    use crate::config::{Config, DeploymentMode};
     use crate::db::Storage;
     use crate::error::ApiError;
 
@@ -496,6 +499,46 @@ mod tests {
         let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
         let payload: Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(payload["service"], "vifu-server");
+    }
+
+    #[tokio::test]
+    async fn local_embedded_console_mounts_at_server_root() {
+        let mut config = Config::from_env().unwrap();
+        config.deployment_mode = DeploymentMode::Local;
+        config.addr = "127.0.0.1:6790".parse().unwrap();
+        let pool = PgPoolOptions::new()
+            .connect_lazy("postgres://vifu@127.0.0.1:1/vifu")
+            .unwrap();
+        let router = app(state(config, pool));
+
+        let root = router
+            .clone()
+            .oneshot(Request::get("/").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(root.status(), StatusCode::OK);
+        assert!(root
+            .headers()
+            .get(CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| value.starts_with("text/html")));
+
+        let project_route = router
+            .clone()
+            .oneshot(
+                Request::get("/project/demo/agents")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(project_route.status(), StatusCode::OK);
+
+        let console_route = router
+            .oneshot(Request::get("/console").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(console_route.status(), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]
