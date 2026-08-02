@@ -450,12 +450,16 @@ pub fn app(state: AppState) -> Router {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
     use std::sync::Arc;
 
     use axum::body::{to_bytes, Body};
     use axum::http::{Request, StatusCode};
-    use serde_json::Value;
+    use axum::response::Response;
+    use axum::routing::get;
+    use serde_json::{json, Value};
     use sqlx::postgres::PgPoolOptions;
+    use tokio::task::JoinHandle;
     use tower::ServiceExt;
 
     use super::{app, state, state_with_storage, state_with_storage_and_auth, AppState};
@@ -1495,6 +1499,227 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn project_provider_catalog_reports_only_its_gateway_available_providers() {
+        let (storage, path) = temp_sqlite_storage("provider-catalog").await;
+        let config = Config::from_env().unwrap();
+        let admin = admin_authorization(&config);
+        create_test_project(&storage, "provider-catalog-project", "gateway-project").await;
+        open_provider_gateway_session(&storage, "gateway-project").await;
+        crate::db::open_agent_gateway_session(
+            &storage,
+            "gateway-other",
+            None,
+            &json!([{
+                "id": "other-agent",
+                "name": "Other Agent",
+                "metadata": {
+                    "providerKey": "other-openai",
+                    "providerType": "vifu-runtime",
+                    "localProviderType": "openai-compatible",
+                    "capabilities": ["chat"]
+                }
+            }]),
+            &json!({
+                "providers": [{"id": "other-openai", "type": "vifu-runtime"}]
+            }),
+        )
+        .await
+        .unwrap();
+
+        let runtime_app = app(state_with_storage(config, storage.clone()));
+        let response = runtime_app
+            .oneshot(
+                Request::get("/v1/project/provider-catalog-project/provider-catalog")
+                    .header("authorization", admin)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let payload = response_json(response).await;
+        let providers = payload["custom"].as_array().unwrap();
+        let keys = providers
+            .iter()
+            .map(|provider| provider["providerKey"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert!(keys.contains(&"local-openai"));
+        assert!(keys.contains(&"local-llama"));
+        assert!(keys.contains(&"local-whisper"));
+        assert!(!keys.contains(&"other-openai"));
+        let openai = providers
+            .iter()
+            .find(|provider| provider["providerKey"] == "local-openai")
+            .unwrap();
+        assert_eq!(openai["providerType"], "vifu-runtime");
+        assert_eq!(openai["status"], "online");
+        assert_eq!(openai["config"]["gatewayId"], "gateway-project");
+        assert_eq!(openai["config"]["localProviderType"], "openai-compatible");
+        assert_eq!(
+            openai["config"]["capabilities"],
+            json!(["chat", "embedding"])
+        );
+
+        close_temp_storage(storage, path).await;
+    }
+
+    #[tokio::test]
+    async fn available_gateway_provider_assignment_stores_only_project_binding() {
+        let (storage, path) = temp_sqlite_storage("provider-assign").await;
+        let config = Config::from_env().unwrap();
+        let admin = admin_authorization(&config);
+        create_test_project(&storage, "provider-assign-project", "gateway-project").await;
+        open_provider_gateway_session(&storage, "gateway-project").await;
+        let runtime_app = app(state_with_storage(config, storage.clone()));
+
+        let response = runtime_app
+            .clone()
+            .oneshot(
+                Request::post("/v1/project/provider-assign-project/providers")
+                    .header("authorization", admin.clone())
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{
+                            "source": {"kind": "custom", "key": "local-openai"},
+                            "name": "Local OpenAI"
+                        }"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let payload = response_json(response).await;
+        assert_eq!(payload["provider"]["providerKey"], "local-openai");
+        assert_eq!(payload["provider"]["sourceKind"], "custom");
+        assert_eq!(payload["provider"]["sourceKey"], "local-openai");
+        assert_eq!(payload["provider"]["status"], "online");
+        assert_eq!(payload["provider"]["baseUrl"], "");
+        assert_eq!(payload["addedAgents"], 1);
+
+        let stored = crate::db::get_provider_connection_secret_by_key(
+            &storage,
+            "provider-assign-project",
+            "local-openai",
+        )
+        .await
+        .unwrap();
+        assert_eq!(stored.source_kind, "custom");
+        assert_eq!(stored.source_key, "local-openai");
+        assert!(stored.base_url.is_empty());
+        assert_eq!(stored.config, json!({}));
+        assert!(stored.secret_keys.is_empty());
+        assert_eq!(custom_provider_row_count(&storage).await, 0);
+
+        close_temp_storage(storage, path).await;
+    }
+
+    #[tokio::test]
+    async fn project_local_openai_provider_stores_project_settings_and_probes_live() {
+        let (storage, path) = temp_sqlite_storage("project-local-openai").await;
+        let config = Config::from_env().unwrap();
+        let admin = admin_authorization(&config);
+        create_test_project(&storage, "project-local-openai", "gateway-project").await;
+        let (base_url, server) = openai_probe_mock().await;
+        let runtime_app = app(state_with_storage(config, storage.clone()));
+
+        let response = runtime_app
+            .oneshot(
+                Request::post("/v1/project/project-local-openai/providers")
+                    .header("authorization", admin)
+                    .header("content-type", "application/json")
+                    .body(Body::from(format!(
+                        r#"{{
+                            "source": {{"kind": "registry", "key": "openai-compatible"}},
+                            "name": "Project OpenAI",
+                            "baseUrl": "{base_url}",
+                            "config": {{"organization": "test-org"}},
+                            "secrets": {{"token": "local-test-token"}}
+                        }}"#
+                    )))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let payload = response_json(response).await;
+        assert_eq!(payload["provider"]["providerKey"], "openai-compatible");
+        assert_eq!(payload["provider"]["sourceKind"], "registry");
+        assert_eq!(payload["provider"]["sourceKey"], "openai-compatible");
+        assert_eq!(payload["provider"]["status"], "online");
+
+        let stored = crate::db::get_provider_connection_secret_by_key(
+            &storage,
+            "project-local-openai",
+            "openai-compatible",
+        )
+        .await
+        .unwrap();
+        assert_eq!(stored.source_kind, "registry");
+        assert_eq!(stored.source_key, "openai-compatible");
+        assert_eq!(stored.provider_type, "openai-compatible");
+        assert_eq!(stored.base_url, base_url);
+        assert_eq!(stored.config, json!({"organization": "test-org"}));
+        assert_eq!(stored.secret_keys, vec!["token".to_string()]);
+        assert_eq!(stored.display_secret.as_deref(), Some("****oken"));
+        assert_eq!(custom_provider_row_count(&storage).await, 0);
+
+        server.abort();
+        close_temp_storage(storage, path).await;
+    }
+
+    #[tokio::test]
+    async fn assigned_gateway_provider_test_reports_offline_when_gateway_disconnects() {
+        let (storage, path) = temp_sqlite_storage("provider-offline").await;
+        let config = Config::from_env().unwrap();
+        let admin = admin_authorization(&config);
+        create_test_project(&storage, "provider-offline-project", "gateway-project").await;
+        let session_id = open_provider_gateway_session(&storage, "gateway-project").await;
+        let runtime_app = app(state_with_storage(config, storage.clone()));
+
+        let assigned = runtime_app
+            .clone()
+            .oneshot(
+                Request::post("/v1/project/provider-offline-project/providers")
+                    .header("authorization", admin.clone())
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{
+                            "source": {"kind": "custom", "key": "local-openai"},
+                            "name": "Local OpenAI"
+                        }"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(assigned.status(), StatusCode::CREATED);
+
+        crate::db::close_agent_gateway_session(&storage, session_id)
+            .await
+            .unwrap();
+        let tested = runtime_app
+            .oneshot(
+                Request::post("/v1/project/provider-offline-project/providers/local-openai/test")
+                    .header("authorization", admin)
+                    .header("content-type", "application/json")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(tested.status(), StatusCode::OK);
+        let payload = response_json(tested).await;
+        assert_eq!(payload["provider"]["status"], "offline");
+        assert!(payload["message"]
+            .as_str()
+            .unwrap()
+            .contains("not reported by gateway gateway-project"));
+
+        close_temp_storage(storage, path).await;
+    }
+
+    #[tokio::test]
     async fn legacy_provider_connection_routes_are_not_registered() {
         let config = Config::from_env().unwrap();
         let pool = PgPoolOptions::new()
@@ -1549,6 +1774,136 @@ mod tests {
             state_with_storage_and_auth(config, storage, auth),
             credential,
         )
+    }
+
+    async fn temp_sqlite_storage(prefix: &str) -> (Storage, PathBuf) {
+        let path =
+            std::env::temp_dir().join(format!("vifu-{prefix}-{}.sqlite", uuid::Uuid::new_v4()));
+        let storage = crate::db::connect(&format!("sqlite://{}", path.display()), 5)
+            .await
+            .unwrap();
+        crate::db::migrate(&storage).await.unwrap();
+        (storage, path)
+    }
+
+    async fn close_temp_storage(storage: Storage, path: PathBuf) {
+        match storage {
+            Storage::Postgres(pool) => pool.close().await,
+            Storage::Sqlite(pool) => pool.close().await,
+        }
+        std::fs::remove_file(path).unwrap();
+    }
+
+    fn admin_authorization(config: &Config) -> String {
+        format!("Bearer {}", config.admin_key)
+    }
+
+    async fn response_json(response: Response) -> Value {
+        let body = to_bytes(response.into_body(), 256 * 1024).await.unwrap();
+        serde_json::from_slice(&body).unwrap()
+    }
+
+    async fn create_test_project(storage: &Storage, slug: &str, gateway_id: &str) -> uuid::Uuid {
+        let project_id = uuid::Uuid::new_v4();
+        crate::db::create_project(
+            storage,
+            crate::db::NewProject {
+                id: project_id,
+                owner_user_id: None,
+                slug,
+                name: "Provider Project",
+                description: None,
+                gateway_id,
+                binding_ids: &[],
+            },
+        )
+        .await
+        .unwrap();
+        project_id
+    }
+
+    async fn open_provider_gateway_session(storage: &Storage, gateway_id: &str) -> uuid::Uuid {
+        let (session_id, _resumed) = crate::db::open_agent_gateway_session(
+            storage,
+            gateway_id,
+            None,
+            &json!([
+                {
+                    "id": "openai-agent",
+                    "name": "OpenAI Agent",
+                    "metadata": {
+                        "providerKey": "local-openai",
+                        "providerType": "vifu-runtime",
+                        "localProviderType": "openai-compatible",
+                        "capabilities": ["chat", "embedding"]
+                    }
+                },
+                {
+                    "id": "llama-agent",
+                    "name": "Llama Agent",
+                    "metadata": {
+                        "providerKey": "local-llama",
+                        "providerType": "vifu-runtime",
+                        "localProviderType": "llama",
+                        "capabilities": ["chat", "embedding"]
+                    }
+                },
+                {
+                    "id": "whisper-agent",
+                    "name": "Whisper Agent",
+                    "metadata": {
+                        "providerKey": "local-whisper",
+                        "providerType": "vifu-runtime",
+                        "localProviderType": "local-whisper",
+                        "capabilities": ["transcription"]
+                    }
+                }
+            ]),
+            &json!({
+                "providers": [
+                    {"id": "local-openai", "type": "vifu-runtime"},
+                    {"id": "local-llama", "type": "vifu-runtime"},
+                    {"id": "local-whisper", "type": "vifu-runtime"}
+                ]
+            }),
+        )
+        .await
+        .unwrap();
+        session_id
+    }
+
+    async fn custom_provider_row_count(storage: &Storage) -> i64 {
+        match storage {
+            Storage::Sqlite(pool) => {
+                sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM custom_providers")
+                    .fetch_one(pool)
+                    .await
+                    .unwrap()
+            }
+            Storage::Postgres(pool) => {
+                sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM custom_providers")
+                    .fetch_one(pool)
+                    .await
+                    .unwrap()
+            }
+        }
+    }
+
+    async fn openai_probe_mock() -> (String, JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                axum::Router::new().route(
+                    "/v1/models",
+                    get(|| async { axum::Json(json!({ "data": [] })) }),
+                ),
+            )
+            .await
+            .unwrap();
+        });
+        (format!("http://{addr}/v1"), server)
     }
 
     struct StaticAccessTokenAuth {

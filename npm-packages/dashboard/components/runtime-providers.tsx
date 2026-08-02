@@ -25,6 +25,7 @@ import type {
   ProviderAdapterField,
   RuntimeProject,
 } from "../lib/runtime-types";
+import { providerSettingsRequestBody } from "../lib/provider-request";
 import { RuntimeConfirmDialog } from "./runtime-confirm-dialog";
 
 type ProvidersViewProps = {
@@ -200,28 +201,7 @@ function ProviderDialog({
     event.preventDefault();
     if (!choice) return;
     const form = new FormData(event.currentTarget);
-    const attachConfiguredProvider = !provider && choice.source.kind === "custom";
-    const config: Record<string, unknown> = {};
-    const secrets: Record<string, string> = {};
-    if (!attachConfiguredProvider) {
-      for (const field of choice.fields) {
-        if (field.key === "baseUrl") continue;
-        const value = String(form.get(field.key) ?? "").trim();
-        if (!value) continue;
-        if (field.secret) secrets[field.key] = value;
-        else config[field.key] = value;
-      }
-    }
-    const name = String(form.get("name") ?? choice.name).trim();
-    const body = attachConfiguredProvider
-      ? { source: choice.source, name }
-      : {
-          ...(provider ? {} : { source: choice.source }),
-          name,
-          baseUrl: String(form.get("baseUrl") ?? choice.baseUrl).trim(),
-          config,
-          secrets,
-        };
+    const body = providerSettingsRequestBody(provider, choice, form);
     setPending(true);
     setError(null);
     setNotice(null);

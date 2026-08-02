@@ -6426,7 +6426,9 @@ async fn effective_provider_connection(
     {
         Ok(source) => source,
         Err(ApiError::NotFound) => {
-            connection.status = "missing_source".to_string();
+            if connection.status != "offline" {
+                connection.status = "missing_source".to_string();
+            }
             return Ok(connection);
         }
         Err(error) => return Err(error),
