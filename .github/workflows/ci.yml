@@ -217,7 +217,10 @@ jobs:
       - name: Unit tests
         run: bun run test
       - name: Production builds
-        run: bun run build
+        run: |
+          bun run build
+          bun run build:console
+          test -s target/vifu-console-assets/index.html
       - name: Inspect public package artifacts
         run: npm pack --dry-run --json ./packages/protocol
 

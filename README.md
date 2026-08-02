@@ -19,30 +19,15 @@
 
 Download the archive for your platform from the
 [latest release](https://github.com/vifudotdev/vifu/releases/latest), extract
-it, then start the local Server and Agent Gateway:
+it, then run Vifu:
 
 ```bash
 ./vifu
 ```
 
-Open the Console URL printed by the process, normally
-`http://127.0.0.1:6790`.
-
-For the PostgreSQL self-host Console stack:
-
-```bash
-cp .env.example .env
-docker compose up -d
-```
-
-Open `http://localhost:6791`; if prompted, read the generated Admin Key:
-
-```bash
-docker compose exec backend cat /run/vifu/secrets/admin_key
-```
-
-Use the Console to connect a Provider, expose an Agent endpoint, and copy a
-project key.
+Vifu starts locally, stores its state in SQLite under `~/.vifu`, opens the
+Dashboard automatically, and keeps running until you press `Ctrl-C`. The local
+Dashboard is normally available at `http://127.0.0.1:6790`.
 
 ## Description
 

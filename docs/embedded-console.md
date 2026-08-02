@@ -93,14 +93,13 @@ cargo run -p vifu
 ```
 
 `cargo run` embeds whatever is already in `target/vifu-console-assets/`. It
-does not invoke Bun automatically, so Rust builds still work in environments
-that do not have JavaScript dependencies installed.
-
+does not invoke Bun automatically, so build the Console before compiling Vifu.
 If the asset directory is absent, the Rust server embeds a fallback page that
 asks the developer to run `bun run build:console`.
 
-Release packaging should run `bun run build:console` before compiling the
-release binary.
+The release workflow runs `bun run build:console`, verifies `index.html`, and
+requires the bundle when compiling every release binary. A release fails rather
+than silently shipping the fallback page when those assets are unavailable.
 
 ## Development Boundaries
 

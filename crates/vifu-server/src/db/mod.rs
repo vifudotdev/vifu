@@ -71,6 +71,60 @@ pub async fn connect(database_url: &str, max_connections: u32) -> Result<Storage
     ))
 }
 
+#[cfg(unix)]
+pub fn protect_sqlite_files(database_url: &str) -> Result<(), ApiError> {
+    use std::os::unix::fs::PermissionsExt;
+
+    if !database_url.starts_with("sqlite:") {
+        return Ok(());
+    }
+
+    let options = SqliteConnectOptions::from_str(database_url)?;
+    let path = options.get_filename();
+    if path == std::path::Path::new(":memory:") {
+        return Ok(());
+    }
+
+    for candidate in [
+        path.to_path_buf(),
+        sqlite_sidecar_path(path, "-wal"),
+        sqlite_sidecar_path(path, "-shm"),
+    ] {
+        let metadata = match std::fs::metadata(&candidate) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                return Err(ApiError::Invalid(format!(
+                    "{} metadata could not be read: {error}",
+                    candidate.display()
+                )))
+            }
+        };
+        let mut permissions = metadata.permissions();
+        permissions.set_mode(0o600);
+        std::fs::set_permissions(&candidate, permissions).map_err(|error| {
+            ApiError::Invalid(format!(
+                "{} permissions could not be updated: {error}",
+                candidate.display()
+            ))
+        })?;
+    }
+
+    Ok(())
+}
+
+#[cfg(not(unix))]
+pub fn protect_sqlite_files(_database_url: &str) -> Result<(), ApiError> {
+    Ok(())
+}
+
+#[cfg(unix)]
+fn sqlite_sidecar_path(path: &std::path::Path, suffix: &str) -> std::path::PathBuf {
+    let mut value = path.as_os_str().to_owned();
+    value.push(suffix);
+    value.into()
+}
+
 macro_rules! dispatch {
     (
         $(
@@ -253,6 +307,37 @@ mod tests {
             Storage::Sqlite(pool) => pool.close().await,
         }
         std::fs::remove_file(path).expect("SQLite database should be removable");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sqlite_state_files_are_private() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = std::env::temp_dir().join(format!("vifu-private-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&directory).expect("temporary directory should be created");
+        let path = directory.join("vifu.sqlite");
+        let files = [
+            path.clone(),
+            sqlite_sidecar_path(&path, "-wal"),
+            sqlite_sidecar_path(&path, "-shm"),
+        ];
+        for file in &files {
+            std::fs::write(file, b"test").expect("SQLite state file should be created");
+        }
+
+        protect_sqlite_files(&format!("sqlite://{}", path.display()))
+            .expect("SQLite state files should be protected");
+
+        let modes = files.map(|file| {
+            std::fs::metadata(file)
+                .expect("SQLite state file should exist")
+                .permissions()
+                .mode()
+                & 0o777
+        });
+        assert_eq!(modes, [0o600; 3]);
+        std::fs::remove_dir_all(directory).expect("temporary directory should be removable");
     }
 
     async fn primary_deployment_id(storage: &Storage, project_id: Uuid) -> Uuid {

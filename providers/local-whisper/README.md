@@ -1,7 +1,10 @@
 # Local Whisper Provider
 
-The `local-whisper` Provider runs speech-to-text in the `vifu` process. Its
-model setting belongs in the private local Provider registry:
+The `local-whisper` Provider runs speech-to-text in the `vifu` process. It
+is included in the default Vifu build. Source builds require CMake, a C/C++
+compiler, and libclang; follow the
+[installation guide](../../docs/install.md#install-native-build-dependencies).
+Its model setting belongs in the private local Provider registry:
 
 ```text
 ~/.vifu/providers.json

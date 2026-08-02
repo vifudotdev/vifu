@@ -6,38 +6,41 @@ repository root because the Compose file lives there.
 ## Prerequisites
 
 - Rust 1.95 or newer
-- Bun 1.3.9
-- Node.js 22
-- Docker with Compose v2
+- CMake, a C/C++ compiler, and libclang
+- Bun 1.3.9 and Node.js 22
+- Docker with Compose v2 for the self-host stack
 
 Building the Apple XCFramework additionally requires Xcode 15 or newer.
 
-Install Dashboard dependencies:
-
-```bash
-bun install --frozen-lockfile
-```
-
-Source development uses loopback defaults. Docker self-hosting uses the root
-`.env.example` template described below.
+Install the native build tools for your operating system before the first Cargo
+build. The copy-pasteable commands and `LIBCLANG_PATH` troubleshooting are in
+[Install native build dependencies](docs/install.md#install-native-build-dependencies).
 
 ## Source Development
 
+The first run needs no Vifu configuration. Install the workspace dependencies,
+build the official Console bundle, then start Vifu:
+
 ```bash
+bun install --frozen-lockfile
 bun run build:console
 cargo run -p vifu
 ```
 
-The first `cargo run` creates `~/.vifu/config.json` and
-`~/.vifu/providers.json`, starts both roles on loopback, and creates
-`~/.vifu/runtime.sqlite` for Runtime and Gateway state plus
-`~/.vifu/vifu.sqlite` for local Server data. The server listens on
-`http://127.0.0.1:6790` and serves the embedded Console from the same root.
+The default build includes the llama.cpp and Local Whisper Providers. Vifu
+creates `~/.vifu/config.json` and `~/.vifu/providers.json`, starts both roles
+on loopback, opens the local Dashboard, and keeps running until the user presses
+`Ctrl-C`. Runtime and Gateway state is stored in `~/.vifu/runtime.sqlite`;
+local Server data is stored in `~/.vifu/vifu.sqlite`.
 
 `bun run build:console` compiles the shared React Console into
 `target/vifu-console-assets/`. Cargo embeds the files already present in that
 directory; it does not run Bun automatically. Re-run the Console build after UI
 changes and before compiling release binaries.
+
+The release workflow verifies this bundle and sets
+`VIFU_REQUIRE_CONSOLE_ASSETS=1`, so a release build cannot silently embed the
+development fallback page.
 
 To run a Gateway-only process on a machine that already has a Server, replace
 the generated runtime configuration with a gateway-only configuration:

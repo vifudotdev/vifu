@@ -7,6 +7,7 @@ fn main() {
     println!("cargo:rerun-if-changed=migrations");
     println!("cargo:rerun-if-changed=migrations-sqlite");
     println!("cargo:rerun-if-env-changed=VIFU_CONSOLE_ASSETS_DIR");
+    println!("cargo:rerun-if-env-changed=VIFU_REQUIRE_CONSOLE_ASSETS");
 
     let out_dir = PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR is set by Cargo"));
     let target = out_dir.join("console_assets.rs");
@@ -19,6 +20,12 @@ fn main() {
     println!("cargo:rerun-if-changed={}", asset_dir.display());
 
     if !asset_dir.join("index.html").is_file() {
+        if env::var_os("VIFU_REQUIRE_CONSOLE_ASSETS").is_some() {
+            panic!(
+                "embedded Dashboard assets are required but {} does not contain index.html; run `bun run build:console` before building Vifu",
+                asset_dir.display()
+            );
+        }
         write_fallback(&target).expect("write fallback console assets");
         return;
     }

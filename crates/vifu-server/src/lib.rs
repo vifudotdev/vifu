@@ -45,6 +45,7 @@ pub async fn connect(config: Config) -> Result<AppState, ApiError> {
     db::migrate(&pool)
         .await
         .map_err(|error| diagnose_startup_error("migrate", error))?;
+    db::protect_sqlite_files(&config.database_url)?;
     db::mark_agent_gateway_sessions_disconnected(&pool)
         .await
         .map_err(|error| diagnose_startup_error("mark gateway sessions disconnected", error))?;

@@ -14,18 +14,14 @@ Download the archive for your platform, extract it, then run:
 ./vifu
 ```
 
-If you already use Cargo:
+The default binary runs Vifu Server and Agent Gateway and includes the
+in-process llama.cpp and Local Whisper Providers. The first launch creates the
+local files and opens the Dashboard. Runtime and Gateway state use
+`~/.vifu/runtime.sqlite`; the local Server uses `~/.vifu/vifu.sqlite`.
+Configure models in `~/.vifu/providers.json` when you are ready to run them.
 
-```bash
-cargo install vifu
-vifu
-```
-
-The default binary runs Vifu Server and Agent Gateway according to the local
-Vifu configuration. Runtime and Gateway state use `~/.vifu/runtime.sqlite`; the
-local Server uses `~/.vifu/vifu.sqlite`. It includes provider features shipped
-by this package, including the in-process llama.cpp and Local Whisper Providers.
-Configure local models in `~/.vifu/providers.json`.
+For a source build, including its official Dashboard bundle, follow the
+[source installation guide](https://github.com/vifudotdev/vifu/blob/main/docs/install.md#build-from-source).
 
 Rust applications that embed the execution kernel should depend on
 [`vifu-runtime`](https://crates.io/crates/vifu-runtime) instead of this

@@ -1,11 +1,28 @@
 # Self-host Vifu
 
-## Start
+Self-hosted mode runs Vifu as managed services. The Vifu Server does not expose
+the embedded local Dashboard in this mode, and it does not open a browser. The
+operations Dashboard is a separate, optional Compose service. `--no-browser`
+is only needed when suppressing browser launch for a local loopback `vifu`
+process.
 
-From the repository root:
+The Compose backend and Dashboard use separate images. The backend image does
+not build or copy the Dashboard bundle; the Full Operations Stack builds the
+Dashboard image independently.
+
+## Choose A Deployment Shape
+
+From the repository root, create the deployment environment once:
 
 ```bash
 cp .env.example .env
+```
+
+### Full Operations Stack
+
+Start Vifu with its operations Dashboard:
+
+```bash
 docker compose up -d
 ```
 
@@ -26,6 +43,36 @@ The Compose project starts:
 
 The Server and Gateway containers use the same `vifu` image with different
 runtime configuration files.
+
+### Headless Runtime
+
+Start the Server and Agent Gateway without the Dashboard service:
+
+```bash
+docker compose up -d backend agent-gateway
+```
+
+Compose starts the required secrets and PostgreSQL dependencies automatically.
+The Server API is available on the configured port, normally
+`http://localhost:6790`; the `dashboard` service is not started. Operate the
+deployment through the Server API using the generated Admin Key.
+
+Read that key when an API client needs deployment-admin access:
+
+```bash
+docker compose exec backend cat /run/vifu/secrets/admin_key
+```
+
+### Server Only
+
+Start only the Server and its required dependencies when Gateways run on other
+machines:
+
+```bash
+docker compose up -d backend
+```
+
+The backend remains headless. Enroll remote Gateways as described below.
 
 Server and Gateway may also run as roles in the same local `vifu` process. The
 combined and Compose configurations use a deployment bootstrap credential
@@ -71,7 +118,8 @@ described in [Embed the runtime](runtime-embedding.md).
 
 ```bash
 docker compose ps
-docker compose logs -f backend agent-gateway dashboard
+docker compose logs -f backend agent-gateway
+docker compose logs -f dashboard # Full Operations Stack only
 docker compose up -d
 docker compose down
 ```

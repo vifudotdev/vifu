@@ -210,10 +210,32 @@ fn should_open_browser() -> bool {
 }
 
 async fn open_console_when_ready(url: String) {
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    if let Err(error) = wait_for_console(&url).await {
+        eprintln!("Could not load Vifu Console automatically: {error}");
+        return;
+    }
     if let Err(error) = open_browser(&url) {
         eprintln!("Could not open Vifu Console automatically: {error}");
     }
+}
+
+async fn wait_for_console(url: &str) -> Result<(), String> {
+    let authority = url
+        .strip_prefix("http://")
+        .ok_or_else(|| format!("unsupported local Console URL: {url}"))?;
+    let address = authority
+        .parse::<std::net::SocketAddr>()
+        .map_err(|error| format!("invalid local Console URL {url}: {error}"))?;
+
+    for attempt in 0..50 {
+        if tokio::net::TcpStream::connect(address).await.is_ok() {
+            return Ok(());
+        }
+        if attempt < 49 {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+    Err(format!("the local Server did not become ready at {url}"))
 }
 
 fn open_browser(url: &str) -> Result<(), String> {
@@ -274,4 +296,37 @@ fn init_tracing() {
         .json()
         .with_current_span(false)
         .try_init();
+}
+
+#[cfg(test)]
+mod tests {
+    use tokio::net::TcpListener;
+
+    use super::{join_result, wait_for_console};
+
+    #[tokio::test]
+    async fn runtime_errors_keep_their_original_cause() {
+        let task = tokio::spawn(async { Err("could not bind loopback".to_string()) });
+
+        let error = join_result("Vifu Server", task.await).unwrap_err();
+
+        assert_eq!(error, "Vifu Server failed: could not bind loopback");
+    }
+
+    #[tokio::test]
+    async fn console_readiness_succeeds_when_server_is_listening() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+
+        assert!(wait_for_console(&url).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn console_readiness_rejects_non_http_urls() {
+        let error = wait_for_console("https://dashboard.example.com")
+            .await
+            .unwrap_err();
+
+        assert!(error.contains("unsupported local Console URL"));
+    }
 }

@@ -1,8 +1,10 @@
 # Local llama Provider
 
 The `llama` Provider loads one GGUF model into the `vifu` process through
-llama.cpp. Its model and resource settings belong in the private local Provider
-registry:
+llama.cpp. It is included in the default Vifu build. Source builds require
+CMake, a C/C++ compiler, and libclang; follow the
+[installation guide](../../docs/install.md#install-native-build-dependencies).
+Its model and resource settings belong in the private local Provider registry:
 
 ```text
 ~/.vifu/providers.json

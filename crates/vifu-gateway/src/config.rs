@@ -274,6 +274,15 @@ pub fn write_private_file(path: &Path, contents: &str) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
             .map_err(|error| format!("{} could not be created: {error}", parent.display()))?;
+        #[cfg(unix)]
+        std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700)).map_err(
+            |error| {
+                format!(
+                    "{} permissions could not be updated: {error}",
+                    parent.display()
+                )
+            },
+        )?;
     }
 
     let mut options = OpenOptions::new();
@@ -454,9 +463,9 @@ pub fn default_home_dir() -> Result<PathBuf, String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        read_provider_registry_file, write_provider_registry_file, AgentProviderAuthDefinition,
-        AgentProviderDefinition, AgentProvidersFile, Config, DEFAULT_OPENCLAW_URL,
-        DEFAULT_SERVER_URL,
+        read_provider_registry_file, write_private_file, write_provider_registry_file,
+        AgentProviderAuthDefinition, AgentProviderDefinition, AgentProvidersFile, Config,
+        DEFAULT_OPENCLAW_URL, DEFAULT_SERVER_URL,
     };
     use serde_json::json;
     use std::fs;
@@ -468,6 +477,21 @@ mod tests {
     fn default_urls_target_local_services() {
         assert_eq!(DEFAULT_OPENCLAW_URL, "http://127.0.0.1:18789");
         assert_eq!(DEFAULT_SERVER_URL, "http://127.0.0.1:6790");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn private_file_writer_secures_its_parent_directory() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = unique_directory("vifu-private-directory");
+        let directory = root.join(".vifu");
+        write_private_file(&directory.join("config.json"), "{}\n").unwrap();
+
+        let mode = fs::metadata(&directory).unwrap().permissions().mode() & 0o777;
+
+        assert_eq!(mode, 0o700);
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
