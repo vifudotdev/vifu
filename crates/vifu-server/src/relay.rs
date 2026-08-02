@@ -2,10 +2,11 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
+use base64::Engine;
 use serde_json::Value;
 use tokio::sync::{mpsc, oneshot, Mutex};
 use uuid::Uuid;
-use vifu_gateway::protocol::AgentGatewayCommand;
+use vifu_gateway::protocol::{AgentGatewayCommand, MAX_INVOCATION_BODY_BYTES};
 use vifu_runtime::{
     AgentProvider, CancellationToken, InvocationData, ProviderFuture, ProviderRequest,
     ProviderResponse, RuntimeError,
@@ -132,10 +133,23 @@ impl AgentProvider for RelayAgentProvider {
         cancellation: CancellationToken,
     ) -> ProviderFuture<'a> {
         Box::pin(async move {
-            let InvocationData::Json(input) = request.data else {
-                return Err(RuntimeError::InvalidDefinition(
-                    "agent gateway capabilities require JSON input".to_string(),
-                ));
+            let input = match request.data {
+                InvocationData::Json(input) => input,
+                InvocationData::Binary(bytes) => {
+                    let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
+                    if encoded.len() > MAX_INVOCATION_BODY_BYTES {
+                        return Err(RuntimeError::InvalidDefinition(
+                            "agent gateway binary input is too large".to_string(),
+                        ));
+                    }
+                    serde_json::json!({
+                        "_vifuBinary": {
+                            "encoding": "base64",
+                            "data": encoded,
+                            "metadata": request.metadata,
+                        }
+                    })
+                }
             };
             let output = self
                 .hub

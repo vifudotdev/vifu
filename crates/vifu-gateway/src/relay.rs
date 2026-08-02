@@ -7,6 +7,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use base64::Engine;
 use futures_util::{SinkExt, StreamExt};
 use tokio::sync::{mpsc, Semaphore};
 use tokio::task::JoinHandle;
@@ -124,8 +125,13 @@ pub struct InProcessGatewayProvider {
 
 impl InProcessGatewayProvider {
     pub fn new(id: impl Into<String>, provider: Arc<dyn AgentProvider>) -> Result<Self, String> {
-        if !provider.supports("chat") && !provider.supports("embedding") {
-            return Err("in-process provider must support chat or embedding".to_string());
+        if !["chat", "embedding", "transcription", "tool", "realtime"]
+            .iter()
+            .any(|capability| provider.supports(capability))
+        {
+            return Err(
+                "in-process provider must support at least one gateway capability".to_string(),
+            );
         }
         Ok(Self {
             id: id.into(),
@@ -182,8 +188,11 @@ impl AgentGatewayProvider for InProcessGatewayProvider {
                         .unwrap_or_else(|| serde_json::json!({})),
                 },
                 capability: capability.to_string(),
-                data: InvocationData::Json(input.clone()),
-                metadata: serde_json::json!({ "source": "agent-gateway" }),
+                data: gateway_invocation_data(input)?,
+                metadata: serde_json::json!({
+                    "source": "agent-gateway",
+                    "binding": binding,
+                }),
                 snapshot: RuntimeSnapshot::default(),
             };
             let invocation = self.provider.invoke(request, cancellation.clone());
@@ -202,6 +211,22 @@ impl AgentGatewayProvider for InProcessGatewayProvider {
             }
         })
     }
+}
+
+fn gateway_invocation_data(input: &serde_json::Value) -> Result<InvocationData, String> {
+    let Some(binary) = input.get("_vifuBinary") else {
+        return Ok(InvocationData::Json(input.clone()));
+    };
+    let encoding = binding_text(binary, "encoding").unwrap_or_default();
+    if encoding != "base64" {
+        return Err("binary gateway input must use base64 encoding".to_string());
+    }
+    let data = binding_text(binary, "data")
+        .ok_or_else(|| "binary gateway input is missing data".to_string())?;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(data)
+        .map_err(|error| format!("binary gateway input could not be decoded: {error}"))?;
+    Ok(InvocationData::Binary(bytes))
 }
 
 fn binding_text<'a>(binding: &'a serde_json::Value, name: &str) -> Option<&'a str> {
@@ -1086,6 +1111,7 @@ fn sanitize_error(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use base64::Engine;
     use serde_json::json;
     use std::sync::Arc;
     use std::time::Duration;
@@ -1104,7 +1130,8 @@ mod tests {
         AGENT_GATEWAY_HELLO_REQUEST_ID, VERSION,
     };
     use vifu_runtime::{
-        AgentProvider, CancellationToken, ProviderFuture, ProviderRequest, ProviderResponse,
+        AgentProvider, CancellationToken, InvocationData, ProviderFuture, ProviderRequest,
+        ProviderResponse,
     };
 
     struct PersonaProvider;
@@ -1138,6 +1165,32 @@ mod tests {
             Box::pin(async move {
                 Ok(ProviderResponse::json(json!({
                     "capability": request.capability,
+                })))
+            })
+        }
+    }
+
+    struct BinaryTranscriptionProvider;
+
+    impl AgentProvider for BinaryTranscriptionProvider {
+        fn supports(&self, capability: &str) -> bool {
+            capability == "transcription"
+        }
+
+        fn invoke<'a>(
+            &'a self,
+            request: ProviderRequest,
+            _cancellation: CancellationToken,
+        ) -> ProviderFuture<'a> {
+            Box::pin(async move {
+                let InvocationData::Binary(audio) = request.data else {
+                    return Ok(ProviderResponse::json(
+                        json!({ "error": "expected binary" }),
+                    ));
+                };
+                Ok(ProviderResponse::json(json!({
+                    "capability": request.capability,
+                    "bytes": audio.len(),
                 })))
             })
         }
@@ -1204,6 +1257,33 @@ mod tests {
             .unwrap();
 
         assert_eq!(output["capability"], "embedding");
+    }
+
+    #[tokio::test]
+    async fn in_process_provider_decodes_binary_gateway_input() {
+        let provider = InProcessGatewayProvider::new(
+            "local-transcriber",
+            Arc::new(BinaryTranscriptionProvider),
+        )
+        .unwrap();
+
+        let output = provider
+            .invoke(
+                "local-transcriber",
+                &json!({ "capability": "transcription" }),
+                &json!({
+                    "_vifuBinary": {
+                        "encoding": "base64",
+                        "data": base64::engine::general_purpose::STANDARD.encode(b"abc"),
+                    }
+                }),
+                Duration::from_secs(1),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(output["capability"], "transcription");
+        assert_eq!(output["bytes"], 3);
     }
 
     #[test]

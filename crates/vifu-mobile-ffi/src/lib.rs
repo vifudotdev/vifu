@@ -7,8 +7,8 @@ use serde_json::Value;
 use vifu_gateway::embedded::{
     EmbeddedRuntimeGateway, EmbeddedRuntimeGatewayConfig, EmbeddedRuntimeGatewayState,
 };
+use vifu_gateway::identity::MachineIdentity;
 use vifu_gateway::relay;
-use vifu_gateway::session;
 use vifu_gateway::{config, openclaw};
 #[cfg(feature = "local-llama")]
 use vifu_provider_llama::{LlamaProvider, LlamaProviderConfig};
@@ -666,22 +666,25 @@ impl VifuEmbeddedRuntime {
 #[derive(Debug, Clone, uniffi::Record)]
 pub struct VifuEmbeddedGatewayConfig {
     pub server_url: String,
-    pub gateway_id: String,
+    pub dashboard_url: Option<String>,
     pub runtime_database_path: String,
 }
 
 #[derive(Clone, uniffi::Record)]
 pub struct VifuGeneratedGatewayIdentity {
-    pub gateway_id: String,
-    pub credential: String,
+    pub machine_id: String,
+    pub public_key: String,
+    pub private_key: String,
 }
 
 #[uniffi::export]
-pub fn generate_vifu_gateway_identity() -> VifuGeneratedGatewayIdentity {
-    VifuGeneratedGatewayIdentity {
-        gateway_id: session::generate_gateway_id(),
-        credential: session::generate_gateway_credential(),
-    }
+pub fn generate_vifu_gateway_identity() -> Result<VifuGeneratedGatewayIdentity, VifuRuntimeError> {
+    let identity = MachineIdentity::generate()?;
+    Ok(VifuGeneratedGatewayIdentity {
+        machine_id: identity.machine_id.clone(),
+        public_key: identity.public_key.clone(),
+        private_key: identity.encoded_private_key().to_string(),
+    })
 }
 
 #[derive(Debug, Clone, uniffi::Enum)]
@@ -695,6 +698,31 @@ pub enum VifuEmbeddedGatewayState {
 pub struct VifuEmbeddedGatewayStatus {
     pub state: VifuEmbeddedGatewayState,
     pub last_error: Option<String>,
+    pub guest_project: Option<VifuGuestProject>,
+    pub authorization: Option<VifuGatewayAuthorization>,
+    pub pairing: Option<VifuGatewayPairing>,
+}
+
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct VifuGatewayAuthorization {
+    pub gateway_id: String,
+    pub device_token: String,
+    pub generation: u64,
+    pub expires_at: String,
+}
+
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct VifuGatewayPairing {
+    pub request_id: String,
+    pub auth_url: String,
+}
+
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct VifuGuestProject {
+    pub project_slug: String,
+    pub endpoint_path: String,
+    pub claim_token: String,
+    pub expires_at: String,
 }
 
 #[derive(uniffi::Object)]
@@ -710,27 +738,27 @@ impl VifuEmbeddedGateway {
         runtime: Arc<VifuEmbeddedRuntime>,
         config: VifuEmbeddedGatewayConfig,
     ) -> Result<Arc<Self>, VifuRuntimeError> {
-        let gateway = EmbeddedRuntimeGateway::new(
-            runtime.runtime.clone(),
-            EmbeddedRuntimeGatewayConfig::new(
-                config.server_url,
-                config.gateway_id,
-                config.runtime_database_path,
-            ),
-        )
-        .map_err(|message| VifuRuntimeError::InvalidConfig { message })?;
+        let mut gateway_config =
+            EmbeddedRuntimeGatewayConfig::new(config.server_url, config.runtime_database_path);
+        if let Some(dashboard_url) = config.dashboard_url {
+            gateway_config = gateway_config.with_dashboard_url(dashboard_url);
+        }
+        let gateway = EmbeddedRuntimeGateway::new(runtime.runtime.clone(), gateway_config)
+            .map_err(|message| VifuRuntimeError::InvalidConfig { message })?;
         Ok(Arc::new(Self { runtime, gateway }))
     }
 
-    /// Starts the optional network Gateway. The credential remains in memory.
+    /// Starts the optional network Gateway with caller-owned credential storage.
     pub fn start(
         &self,
-        gateway_credential: String,
+        machine_private_key: String,
+        device_token: Option<String>,
         enrollment_token: Option<String>,
     ) -> Result<(), VifuRuntimeError> {
         self.runtime.prepare_gateway_release()?;
+        let identity = MachineIdentity::from_encoded_private_key(&machine_private_key)?;
         self.gateway
-            .start(gateway_credential, enrollment_token)
+            .start(identity, device_token, enrollment_token)
             .map_err(Into::into)
     }
 
@@ -743,6 +771,24 @@ impl VifuEmbeddedGateway {
         Ok(VifuEmbeddedGatewayStatus {
             state: status.state.into(),
             last_error: status.last_error,
+            guest_project: self.gateway.guest_project()?.map(|guest| VifuGuestProject {
+                project_slug: guest.project_slug,
+                endpoint_path: guest.endpoint_path,
+                claim_token: guest.claim_token,
+                expires_at: guest.expires_at,
+            }),
+            authorization: self.gateway.authorization()?.map(|authorization| {
+                VifuGatewayAuthorization {
+                    gateway_id: authorization.gateway_id,
+                    device_token: authorization.device_token,
+                    generation: authorization.generation,
+                    expires_at: authorization.expires_at,
+                }
+            }),
+            pairing: self.gateway.pairing()?.map(|pairing| VifuGatewayPairing {
+                request_id: pairing.request_id.to_string(),
+                auth_url: pairing.auth_url,
+            }),
         })
     }
 }
@@ -911,10 +957,12 @@ mod tests {
 
     #[test]
     fn generated_gateway_identity_is_ready_for_keychain_storage() {
-        let identity = generate_vifu_gateway_identity();
+        let identity = generate_vifu_gateway_identity().unwrap();
 
-        assert!(identity.gateway_id.starts_with("gateway-"));
-        session::validate_gateway_credential(&identity.credential).unwrap();
+        assert!(identity.machine_id.starts_with("machine-"));
+        let restored = MachineIdentity::from_encoded_private_key(&identity.private_key).unwrap();
+        assert_eq!(restored.machine_id, identity.machine_id);
+        assert_eq!(restored.public_key, identity.public_key);
     }
 
     #[test]

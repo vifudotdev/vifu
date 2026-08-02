@@ -1,0 +1,15 @@
+{
+  "providers": [
+    {
+      "key": "local-qwen",
+      "name": "Local Qwen",
+      "type": "llama",
+      "config": {
+        "modelPath": "models/Qwen3-1.7B-Q4_K_M.gguf",
+        "contextSize": 4096,
+        "defaultMaxTokens": 256,
+        "maxConcurrency": 1
+      }
+    }
+  ]
+}

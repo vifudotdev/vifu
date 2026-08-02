@@ -48,7 +48,10 @@ The token is consumed by Server and is not copied into `config.json`.
 Enrollment tokens expire after five minutes, can be used once, and are never
 written to the persistent runtime configuration. Issuing a new unused token for
 the deployment revokes the previous unused token. A Gateway that has enrolled
-can reconnect using the credential in its Server-scoped local session file.
+reconnects with its stable Machine identity and Server-issued Device Token in
+the Server-scoped record inside `~/.vifu/runtime.sqlite`. If authorization is
+required again, Vifu prints a Dashboard link and keeps retrying while the
+operator reviews the request.
 
 Each project starts with a `development` deployment. More deployments can use
 different Gateways and active Runtime Releases while keeping the same project

@@ -16,7 +16,7 @@ host-selectable store.
 
 | Shape | Use it for | Contract |
 | --- | --- | --- |
-| Embedded Runtime | A Rust, iOS, or Android application that owns one project | The host calls `VifuRuntime` directly and registers provider implementations in process |
+| Embedded Runtime | A Rust or Apple application that owns one project | The host calls `VifuRuntime` directly and registers provider implementations in process |
 | Vifu Server | A deployment that operates multiple projects | Applications call project HTTP/WebSocket endpoints; Server adds keys, database state, provider configuration, and traces |
 | Server with Agent Gateway | Providers that run on another machine or network boundary | Gateway connects provider resources to Server over one authenticated multiplexed connection |
 
@@ -44,7 +44,10 @@ let snapshot = try runtime.exportSnapshot()
 
 The Swift source API is generated from the same UniFFI contract used by the
 Rust mobile adapter. The package downloads a checksum-verified XCFramework
-containing device, simulator, and macOS libraries.
+containing device, simulator, and macOS libraries. The mobile FFI artifact is
+built with the package's default provider features, including in-process llama
+and Local Whisper support; the application still decides which Providers to
+register or expose.
 
 Open a SQLite-backed Runtime when project configuration and session state must
 survive application restarts:
@@ -148,8 +151,9 @@ match poll.status {
 runtime.cancel_invocation(&handle)?;
 ```
 
-iOS and Android hosts use the equivalent `VifuEmbeddedRuntime` UniFFI object and
-implement `VifuAgentProvider` as a native callback.
+Apple hosts use the equivalent `VifuEmbeddedRuntime` UniFFI object and implement
+`VifuAgentProvider` as a native callback. Generated Kotlin/Android bindings are
+experimental and follow the same contract.
 
 ## Connect An Embedded Runtime To Vifu Server
 
@@ -162,25 +166,64 @@ Server deployment:
 3. Start `VifuEmbeddedGateway` with that identity and the enrollment token.
 
 ```swift
-let generated = generateVifuGatewayIdentity()
-let identity = VifuGatewayIdentity(generated: generated)
 let identityStore = VifuGatewayIdentityStore()
-try identityStore.save(identity, for: "my-application")
+let identity = try identityStore.loadOrCreateMachineIdentity()
+let serverURL = "https://runtime.example.com"
+let authorization = try identityStore.loadAuthorization(for: serverURL)
 
 let gateway = try VifuEmbeddedGateway(
     runtime: runtime,
     config: VifuEmbeddedGatewayConfig(
-        serverUrl: "https://runtime.example.com",
-        gatewayId: identity.gatewayId,
+        serverUrl: serverURL,
+        dashboardUrl: "https://dashboard.example.com",
         runtimeDatabasePath: runtimeDatabaseURL.path
     )
 )
-try gateway.start(identity: identity, enrollmentToken: enrollmentToken)
+try gateway.start(
+    identity: identity,
+    authorization: authorization,
+    enrollmentToken: enrollmentToken
+)
+
+if let updated = try gateway.status().authorization {
+    try identityStore.saveAuthorization(updated, for: serverURL)
+}
 ```
 
-The enrollment token is consumed once. Later starts load the same device
-identity from Keychain and omit the token. Rust keeps the credential in memory;
-it is not written to the Runtime SQLite database or portable manifest.
+The enrollment token is consumed once. Later starts load the same Machine
+identity and server-specific Device Token from Keychain and omit the token.
+Neither secret is written to `runtime.sqlite` or the portable manifest. Runtime
+state, Gateway resume state, and private guest project registration capabilities
+share the SQLite file. The application must keep that file inside its protected
+application data directory.
+
+Rust hosts use the lifecycle implementation from `vifu-gateway` directly:
+
+```rust
+use vifu_gateway::embedded::{
+    EmbeddedRuntimeGateway,
+    EmbeddedRuntimeGatewayConfig,
+};
+use vifu_gateway::identity::MachineIdentity;
+
+let gateway = EmbeddedRuntimeGateway::new(
+    runtime.clone(),
+    EmbeddedRuntimeGatewayConfig::new(
+        "https://runtime.example.com",
+        "runtime.sqlite",
+    )
+    .with_dashboard_url("https://dashboard.example.com"),
+)?;
+let identity = MachineIdentity::from_encoded_private_key(&machine_private_key)?;
+gateway.start(identity, device_token, enrollment_token)?;
+```
+
+`start` requires an applied manifest or active release. It derives advertised
+Agent/provider descriptors from that manifest and runs the reconnecting Gateway
+on its own worker thread. Custom Rust hosts must keep the Machine private key and
+latest Device Token in their credential store. `status` reports
+`Stopped`, `Running`, or `Failed`; `stop` cancels the network loop and joins the
+worker.
 
 The first connection to an empty deployment imports the embedded manifest as
 release 1. Later release activation, configuration sync, trace upload, and
@@ -229,16 +272,16 @@ limit.
 reimplement invocation, session, provider, or cancellation behavior.
 
 ```text
-Godot / Unity / Unreal
-          |
-    engine adapter
-          |
-      transport
-          |
- Runtime Bridge session
-      /           \
- embedded       application
- Runtime         messages
+Godot / native host
+        |
+  engine adapter
+        |
+    transport
+        |
+Runtime Bridge session
+    /           \
+embedded       application
+Runtime         messages
 ```
 
 Use `VifuInProcessBridgeTransport` when Vifu is embedded in the same
@@ -247,19 +290,30 @@ application. A WebSocket transport can implement the same
 processes or devices. Both shapes preserve the same frame contract, so moving
 execution does not require rewriting game logic.
 
-The initial Godot frame adapter is in `integrations/godot/apple/`. It only
+The experimental Godot frame adapter is in `integrations/godot/apple/`. It only
 connects `GlobalState` signals to `VifuInProcessBridgeTransport` and attaches
 to an already-started `GodotInstance`; the host application retains Godot's
 creation, rendering, frame-loop, restart, and destruction lifecycle. Runtime
 routing belongs to `VifuRuntimeBridgeSession`, while application-specific
-message decoding stays in the host. Unity and Unreal adapters can implement the
-same small frame transport against their native plugin systems.
+message decoding stays in the host. Generic Godot and managed-language engine
+adapters are future integration work, not current support.
 
 The optional `vifu-provider-llama` crate implements this contract for local
-GGUF models through llama.cpp. Apple applications can enable the same provider
-through the `local-llama` feature of `vifu-mobile-ffi`. The provider crate's
+GGUF models through llama.cpp. Apple applications receive the same provider in
+the default `vifu-mobile-ffi` binary so installed SDK users can load local GGUF
+models directly. The provider crate's
 [`chat` example](../crates/vifu-provider-llama/examples/chat.rs) demonstrates
-the same runtime registration and invocation path.
+the same runtime registration and invocation path. A loaded provider keeps one
+model resident and creates a bounded context for each invocation.
+
+For action selection and tool calls, the provider accepts either
+`responseFormat.type = "jsonSchema"` or OpenAI-compatible
+`response_format.type = "json_schema"`. Schemas are limited to 64 KiB and are
+compiled into a llama.cpp grammar before prompt inference. The completed text
+must also parse as JSON; truncated or invalid structured output returns a
+provider error instead of an application action. Responses include native
+`text`, `message`, and `structured` values together with OpenAI-compatible
+`choices` and `usage`.
 
 ## Persist State
 

@@ -1,46 +1,76 @@
 import Foundation
 import Security
 
-/// Device-local Agent Gateway identity returned by an enrollment flow.
+/// Stable installation identity used to prove ownership to Vifu servers.
 ///
-/// The credential is stored in Keychain and is only passed to the Rust Gateway
-/// while its network connection is running.
-public struct VifuGatewayIdentity: Codable, Sendable {
-    public let gatewayId: String
-    public let credential: String
+/// The private key remains in Keychain. Gateway IDs and Device Tokens are
+/// server-specific authorizations and are stored separately.
+public struct VifuGatewayMachineIdentity: Codable, Sendable {
+    public let machineId: String
+    public let publicKey: String
+    public let privateKey: String
 
-    public init(gatewayId: String, credential: String) {
-        self.gatewayId = gatewayId
-        self.credential = credential
+    public init(machineId: String, publicKey: String, privateKey: String) {
+        self.machineId = machineId
+        self.publicKey = publicKey
+        self.privateKey = privateKey
     }
 
     public init(generated: VifuGeneratedGatewayIdentity) {
         self.init(
-            gatewayId: generated.gatewayId,
-            credential: generated.credential
+            machineId: generated.machineId,
+            publicKey: generated.publicKey,
+            privateKey: generated.privateKey
+        )
+    }
+}
+
+private struct StoredGatewayAuthorization: Codable {
+    let gatewayId: String
+    let deviceToken: String
+    let generation: UInt64
+    let expiresAt: String
+
+    init(_ authorization: VifuGatewayAuthorization) {
+        gatewayId = authorization.gatewayId
+        deviceToken = authorization.deviceToken
+        generation = authorization.generation
+        expiresAt = authorization.expiresAt
+    }
+
+    var value: VifuGatewayAuthorization {
+        VifuGatewayAuthorization(
+            gatewayId: gatewayId,
+            deviceToken: deviceToken,
+            generation: generation,
+            expiresAt: expiresAt
         )
     }
 }
 
 public enum VifuGatewayIdentityStoreError: LocalizedError {
     case invalidIdentity
+    case invalidServerURL
     case keychain(OSStatus)
-    case invalidStoredIdentity
+    case invalidStoredValue
 
     public var errorDescription: String? {
         switch self {
         case .invalidIdentity:
-            "The Agent Gateway identity is invalid."
+            "The Agent Gateway machine identity is invalid."
+        case .invalidServerURL:
+            "The Vifu server URL is invalid."
         case let .keychain(status):
             "Keychain operation failed with status \(status)."
-        case .invalidStoredIdentity:
-            "The stored Agent Gateway identity is invalid."
+        case .invalidStoredValue:
+            "The stored Agent Gateway value is invalid."
         }
     }
 }
 
-/// Stores one Gateway identity per runtime project in the Apple Keychain.
+/// Stores one Machine identity per app installation and one authorization per server.
 public struct VifuGatewayIdentityStore: Sendable {
+    private static let machineAccount = "machine-identity"
     private let service: String
 
     public init(service: String? = nil) {
@@ -49,23 +79,63 @@ public struct VifuGatewayIdentityStore: Sendable {
             ?? "dev.vifu.gateway"
     }
 
-    public func save(_ identity: VifuGatewayIdentity, for projectId: String) throws {
-        guard !projectId.isEmpty,
-              !identity.gatewayId.isEmpty,
-              !identity.credential.isEmpty
-        else {
-            throw VifuGatewayIdentityStoreError.invalidIdentity
+    public func loadOrCreateMachineIdentity() throws -> VifuGatewayMachineIdentity {
+        if let stored: VifuGatewayMachineIdentity = try load(
+            account: Self.machineAccount,
+            as: VifuGatewayMachineIdentity.self
+        ) {
+            return stored
         }
-        let data = try JSONEncoder().encode(identity)
-        let query = keychainQuery(projectId: projectId)
+        let generated = try generateVifuGatewayIdentity()
+        let identity = VifuGatewayMachineIdentity(generated: generated)
+        try save(identity, account: Self.machineAccount)
+        return identity
+    }
+
+    public func saveAuthorization(
+        _ authorization: VifuGatewayAuthorization,
+        for serverURL: String
+    ) throws {
+        try save(StoredGatewayAuthorization(authorization), account: try authorizationAccount(serverURL))
+    }
+
+    public func loadAuthorization(for serverURL: String) throws -> VifuGatewayAuthorization? {
+        let stored: StoredGatewayAuthorization? = try load(
+            account: try authorizationAccount(serverURL),
+            as: StoredGatewayAuthorization.self
+        )
+        return stored?.value
+    }
+
+    public func deleteAuthorization(for serverURL: String) throws {
+        let status = SecItemDelete(
+            keychainQuery(account: try authorizationAccount(serverURL)) as CFDictionary
+        )
+        guard status == errSecSuccess || status == errSecItemNotFound else {
+            throw VifuGatewayIdentityStoreError.keychain(status)
+        }
+    }
+
+    private func authorizationAccount(_ serverURL: String) throws -> String {
+        guard let components = URLComponents(string: serverURL),
+              let scheme = components.scheme?.lowercased(),
+              ["http", "https"].contains(scheme),
+              let host = components.host?.lowercased()
+        else {
+            throw VifuGatewayIdentityStoreError.invalidServerURL
+        }
+        let port = components.port.map { ":\($0)" } ?? ""
+        return "authorization:\(scheme)://\(host)\(port)"
+    }
+
+    private func save<Value: Encodable>(_ value: Value, account: String) throws {
+        let data = try JSONEncoder().encode(value)
+        let query = keychainQuery(account: account)
         let attributes: [CFString: Any] = [
             kSecValueData: data,
             kSecAttrAccessible: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly,
         ]
-        let updateStatus = SecItemUpdate(
-            query as CFDictionary,
-            attributes as CFDictionary
-        )
+        let updateStatus = SecItemUpdate(query as CFDictionary, attributes as CFDictionary)
         if updateStatus == errSecSuccess {
             return
         }
@@ -80,8 +150,8 @@ public struct VifuGatewayIdentityStore: Sendable {
         }
     }
 
-    public func load(for projectId: String) throws -> VifuGatewayIdentity? {
-        var query = keychainQuery(projectId: projectId)
+    private func load<Value: Decodable>(account: String, as: Value.Type) throws -> Value? {
+        var query = keychainQuery(account: account)
         query[kSecReturnData] = true
         query[kSecMatchLimit] = kSecMatchLimitOne
         var result: CFTypeRef?
@@ -93,27 +163,18 @@ public struct VifuGatewayIdentityStore: Sendable {
             throw VifuGatewayIdentityStoreError.keychain(status)
         }
         guard let data = result as? Data,
-              let identity = try? JSONDecoder().decode(VifuGatewayIdentity.self, from: data),
-              !identity.gatewayId.isEmpty,
-              !identity.credential.isEmpty
+              let value = try? JSONDecoder().decode(Value.self, from: data)
         else {
-            throw VifuGatewayIdentityStoreError.invalidStoredIdentity
+            throw VifuGatewayIdentityStoreError.invalidStoredValue
         }
-        return identity
+        return value
     }
 
-    public func delete(for projectId: String) throws {
-        let status = SecItemDelete(keychainQuery(projectId: projectId) as CFDictionary)
-        guard status == errSecSuccess || status == errSecItemNotFound else {
-            throw VifuGatewayIdentityStoreError.keychain(status)
-        }
-    }
-
-    private func keychainQuery(projectId: String) -> [CFString: Any] {
+    private func keychainQuery(account: String) -> [CFString: Any] {
         [
             kSecClass: kSecClassGenericPassword,
             kSecAttrService: service,
-            kSecAttrAccount: projectId,
+            kSecAttrAccount: account,
             kSecAttrSynchronizable: false,
         ]
     }
@@ -121,11 +182,13 @@ public struct VifuGatewayIdentityStore: Sendable {
 
 public extension VifuEmbeddedGateway {
     func start(
-        identity: VifuGatewayIdentity,
+        identity: VifuGatewayMachineIdentity,
+        authorization: VifuGatewayAuthorization? = nil,
         enrollmentToken: String? = nil
     ) throws {
         try start(
-            gatewayCredential: identity.credential,
+            machinePrivateKey: identity.privateKey,
+            deviceToken: authorization?.deviceToken,
             enrollmentToken: enrollmentToken
         )
     }

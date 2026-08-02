@@ -30,7 +30,8 @@ cargo run
 
 The first `cargo run` creates `~/.vifu/config.json` and
 `~/.vifu/providers.json`, starts both roles on loopback, and creates
-`~/.vifu/vifu.sqlite` for durable local state. The server listens on
+`~/.vifu/runtime.sqlite` for Runtime and Gateway state plus
+`~/.vifu/vifu.sqlite` for local Server data. The server listens on
 `http://127.0.0.1:6790`.
 
 To run a Gateway-only process on a machine that already has a Server, replace
@@ -64,11 +65,12 @@ VIFU_AGENT_GATEWAY_ENROLLMENT_TOKEN_FILE=/secure/path/to/one-time-token cargo ru
 
 The project owner issues the one-time enrollment token through
 `POST /v1/project/{slug}/agent-gateway-enrollments`. Gateway consumes it on its
-first successful registration, stores only its long-lived credential in the
-server-scoped Gateway session file, and reconnects with that credential on
-later starts. Remove the one-time token file after enrollment. There is no
-enrollment command-line flag, and enrollment tokens are rejected in persistent
-Vifu runtime configuration.
+first successful authorization. Vifu keeps one stable Machine identity and the
+Server-issued Device Token in private, server-scoped state inside
+`~/.vifu/runtime.sqlite`; later starts reconnect automatically and rotate the
+token when required. Remove the one-time token file after enrollment. There is
+no enrollment command-line flag, and enrollment tokens are rejected in
+persistent Vifu runtime configuration.
 
 For a provider that does not require authentication, omit its `auth` block.
 The repository's combined local and Docker configurations use deployment
@@ -109,7 +111,7 @@ The Rust workspace produces one runtime executable. Its configuration selects
 the Server role, Agent Gateway role, or both:
 
 ```bash
-cargo build --release --locked -p vifu
+cargo build --release --locked -p vifu --all-features
 ```
 
 It is written to `target/release/vifu`. The binary uses embedded SQLite unless

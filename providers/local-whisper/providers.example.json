@@ -1,0 +1,13 @@
+{
+  "providers": [
+    {
+      "key": "local-transcriber",
+      "name": "Local Transcriber",
+      "type": "local-whisper",
+      "config": {
+        "model": "ggml-base.en.bin",
+        "language": "en"
+      }
+    }
+  ]
+}

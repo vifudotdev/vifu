@@ -19,9 +19,10 @@ Embed the execution kernel directly:
 vifu-runtime = "0.1"
 ```
 
-The application always includes its Server and Agent Gateway roles. Runtime
-configuration selects which roles start. The `local-whisper` feature is reserved
-for the optional native Whisper dependency.
+The application release artifacts are built with the package provider features
+enabled, including the in-process llama.cpp and Local Whisper Providers. Runtime
+configuration selects which roles start, while `providers.json` and project
+bindings select which configured Providers are reachable.
 
 ## Package Layout
 
@@ -31,6 +32,7 @@ tested and optimized independently:
 | Package | Role |
 | --- | --- |
 | `vifu-runtime` | Portable Bevy execution kernel |
+| `vifu-provider-llama` | In-process llama.cpp GGUF Provider |
 | `vifu-gateway` | Provider, protocol, relay, and session implementation |
 | `vifu-server` | HTTP, WebSocket, SQLite, and PostgreSQL server implementation |
 | `vifu` | Complete configuration-driven application and binary |
@@ -45,6 +47,7 @@ Publish one version from a clean, tagged commit in dependency order:
 
 ```bash
 cargo publish -p vifu-runtime
+cargo publish -p vifu-provider-llama
 cargo publish -p vifu-gateway
 cargo publish -p vifu-server
 cargo publish -p vifu

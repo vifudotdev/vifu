@@ -34,13 +34,15 @@ private endpoint URLs, database contents, or sensitive logs.
   peppered hash and returns the raw value only at creation.
 - The Agent Gateway bootstrap token enrolls independent Gateway identities; it
   is not the normal WebSocket credential. Each Gateway stores its own credential
-  in a permission-restricted local session file, while the server stores only a
-  peppered hash and supports revocation. Request IDs and channel IDs are checked
-  against the connection that owns the in-flight call.
+  in permission-restricted local state, while native applications may keep it
+  in the platform credential store. The server stores only a peppered hash and
+  supports revocation. Request IDs and channel IDs are checked against the
+  connection that owns the in-flight call.
 - The Agent Gateway accepts only loopback OpenClaw URLs, disables HTTP redirects,
   limits request and response sizes, and does not open a local public listener.
   Provider credentials remain in the operator-controlled provider
-  configuration and are not copied into the Agent Gateway session file.
+  configuration and are not copied into Agent Gateway session records in
+  `runtime.sqlite`.
 - SQLite or PostgreSQL stores runtime metadata. Restrict database access,
   encrypt backups, and manage retention outside the Dashboard.
 - Vifu is designed for local and self-hosted deployments, with Dashboard

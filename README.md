@@ -3,154 +3,227 @@
 ![Vifu](npm-packages/dashboard/public/brand/vifu-lockup.png)
 
 [![Crates.io](https://img.shields.io/crates/v/vifu.svg)](https://crates.io/crates/vifu)
-[![Downloads](https://img.shields.io/crates/d/vifu.svg)](https://crates.io/crates/vifu)
 [![Runtime API](https://docs.rs/vifu-runtime/badge.svg)](https://docs.rs/vifu-runtime)
 [![CI](https://github.com/vifudotdev/vifu/actions/workflows/ci.yml/badge.svg)](https://github.com/vifudotdev/vifu/actions/workflows/ci.yml)
 [![Discord](https://img.shields.io/badge/Discord-Join-5865F2?logo=discord&logoColor=white)](https://discord.com/invite/VdqqFwJbNE)
 
-Vifu is a small, fast, stateful, and portable runtime for agents.
+**Agent runtime in Rust.**
 
-Connect applications to agents from local or remote providers through one
-runtime for stable APIs, durable state, access control, routing, and traces.
+## Embed and operate agents inside products.
 
-Vifu includes the cross-platform Rust runtime, Agent Gateway, durable state,
-stable application APIs, traces, and a small operations Console. A runtime can
-live directly inside an application, or the same invocation model can sit behind
-Vifu Server for multi-project deployments.
+Vifu gives an application one stable contract for local and remote agents. The
+product owns its state, interface, safety rules, and allowed actions. Vifu owns
+provider connections, agent identity, versioned configuration, sessions,
+named endpoints, cancellation, and traces.
 
-## Install Vifu
+Use the Runtime as a Rust library, ship it in an Apple application, or connect
+the same embedded agents to Vifu Server and its operations Console.
 
-The `vifu` package installs the complete Runtime, Agent Gateway, and Server
-application:
+## The product boundary
 
-```bash
-cargo install vifu
-vifu
+| Your product owns | Vifu owns | Providers own |
+| --- | --- | --- |
+| Game state, UI, action allowlists, domain policy | Agent registry, stable endpoints, sessions, releases, Gateway transport, traces | Model inference, hosted APIs, device capabilities |
+
+This boundary is the reason to embed Vifu: agent implementations can change
+while application code continues to invoke a named product capability.
+
+```text
+product code -> named Vifu endpoint -> agent -> local or remote provider
 ```
 
-Its configuration selects whether the process runs the Server role, Agent
-Gateway role, or both. Provider capabilities are registered at runtime rather
-than selected through vendor-specific Cargo features.
+## Embed the Runtime
 
-## Embed Vifu
-
-Rust applications embed the portable execution kernel directly:
+Add the library:
 
 ```toml
 [dependencies]
 vifu-runtime = "0.1"
 ```
 
-See [Embed the runtime](docs/runtime-embedding.md) and the
-[crates.io release contract](docs/crates-io.md).
+Register a provider once, apply the product manifest, and invoke a named
+endpoint from an application session:
 
-Apple applications can add this repository directly as a Swift Package:
+```rust
+use std::sync::Arc;
+use vifu_runtime::prelude::*;
 
-```text
-https://github.com/vifudotdev/vifu
+let mut provider = HttpCapabilityProvider::new(
+    "models",
+    "https://provider.example.com/v1",
+    Some(std::env::var("MODEL_API_TOKEN")?),
+)?;
+provider.add_route(
+    "chat",
+    HttpCapabilityRoute::OpenAiChat {
+        model: "model-name".into(),
+        persona: json!({ "instructions": "Guide the player concisely." }),
+    },
+)?;
+
+let runtime = VifuRuntime::new("my-product")?;
+runtime.register_provider("models", Arc::new(provider))?;
+runtime.apply_manifest(RuntimeManifest::from_json(include_bytes!("vifu.json"))?)?;
+
+let output = runtime
+    .session("player-42")?
+    .invoke(InvocationInput::json(
+        "town-guide",
+        json!({
+            "messages": [{ "role": "user", "content": "Open the north gate" }]
+        }),
+    ))
+    .await?;
 ```
 
-Select the `Vifu` product, then use `import Vifu`. SwiftPM downloads the
-versioned XCFramework from the matching GitHub release, so application
-developers do not need a Rust toolchain.
+`vifu.json` is portable product configuration. Credentials and device paths
+stay in the host:
 
-## Run With Docker
+```json
+{
+  "schemaVersion": 1,
+  "projectId": "my-product",
+  "providers": [{
+    "id": "models",
+    "providerType": "openai-compatible",
+    "capabilities": ["chat"]
+  }],
+  "agents": [{
+    "id": "guide",
+    "name": "Town Guide",
+    "provider": "models",
+    "capabilities": ["chat"]
+  }],
+  "endpoints": [{
+    "name": "town-guide",
+    "agent": "guide",
+    "capability": "chat",
+    "timeoutMs": 30000
+  }]
+}
+```
+
+The same Runtime has async, start/poll/cancel, ordered output events, snapshots,
+and the transport-neutral `vifu.runtime-bridge/1` protocol. See
+[Embed the Runtime](docs/runtime-embedding.md).
+
+## Run local providers
+
+The `vifu` binary includes the in-process llama.cpp Provider so installed
+release builds can run local GGUF models directly. Configure its GGUF path and
+resource limits in `~/.vifu/providers.json`, then start Vifu normally:
+
+```bash
+mkdir -p ~/.vifu/models
+cp providers/llama/providers.example.json ~/.vifu/providers.json
+vifu
+```
+
+When a registry already contains Providers, add the `llama` entry instead of
+replacing the file. Relative model paths resolve from the registry directory.
+See [Local llama Provider](providers/llama/) for every supported setting.
+
+The same registry also supports Local Whisper for speech-to-text. Add a
+`local-whisper` entry with a model file from `~/.vifu/models`; projects and
+endpoints bind to the resulting `transcription` capability instead of storing
+device-local model paths in Server settings.
+
+The Provider keeps the model resident, streams text fragments into the Runtime,
+reports token counts, and supports strict JSON Schema output. Apple builds
+enable Metal; `gpuLayers: 0` provides a CPU control path.
+
+Requests accept both Vifu and OpenAI-compatible structured-output fields:
+
+```json
+{
+  "messages": [{ "role": "user", "content": "Choose an action" }],
+  "max_tokens": 64,
+  "temperature": 0,
+  "response_format": {
+    "type": "json_schema",
+    "json_schema": {
+      "name": "action",
+      "strict": true,
+      "schema": {
+        "type": "object",
+        "properties": { "action": { "type": "string" } },
+        "required": ["action"],
+        "additionalProperties": false
+      }
+    }
+  }
+}
+```
+
+Vifu validates the schema before inference and returns a provider error when a
+generation ends before producing valid JSON. Responses retain native
+`text`/`message` fields and also expose OpenAI-compatible `choices` and `usage`.
+
+## Connect embedded agents to the Console
+
+The reusable `EmbeddedRuntimeGateway` runs beside any manifest-configured
+`VifuRuntime`:
+
+```rust
+use vifu_gateway::embedded::{
+    EmbeddedRuntimeGateway,
+    EmbeddedRuntimeGatewayConfig,
+};
+use vifu_gateway::identity::MachineIdentity;
+
+let gateway = EmbeddedRuntimeGateway::new(
+    runtime.clone(),
+    EmbeddedRuntimeGatewayConfig::new(
+        "https://runtime.example.com",
+        "runtime.sqlite",
+    )
+    .with_dashboard_url("https://dashboard.example.com"),
+)?;
+let identity = MachineIdentity::from_encoded_private_key(&machine_private_key)?;
+gateway.start(identity, device_token, enrollment_token)?;
+```
+
+The Machine private key is stable host identity; the Server returns a
+server-scoped Device Token after authorization. One authenticated Gateway
+connection publishes the manifest's agents, carries
+remote invocations, synchronizes releases, and uploads safe trace summaries.
+The Console operates projects, deployments, provider bindings, keys, connected
+Gateways, available agents, and traces.
+
+## Supported integration surfaces
+
+| Surface | Status | Integration contract |
+| --- | --- | --- |
+| Rust | Supported | `vifu-runtime`, `vifu-gateway`, and provider traits |
+| Swift on iOS/macOS | Supported | Swift Package plus versioned XCFramework and UniFFI API |
+| Godot in an Apple host | Experimental | Thin signal/frame adapter over Runtime Bridge |
+| Kotlin/Android | Experimental | Generated UniFFI bindings and native callback providers |
+
+Runtime Bridge keeps engine adapters thin: they move complete JSON frames while
+Vifu retains endpoint, session, event, and cancellation behavior. Additional
+managed-language and engine bindings can implement the same protocol.
+
+## Run Vifu Server and Console
+
+The `vifu` package runs Server and Agent Gateway roles from one binary:
+
+```bash
+cargo install vifu
+vifu
+```
+
+For the complete self-hosted stack:
 
 ```bash
 cp .env.example .env
 docker compose up -d
 ```
 
-Open `http://localhost:6791`. The stack starts PostgreSQL, Vifu Server, Vifu
-Agent Gateway, and the operations Console. Read the generated Admin Key, then
-enter it in the Console:
-
-```bash
-docker compose exec backend cat /run/vifu/secrets/admin_key
-```
-
-Use the same command to restart the stack. Stop it while preserving the database
-volume with:
-
-```bash
-docker compose down
-```
-
-See [Self-hosting Vifu](docs/self-hosting.md) for configuration and upgrades.
-
-## Run From Source
-
-```bash
-cd crates/vifu
-cargo run
-```
-
-On first run, `vifu` creates its local configuration under `~/.vifu/`. The
-default configuration runs Server and Agent Gateway roles together and stores
-durable state in `~/.vifu/vifu.sqlite`. The API listens on
-`http://127.0.0.1:6790`.
-
-The same binary can run either role separately when a deployment needs
-independent processes. Use Docker Compose when you also need the operations
-Console and PostgreSQL-backed self-hosting.
-
-## Architecture
-
-Vifu has one runtime model and two optional deployment components:
-
-| Component | Primary resource | Role |
-| --- | --- | --- |
-| Embedded Runtime | One application or project | Registers providers, agents, named endpoints, sessions, state, and effects inside the host process |
-| Vifu Server | Many projects | Adds HTTP/WebSocket APIs, project keys, provider configuration, database persistence, and traces |
-| Agent Gateway | One Server connection | Connects provider resources on another machine to Server over an authenticated multiplexed transport |
-| Operations Console | One Server deployment | Operates Server projects, providers, keys, gateways, and traces |
-
-Embedded applications call `VifuRuntime` directly:
-
-```text
-Application -> VifuRuntime -> local or remote provider
-```
-
-Multi-project deployments use Server and can add any number of Gateways:
-
-```text
-Application -> Vifu Server -> SQLite or PostgreSQL
-                     |
-                     +-> Vifu Gateway A -> provider agents
-                     +-> Vifu Gateway B -> provider agents
-                     +-> Vifu Gateway N -> provider agents
-
-Console -----> Vifu Server
-```
-
-Agent Gateway is a Server transport, so it connects to a running Vifu Server.
-The embedded Runtime is independently usable: a host registers its provider
-implementations directly and owns its snapshot storage.
-
-Server organizes runtime configuration with four resources:
-
-```text
-Project
-  +-- Deployment: development (primary)
-  |     +-- active Runtime Release
-  |     +-- paired Gateway(s)
-  |     +-- sync, trace, and remote-call policies
-  +-- Deployment: staging
-        +-- active Runtime Release
-        +-- paired Gateway(s)
-```
-
-A **Project** is the stable application boundary. A **Deployment** is a named
-runtime environment for that project. A **Runtime Release** is an immutable,
-portable manifest of providers, agents, and endpoints; activating an earlier
-release rolls a deployment back without changing the project endpoint. A
-**Gateway** connects the provider resources available on one device or network
-to a selected deployment.
-
-Applications call a project-scoped, OpenAI-compatible endpoint:
+Open `http://localhost:6791`. Applications call a project-scoped,
+OpenAI-compatible endpoint:
 
 ```http
-POST http://localhost:6790/my-project/v1/chat/completions
+POST http://localhost:6790/my-product/v1/chat/completions
 Authorization: Bearer vifu_pk_...
 Content-Type: application/json
 
@@ -160,73 +233,41 @@ Content-Type: application/json
 }
 ```
 
-A Vifu Gateway connects provider resources to the Server over one authenticated,
-multiplexed WebSocket. Projects, profiles, API keys, provider settings, and
-traces use embedded SQLite locally and PostgreSQL in the Docker self-hosted
-stack.
+See [Self-host Vifu](docs/self-hosting.md) for enrollment, network boundaries,
+and upgrades.
 
-## Embedded Runtime
-
-`crates/vifu-runtime` is the public Bevy-based execution kernel for embedded
-applications. It supplies:
-
-- dynamic provider, agent, and named endpoint registration;
-- async invocation and non-blocking start/poll/cancel APIs with ordered output
-  events for game loops;
-- independent session state with host-provided storage;
-- portable project snapshot export and restore;
-- a deterministic runtime schedule;
-- command and effect-result queues;
-- event and effect-request queues;
-- JSON state and revisioned snapshots;
-- a standard Bevy `Plugin` extension point.
-
-It does not prescribe a graph language, narrative schema, or editor format.
-Application-specific behavior stays in provider adapters and application
-plugins. See [Embed the runtime](docs/runtime-embedding.md).
-
-## Repository Layout
+## Architecture
 
 ```text
-crates/
-  vifu/               Single executable and Agent Gateway
-  vifu-gateway/       Provider and protocol building blocks
-  vifu-runtime/       Embeddable Bevy runtime primitives
-  vifu-server/        HTTP API, relay, traces, and durable storage
-npm-packages/
-  dashboard/          Lightweight operations Console
-providers/            Provider integration guides
+Embedded product
+  UI / game loop -> VifuRuntime -> local provider
+                       |
+                       +-> optional EmbeddedRuntimeGateway
+                                      |
+Application -> project endpoint -> Vifu Server -> Gateway -> provider agents
+                                      |
+Console ------------------------------+ projects / releases / traces
 ```
+
+| Component | Responsibility |
+| --- | --- |
+| Embedded Runtime | One product's providers, agents, endpoints, sessions, state, effects, and invocation lifecycle |
+| Vifu Server | Multi-project HTTP/WebSocket access, keys, deployment state, routing, and traces |
+| Agent Gateway | Authenticated, multiplexed transport between provider resources and Server |
+| Operations Console | One operating surface for projects, deployments, agents, Gateways, keys, and traces |
 
 ## Documentation
 
+- [Documentation index](docs/README.md)
 - [Install from source](docs/install.md)
+- [Embed the Runtime](docs/runtime-embedding.md)
 - [Self-host Vifu](docs/self-hosting.md)
-- [Embed the runtime](docs/runtime-embedding.md)
-- [crates.io release contract](docs/crates-io.md)
+- [Positioning and related projects](docs/comparison.md)
 - [Provider integrations](providers/README.md)
 - [Build and test](BUILD.md)
 
-## Related Agent Runtimes
-
-These open-source projects solve adjacent parts of the agent runtime stack. The
-comparison describes each project's primary model, not an exhaustive feature
-checklist.
-
-| Project | Primary model | How Vifu differs |
-| --- | --- | --- |
-| [ADK-Rust](https://github.com/zavora-ai/adk-rust) | Rust framework and execution runtime for defining agents, tools, workflows, sessions, memory, and servers | Vifu centers the project-level contract through which applications access agents exposed by local or remote providers |
-| [Google Agent Development Kit](https://github.com/google/adk-python) | Code-first framework for building, evaluating, orchestrating, and deploying agent systems | Vifu centers stable project endpoints, provider connections, access, durable state, and traces at the application boundary |
-| [LangGraph](https://github.com/langchain-ai/langgraph) | Graph orchestration framework and runtime for long-running, stateful agents and workflows | Vifu organizes agents and access around a project rather than a workflow graph |
-| [Cloudflare Agents SDK](https://github.com/cloudflare/agents) | Cloudflare-hosted runtime for durable agent instances, state, sessions, connections, and scheduling | Vifu keeps the application contract portable across agents running on local or remote providers |
-
-**Vifu does not replace agent providers. It gives applications a stable,
-stateful runtime contract for accessing agents across local and remote
-providers.**
-
 Read [CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request. Report
-security issues through the private process in [SECURITY.md](SECURITY.md).
+security issues through [SECURITY.md](SECURITY.md).
 
 Vifu is licensed under [Apache-2.0](LICENSE). The license does not grant rights
-to the Vifu name and logos; see
-[TRADEMARKS.md](TRADEMARKS.md).
+to the Vifu name and logos; see [TRADEMARKS.md](TRADEMARKS.md).

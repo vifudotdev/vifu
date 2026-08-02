@@ -13,7 +13,11 @@ cargo run
 
 The first run creates `~/.vifu/config.json` and
 `~/.vifu/providers.json`. With the default configuration, one process runs the
-Server and Agent Gateway roles and stores state in `~/.vifu/vifu.sqlite`.
+Server and Agent Gateway roles. Runtime and Gateway state is stored in
+`~/.vifu/runtime.sqlite`; local Server data is stored separately in
+`~/.vifu/vifu.sqlite`.
+Add `llama` or `local-whisper` entries to `providers.json` to load local models
+in the same process; see [Agent Providers](../providers/README.md).
 
 ## Run The Console
 

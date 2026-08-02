@@ -1,9 +1,10 @@
 # Agent Providers
 
-Vifu Agent Gateway connects Vifu to external agent providers. Providers own
-their own model credentials, workspaces, tools, memory, and agent definitions.
-Vifu discovers what a provider exposes, then makes those agents manageable
-through Projects, endpoints, keys, status, and logs.
+Vifu Agent Gateway connects Vifu to external and in-process Agent Providers.
+External providers own their model credentials, workspaces, tools, memory, and
+agent definitions. In-process providers keep their model and resource settings
+in the local Provider registry. Vifu makes the resulting capabilities
+manageable through Projects, endpoints, keys, status, and logs.
 
 Provider registrations use the same Vifu Server, Dashboard, database, and Agent
 Gateway deployment. You can add, disable, replace, or delete a registration
@@ -27,11 +28,13 @@ Vifu reads provider registrations from the user configuration file at
 }
 ```
 
-`key` is the stable Vifu-side provider identifier. `type` selects the adapter.
-`url` is the provider's API endpoint. `auth.token` is the provider credential
-used by the adapter. Create `providers.json` before connecting a provider to a
-Vifu project.
+`key` is the stable Vifu-side provider identifier and `type` selects the
+adapter. Network providers use `url` and may use `auth.token`. In-process
+providers use `config` for device-local settings such as a model path. Create
+`providers.json` before connecting a provider to a Vifu project.
 
 | Provider | Status | Guide |
 | --- | --- | --- |
 | OpenClaw | Supported local provider | [OpenClaw](openclaw/) |
+| llama.cpp GGUF | Supported in-process provider | [Local llama](llama/) |
+| Whisper GGML | Supported in-process provider | [Local Whisper](local-whisper/) |

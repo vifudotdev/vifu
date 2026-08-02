@@ -9,7 +9,7 @@ LOCAL_XCFRAMEWORK="$REPO_ROOT/Frameworks/VifuMobileFFI.xcframework"
 SWIFT_SOURCE="$REPO_ROOT/apple/Sources/Vifu/Vifu.swift"
 FFI_CRATE="vifu-mobile-ffi"
 FFI_LIBRARY="libvifu_mobile_ffi.a"
-FFI_FEATURES="${VIFU_APPLE_FFI_FEATURES:-local-llama}"
+FFI_FEATURES="${VIFU_APPLE_FFI_FEATURES:-local-llama,local-whisper}"
 UPDATE_BINDINGS=false
 MACOS_ONLY=false
 

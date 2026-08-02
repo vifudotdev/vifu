@@ -13,13 +13,9 @@ vifu
 
 The default binary runs Vifu Server and Agent Gateway according to the local
 Vifu configuration. Runtime and Gateway state use `~/.vifu/runtime.sqlite`; the
-local Server uses `~/.vifu/vifu.sqlite`. It includes
-the in-process llama.cpp Provider; configure GGUF models in
-`~/.vifu/providers.json`. Local Whisper support is opt-in:
-
-```bash
-cargo install vifu --features local-whisper
-```
+local Server uses `~/.vifu/vifu.sqlite`. It includes provider features shipped
+by this package, including the in-process llama.cpp and Local Whisper Providers.
+Configure local models in `~/.vifu/providers.json`.
 
 Rust applications that embed the execution kernel should depend on
 [`vifu-runtime`](https://crates.io/crates/vifu-runtime) instead of this

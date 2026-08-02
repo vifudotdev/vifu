@@ -535,9 +535,9 @@ fileprivate struct FfiConverterData: FfiConverterRustBuffer {
 public protocol VifuEmbeddedGatewayProtocol: AnyObject, Sendable {
 
     /**
-     * Starts the optional network Gateway. The credential remains in memory.
+     * Starts the optional network Gateway with caller-owned credential storage.
      */
-    func start(gatewayCredential: String, enrollmentToken: String?) throws
+    func start(machinePrivateKey: String, deviceToken: String?, enrollmentToken: String?) throws
 
     func status() throws  -> VifuEmbeddedGatewayStatus
 
@@ -602,12 +602,13 @@ public convenience init(runtime: VifuEmbeddedRuntime, config: VifuEmbeddedGatewa
 
 
     /**
-     * Starts the optional network Gateway. The credential remains in memory.
+     * Starts the optional network Gateway with caller-owned credential storage.
      */
-open func start(gatewayCredential: String, enrollmentToken: String?)throws   {try rustCallWithError(FfiConverterTypeVifuRuntimeError_lift) {
+open func start(machinePrivateKey: String, deviceToken: String?, enrollmentToken: String?)throws   {try rustCallWithError(FfiConverterTypeVifuRuntimeError_lift) {
     uniffi_vifu_mobile_ffi_fn_method_vifuembeddedgateway_start(
             self.uniffiCloneHandle(),
-        FfiConverterString.lower(gatewayCredential),
+        FfiConverterString.lower(machinePrivateKey),
+        FfiConverterOptionString.lower(deviceToken),
         FfiConverterOptionString.lower(enrollmentToken),$0
     )
 }
@@ -1042,14 +1043,14 @@ public func FfiConverterTypeVifuEmbeddedRuntime_lower(_ value: VifuEmbeddedRunti
 
 public struct VifuEmbeddedGatewayConfig: Equatable, Hashable {
     public var serverUrl: String
-    public var gatewayId: String
+    public var dashboardUrl: String?
     public var runtimeDatabasePath: String
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(serverUrl: String, gatewayId: String, runtimeDatabasePath: String) {
+    public init(serverUrl: String, dashboardUrl: String?, runtimeDatabasePath: String) {
         self.serverUrl = serverUrl
-        self.gatewayId = gatewayId
+        self.dashboardUrl = dashboardUrl
         self.runtimeDatabasePath = runtimeDatabasePath
     }
 
@@ -1068,14 +1069,14 @@ public struct FfiConverterTypeVifuEmbeddedGatewayConfig: FfiConverterRustBuffer 
         return
             try VifuEmbeddedGatewayConfig(
                 serverUrl: FfiConverterString.read(from: &buf),
-                gatewayId: FfiConverterString.read(from: &buf),
+                dashboardUrl: FfiConverterOptionString.read(from: &buf),
                 runtimeDatabasePath: FfiConverterString.read(from: &buf)
         )
     }
 
     public static func write(_ value: VifuEmbeddedGatewayConfig, into buf: inout [UInt8]) {
         FfiConverterString.write(value.serverUrl, into: &buf)
-        FfiConverterString.write(value.gatewayId, into: &buf)
+        FfiConverterOptionString.write(value.dashboardUrl, into: &buf)
         FfiConverterString.write(value.runtimeDatabasePath, into: &buf)
     }
 }
@@ -1099,12 +1100,18 @@ public func FfiConverterTypeVifuEmbeddedGatewayConfig_lower(_ value: VifuEmbedde
 public struct VifuEmbeddedGatewayStatus: Equatable, Hashable {
     public var state: VifuEmbeddedGatewayState
     public var lastError: String?
+    public var guestProject: VifuGuestProject?
+    public var authorization: VifuGatewayAuthorization?
+    public var pairing: VifuGatewayPairing?
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(state: VifuEmbeddedGatewayState, lastError: String?) {
+    public init(state: VifuEmbeddedGatewayState, lastError: String?, guestProject: VifuGuestProject?, authorization: VifuGatewayAuthorization?, pairing: VifuGatewayPairing?) {
         self.state = state
         self.lastError = lastError
+        self.guestProject = guestProject
+        self.authorization = authorization
+        self.pairing = pairing
     }
 
 
@@ -1122,13 +1129,19 @@ public struct FfiConverterTypeVifuEmbeddedGatewayStatus: FfiConverterRustBuffer 
         return
             try VifuEmbeddedGatewayStatus(
                 state: FfiConverterTypeVifuEmbeddedGatewayState.read(from: &buf),
-                lastError: FfiConverterOptionString.read(from: &buf)
+                lastError: FfiConverterOptionString.read(from: &buf),
+                guestProject: FfiConverterOptionTypeVifuGuestProject.read(from: &buf),
+                authorization: FfiConverterOptionTypeVifuGatewayAuthorization.read(from: &buf),
+                pairing: FfiConverterOptionTypeVifuGatewayPairing.read(from: &buf)
         )
     }
 
     public static func write(_ value: VifuEmbeddedGatewayStatus, into buf: inout [UInt8]) {
         FfiConverterTypeVifuEmbeddedGatewayState.write(value.state, into: &buf)
         FfiConverterOptionString.write(value.lastError, into: &buf)
+        FfiConverterOptionTypeVifuGuestProject.write(value.guestProject, into: &buf)
+        FfiConverterOptionTypeVifuGatewayAuthorization.write(value.authorization, into: &buf)
+        FfiConverterOptionTypeVifuGatewayPairing.write(value.pairing, into: &buf)
     }
 }
 
@@ -1148,15 +1161,129 @@ public func FfiConverterTypeVifuEmbeddedGatewayStatus_lower(_ value: VifuEmbedde
 }
 
 
-public struct VifuGeneratedGatewayIdentity: Equatable, Hashable {
+public struct VifuGatewayAuthorization: Equatable, Hashable {
     public var gatewayId: String
-    public var credential: String
+    public var deviceToken: String
+    public var generation: UInt64
+    public var expiresAt: String
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(gatewayId: String, credential: String) {
+    public init(gatewayId: String, deviceToken: String, generation: UInt64, expiresAt: String) {
         self.gatewayId = gatewayId
-        self.credential = credential
+        self.deviceToken = deviceToken
+        self.generation = generation
+        self.expiresAt = expiresAt
+    }
+
+
+}
+
+#if compiler(>=6)
+extension VifuGatewayAuthorization: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeVifuGatewayAuthorization: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> VifuGatewayAuthorization {
+        return
+            try VifuGatewayAuthorization(
+                gatewayId: FfiConverterString.read(from: &buf),
+                deviceToken: FfiConverterString.read(from: &buf),
+                generation: FfiConverterUInt64.read(from: &buf),
+                expiresAt: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: VifuGatewayAuthorization, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.gatewayId, into: &buf)
+        FfiConverterString.write(value.deviceToken, into: &buf)
+        FfiConverterUInt64.write(value.generation, into: &buf)
+        FfiConverterString.write(value.expiresAt, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeVifuGatewayAuthorization_lift(_ buf: RustBuffer) throws -> VifuGatewayAuthorization {
+    return try FfiConverterTypeVifuGatewayAuthorization.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeVifuGatewayAuthorization_lower(_ value: VifuGatewayAuthorization) -> RustBuffer {
+    return FfiConverterTypeVifuGatewayAuthorization.lower(value)
+}
+
+
+public struct VifuGatewayPairing: Equatable, Hashable {
+    public var requestId: String
+    public var authUrl: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(requestId: String, authUrl: String) {
+        self.requestId = requestId
+        self.authUrl = authUrl
+    }
+
+
+}
+
+#if compiler(>=6)
+extension VifuGatewayPairing: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeVifuGatewayPairing: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> VifuGatewayPairing {
+        return
+            try VifuGatewayPairing(
+                requestId: FfiConverterString.read(from: &buf),
+                authUrl: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: VifuGatewayPairing, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.requestId, into: &buf)
+        FfiConverterString.write(value.authUrl, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeVifuGatewayPairing_lift(_ buf: RustBuffer) throws -> VifuGatewayPairing {
+    return try FfiConverterTypeVifuGatewayPairing.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeVifuGatewayPairing_lower(_ value: VifuGatewayPairing) -> RustBuffer {
+    return FfiConverterTypeVifuGatewayPairing.lower(value)
+}
+
+
+public struct VifuGeneratedGatewayIdentity: Equatable, Hashable {
+    public var machineId: String
+    public var publicKey: String
+    public var privateKey: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(machineId: String, publicKey: String, privateKey: String) {
+        self.machineId = machineId
+        self.publicKey = publicKey
+        self.privateKey = privateKey
     }
 
 
@@ -1173,14 +1300,16 @@ public struct FfiConverterTypeVifuGeneratedGatewayIdentity: FfiConverterRustBuff
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> VifuGeneratedGatewayIdentity {
         return
             try VifuGeneratedGatewayIdentity(
-                gatewayId: FfiConverterString.read(from: &buf),
-                credential: FfiConverterString.read(from: &buf)
+                machineId: FfiConverterString.read(from: &buf),
+                publicKey: FfiConverterString.read(from: &buf),
+                privateKey: FfiConverterString.read(from: &buf)
         )
     }
 
     public static func write(_ value: VifuGeneratedGatewayIdentity, into buf: inout [UInt8]) {
-        FfiConverterString.write(value.gatewayId, into: &buf)
-        FfiConverterString.write(value.credential, into: &buf)
+        FfiConverterString.write(value.machineId, into: &buf)
+        FfiConverterString.write(value.publicKey, into: &buf)
+        FfiConverterString.write(value.privateKey, into: &buf)
     }
 }
 
@@ -1197,6 +1326,66 @@ public func FfiConverterTypeVifuGeneratedGatewayIdentity_lift(_ buf: RustBuffer)
 #endif
 public func FfiConverterTypeVifuGeneratedGatewayIdentity_lower(_ value: VifuGeneratedGatewayIdentity) -> RustBuffer {
     return FfiConverterTypeVifuGeneratedGatewayIdentity.lower(value)
+}
+
+
+public struct VifuGuestProject: Equatable, Hashable {
+    public var projectSlug: String
+    public var endpointPath: String
+    public var claimToken: String
+    public var expiresAt: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(projectSlug: String, endpointPath: String, claimToken: String, expiresAt: String) {
+        self.projectSlug = projectSlug
+        self.endpointPath = endpointPath
+        self.claimToken = claimToken
+        self.expiresAt = expiresAt
+    }
+
+
+}
+
+#if compiler(>=6)
+extension VifuGuestProject: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeVifuGuestProject: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> VifuGuestProject {
+        return
+            try VifuGuestProject(
+                projectSlug: FfiConverterString.read(from: &buf),
+                endpointPath: FfiConverterString.read(from: &buf),
+                claimToken: FfiConverterString.read(from: &buf),
+                expiresAt: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: VifuGuestProject, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.projectSlug, into: &buf)
+        FfiConverterString.write(value.endpointPath, into: &buf)
+        FfiConverterString.write(value.claimToken, into: &buf)
+        FfiConverterString.write(value.expiresAt, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeVifuGuestProject_lift(_ buf: RustBuffer) throws -> VifuGuestProject {
+    return try FfiConverterTypeVifuGuestProject.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeVifuGuestProject_lower(_ value: VifuGuestProject) -> RustBuffer {
+    return FfiConverterTypeVifuGuestProject.lower(value)
 }
 
 
@@ -2410,6 +2599,78 @@ fileprivate struct FfiConverterOptionString: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionTypeVifuGatewayAuthorization: FfiConverterRustBuffer {
+    typealias SwiftType = VifuGatewayAuthorization?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeVifuGatewayAuthorization.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeVifuGatewayAuthorization.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionTypeVifuGatewayPairing: FfiConverterRustBuffer {
+    typealias SwiftType = VifuGatewayPairing?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeVifuGatewayPairing.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeVifuGatewayPairing.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionTypeVifuGuestProject: FfiConverterRustBuffer {
+    typealias SwiftType = VifuGuestProject?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeVifuGuestProject.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeVifuGuestProject.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterOptionTypeVifuInvocationResult: FfiConverterRustBuffer {
     typealias SwiftType = VifuInvocationResult?
 
@@ -2510,8 +2771,8 @@ public func defaultVifuRuntimeConfig() -> VifuRuntimeConfig  {
     )
 })
 }
-public func generateVifuGatewayIdentity() -> VifuGeneratedGatewayIdentity  {
-    return try!  FfiConverterTypeVifuGeneratedGatewayIdentity_lift(try! rustCall() {
+public func generateVifuGatewayIdentity()throws  -> VifuGeneratedGatewayIdentity  {
+    return try  FfiConverterTypeVifuGeneratedGatewayIdentity_lift(try rustCallWithError(FfiConverterTypeVifuRuntimeError_lift) {
     uniffi_vifu_mobile_ffi_fn_func_generate_vifu_gateway_identity($0
     )
 })
@@ -2556,7 +2817,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_vifu_mobile_ffi_checksum_func_default_vifu_runtime_config() != 26688) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_vifu_mobile_ffi_checksum_func_generate_vifu_gateway_identity() != 46793) {
+    if (uniffi_vifu_mobile_ffi_checksum_func_generate_vifu_gateway_identity() != 6028) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_vifu_mobile_ffi_checksum_func_parse_vifu_openclaw_endpoint() != 65405) {
@@ -2568,7 +2829,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_vifu_mobile_ffi_checksum_func_vifu_agent_gateway_websocket_url() != 29614) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_vifu_mobile_ffi_checksum_method_vifuembeddedgateway_start() != 64091) {
+    if (uniffi_vifu_mobile_ffi_checksum_method_vifuembeddedgateway_start() != 30311) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_vifu_mobile_ffi_checksum_method_vifuembeddedgateway_status() != 52520) {

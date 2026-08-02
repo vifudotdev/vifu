@@ -23,7 +23,8 @@ checks do not require a synchronous native callback.
 
 Apple application developers can add `https://github.com/vifudotdev/vifu` as a
 Swift Package and select the `Vifu` product. The release package contains the
-generated Swift source and a checksum-verified XCFramework.
+generated Swift source and a checksum-verified XCFramework built with the
+default mobile provider features, including in-process llama and Local Whisper.
 
 Build the Apple distribution artifact from the repository root:
 

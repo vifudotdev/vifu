@@ -125,6 +125,21 @@ impl HttpCapabilityProvider {
         })
     }
 
+    pub fn local(name: impl Into<String>) -> Result<Self, RuntimeError> {
+        let name = name.into();
+        if name.trim().is_empty() {
+            return Err(RuntimeError::InvalidDefinition(
+                "provider name is required".to_string(),
+            ));
+        }
+        Ok(Self {
+            name,
+            base_url: String::new(),
+            token: None,
+            routes: HashMap::new(),
+        })
+    }
+
     pub fn add_route(
         &mut self,
         capability: impl Into<String>,
@@ -272,7 +287,11 @@ impl AgentProvider for HttpCapabilityProvider {
                             "text": local_whisper_transcription(
                                 model_path,
                                 audio,
-                                language.as_deref(),
+                                request
+                                    .metadata
+                                    .pointer("/binding/language")
+                                    .and_then(Value::as_str)
+                                    .or(language.as_deref()),
                             )
                             .map_err(|message| RuntimeError::provider(&self.name, message))?,
                         })),

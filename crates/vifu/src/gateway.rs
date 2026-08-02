@@ -52,6 +52,10 @@ pub async fn run(
         print_server_config(&config)?;
         let openclaw_providers = config.openclaw_providers().cloned().collect::<Vec<_>>();
         let llama_providers = config.llama_providers().cloned().collect::<Vec<_>>();
+        let local_whisper_providers = config
+            .local_whisper_providers()
+            .cloned()
+            .collect::<Vec<_>>();
         let openai_compatible_providers = config
             .openai_compatible_providers()
             .cloned()
@@ -63,6 +67,7 @@ pub async fn run(
         }
         let has_configured_providers = !openclaw_providers.is_empty()
             || !llama_providers.is_empty()
+            || !local_whisper_providers.is_empty()
             || !openai_compatible_providers.is_empty();
         let mut runtime_providers: Vec<Arc<dyn relay::AgentGatewayProvider>> = Vec::new();
         let mut agents = Vec::new();
@@ -74,6 +79,12 @@ pub async fn run(
                     .parent()
                     .unwrap_or_else(|| Path::new(".")),
             )?;
+            runtime_providers.push(runtime_provider);
+            agents.push(agent);
+        }
+        for provider in local_whisper_providers {
+            let (runtime_provider, agent) =
+                load_local_whisper_provider(provider, &config.home_dir)?;
             runtime_providers.push(runtime_provider);
             agents.push(agent);
         }
@@ -237,6 +248,7 @@ pub async fn status(
         print_agent_provider_config(config);
     }
     print_llama_provider_status(config)?;
+    print_local_whisper_provider_status(config)?;
     print_openai_compatible_provider_status(config).await;
     print_agent_provider_status(config).await;
     print_stored_session(config, dashboard_url, session_scope)?;
@@ -257,6 +269,7 @@ pub async fn doctor(
         print_agent_provider_config(config);
     }
     print_llama_provider_status(config)?;
+    print_local_whisper_provider_status(config)?;
     print_openai_compatible_provider_status(config).await;
     let providers = print_agent_provider_status(config).await;
     print_stored_session(config, dashboard_url, session_scope)?;
@@ -421,7 +434,7 @@ fn has_supported_gateway_provider(config: &Config) -> bool {
     config.agent_providers.iter().any(|provider| {
         matches!(
             provider.provider_type.as_str(),
-            "llama" | "openclaw" | "openai-compatible"
+            "llama" | "local-whisper" | "openclaw" | "openai-compatible"
         )
     })
 }
@@ -534,6 +547,107 @@ fn print_llama_provider_status(config: &Config) -> Result<(), String> {
 fn print_llama_provider_status(config: &Config) -> Result<(), String> {
     for provider in config.llama_providers() {
         println!("  {} (Llama): unavailable in this Vifu build", provider.id);
+    }
+    Ok(())
+}
+
+#[cfg(feature = "local-whisper")]
+fn load_local_whisper_provider(
+    provider: AgentProviderConfig,
+    home_dir: &Path,
+) -> Result<
+    (
+        Arc<dyn relay::AgentGatewayProvider>,
+        vifu_gateway::protocol::AgentDescriptor,
+    ),
+    String,
+> {
+    let model = provider_config_text(&provider.config, "model").ok_or_else(|| {
+        format!(
+            "local-whisper provider {} requires config.model",
+            provider.id
+        )
+    })?;
+    let model_path = providers::resolve_local_model_path(home_dir, &model)?;
+    if !model_path.is_file() {
+        return Err(format!(
+            "local-whisper provider {} model file is missing in ~/.vifu/models: {}",
+            provider.id, model
+        ));
+    }
+    let language = provider_config_text(&provider.config, "language");
+    let mut local_provider = providers::HttpCapabilityProvider::local(provider.id.clone())
+        .map_err(|error| error.public_message())?;
+    local_provider
+        .add_route(
+            "transcription",
+            providers::HttpCapabilityRoute::LocalWhisper {
+                model_path,
+                language,
+            },
+        )
+        .map_err(|error| error.public_message())?;
+    let runtime_provider =
+        relay::InProcessGatewayProvider::new(provider.id.clone(), Arc::new(local_provider))?;
+    let name = provider.name.unwrap_or_else(|| provider.id.clone());
+    let agent = vifu_gateway::protocol::AgentDescriptor {
+        id: provider.id.clone(),
+        name,
+        metadata: serde_json::json!({
+            "providerKey": provider.id,
+            "providerType": "vifu-runtime",
+            "localProviderType": "local-whisper",
+            "capabilities": ["transcription"],
+            "inputModalities": ["audio"],
+        }),
+    };
+    Ok((Arc::new(runtime_provider), agent))
+}
+
+#[cfg(not(feature = "local-whisper"))]
+fn load_local_whisper_provider(
+    provider: AgentProviderConfig,
+    _home_dir: &Path,
+) -> Result<
+    (
+        Arc<dyn relay::AgentGatewayProvider>,
+        vifu_gateway::protocol::AgentDescriptor,
+    ),
+    String,
+> {
+    Err(format!(
+        "local-whisper provider {} requires a Vifu build with the local-whisper feature",
+        provider.id
+    ))
+}
+
+#[cfg(feature = "local-whisper")]
+fn print_local_whisper_provider_status(config: &Config) -> Result<(), String> {
+    for provider in config.local_whisper_providers() {
+        let model = provider_config_text(&provider.config, "model").ok_or_else(|| {
+            format!(
+                "local-whisper provider {} requires config.model",
+                provider.id
+            )
+        })?;
+        let model_path = providers::resolve_local_model_path(&config.home_dir, &model)?;
+        let status = if model_path.is_file() {
+            "model file ready"
+        } else {
+            "model file missing"
+        };
+        println!("  {} (Local Whisper): {status}", provider.id);
+    }
+    Ok(())
+}
+
+#[cfg(not(feature = "local-whisper"))]
+fn print_local_whisper_provider_status(config: &Config) -> Result<(), String> {
+    for provider in config.local_whisper_providers() {
+        println!(
+            "  {} (Local Whisper): unavailable in this Vifu build",
+            provider.id
+        );
     }
     Ok(())
 }
@@ -695,6 +809,8 @@ fn now_unix_seconds() -> Result<u64, String> {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "local-whisper")]
+    use super::load_local_whisper_provider;
     use super::{format_terminal_link, load_openai_compatible_provider, AgentProviderConfig};
     use serde_json::json;
 
@@ -735,5 +851,46 @@ mod tests {
         assert_eq!(agent.metadata["localProviderType"], "openai-compatible");
         assert_eq!(agent.metadata["capabilities"], json!(["chat", "embedding"]));
         assert_eq!(agent.metadata["inputModalities"], json!(["text", "image"]));
+    }
+
+    #[cfg(feature = "local-whisper")]
+    #[test]
+    fn local_whisper_provider_is_exposed_through_gateway_runtime() {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let home = std::env::temp_dir().join(format!("vifu-local-whisper-provider-{stamp}"));
+        let models = home.join("models");
+        std::fs::create_dir_all(&models).unwrap();
+        std::fs::write(
+            models.join("ggml-base.en.bin"),
+            b"synthetic model placeholder",
+        )
+        .unwrap();
+        let provider = AgentProviderConfig {
+            id: "local-transcriber".to_string(),
+            name: Some("Local Transcriber".to_string()),
+            provider_type: "local-whisper".to_string(),
+            url: String::new(),
+            token: None,
+            config: json!({
+                "model": "ggml-base.en.bin",
+                "language": "en"
+            }),
+        };
+
+        let (runtime_provider, agent) = load_local_whisper_provider(provider, &home).unwrap();
+
+        assert_eq!(runtime_provider.id(), "local-transcriber");
+        assert_eq!(runtime_provider.provider_type(), "vifu-runtime");
+        assert_eq!(agent.id, "local-transcriber");
+        assert_eq!(agent.name, "Local Transcriber");
+        assert_eq!(agent.metadata["providerKey"], "local-transcriber");
+        assert_eq!(agent.metadata["providerType"], "vifu-runtime");
+        assert_eq!(agent.metadata["localProviderType"], "local-whisper");
+        assert_eq!(agent.metadata["capabilities"], json!(["transcription"]));
+        assert_eq!(agent.metadata["inputModalities"], json!(["audio"]));
+        std::fs::remove_dir_all(home).unwrap();
     }
 }

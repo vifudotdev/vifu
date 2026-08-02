@@ -1,12 +1,14 @@
 # vifu-runtime
 
-`vifu-runtime` is the small, stateful execution kernel at the center of Vifu.
+`vifu-runtime` is the embeddable, stateful Agent Runtime at the center of Vifu.
 Rust applications use this crate to embed Vifu directly in their process. The
 separate `vifu` package installs the complete Server and Agent Gateway
 application.
 
 The crate uses Bevy App and ECS primitives without the renderer, windowing
-stack, database, HTTP server, or Vifu Console. It also provides the higher-level
+stack, HTTP server, or Vifu Console. The default crates.io build includes the
+SQLite store and Local Whisper provider helpers; hosts that need a smaller core
+can compile with `default-features = false`. It also provides the higher-level
 `VifuRuntime` API used by applications and Vifu Server.
 
 ## Add the runtime

@@ -32,7 +32,11 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 uuid = { version = "1", features = ["serde", "v4"] }
 vifu-gateway = { version = "0.1.3", path = "../vifu-gateway", default-features = false }
-vifu-runtime = { version = "0.1.3", path = "../vifu-runtime" }
+vifu-runtime = { version = "0.1.3", path = "../vifu-runtime", default-features = false }
+
+[features]
+default = ["local-whisper"]
+local-whisper = ["vifu-gateway/local-whisper", "vifu-runtime/local-whisper"]
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }

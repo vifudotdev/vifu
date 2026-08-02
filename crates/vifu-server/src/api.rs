@@ -3436,6 +3436,7 @@ pub async fn create_project_transcription(
     let started_at = Instant::now();
     let result = transcribe_profile_audio(
         &state,
+        project.project.id,
         &project_slug,
         &route,
         TranscriptionInvocation {
@@ -3669,6 +3670,7 @@ struct TranscriptionInvocation<'a> {
 
 async fn transcribe_profile_audio(
     state: &AppState,
+    project_id: Uuid,
     project_slug: &str,
     route: &crate::models::ProfileRoute,
     invocation: TranscriptionInvocation<'_>,
@@ -3711,6 +3713,81 @@ async fn transcribe_profile_audio(
             .map_err(|_| ApiError::Internal)?
             .map_err(ApiError::Provider)?;
             Ok(json!({ "text": text }))
+        }
+        "vifu-runtime" => {
+            let gateway_id = profile_gateway_id(route).ok_or_else(|| {
+                ApiError::Invalid(
+                    "Gateway transcription capability is missing gatewayId".to_string(),
+                )
+            })?;
+            if !db::runtime_deployment_allows_remote_invocation(
+                &state.pool,
+                project_id,
+                &gateway_id,
+            )
+            .await?
+            {
+                return Err(ApiError::Forbidden);
+            }
+            let agent_id = route.resource_id.as_deref().ok_or_else(|| {
+                ApiError::Invalid(
+                    "Gateway transcription capability is missing resourceId".to_string(),
+                )
+            })?;
+            let mut binding_config = gateway_binding_config(
+                route.capability_config.clone(),
+                &route.provider_key,
+                "transcription",
+                &route.persona,
+            )?;
+            if let Some(binding) = binding_config.as_object_mut() {
+                binding.insert("fileName".to_string(), Value::String(file_name.to_string()));
+                binding.insert(
+                    "contentType".to_string(),
+                    Value::String(content_type.to_string()),
+                );
+                if let Some(language) = language {
+                    binding.insert("language".to_string(), Value::String(language.to_string()));
+                }
+            }
+            let timeout = profile_timeout(&route.runtime, state.config.request_timeout);
+            let endpoint_route = EndpointRoute {
+                endpoint_id: route.capability_id,
+                endpoint_slug: route.profile_slug.clone(),
+                endpoint_name: route.profile_name.clone(),
+                request_timeout_ms: i32::try_from(timeout.as_millis()).unwrap_or(i32::MAX),
+                profile_id: route.profile_id,
+                binding_id: route.capability_id,
+                gateway_id,
+                agent_id: agent_id.to_string(),
+                binding_config,
+            };
+            let provider: Arc<dyn AgentProvider> = Arc::new(RelayAgentProvider::new(
+                "agent-gateway",
+                "transcription",
+                state.relay.clone(),
+                endpoint_route,
+                request_id,
+                timeout,
+            ));
+            let (output, _) = invoke_registered_provider(
+                RegisteredInvocation {
+                    project_id: project_slug,
+                    agent_id: route.profile_id,
+                    agent_name: &route.profile_name,
+                    endpoint: &route.profile_slug,
+                    capability: "transcription",
+                    timeout,
+                    request_id,
+                },
+                provider,
+                InvocationData::Binary(audio),
+            )
+            .await?;
+            match output {
+                InvocationData::Json(output) => Ok(output),
+                InvocationData::Binary(_) => Err(ApiError::Internal),
+            }
         }
         "openai-compatible" => {
             let provider =
@@ -3908,6 +3985,7 @@ async fn run_realtime_socket(
                         let audio = std::mem::take(&mut audio_buffer);
                         match transcribe_profile_audio(
                             &state,
+                            session.project_id,
                             &project_slug,
                             &route,
                             TranscriptionInvocation {
@@ -5918,10 +5996,11 @@ fn provider_adapters() -> Vec<ProviderAdapter> {
             id: "local-whisper".to_string(),
             category: "local".to_string(),
             name: "Local Whisper".to_string(),
-            description: "Run speech-to-text locally with models stored in ~/.vifu/models."
-                .to_string(),
+            description:
+                "Run speech-to-text through a local Agent Gateway provider registered in providers.json."
+                    .to_string(),
             capabilities: vec!["transcription".to_string()],
-            execution_modes: vec!["server".to_string()],
+            execution_modes: vec!["gateway".to_string()],
             supports_discovery: false,
             fields: vec![ProviderAdapterField {
                 key: "model".to_string(),
@@ -6552,7 +6631,7 @@ fn prepare_provider_connection(
 }
 
 fn validated_provider_base_url(provider_type: &str, value: &str) -> Result<String, ApiError> {
-    if provider_type == "llama" && value.trim().is_empty() {
+    if matches!(provider_type, "llama" | "local-whisper") && value.trim().is_empty() {
         return Ok(String::new());
     }
     Ok(required_text("provider base URL", value, 2048)?.to_string())

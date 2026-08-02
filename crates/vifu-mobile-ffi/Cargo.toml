@@ -20,13 +20,14 @@ serde_json.workspace = true
 thiserror.workspace = true
 tokio = { version = "1", features = ["rt"] }
 uniffi.workspace = true
-vifu-gateway = { path = "../vifu-gateway", features = ["sqlite"] }
+vifu-gateway = { path = "../vifu-gateway", default-features = false, features = ["sqlite"] }
 vifu-provider-llama = { path = "../vifu-provider-llama", optional = true }
-vifu-runtime = { path = "../vifu-runtime", features = ["sqlite"] }
+vifu-runtime = { path = "../vifu-runtime", default-features = false, features = ["sqlite"] }
 
 [features]
-default = []
+default = ["local-llama", "local-whisper"]
 local-llama = ["dep:vifu-provider-llama"]
+local-whisper = ["vifu-gateway/local-whisper", "vifu-runtime/local-whisper"]
 
 [[bin]]
 name = "uniffi-bindgen"

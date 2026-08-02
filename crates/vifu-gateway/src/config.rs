@@ -136,6 +136,12 @@ impl Config {
             .filter(|provider| provider.provider_type == "llama")
     }
 
+    pub fn local_whisper_providers(&self) -> impl Iterator<Item = &AgentProviderConfig> {
+        self.agent_providers
+            .iter()
+            .filter(|provider| provider.provider_type == "local-whisper")
+    }
+
     pub fn openai_compatible_providers(&self) -> impl Iterator<Item = &AgentProviderConfig> {
         self.agent_providers
             .iter()
@@ -317,7 +323,7 @@ fn resolve_agent_provider(
     crate::protocol::validate_identifier("agent provider type", &provider.provider_type)?;
     let provider_type = provider.provider_type.trim().to_ascii_lowercase();
     let url = provider.url.trim().to_string();
-    if provider_type != "llama" && url.is_empty() {
+    if provider_type_requires_url(&provider_type) && url.is_empty() {
         return Err(format!("agent provider {} url is required", provider.key));
     }
     if !provider.config.is_object() {
@@ -338,6 +344,10 @@ fn resolve_agent_provider(
         token,
         config: provider.config,
     })
+}
+
+fn provider_type_requires_url(provider_type: &str) -> bool {
+    !matches!(provider_type, "llama" | "local-whisper")
 }
 
 pub fn resolve_provider_token(
@@ -634,6 +644,35 @@ mod tests {
             config.agent_providers[0].config,
             json!({ "modelPath": "models/qwen.gguf", "contextSize": 4096 })
         );
+        restore_env(
+            "VIFU_AGENT_GATEWAY_BOOTSTRAP_TOKEN_FILE",
+            previous_token_file,
+        );
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn loads_local_whisper_provider_without_a_url() {
+        let _guard = env_lock().lock().unwrap();
+        let previous_token_file = std::env::var_os("VIFU_AGENT_GATEWAY_BOOTSTRAP_TOKEN_FILE");
+        let dir = unique_directory("vifu-gateway-local-whisper-provider");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("providers.json"),
+            r#"{"providers":[{"key":"local-transcriber","type":"local-whisper","config":{"model":"ggml-base.en.bin","language":"en"}}]}"#,
+        )
+        .unwrap();
+        std::env::remove_var("VIFU_AGENT_GATEWAY_BOOTSTRAP_TOKEN_FILE");
+
+        let config =
+            Config::load_from_home_dir(dir.clone(), DEFAULT_SERVER_URL.to_string(), None).unwrap();
+
+        let provider = config.local_whisper_providers().next().unwrap();
+        assert_eq!(provider.id, "local-transcriber");
+        assert!(provider.url.is_empty());
+        assert_eq!(provider.config["model"], "ggml-base.en.bin");
+        assert_eq!(provider.config["language"], "en");
+
         restore_env(
             "VIFU_AGENT_GATEWAY_BOOTSTRAP_TOKEN_FILE",
             previous_token_file,
