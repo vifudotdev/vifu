@@ -11,11 +11,14 @@ use crate::gateway_frame::{
 pub const VERSION: &str = "vifu.agent-gateway/1";
 pub const MAX_FRAME_BYTES: usize = gateway_frame::MAX_GATEWAY_FRAME_BYTES;
 pub const MAX_BODY_BYTES: usize = 512 * 1024;
+pub const MAX_INVOCATION_BODY_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_PATH_BYTES: usize = 2 * 1024;
 pub const MAX_AGENTS: usize = 256;
 
 pub const AGENT_GATEWAY_HELLO_METHOD: &str = "gateway.hello";
 pub const AGENT_GATEWAY_HELLO_REQUEST_ID: &str = "gateway.hello";
+pub const AGENT_GATEWAY_CHALLENGE_EVENT: &str = "gateway.challenge";
+pub const AGENT_GATEWAY_PAIRING_REQUIRED_EVENT: &str = "gateway.pairingRequired";
 pub const AGENT_GATEWAY_INVOKE_METHOD: &str = "agent.invoke";
 pub const AGENT_GATEWAY_CANCEL_EVENT: &str = "agent.cancel";
 pub const AGENT_GATEWAY_HEARTBEAT_EVENT: &str = "gateway.heartbeat";
@@ -32,16 +35,48 @@ pub struct AgentDescriptor {
     pub metadata: Value,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GatewayMachineProof {
+    pub id: String,
+    pub public_key: String,
+    pub signature: String,
+    pub signed_at: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GatewayHelloAuth {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device_token: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GatewayWelcomeAuth {
+    pub device_token: String,
+    pub generation: u64,
+    pub expires_at: String,
+}
+
 /// Internal semantic command for relay state machines.
 ///
 /// The WebSocket wire contract is `GatewayFrame`; do not serialize this enum directly.
 #[derive(Debug, Clone, PartialEq)]
 pub enum AgentGatewayCommand {
+    Challenge {
+        nonce: String,
+        timestamp: u64,
+        audience: String,
+    },
     Hello {
         protocol: String,
         resume_session_id: Option<Uuid>,
         agents: Vec<AgentDescriptor>,
         metadata: Value,
+        machine: GatewayMachineProof,
+        auth: GatewayHelloAuth,
+        followup: Option<String>,
     },
     Welcome {
         gateway_id: String,
@@ -49,6 +84,14 @@ pub enum AgentGatewayCommand {
         session_id: Uuid,
         heartbeat_interval_ms: u64,
         resumed: bool,
+        auth: Option<GatewayWelcomeAuth>,
+    },
+    PairingRequired {
+        request_id: Uuid,
+        auth_url: String,
+        retryable: bool,
+        recommended_next_step: String,
+        retry_after_ms: u64,
     },
     Invoke {
         request_id: Uuid,
@@ -96,6 +139,11 @@ struct HelloParams {
     agents: Vec<AgentDescriptor>,
     #[serde(default)]
     metadata: Value,
+    machine: GatewayMachineProof,
+    #[serde(default)]
+    auth: GatewayHelloAuth,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    followup: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -106,6 +154,26 @@ struct WelcomePayload {
     session_id: Uuid,
     heartbeat_interval_ms: u64,
     resumed: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    auth: Option<GatewayWelcomeAuth>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ChallengePayload {
+    nonce: String,
+    timestamp: u64,
+    audience: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct PairingRequiredPayload {
+    request_id: Uuid,
+    auth_url: String,
+    retryable: bool,
+    recommended_next_step: String,
+    retry_after_ms: u64,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -163,11 +231,26 @@ struct RuntimeConfigChangedPayload {
 pub fn to_gateway_frame(command: &AgentGatewayCommand) -> Result<GatewayFrame, String> {
     validate_command(command)?;
     match command {
+        AgentGatewayCommand::Challenge {
+            nonce,
+            timestamp,
+            audience,
+        } => event_frame(
+            AGENT_GATEWAY_CHALLENGE_EVENT,
+            &ChallengePayload {
+                nonce: nonce.clone(),
+                timestamp: *timestamp,
+                audience: audience.clone(),
+            },
+        ),
         AgentGatewayCommand::Hello {
             protocol,
             resume_session_id,
             agents,
             metadata,
+            machine,
+            auth,
+            followup,
         } => request_frame(
             AGENT_GATEWAY_HELLO_REQUEST_ID,
             AGENT_GATEWAY_HELLO_METHOD,
@@ -176,6 +259,9 @@ pub fn to_gateway_frame(command: &AgentGatewayCommand) -> Result<GatewayFrame, S
                 resume_session_id: *resume_session_id,
                 agents: agents.clone(),
                 metadata: metadata.clone(),
+                machine: machine.clone(),
+                auth: auth.clone(),
+                followup: followup.clone(),
             },
         ),
         AgentGatewayCommand::Welcome {
@@ -184,6 +270,7 @@ pub fn to_gateway_frame(command: &AgentGatewayCommand) -> Result<GatewayFrame, S
             session_id,
             heartbeat_interval_ms,
             resumed,
+            auth,
         } => response_frame(
             AGENT_GATEWAY_HELLO_REQUEST_ID,
             &WelcomePayload {
@@ -192,6 +279,23 @@ pub fn to_gateway_frame(command: &AgentGatewayCommand) -> Result<GatewayFrame, S
                 session_id: *session_id,
                 heartbeat_interval_ms: *heartbeat_interval_ms,
                 resumed: *resumed,
+                auth: auth.clone(),
+            },
+        ),
+        AgentGatewayCommand::PairingRequired {
+            request_id,
+            auth_url,
+            retryable,
+            recommended_next_step,
+            retry_after_ms,
+        } => event_frame(
+            AGENT_GATEWAY_PAIRING_REQUIRED_EVENT,
+            &PairingRequiredPayload {
+                request_id: *request_id,
+                auth_url: auth_url.clone(),
+                retryable: *retryable,
+                recommended_next_step: recommended_next_step.clone(),
+                retry_after_ms: *retry_after_ms,
             },
         ),
         AgentGatewayCommand::Invoke {
@@ -312,6 +416,9 @@ fn from_request_frame(request: RequestFrame) -> Result<AgentGatewayCommand, Stri
                 resume_session_id: params.resume_session_id,
                 agents: params.agents,
                 metadata: params.metadata,
+                machine: params.machine,
+                auth: params.auth,
+                followup: params.followup,
             })
         }
         AGENT_GATEWAY_INVOKE_METHOD => {
@@ -356,6 +463,7 @@ fn from_response_frame(response: ResponseFrame) -> Result<AgentGatewayCommand, S
             session_id: payload.session_id,
             heartbeat_interval_ms: payload.heartbeat_interval_ms,
             resumed: payload.resumed,
+            auth: payload.auth,
         });
     }
 
@@ -385,6 +493,28 @@ fn from_response_frame(response: ResponseFrame) -> Result<AgentGatewayCommand, S
 
 fn from_event_frame(event: EventFrame) -> Result<AgentGatewayCommand, String> {
     match event.event.as_str() {
+        AGENT_GATEWAY_CHALLENGE_EVENT => {
+            let payload =
+                decode_required::<ChallengePayload>(event.payload, "gateway.challenge payload")?;
+            Ok(AgentGatewayCommand::Challenge {
+                nonce: payload.nonce,
+                timestamp: payload.timestamp,
+                audience: payload.audience,
+            })
+        }
+        AGENT_GATEWAY_PAIRING_REQUIRED_EVENT => {
+            let payload = decode_required::<PairingRequiredPayload>(
+                event.payload,
+                "gateway.pairingRequired payload",
+            )?;
+            Ok(AgentGatewayCommand::PairingRequired {
+                request_id: payload.request_id,
+                auth_url: payload.auth_url,
+                retryable: payload.retryable,
+                recommended_next_step: payload.recommended_next_step,
+                retry_after_ms: payload.retry_after_ms,
+            })
+        }
         AGENT_GATEWAY_CANCEL_EVENT => {
             let payload = decode_required::<CancelPayload>(event.payload, "agent.cancel payload")?;
             Ok(AgentGatewayCommand::Cancel {
@@ -481,11 +611,26 @@ fn parse_uuid(name: &str, value: &str) -> Result<Uuid, String> {
 
 pub fn validate_command(command: &AgentGatewayCommand) -> Result<(), String> {
     match command {
+        AgentGatewayCommand::Challenge {
+            nonce,
+            timestamp,
+            audience,
+        } => {
+            validate_token("challenge nonce", nonce, 32, 256)?;
+            if *timestamp == 0 {
+                return Err("challenge timestamp is required".to_string());
+            }
+            validate_text("challenge audience", audience, 1, 512)?;
+            Ok(())
+        }
         AgentGatewayCommand::Hello {
             protocol,
             resume_session_id: _,
             agents,
             metadata,
+            machine,
+            auth,
+            followup,
         } => {
             if protocol != VERSION {
                 return Err(format!("unsupported agent gateway protocol: {protocol}"));
@@ -498,16 +643,50 @@ pub fn validate_command(command: &AgentGatewayCommand) -> Result<(), String> {
                 validate_text("agent name", &agent.name, 1, 128)?;
                 validate_json("agent metadata", &agent.metadata, 64 * 1024)?;
             }
-            validate_json("agent gateway metadata", metadata, 64 * 1024)
+            validate_json("agent gateway metadata", metadata, 64 * 1024)?;
+            validate_identifier("Gateway machine id", &machine.id)?;
+            validate_token("Gateway machine public key", &machine.public_key, 32, 256)?;
+            validate_token("Gateway machine signature", &machine.signature, 32, 256)?;
+            if machine.signed_at == 0 {
+                return Err("Gateway machine signature timestamp is required".to_string());
+            }
+            if let Some(device_token) = auth.device_token.as_deref() {
+                validate_token("Gateway device token", device_token, 48, 256)?;
+            }
+            if let Some(followup) = followup.as_deref() {
+                validate_token("Gateway follow-up", followup, 16, 512)?;
+            }
+            Ok(())
         }
         AgentGatewayCommand::Welcome {
             gateway_id,
             heartbeat_interval_ms,
+            auth,
             ..
         } => {
             validate_identifier("agent gateway id", gateway_id)?;
             if !(1_000..=60_000).contains(heartbeat_interval_ms) {
                 return Err("invalid heartbeat interval".to_string());
+            }
+            if let Some(auth) = auth {
+                validate_token("Gateway device token", &auth.device_token, 48, 256)?;
+                if auth.generation == 0 || auth.expires_at.is_empty() || auth.expires_at.len() > 64
+                {
+                    return Err("invalid Gateway authorization update".to_string());
+                }
+            }
+            Ok(())
+        }
+        AgentGatewayCommand::PairingRequired {
+            auth_url,
+            recommended_next_step,
+            retry_after_ms,
+            ..
+        } => {
+            validate_text("Gateway authorization URL", auth_url, 1, 2048)?;
+            validate_token("Gateway pairing next step", recommended_next_step, 3, 64)?;
+            if !(250..=60_000).contains(retry_after_ms) {
+                return Err("invalid Gateway pairing retry interval".to_string());
             }
             Ok(())
         }
@@ -522,7 +701,7 @@ pub fn validate_command(command: &AgentGatewayCommand) -> Result<(), String> {
             validate_channel(*channel_id)?;
             validate_identifier("agent id", agent_id)?;
             validate_json("binding", binding, 64 * 1024)?;
-            validate_json("input", input, MAX_BODY_BYTES)?;
+            validate_json("input", input, MAX_INVOCATION_BODY_BYTES)?;
             if !(500..=120_000).contains(timeout_ms) {
                 return Err("invalid request timeout".to_string());
             }
@@ -532,7 +711,7 @@ pub fn validate_command(command: &AgentGatewayCommand) -> Result<(), String> {
             channel_id, output, ..
         } => {
             validate_channel(*channel_id)?;
-            validate_json("output", output, MAX_BODY_BYTES)
+            validate_json("output", output, MAX_INVOCATION_BODY_BYTES)
         }
         AgentGatewayCommand::Error {
             request_id,
@@ -563,6 +742,45 @@ pub fn validate_command(command: &AgentGatewayCommand) -> Result<(), String> {
             }
         }
     }
+}
+
+pub fn gateway_signature_payload(
+    server_origin: &str,
+    nonce: &str,
+    challenge_timestamp: u64,
+    signed_at: u64,
+    machine_id: &str,
+    followup: Option<&str>,
+    device_token: Option<&str>,
+) -> Vec<u8> {
+    use sha2::{Digest, Sha256};
+    let token_hash = Sha256::digest(device_token.unwrap_or_default().as_bytes());
+    format!(
+        "{VERSION}\n{server_origin}\n{nonce}\n{challenge_timestamp}\n{signed_at}\n{machine_id}\ngateway\n{}\n{}",
+        followup.unwrap_or_default(),
+        hex(&token_hash),
+    )
+    .into_bytes()
+}
+
+fn validate_token(name: &str, value: &str, min: usize, max: usize) -> Result<(), String> {
+    if !(min..=max).contains(&value.len())
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':'))
+    {
+        return Err(format!("invalid {name}"));
+    }
+    Ok(())
+}
+
+fn hex(bytes: &[u8]) -> String {
+    let mut value = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        use std::fmt::Write;
+        let _ = write!(value, "{byte:02x}");
+    }
+    value
 }
 
 pub fn validate_path(path: &str) -> Result<(), String> {
@@ -654,7 +872,8 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        from_gateway_frame, to_gateway_frame, AgentDescriptor, AgentGatewayCommand, VERSION,
+        from_gateway_frame, to_gateway_frame, AgentDescriptor, AgentGatewayCommand,
+        GatewayHelloAuth, GatewayMachineProof, VERSION,
     };
     use crate::gateway_frame;
 
@@ -681,6 +900,36 @@ mod tests {
     }
 
     #[test]
+    fn round_trips_multimodal_invoke_larger_than_the_http_proxy_body_limit() {
+        let image = "A".repeat(super::MAX_BODY_BYTES + 1);
+        let command = AgentGatewayCommand::Invoke {
+            request_id: Uuid::new_v4(),
+            channel_id: 7,
+            endpoint_id: Uuid::new_v4(),
+            profile_id: Uuid::new_v4(),
+            binding_id: Uuid::new_v4(),
+            agent_id: "vision-agent".to_string(),
+            binding: json!({}),
+            input: json!({
+                "messages": [{
+                    "role": "user",
+                    "content": [{
+                        "type": "image_url",
+                        "image_url": {
+                            "url": format!("data:image/png;base64,{image}")
+                        }
+                    }]
+                }]
+            }),
+            timeout_ms: 30_000,
+        };
+
+        let value = round_trip_command_over_gateway_frame(&command);
+
+        assert_eq!(value["method"], "agent.invoke");
+    }
+
+    #[test]
     fn round_trips_resume_hello_command_over_gateway_frame() {
         let command = AgentGatewayCommand::Hello {
             protocol: VERSION.to_string(),
@@ -691,6 +940,9 @@ mod tests {
                 metadata: json!({}),
             }],
             metadata: json!({ "adapter": "openclaw" }),
+            machine: machine_proof(),
+            auth: GatewayHelloAuth::default(),
+            followup: None,
         };
         let value = round_trip_command_over_gateway_frame(&command);
         assert_eq!(value["type"], "req");
@@ -778,6 +1030,9 @@ mod tests {
             resume_session_id: None,
             agents: Vec::new(),
             metadata: json!({}),
+            machine: machine_proof(),
+            auth: GatewayHelloAuth::default(),
+            followup: None,
         };
         assert!(to_gateway_frame(&command)
             .unwrap_err()
@@ -791,6 +1046,15 @@ mod tests {
         let decoded_frame = gateway_frame::decode(&encoded).unwrap();
         assert_eq!(from_gateway_frame(decoded_frame).unwrap(), command.clone());
         value
+    }
+
+    fn machine_proof() -> GatewayMachineProof {
+        GatewayMachineProof {
+            id: format!("machine-{}", "a".repeat(64)),
+            public_key: "a".repeat(43),
+            signature: "b".repeat(86),
+            signed_at: 42,
+        }
     }
 
     fn command_request_id(command: &AgentGatewayCommand) -> Uuid {

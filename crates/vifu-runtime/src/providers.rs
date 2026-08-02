@@ -24,6 +24,9 @@ pub enum HttpCapabilityRoute {
         model: String,
         persona: Value,
     },
+    OpenAiEmbedding {
+        model: String,
+    },
     ElevenLabsSpeech {
         voice_id: String,
     },
@@ -46,6 +49,10 @@ impl fmt::Debug for HttpCapabilityRoute {
                 .debug_struct("OpenAiChat")
                 .field("model", model)
                 .field("persona", &"[REDACTED]")
+                .finish(),
+            Self::OpenAiEmbedding { model } => formatter
+                .debug_struct("OpenAiEmbedding")
+                .field("model", model)
                 .finish(),
             Self::ElevenLabsSpeech { voice_id } => formatter
                 .debug_struct("ElevenLabsSpeech")
@@ -186,6 +193,27 @@ impl AgentProvider for HttpCapabilityProvider {
                         state: None,
                     }
                 }
+                HttpCapabilityRoute::OpenAiEmbedding { model } => {
+                    let InvocationData::Json(payload) = &request.data else {
+                        return Err(RuntimeError::InvalidDefinition(
+                            "embedding capability requires JSON input".to_string(),
+                        ));
+                    };
+                    ProviderResponse {
+                        data: InvocationData::Json(
+                            openai_embeddings(
+                                &self.base_url,
+                                self.token.as_deref(),
+                                model,
+                                payload,
+                            )
+                            .await
+                            .map_err(|message| RuntimeError::provider(&self.name, message))?,
+                        ),
+                        metadata: json!({ "contentType": "application/json" }),
+                        state: None,
+                    }
+                }
                 HttpCapabilityRoute::ElevenLabsSpeech { voice_id } => {
                     let InvocationData::Json(payload) = &request.data else {
                         return Err(RuntimeError::InvalidDefinition(
@@ -284,6 +312,29 @@ pub async fn openai_chat_completion(
     .await
     .map_err(|error| format!("provider request failed: {error}"))?;
     decode_json_response(response, "chat completion").await
+}
+
+pub async fn openai_embeddings(
+    base_url: &str,
+    token: Option<&str>,
+    model: &str,
+    request: &Value,
+) -> Result<Value, String> {
+    let mut request = request.clone();
+    request
+        .as_object_mut()
+        .ok_or_else(|| "embedding request must be an object".to_string())?
+        .insert("model".to_string(), Value::String(model.to_string()));
+
+    let response = authorized(
+        reqwest::Client::new().post(provider_url(base_url, "embeddings")?),
+        token,
+    )
+    .json(&request)
+    .send()
+    .await
+    .map_err(|error| format!("embedding provider request failed: {error}"))?;
+    decode_json_response(response, "embedding").await
 }
 
 pub fn apply_persona_to_chat_request(request: &mut Value, persona: &Value) -> Result<(), String> {
@@ -640,6 +691,14 @@ mod tests {
         assert_eq!(
             provider_url("https://example.com/v1/", "chat/completions").unwrap(),
             "https://example.com/v1/chat/completions"
+        );
+    }
+
+    #[test]
+    fn appends_the_openai_embedding_path() {
+        assert_eq!(
+            provider_url("https://example.com/v1/", "embeddings").unwrap(),
+            "https://example.com/v1/embeddings"
         );
     }
 

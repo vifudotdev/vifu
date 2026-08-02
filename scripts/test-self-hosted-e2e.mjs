@@ -10,9 +10,12 @@ const command = process.argv[2] || "setup";
 let runtimeCredential = adminKey;
 
 if (command === "setup") await setup();
+else if (command === "pairing") await pairing();
+else if (command === "pairing-restart") await pairingRestart();
+else if (command === "pairing-revoke") await pairingRevoke();
 else if (command === "verify") await verify();
 else if (command === "cleanup") await cleanup();
-else throw new Error("Usage: node scripts/test-self-hosted-e2e.mjs [setup|verify|cleanup]");
+else throw new Error("Usage: node scripts/test-self-hosted-e2e.mjs [setup|pairing|pairing-restart|pairing-revoke|verify|cleanup]");
 
 async function setup() {
   assert(adminKey, "VIFU_E2E_ADMIN_KEY or VIFU_ADMIN_KEY is required");
@@ -421,6 +424,12 @@ async function verify() {
   const resumed = agentGateways.agentGateways.find((item) => item.gatewayId === state.gatewayId && item.status === "connected");
   assert(resumed, "Agent Gateway did not reconnect");
   assert(resumed.sessionId === state.sessionId, "Agent Gateway did not resume its session");
+  if (state.pairingGatewayId) {
+    const paired = await waitFor("the paired Agent Gateway to reconnect after deployment restart", async () =>
+      findConnectedGateway({ gatewayId: state.pairingGatewayId })
+    );
+    assert(paired, "Paired Agent Gateway did not reconnect after deployment restart");
+  }
   console.log(JSON.stringify({
     status: "ok",
     persistedEndpoints: state.endpointIds.length,
@@ -428,6 +437,106 @@ async function verify() {
     projectPersisted: true,
     agentGatewayResumed: true,
     authSessionPersisted: true,
+  }));
+}
+
+async function pairing() {
+  const state = JSON.parse(await readFile(statePath, "utf8"));
+  runtimeCredential = adminKey;
+  const pending = await waitFor("a pending Agent Gateway pairing request", async () => {
+    const pairings = (await request("/v1/agent-gateway-pairings")).pairings ?? [];
+    return pairings.find((item) => item.status === "pending");
+  });
+  assert(pending.machineId, "Pairing request did not include a machine id");
+  const pairPage = await fetch(`${dashboardBaseUrl}/pair?request=${encodeURIComponent(pending.id)}`, {
+    headers: { cookie: `vifu_admin_session=${state.authCookieValue}` },
+  });
+  const pairHtml = await pairPage.text();
+  assert(pairPage.ok && pairHtml.includes("Authorize this device"), "Dashboard pairing page did not render");
+
+  const approved = (await request(`/v1/agent-gateway-pairings/${pending.id}/approve`, { method: "POST" })).pairing;
+  assert(approved.status === "approved", "Pairing request was not approved");
+  const consumed = await waitFor("the approved Agent Gateway pairing request to be consumed", async () => {
+    const pairing = (await request(`/v1/agent-gateway-pairings/${pending.id}`)).pairing;
+    return pairing.status === "consumed" ? pairing : null;
+  });
+  const pairedGateway = await waitFor("the paired Agent Gateway to connect", async () =>
+    findConnectedGateway({ excludeGatewayId: state.gatewayId })
+  );
+  assert(
+    pairedGateway.agents?.some((agent) => agent.id === "guide-agent"),
+    "Paired Agent Gateway did not expose the OpenClaw guide agent",
+  );
+
+  await writeFile(statePath, `${JSON.stringify({
+    ...state,
+    pairingRequestId: consumed.id,
+    pairingMachineId: pending.machineId,
+    pairingGatewayId: pairedGateway.gatewayId,
+    pairingSessionId: pairedGateway.sessionId,
+  }, null, 2)}\n`, { mode: 0o600 });
+  console.log(JSON.stringify({
+    status: "ok",
+    pairingRequestId: consumed.id,
+    pairingGatewayId: pairedGateway.gatewayId,
+    pairingConsumed: true,
+  }));
+}
+
+async function pairingRestart() {
+  const state = JSON.parse(await readFile(statePath, "utf8"));
+  runtimeCredential = adminKey;
+  assert(state.pairingGatewayId && state.pairingMachineId, "Pairing state is missing");
+  const pairedGateway = await waitFor("the paired Agent Gateway to reconnect after restart", async () =>
+    findConnectedGateway({ gatewayId: state.pairingGatewayId })
+  );
+  assert(
+    pairedGateway.sessionId === state.pairingSessionId,
+    "Paired Agent Gateway did not resume its stored session after restart",
+  );
+  const pairings = (await request("/v1/agent-gateway-pairings")).pairings ?? [];
+  assert(
+    !pairings.some((item) => item.machineId === state.pairingMachineId && item.status === "pending"),
+    "Paired Agent Gateway requested a new pairing after restart",
+  );
+  console.log(JSON.stringify({
+    status: "ok",
+    pairingGatewayId: pairedGateway.gatewayId,
+    pairingRestartResumed: true,
+  }));
+}
+
+async function pairingRevoke() {
+  const state = JSON.parse(await readFile(statePath, "utf8"));
+  runtimeCredential = adminKey;
+  assert(state.pairingGatewayId && state.pairingMachineId, "Pairing state is missing");
+  await request(`/v1/agent-gateways/${state.pairingGatewayId}/revoke`, { method: "POST" });
+  const pending = await waitFor("a new pending Agent Gateway pairing request after revocation", async () => {
+    const pairings = (await request("/v1/agent-gateway-pairings")).pairings ?? [];
+    return pairings.find((item) =>
+      item.machineId === state.pairingMachineId
+        && item.status === "pending"
+        && item.id !== state.pairingRequestId
+    );
+  });
+  assert(pending.id, "Revoked Agent Gateway did not create a new pairing request");
+  await request(`/v1/agent-gateway-pairings/${pending.id}/approve`, { method: "POST" });
+  await waitFor("the post-revocation pairing request to be consumed", async () => {
+    const pairing = (await request(`/v1/agent-gateway-pairings/${pending.id}`)).pairing;
+    return pairing.status === "consumed" ? pairing : null;
+  });
+  const reauthorized = await waitFor("the revoked Agent Gateway to reconnect after approval", async () =>
+    findConnectedGateway({ gatewayId: state.pairingGatewayId })
+  );
+  await writeFile(statePath, `${JSON.stringify({
+    ...state,
+    pairingRevocationRequestId: pending.id,
+    pairingSessionIdAfterRevoke: reauthorized.sessionId,
+  }, null, 2)}\n`, { mode: 0o600 });
+  console.log(JSON.stringify({
+    status: "ok",
+    pairingGatewayId: reauthorized.gatewayId,
+    pairingRevokedAndReapproved: true,
   }));
 }
 
@@ -484,6 +593,30 @@ async function request(path, init = {}, credential = runtimeCredential) {
     throw new Error(`${init.method || "GET"} ${path}: ${message}`);
   }
   return payload ?? {};
+}
+
+async function findConnectedGateway({ gatewayId = null, excludeGatewayId = null }) {
+  const agentGateways = (await request("/v1/agent-gateways")).agentGateways ?? [];
+  return agentGateways.find((item) =>
+    item.status === "connected"
+      && (!gatewayId || item.gatewayId === gatewayId)
+      && (!excludeGatewayId || item.gatewayId !== excludeGatewayId)
+  ) ?? null;
+}
+
+async function waitFor(description, read, { attempts = 60, intervalMs = 1_000 } = {}) {
+  let lastError = null;
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    try {
+      const value = await read();
+      if (value) return value;
+    } catch (error) {
+      lastError = error;
+    }
+    await new Promise((resolve) => setTimeout(resolve, intervalMs));
+  }
+  const suffix = lastError instanceof Error ? `: ${lastError.message}` : "";
+  throw new Error(`Timed out waiting for ${description}${suffix}`);
 }
 
 function rawRequest(path, init = {}, credential = runtimeCredential) {

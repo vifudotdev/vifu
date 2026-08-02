@@ -2,6 +2,7 @@ pub mod config;
 pub mod control;
 pub mod embedded;
 pub mod gateway_frame;
+pub mod identity;
 pub mod openclaw;
 pub mod openclaw_rpc;
 pub mod protocol;
@@ -9,3 +10,5 @@ pub mod providers;
 pub mod relay;
 pub mod runtime_extension;
 pub mod session;
+#[cfg(feature = "sqlite")]
+pub mod session_store;

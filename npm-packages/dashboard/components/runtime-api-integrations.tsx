@@ -640,6 +640,15 @@ function ApiKeyPermissionsFields({
         onChange={(chatCompletions) => onChange({ ...permissions, chatCompletions })}
       />
       <ApiKeyPermissionRow
+        label="Embeddings"
+        value={permissions.embeddings}
+        options={[
+          { value: "none", label: "No access" },
+          { value: "access", label: "Access" },
+        ]}
+        onChange={(embeddings) => onChange({ ...permissions, embeddings })}
+      />
+      <ApiKeyPermissionRow
         label="Speech"
         value={permissions.speech}
         options={[
@@ -818,6 +827,7 @@ function selectedScopeProfileIds(scope: ApiKeyAgentScope): string[] {
 function defaultApiKeyPermissions(): ApiKeyPermissions {
   return {
     chatCompletions: "access",
+    embeddings: "access",
     speech: "none",
     transcriptions: "none",
     realtime: "none",
@@ -830,6 +840,7 @@ function defaultApiKeyPermissions(): ApiKeyPermissions {
 function formatPermissions(permissions: ApiKeyPermissions): string {
   const enabled: string[] = [];
   if (permissions.chatCompletions === "access") enabled.push("Chat completions");
+  if (permissions.embeddings === "access") enabled.push("Embeddings");
   if (permissions.speech === "access") enabled.push("Speech");
   if (permissions.transcriptions === "access") enabled.push("Transcriptions");
   if (permissions.realtime === "access") enabled.push("Realtime");

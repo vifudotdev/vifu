@@ -1,5 +1,9 @@
 use std::path::Path;
 use std::sync::Mutex;
+use std::time::Duration;
+
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 
 use rusqlite::{params, Connection, OptionalExtension};
 
@@ -9,6 +13,7 @@ use crate::{
 };
 
 const MAX_TRACE_OUTBOX_RECORDS: i64 = 1_000;
+const MAX_HOST_STATE_BYTES: usize = 64 * 1024;
 
 /// SQLite-backed application state for an embedded Vifu runtime.
 ///
@@ -32,6 +37,7 @@ impl SqliteRuntimeStore {
         }
         let connection =
             Connection::open(path).map_err(|error| RuntimeError::store(error.to_string()))?;
+        protect_state_file(path)?;
         Self::from_connection(connection)
     }
 
@@ -43,8 +49,12 @@ impl SqliteRuntimeStore {
 
     fn from_connection(connection: Connection) -> Result<Self, RuntimeError> {
         connection
+            .busy_timeout(Duration::from_secs(5))
+            .map_err(|error| RuntimeError::store(error.to_string()))?;
+        connection
             .execute_batch(
                 "PRAGMA foreign_keys = ON;
+                 PRAGMA journal_mode = WAL;
                  CREATE TABLE IF NOT EXISTS runtime_sessions (
                     project_id TEXT NOT NULL,
                     session_id TEXT NOT NULL,
@@ -80,7 +90,14 @@ impl SqliteRuntimeStore {
                     created_at_ms INTEGER NOT NULL
                  );
                  CREATE INDEX IF NOT EXISTS runtime_trace_outbox_created_idx
-                   ON runtime_trace_outbox(created_at_ms, trace_id);",
+                   ON runtime_trace_outbox(created_at_ms, trace_id);
+                 CREATE TABLE IF NOT EXISTS runtime_host_state (
+                    namespace TEXT NOT NULL,
+                    state_key TEXT NOT NULL,
+                    value_json TEXT NOT NULL,
+                    updated_at_ms INTEGER NOT NULL,
+                    PRIMARY KEY (namespace, state_key)
+                 );",
             )
             .map_err(|error| RuntimeError::store(error.to_string()))?;
         Ok(Self {
@@ -91,6 +108,85 @@ impl SqliteRuntimeStore {
     fn connection(&self) -> Result<std::sync::MutexGuard<'_, Connection>, RuntimeError> {
         self.connection.lock().map_err(|_| RuntimeError::Internal)
     }
+
+    /// Loads host-owned local state kept beside the runtime database.
+    ///
+    /// This is intended for adapters such as Agent Gateway. Portable runtime
+    /// releases must not depend on these records.
+    pub fn load_host_state(
+        &self,
+        namespace: &str,
+        state_key: &str,
+    ) -> Result<Option<serde_json::Value>, RuntimeError> {
+        validate_host_state_key(namespace, "namespace")?;
+        validate_host_state_key(state_key, "state key")?;
+        self.connection()?
+            .query_row(
+                "SELECT value_json
+                 FROM runtime_host_state
+                 WHERE namespace = ?1 AND state_key = ?2",
+                params![namespace, state_key],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(|error| RuntimeError::store(error.to_string()))?
+            .map(|value_json| {
+                serde_json::from_str(&value_json)
+                    .map_err(|error| RuntimeError::store(error.to_string()))
+            })
+            .transpose()
+    }
+
+    /// Saves bounded host-owned local state atomically.
+    pub fn save_host_state(
+        &self,
+        namespace: &str,
+        state_key: &str,
+        value: &serde_json::Value,
+    ) -> Result<(), RuntimeError> {
+        validate_host_state_key(namespace, "namespace")?;
+        validate_host_state_key(state_key, "state key")?;
+        let value_json =
+            serde_json::to_string(value).map_err(|error| RuntimeError::store(error.to_string()))?;
+        if value_json.len() > MAX_HOST_STATE_BYTES {
+            return Err(RuntimeError::store("host state is too large".to_string()));
+        }
+        let updated_at_ms = i64::try_from(crate::unix_time_ms())
+            .map_err(|error| RuntimeError::store(error.to_string()))?;
+        self.connection()?
+            .execute(
+                "INSERT INTO runtime_host_state(namespace, state_key, value_json, updated_at_ms)
+                 VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT(namespace, state_key) DO UPDATE SET
+                   value_json = excluded.value_json,
+                   updated_at_ms = excluded.updated_at_ms",
+                params![namespace, state_key, value_json, updated_at_ms],
+            )
+            .map_err(|error| RuntimeError::store(error.to_string()))?;
+        Ok(())
+    }
+}
+
+fn validate_host_state_key(value: &str, label: &str) -> Result<(), RuntimeError> {
+    if value.is_empty() || value.len() > 512 || value.chars().any(char::is_control) {
+        return Err(RuntimeError::store(format!("invalid host state {label}")));
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn protect_state_file(path: &Path) -> Result<(), RuntimeError> {
+    let mut permissions = std::fs::metadata(path)
+        .map_err(|error| RuntimeError::store(error.to_string()))?
+        .permissions();
+    permissions.set_mode(0o600);
+    std::fs::set_permissions(path, permissions)
+        .map_err(|error| RuntimeError::store(error.to_string()))
+}
+
+#[cfg(not(unix))]
+fn protect_state_file(_path: &Path) -> Result<(), RuntimeError> {
+    Ok(())
 }
 
 impl RuntimeStore for SqliteRuntimeStore {
@@ -510,5 +606,40 @@ mod tests {
         changed.manifest.metadata = json!({ "changed": true });
         changed.content_hash = changed.manifest.content_hash().unwrap();
         assert!(store.save_release(&changed).is_err());
+    }
+
+    #[test]
+    fn sqlite_store_persists_and_updates_bounded_host_state() {
+        let store = SqliteRuntimeStore::in_memory().unwrap();
+        let value = json!({ "gatewayId": "gateway-test", "resume": true });
+
+        store
+            .save_host_state(
+                "agent-gateway-session",
+                "cloud|https://api.example.com/",
+                &value,
+            )
+            .unwrap();
+
+        assert_eq!(
+            store
+                .load_host_state("agent-gateway-session", "cloud|https://api.example.com/")
+                .unwrap(),
+            Some(value)
+        );
+        let updated = json!({ "gatewayId": "gateway-test", "resume": false });
+        store
+            .save_host_state(
+                "agent-gateway-session",
+                "cloud|https://api.example.com/",
+                &updated,
+            )
+            .unwrap();
+        assert_eq!(
+            store
+                .load_host_state("agent-gateway-session", "cloud|https://api.example.com/")
+                .unwrap(),
+            Some(updated)
+        );
     }
 }

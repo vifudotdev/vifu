@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { AuthorityError, resolveAuthority } from "../../../../lib/authority";
 import { VifuHttpError } from "../../../../lib/deployment-client";
+import { isSameOriginRequest } from "../../../../lib/request-security";
 import { forwardRuntimeResponse } from "../../../../lib/runtime-proxy";
 
 const ALLOWED_ROOTS = new Set([
@@ -12,6 +13,7 @@ const ALLOWED_ROOTS = new Set([
   "models",
   "api-keys",
   "agent-gateways",
+  "agent-gateway-pairings",
   "project",
   "provider-adapters",
   "provider-catalog",
@@ -54,6 +56,9 @@ async function proxyRuntimeRequest(
   method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE",
 ): Promise<Response> {
   try {
+    if (method !== "GET" && !isSameOriginRequest(request)) {
+      return errorResponse(403, "INVALID_ORIGIN", "Invalid runtime request origin.");
+    }
     const { path } = await context.params;
     if (!isAllowedPath(path)) return errorResponse(404, "NOT_FOUND", "Resource not found.");
     const body = method === "GET" ? undefined : await readBody(request);
@@ -100,6 +105,11 @@ function isAllowedPath(path: string[]): boolean {
   if (path[0] === "provider-adapters") return path.length === 1;
   if (path[0] === "provider-catalog") return path.length === 1;
   if (path[0] === "guest") return path.length === 2 && path[1] === "claim";
+  if (path[0] === "agent-gateway-pairings") {
+    return path.length === 1
+      || path.length === 2
+      || (path.length === 3 && (path[2] === "approve" || path[2] === "reject"));
+  }
   if (path[0] === "project") {
     if (path.length < 3) return false;
     if (path[2] === "providers") {
@@ -113,6 +123,7 @@ function isAllowedPath(path: string[]): boolean {
       if (path.length === 5) {
         return path[4] === "promote" || path[4] === "agent-gateway-enrollments";
       }
+      if (path.length === 6 && path[4] === "agent-gateways") return true;
       return path.length === 7
         && path[4] === "runtime-releases"
         && path[6] === "activate";
@@ -166,7 +177,7 @@ function runtimeApiPath(path: string[]): string {
 
 function isProjectScopedEndpointPath(path: string[]): boolean {
   if (path[1] !== "v1") return false;
-  if (path.length === 3) return path[2] === "models";
+  if (path.length === 3) return path[2] === "models" || path[2] === "embeddings";
   if (path.length === 4 && path[2] === "chat") return path[3] === "completions";
   if (path.length === 4 && path[2] === "audio") {
     return path[3] === "speech" || path[3] === "transcriptions";

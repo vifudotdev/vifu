@@ -78,6 +78,10 @@ pub struct AccessTokenAuthorityConfig {
 pub struct GatewayRuntimeConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub server_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dashboard_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guest_bootstrap: Option<bool>,
 }
 
 impl LoadedRuntimeConfig {
@@ -119,7 +123,13 @@ impl LoadedRuntimeConfig {
             .unwrap_or_else(|| vifu_gateway::config::DEFAULT_SERVER_URL.to_string());
         Ok(GatewayRuntimeOptions {
             server_url,
+            dashboard_url: gateway.dashboard_url.clone(),
+            allow_guest_bootstrap: gateway.guest_bootstrap.unwrap_or(true),
             enrollment_token: None,
+            session_scope: self
+                .profile
+                .clone()
+                .unwrap_or_else(|| "default".to_string()),
         })
     }
 
@@ -181,6 +191,8 @@ impl RuntimeConfig {
             }),
             gateway: Some(GatewayRuntimeConfig {
                 server_url: Some(vifu_gateway::config::DEFAULT_SERVER_URL.to_string()),
+                dashboard_url: None,
+                guest_bootstrap: None,
             }),
         })
     }
@@ -532,11 +544,14 @@ mod tests {
 
         let gateway_only = RuntimeConfig::parse(
             Path::new("/tmp/gateway.json"),
-            r#"{"version":1,"gateway":{"serverUrl":"https://runtime.example.com"}}"#,
+            r#"{"version":1,"gateway":{"serverUrl":"https://runtime.example.com","dashboardUrl":"https://dashboard.example.com"}}"#,
         )
         .unwrap();
         assert!(gateway_only.server.is_none());
-        assert!(gateway_only.gateway.is_some());
+        assert_eq!(
+            gateway_only.gateway.unwrap().dashboard_url.as_deref(),
+            Some("https://dashboard.example.com")
+        );
     }
 
     #[test]
@@ -565,6 +580,23 @@ mod tests {
         .unwrap_err();
 
         assert!(error.contains("unknown field `enrollmentToken`"));
+    }
+
+    #[test]
+    fn gateway_can_disable_guest_bootstrap() {
+        let config = RuntimeConfig::parse(
+            Path::new("/tmp/config.json"),
+            r#"{"version":1,"gateway":{"serverUrl":"https://runtime.example.com","guestBootstrap":false}}"#,
+        )
+        .unwrap();
+        let loaded = super::LoadedRuntimeConfig {
+            path: Path::new("/tmp/config.json").to_path_buf(),
+            profile: None,
+            config,
+        };
+
+        let options = loaded.gateway_options().unwrap();
+        assert!(!options.allow_guest_bootstrap);
     }
 
     #[test]

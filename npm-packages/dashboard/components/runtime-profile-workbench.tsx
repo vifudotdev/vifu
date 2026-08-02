@@ -79,6 +79,7 @@ const TABS = [
 
 const CAPABILITY_LABELS: Record<ProfileCapabilityKind, string> = {
   chat: "Conversation",
+  embedding: "Embeddings",
   speech: "Voice",
   transcription: "Listening",
   realtime: "Live voice",
@@ -581,7 +582,7 @@ function CapabilitiesPanel({
     if (!addableKinds.includes(newKind) || !connection) return;
     onChange([...capabilities, {
       kind: newKind,
-      providerType: connection.providerType,
+      providerType: capabilityProviderType(connection.providerType),
       providerKey: connection.providerKey,
       resourceId: null,
       config: {},
@@ -615,7 +616,7 @@ function CapabilitiesPanel({
                     disabled={locked}
                     onChange={(event) => {
                       const next = providerConnections.find((item) => item.providerKey === event.target.value);
-                      if (next) updateCapability(index, { providerKey: next.providerKey, providerType: next.providerType, resourceId: null });
+                      if (next) updateCapability(index, { providerKey: next.providerKey, providerType: capabilityProviderType(next.providerType), resourceId: null });
                     }}
                   >
                     {!connection ? <option value={capability.providerKey}>{capability.providerKey}</option> : null}
@@ -954,7 +955,7 @@ function resourceLabel(kind: ProfileCapabilityKind, providerType: string): strin
   if (providerType === "openclaw") return "OpenClaw agent";
   if (kind === "speech") return "Voice ID";
   if (kind === "transcription") return "Model";
-  if (kind === "chat" || kind === "realtime") return "Model";
+  if (kind === "chat" || kind === "embedding" || kind === "realtime") return "Model";
   return "Resource ID";
 }
 
@@ -967,10 +968,15 @@ function resourcePlaceholder(kind: ProfileCapabilityKind, providerType: string):
 
 function providerSupportsCapability(providerType: string, kind: ProfileCapabilityKind): boolean {
   if (providerType === "openclaw") return kind === "chat" || kind === "tool";
-  if (providerType === "openai-compatible") return kind === "chat" || kind === "transcription" || kind === "realtime";
+  if (providerType === "openai-compatible") return kind === "chat" || kind === "embedding" || kind === "transcription" || kind === "realtime";
+  if (providerType === "llama" || providerType === "vifu-runtime") return kind === "chat" || kind === "embedding";
   if (providerType === "elevenlabs") return kind === "speech";
   if (providerType === "local-whisper") return kind === "transcription";
   return false;
+}
+
+function capabilityProviderType(providerType: string): string {
+  return providerType === "llama" ? "vifu-runtime" : providerType;
 }
 
 function testResponseText(output: unknown): string {

@@ -25,8 +25,6 @@ pub async fn execute(options: Options) -> Result<(), String> {
         Command::Start => start(load_config()?).await,
         Command::Status => status(load_config()?).await,
         Command::Doctor => doctor(load_config()?).await,
-        Command::Logout => gateway_logout(load_config()?),
-        Command::Reset => gateway_reset(load_config()?),
     }
 }
 
@@ -54,8 +52,11 @@ async fn status(config: LoadedRuntimeConfig) -> Result<(), String> {
         role_status(config.config.gateway.is_some())
     );
     if config.config.gateway.is_some() {
-        let gateway = config.gateway_options()?.load_config()?;
-        gateway::status(&gateway).await?;
+        let gateway_options = config.gateway_options()?;
+        let dashboard_url = gateway_options.dashboard_url.clone();
+        let session_scope = gateway_options.session_scope.clone();
+        let gateway = gateway_options.load_config()?;
+        gateway::status(&gateway, dashboard_url.as_deref(), &session_scope).await?;
     }
     Ok(())
 }
@@ -67,22 +68,15 @@ async fn doctor(config: LoadedRuntimeConfig) -> Result<(), String> {
         println!("Profile: {profile}");
     }
     if config.config.gateway.is_some() {
-        let gateway = config.gateway_options()?.load_config()?;
-        gateway::doctor(&gateway).await?;
+        let gateway_options = config.gateway_options()?;
+        let dashboard_url = gateway_options.dashboard_url.clone();
+        let session_scope = gateway_options.session_scope.clone();
+        let gateway = gateway_options.load_config()?;
+        gateway::doctor(&gateway, dashboard_url.as_deref(), &session_scope).await?;
     } else {
         println!("Agent Gateway: not configured");
     }
     Ok(())
-}
-
-fn gateway_logout(config: LoadedRuntimeConfig) -> Result<(), String> {
-    let gateway = config.gateway_options()?.load_config()?;
-    gateway::logout(&gateway)
-}
-
-fn gateway_reset(config: LoadedRuntimeConfig) -> Result<(), String> {
-    let gateway = config.gateway_options()?.load_config()?;
-    gateway::reset(&gateway)
 }
 
 fn role_status(enabled: bool) -> &'static str {

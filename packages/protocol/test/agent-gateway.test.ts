@@ -11,13 +11,28 @@ import {
 } from "../src";
 
 describe("@vifu/protocol agent gateway frames", () => {
-  it("uses a request/response handshake", () => {
+  it("uses a challenge and machine-signed request/response handshake", () => {
+    expect(
+      createEventFrame(VIFU_AGENT_GATEWAY_EVENTS.CHALLENGE, {
+        nonce: "a".repeat(64),
+        timestamp: 42,
+        audience: "https://runtime.example.com/v1/agent-gateway/connect",
+      }),
+    ).toEqual({
+      type: "event",
+      event: "gateway.challenge",
+      payload: {
+        nonce: "a".repeat(64),
+        timestamp: 42,
+        audience: "https://runtime.example.com/v1/agent-gateway/connect",
+      },
+    });
+
     const hello = createRequestFrame(
       AGENT_GATEWAY_HELLO_REQUEST_ID,
       VIFU_AGENT_GATEWAY_METHODS.HELLO,
       {
         protocol: VIFU_AGENT_GATEWAY_PROTOCOL_VERSION,
-        gatewayId: "local-gateway",
         agents: [
           {
             id: "default-agent",
@@ -26,6 +41,13 @@ describe("@vifu/protocol agent gateway frames", () => {
           },
         ],
         metadata: { adapter: "openclaw" },
+        machine: {
+          id: `machine-${"a".repeat(64)}`,
+          publicKey: "public-key",
+          signature: "signature",
+          signedAt: 43,
+        },
+        auth: { deviceToken: "vifu_gw_device-token" },
       },
     );
 
@@ -35,7 +57,6 @@ describe("@vifu/protocol agent gateway frames", () => {
       method: "gateway.hello",
       params: {
         protocol: "vifu.agent-gateway/1",
-        gatewayId: "local-gateway",
         agents: [
           {
             id: "default-agent",
@@ -44,25 +65,66 @@ describe("@vifu/protocol agent gateway frames", () => {
           },
         ],
         metadata: { adapter: "openclaw" },
+        machine: {
+          id: `machine-${"a".repeat(64)}`,
+          publicKey: "public-key",
+          signature: "signature",
+          signedAt: 43,
+        },
+        auth: { deviceToken: "vifu_gw_device-token" },
       },
     });
 
     expect(
       createResponseFrame(AGENT_GATEWAY_HELLO_REQUEST_ID, {
+        gatewayId: "local-gateway",
         connectionId: "connection-id",
         sessionId: "session-id",
         heartbeatIntervalMs: 10000,
         resumed: false,
+        auth: {
+          deviceToken: "vifu_gw_rotated-device-token",
+          generation: 2,
+          expiresAt: "2027-01-01T00:00:00Z",
+        },
       }),
     ).toEqual({
       type: "res",
       id: "gateway.hello",
       ok: true,
       payload: {
+        gatewayId: "local-gateway",
         connectionId: "connection-id",
         sessionId: "session-id",
         heartbeatIntervalMs: 10000,
         resumed: false,
+        auth: {
+          deviceToken: "vifu_gw_rotated-device-token",
+          generation: 2,
+          expiresAt: "2027-01-01T00:00:00Z",
+        },
+      },
+    });
+  });
+
+  it("uses an event for interactive Gateway authorization", () => {
+    expect(
+      createEventFrame(VIFU_AGENT_GATEWAY_EVENTS.PAIRING_REQUIRED, {
+        requestId: "4fc4ef6c-f7f9-4d2d-b02c-226402d864aa",
+        authUrl: "/pair?request=4fc4ef6c-f7f9-4d2d-b02c-226402d864aa",
+        retryable: true,
+        recommendedNextStep: "approve-in-dashboard",
+        retryAfterMs: 2000,
+      }),
+    ).toEqual({
+      type: "event",
+      event: "gateway.pairingRequired",
+      payload: {
+        requestId: "4fc4ef6c-f7f9-4d2d-b02c-226402d864aa",
+        authUrl: "/pair?request=4fc4ef6c-f7f9-4d2d-b02c-226402d864aa",
+        retryable: true,
+        recommendedNextStep: "approve-in-dashboard",
+        retryAfterMs: 2000,
       },
     });
   });

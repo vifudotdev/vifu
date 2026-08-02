@@ -130,16 +130,12 @@ impl RuntimeControlClient {
 
     pub async fn bootstrap_guest_project(
         server_url: &str,
-        gateway_id: &str,
         credential: &str,
     ) -> Result<GuestProjectBootstrap, String> {
         let url = server_endpoint_url(server_url, "v1/guest/bootstrap")?;
         let response = reqwest::Client::new()
             .post(url)
-            .json(&serde_json::json!({
-                "gatewayId": gateway_id,
-                "credential": credential,
-            }))
+            .bearer_auth(credential)
             .send()
             .await
             .map_err(|error| format!("guest project request failed: {error}"))?;

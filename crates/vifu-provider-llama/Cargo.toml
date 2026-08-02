@@ -12,7 +12,7 @@ exclude = ["examples/stardew_valley_gateway.rs"]
 
 [dependencies]
 encoding_rs = "0.8"
-llama-cpp-2 = { version = "=0.1.153", default-features = false, features = ["common", "sampler"] }
+llama-cpp-2 = { version = "=0.1.153", default-features = false, features = ["common", "mtmd", "sampler"] }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
@@ -24,4 +24,4 @@ tokio = { version = "1", features = ["macros", "rt", "signal"] }
 vifu-gateway = { path = "../vifu-gateway", features = ["sqlite"] }
 
 [target.'cfg(any(target_os = "ios", target_os = "macos"))'.dependencies]
-llama-cpp-2 = { version = "=0.1.153", default-features = false, features = ["common", "metal", "sampler"] }
+llama-cpp-2 = { version = "=0.1.153", default-features = false, features = ["common", "metal", "mtmd", "sampler"] }

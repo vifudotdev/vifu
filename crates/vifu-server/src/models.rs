@@ -677,9 +677,10 @@ impl ApiKeyAgentScope {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum EndpointPermission {
+    #[default]
     None,
     Access,
 }
@@ -696,6 +697,8 @@ pub enum ResourcePermission {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ApiKeyPermissions {
     pub chat_completions: EndpointPermission,
+    #[serde(default)]
+    pub embeddings: EndpointPermission,
     pub speech: EndpointPermission,
     pub transcriptions: EndpointPermission,
     pub realtime: EndpointPermission,
@@ -708,6 +711,7 @@ impl Default for ApiKeyPermissions {
     fn default() -> Self {
         Self {
             chat_completions: EndpointPermission::Access,
+            embeddings: EndpointPermission::Access,
             speech: EndpointPermission::None,
             transcriptions: EndpointPermission::None,
             realtime: EndpointPermission::None,
@@ -721,6 +725,10 @@ impl Default for ApiKeyPermissions {
 impl ApiKeyPermissions {
     pub fn chat_completions_allowed(&self) -> bool {
         self.chat_completions == EndpointPermission::Access
+    }
+
+    pub fn embeddings_allowed(&self) -> bool {
+        self.embeddings == EndpointPermission::Access
     }
 
     pub fn speech_allowed(&self) -> bool {
@@ -802,6 +810,34 @@ pub struct AgentGatewayCredential {
     pub created_at: DateTime<Utc>,
     pub last_used_at: Option<DateTime<Utc>>,
     pub revoked_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Serialize, FromRow)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentGatewayAuthorization {
+    pub gateway_id: String,
+    pub machine_id: String,
+    pub owner_user_id: Option<String>,
+    pub status: String,
+    pub token_prefix: String,
+    pub token_generation: i64,
+    pub token_expires_at: DateTime<Utc>,
+    pub last_used_at: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub revoked_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Serialize, FromRow)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentGatewayPairingRequest {
+    pub id: Uuid,
+    pub machine_id: String,
+    pub status: String,
+    pub owner_user_id: Option<String>,
+    pub expires_at: DateTime<Utc>,
+    pub created_at: DateTime<Utc>,
+    pub resolved_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, Serialize, FromRow)]
@@ -977,7 +1013,7 @@ fn default_chat_capability() -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{slugify, validate_slug};
+    use super::{slugify, validate_slug, ApiKeyPermissions, EndpointPermission};
 
     #[test]
     fn creates_stable_slugs() {
@@ -989,5 +1025,21 @@ mod tests {
     fn rejects_unsafe_slugs() {
         assert!(!validate_slug("../admin"));
         assert!(!validate_slug("A"));
+    }
+
+    #[test]
+    fn old_api_key_permissions_do_not_gain_embedding_access() {
+        let permissions = serde_json::from_value::<ApiKeyPermissions>(serde_json::json!({
+            "chatCompletions": "access",
+            "speech": "none",
+            "transcriptions": "none",
+            "realtime": "none",
+            "runtime": "none",
+            "agents": "none",
+            "project": "none"
+        }))
+        .unwrap();
+
+        assert_eq!(permissions.embeddings, EndpointPermission::None);
     }
 }

@@ -4,7 +4,7 @@ use serde::de::{self, DeserializeOwned};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 
-pub const MAX_PROTOCOL_FRAME_BYTES: usize = 16 * 1024 * 1024;
+pub const MAX_PROTOCOL_FRAME_BYTES: usize = 17 * 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RequestFrameType {

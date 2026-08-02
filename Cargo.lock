@@ -3600,10 +3600,13 @@ dependencies = [
 name = "vifu-gateway"
 version = "0.1.3"
 dependencies = [
+ "base64",
  "futures-util",
  "reqwest",
+ "ring",
  "serde",
  "serde_json",
+ "sha2 0.11.0",
  "tokio",
  "tokio-tungstenite",
  "url",

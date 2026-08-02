@@ -74,6 +74,7 @@ write_e2e_env() {
     printf '%s\n' "VIFU_AGENT_GATEWAY_BOOTSTRAP_TOKEN=$agent_gateway_bootstrap_token"
     printf '%s\n' "VIFU_API_KEY_PEPPER=$api_key_pepper"
     printf '%s\n' "VIFU_PROVIDER_SECRET_KEY=$provider_secret_key"
+    printf '%s\n' "VIFU_GUEST_BOOTSTRAP_ENABLED=false"
     printf '%s\n' "POSTGRES_DB=vifu"
     printf '%s\n' "POSTGRES_USER=vifu"
     printf '%s\n' "POSTGRES_PASSWORD=$postgres_password"
@@ -174,7 +175,7 @@ on_failure() {
     tail -n 100 "$agent_gateway_log" 2>/dev/null || true
     printf '%s\n' "--- OpenClaw mock log ---"
     tail -n 100 "$mock_log" 2>/dev/null || true
-    compose logs --no-color --tail=100 agent-gateway backend dashboard postgres openclaw-mock runtime-state || true
+    compose logs --no-color --tail=100 agent-gateway pairing-agent-gateway backend dashboard postgres openclaw-mock runtime-state || true
   fi
   cleanup_processes
   if [ "$managed_stack" = "1" ]; then compose down --volumes --remove-orphans --rmi local >/dev/null 2>&1 || true; fi
@@ -256,6 +257,16 @@ configs:
   e2e_agent_providers:
     content: |
 $providers_config
+  e2e_pairing_gateway_config:
+    content: |
+      {
+        "version": 1,
+        "gateway": {
+          "serverUrl": "http://backend:6790",
+          "dashboardUrl": "http://$docker_access_host:$browser_dashboard_port",
+          "guestBootstrap": false
+        }
+      }
 
 services:
   runtime-state:
@@ -281,6 +292,28 @@ services:
       - source: e2e_agent_providers
         target: /home/vifu/.vifu/providers.json
         mode: 0444
+  pairing-agent-gateway:
+    image: ${compose_project}-runtime:local
+    pull_policy: never
+    depends_on:
+      backend:
+        condition: service_healthy
+      runtime-state:
+        condition: service_completed_successfully
+    configs:
+      - source: e2e_agent_providers
+        target: /home/vifu/.vifu/providers.json
+        mode: 0444
+      - source: e2e_pairing_gateway_config
+        target: /home/vifu/.vifu/config.json
+        mode: 0444
+    volumes:
+      - vifu_pairing_runtime_state:/home/vifu/.vifu
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+volumes:
+  vifu_pairing_runtime_state:
 EOF
   else
     cat > "$compose_override" <<EOF
@@ -288,6 +321,16 @@ configs:
   e2e_agent_providers:
     content: |
 $providers_config
+  e2e_pairing_gateway_config:
+    content: |
+      {
+        "version": 1,
+        "gateway": {
+          "serverUrl": "http://backend:6790",
+          "dashboardUrl": "http://$docker_access_host:$browser_dashboard_port",
+          "guestBootstrap": false
+        }
+      }
 
 services:
   runtime-state:
@@ -316,6 +359,27 @@ services:
       - source: e2e_agent_providers
         target: /home/vifu/.vifu/providers.json
         mode: 0444
+  pairing-agent-gateway:
+    image: ${compose_project}-runtime:local
+    pull_policy: never
+    depends_on:
+      backend:
+        condition: service_healthy
+      runtime-state:
+        condition: service_completed_successfully
+      openclaw-mock:
+        condition: service_healthy
+    configs:
+      - source: e2e_agent_providers
+        target: /home/vifu/.vifu/providers.json
+        mode: 0444
+      - source: e2e_pairing_gateway_config
+        target: /home/vifu/.vifu/config.json
+        mode: 0444
+    volumes:
+      - vifu_pairing_runtime_state:/home/vifu/.vifu
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
   openclaw-mock:
     build:
       context: .
@@ -336,6 +400,9 @@ services:
       interval: 1s
       timeout: 3s
       retries: 20
+
+volumes:
+  vifu_pairing_runtime_state:
 EOF
   fi
   chmod 0600 "$compose_override"
@@ -367,6 +434,12 @@ else
   VIFU_E2E_OPENCLAW_MOCK_URL="http://$docker_access_host:$openclaw_port" \
   VIFU_E2E_STATE_PATH="$state_path" \
   node scripts/test-self-hosted-e2e.mjs setup
+fi
+if [ "$managed_stack" = "1" ]; then
+  VIFU_E2E_STATE_PATH="$state_path" node scripts/test-self-hosted-e2e.mjs pairing
+  compose restart pairing-agent-gateway
+  VIFU_E2E_STATE_PATH="$state_path" node scripts/test-self-hosted-e2e.mjs pairing-restart
+  VIFU_E2E_STATE_PATH="$state_path" node scripts/test-self-hosted-e2e.mjs pairing-revoke
 fi
 compose restart postgres backend dashboard
 

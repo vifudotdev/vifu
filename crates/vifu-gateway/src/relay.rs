@@ -1,17 +1,18 @@
 use std::collections::HashMap;
 use std::future::Future;
+use std::io::{self, IsTerminal};
 use std::net::IpAddr;
 use std::path::Path;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use futures_util::{SinkExt, StreamExt};
 use tokio::sync::{mpsc, Semaphore};
 use tokio::task::JoinHandle;
-use tokio_tungstenite::connect_async;
+use tokio_tungstenite::connect_async_with_config;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
-use tokio_tungstenite::tungstenite::http::{header::AUTHORIZATION, HeaderValue, StatusCode};
+use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use tokio_tungstenite::tungstenite::Message;
 use url::Url;
 use uuid::Uuid;
@@ -20,7 +21,9 @@ use crate::control::{GuestProjectBootstrap, RuntimeControlClient};
 use crate::gateway_frame;
 use crate::openclaw::{self, Endpoint};
 use crate::protocol::{self, AgentDescriptor, AgentGatewayCommand};
-use crate::session::{self, GuestProjectSummary, SessionSummary};
+use crate::session::{self, GuestProjectSummary, PairingSummary, SessionSummary};
+#[cfg(feature = "sqlite")]
+use crate::session_store::GatewaySessionPersistence;
 
 use vifu_runtime::{
     AgentDefinition, AgentProvider, CancellationToken, InvocationData, ProviderRequest,
@@ -35,6 +38,7 @@ const MAX_RECONNECT_DELAY: Duration = Duration::from_secs(30);
 
 pub struct AgentGatewayRuntime<'a> {
     pub server_url: &'a str,
+    pub dashboard_url: Option<&'a str>,
     pub agent_gateway_bootstrap_token: Option<&'a str>,
     pub enrollment_token: Option<String>,
     pub allow_guest_bootstrap: bool,
@@ -43,6 +47,18 @@ pub struct AgentGatewayRuntime<'a> {
     pub session_path: Option<&'a Path>,
     pub runtime_database_path: &'a Path,
     pub embedded_runtime: Option<&'a VifuRuntime>,
+}
+
+pub type GuestProjectObserver = Arc<dyn Fn(&GuestProjectSummary) + Send + Sync>;
+pub type GatewayAuthorizationObserver = Arc<dyn Fn(&GatewayAuthorizationSummary) + Send + Sync>;
+pub type GatewayPairingObserver = Arc<dyn Fn(Option<&PairingSummary>) + Send + Sync>;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GatewayAuthorizationSummary {
+    pub gateway_id: String,
+    pub device_token: String,
+    pub generation: u64,
+    pub expires_at: String,
 }
 
 pub trait AgentGatewayProvider: Send + Sync {
@@ -108,8 +124,8 @@ pub struct InProcessGatewayProvider {
 
 impl InProcessGatewayProvider {
     pub fn new(id: impl Into<String>, provider: Arc<dyn AgentProvider>) -> Result<Self, String> {
-        if !provider.supports("chat") {
-            return Err("in-process provider must support chat".to_string());
+        if !provider.supports("chat") && !provider.supports("embedding") {
+            return Err("in-process provider must support chat or embedding".to_string());
         }
         Ok(Self {
             id: id.into(),
@@ -135,6 +151,12 @@ impl AgentGatewayProvider for InProcessGatewayProvider {
         timeout: Duration,
     ) -> Pin<Box<dyn Future<Output = Result<serde_json::Value, String>> + Send + 'a>> {
         Box::pin(async move {
+            let capability = binding_text(binding, "capability").unwrap_or("chat");
+            if !self.provider.supports(capability) {
+                return Err(format!(
+                    "in-process provider does not support capability {capability}"
+                ));
+            }
             let cancellation = CancellationToken::default();
             let request = ProviderRequest {
                 project_id: binding_text(binding, "projectId")
@@ -152,14 +174,14 @@ impl AgentGatewayProvider for InProcessGatewayProvider {
                         .unwrap_or(agent_id)
                         .to_string(),
                     provider: self.id.clone(),
-                    capabilities: vec!["chat".to_string()],
+                    capabilities: vec![capability.to_string()],
                     metadata: binding
                         .get("persona")
                         .filter(|value| value.is_object())
                         .cloned()
                         .unwrap_or_else(|| serde_json::json!({})),
                 },
-                capability: "chat".to_string(),
+                capability: capability.to_string(),
                 data: InvocationData::Json(input.clone()),
                 metadata: serde_json::json!({ "source": "agent-gateway" }),
                 snapshot: RuntimeSnapshot::default(),
@@ -175,7 +197,7 @@ impl AgentGatewayProvider for InProcessGatewayProvider {
             match response.data {
                 InvocationData::Json(value) => Ok(value),
                 InvocationData::Binary(_) => {
-                    Err("in-process chat provider returned binary data".to_string())
+                    Err("in-process provider returned binary data".to_string())
                 }
             }
         })
@@ -191,71 +213,69 @@ fn binding_text<'a>(binding: &'a serde_json::Value, name: &str) -> Option<&'a st
 }
 
 pub async fn run_agent_gateway(
-    mut runtime: AgentGatewayRuntime<'_>,
+    runtime: AgentGatewayRuntime<'_>,
     session: &mut SessionSummary,
+) -> Result<(), String> {
+    run_agent_gateway_inner(
+        runtime,
+        session,
+        SessionPersistence::LegacyFile,
+        None,
+        None,
+        None,
+    )
+    .await
+}
+
+#[cfg(feature = "sqlite")]
+pub async fn run_agent_gateway_with_session_persistence(
+    runtime: AgentGatewayRuntime<'_>,
+    session: &mut SessionSummary,
+    persistence: GatewaySessionPersistence,
+    guest_project_observer: Option<GuestProjectObserver>,
+    authorization_observer: Option<GatewayAuthorizationObserver>,
+    pairing_observer: Option<GatewayPairingObserver>,
+) -> Result<(), String> {
+    run_agent_gateway_inner(
+        runtime,
+        session,
+        SessionPersistence::Sqlite(persistence),
+        guest_project_observer,
+        authorization_observer,
+        pairing_observer,
+    )
+    .await
+}
+
+enum SessionPersistence {
+    LegacyFile,
+    #[cfg(feature = "sqlite")]
+    Sqlite(GatewaySessionPersistence),
+}
+
+async fn run_agent_gateway_inner(
+    runtime: AgentGatewayRuntime<'_>,
+    session: &mut SessionSummary,
+    persistence: SessionPersistence,
+    guest_project_observer: Option<GuestProjectObserver>,
+    authorization_observer: Option<GatewayAuthorizationObserver>,
+    pairing_observer: Option<GatewayPairingObserver>,
 ) -> Result<(), String> {
     let websocket_url = agent_gateway_websocket_url(runtime.server_url)?;
     let mut reconnect_delay = Duration::from_secs(1);
-    let guest_bootstrap_allowed = runtime.allow_guest_bootstrap
-        && runtime.enrollment_token.is_none()
-        && runtime.agent_gateway_bootstrap_token.is_none();
-    let mut guest_bootstrap_attempted = false;
-    let mut bootstrap_registration_completed = false;
 
     loop {
-        if let Some(token) = runtime.enrollment_token.as_deref() {
-            let registration = register_agent_gateway(
-                runtime.server_url,
-                RegistrationEndpoint::Enrollment,
-                token,
-                &session.gateway_id,
-                &session.gateway_credential,
-            )
-            .await;
-            if let Err(error) = registration {
-                match error {
-                    RegisterAgentGatewayError::Revoked => {
-                        return Err(
-                            "agent gateway access was revoked; run `vifu --reset` to enroll a new gateway identity"
-                                .to_string(),
-                        );
-                    }
-                    RegisterAgentGatewayError::Conflict => {
-                        return Err(
-                            "agent gateway id is already registered; run `vifu --reset` to enroll a new gateway identity"
-                                .to_string(),
-                        );
-                    }
-                    RegisterAgentGatewayError::Failed(error) => {
-                        eprintln!(
-                            "Agent Gateway enrollment failed: {}. Retrying in {}s.",
-                            sanitize_error(&error),
-                            reconnect_delay.as_secs()
-                        );
-                    }
-                }
-                tokio::select! {
-                    _ = tokio::time::sleep(reconnect_delay) => {}
-                    _ = tokio::signal::ctrl_c() => return Ok(()),
-                }
-                reconnect_delay = reconnect_delay.saturating_mul(2).min(MAX_RECONNECT_DELAY);
-                continue;
-            }
-            runtime.enrollment_token.take();
-        }
-        if should_sync_before_connect(
-            guest_bootstrap_allowed,
-            guest_bootstrap_attempted,
-            session.guest_project.is_some(),
-        ) {
-            if let Err(error) = sync_runtime_state(&runtime, session).await {
-                eprintln!(
-                    "Runtime configuration sync is unavailable: {}",
-                    sanitize_error(&error)
-                );
-            }
-        }
-        match run_connection(&websocket_url, &runtime, session).await {
+        match run_connection(
+            &websocket_url,
+            &runtime,
+            session,
+            &persistence,
+            guest_project_observer.as_ref(),
+            authorization_observer.as_ref(),
+            pairing_observer.as_ref(),
+        )
+        .await
+        {
             Ok(ConnectionOutcome::Shutdown) => return Ok(()),
             Ok(ConnectionOutcome::Disconnected) => {
                 eprintln!(
@@ -263,78 +283,31 @@ pub async fn run_agent_gateway(
                     reconnect_delay.as_secs()
                 );
             }
-            Err(AgentGatewayConnectionError::CredentialRejected) => {
-                if let Some(token) = runtime
-                    .agent_gateway_bootstrap_token
-                    .filter(|_| !bootstrap_registration_completed)
-                {
-                    match register_agent_gateway(
-                        runtime.server_url,
-                        RegistrationEndpoint::Bootstrap,
-                        token,
-                        &session.gateway_id,
-                        &session.gateway_credential,
-                    )
-                    .await
-                    {
-                        Ok(()) => {
-                            bootstrap_registration_completed = true;
-                            reconnect_delay = Duration::from_secs(1);
-                            continue;
-                        }
-                        Err(RegisterAgentGatewayError::Revoked) => {
-                            return Err(
-                                "agent gateway access was revoked; run `vifu --reset` to enroll a new gateway identity"
-                                    .to_string(),
-                            );
-                        }
-                        Err(RegisterAgentGatewayError::Conflict) => {
-                            return Err(
-                                "agent gateway id is already registered; run `vifu --reset` to enroll a new gateway identity"
-                                    .to_string(),
-                            );
-                        }
-                        Err(RegisterAgentGatewayError::Failed(error)) => {
-                            eprintln!(
-                                "Agent Gateway registration failed: {}. Retrying in {}s.",
-                                sanitize_error(&error),
-                                reconnect_delay.as_secs()
-                            );
-                            tokio::select! {
-                                _ = tokio::time::sleep(reconnect_delay) => {}
-                                _ = tokio::signal::ctrl_c() => return Ok(()),
-                            }
-                            reconnect_delay =
-                                reconnect_delay.saturating_mul(2).min(MAX_RECONNECT_DELAY);
-                            continue;
-                        }
-                    }
+            Err(AgentGatewayConnectionError::PairingRequired {
+                request_id,
+                auth_url,
+                retry_after,
+            }) => {
+                let auth_url =
+                    pairing_authorization_url(runtime.dashboard_url, &auth_url).unwrap_or(auth_url);
+                let changed = session.pairing.as_ref().is_none_or(|pairing| {
+                    pairing.request_id != request_id || pairing.auth_url != auth_url
+                });
+                session.pairing = Some(PairingSummary {
+                    request_id,
+                    auth_url: auth_url.clone(),
+                });
+                persist_session(&runtime, session, &persistence)?;
+                if let Some(observer) = pairing_observer.as_ref() {
+                    observer(session.pairing.as_ref());
                 }
-                if guest_bootstrap_allowed && !guest_bootstrap_attempted {
-                    guest_bootstrap_attempted = true;
-                    let guest = RuntimeControlClient::bootstrap_guest_project(
-                        runtime.server_url,
-                        &session.gateway_id,
-                        &session.gateway_credential,
-                    )
-                    .await
-                    .map_err(|error| {
-                        format!(
-                            "agent gateway credential was rejected and guest registration failed: {}",
-                            sanitize_error(&error)
-                        )
-                    })?;
-                    session.guest_project = Some(guest_project_summary(&guest));
-                    session.resume_session_id = None;
-                    persist_session(&runtime, session)?;
-                    print_guest_project(runtime.server_url, &guest);
-                    reconnect_delay = Duration::from_secs(1);
-                    continue;
+                if changed {
+                    println!();
+                    println!("Authorization required");
+                    println!("  Dashboard: {}", terminal_link(&auth_url));
+                    println!("  Waiting for approval; this Gateway will reconnect automatically.");
                 }
-                return Err(
-                    "agent gateway credential was rejected or revoked; run `vifu --reset` to enroll a new gateway identity"
-                        .to_string(),
-                );
+                reconnect_delay = retry_after;
             }
             Err(AgentGatewayConnectionError::Failed(error)) => {
                 eprintln!(
@@ -353,6 +326,58 @@ pub async fn run_agent_gateway(
     }
 }
 
+fn terminal_link(url: &str) -> String {
+    if io::stdout().is_terminal() {
+        format!("\u{1b}]8;;{url}\u{1b}\\{url}\u{1b}]8;;\u{1b}\\")
+    } else {
+        url.to_string()
+    }
+}
+
+fn pairing_authorization_url(
+    dashboard_url: Option<&str>,
+    authorization_url: &str,
+) -> Result<String, String> {
+    if let Ok(url) = Url::parse(authorization_url) {
+        if matches!(url.scheme(), "http" | "https") {
+            return Ok(url.to_string());
+        }
+        return Err("Gateway pairing URL must use HTTP or HTTPS".to_string());
+    }
+    let dashboard_url = dashboard_url.ok_or_else(|| {
+        "Gateway pairing requires gateway.dashboardUrl for a relative authorization URL".to_string()
+    })?;
+    let mut base = Url::parse(dashboard_url)
+        .map_err(|_| "gateway.dashboardUrl must be a valid HTTP or HTTPS URL".to_string())?;
+    if !matches!(base.scheme(), "http" | "https") {
+        return Err("gateway.dashboardUrl must use HTTP or HTTPS".to_string());
+    }
+    base.set_path("/");
+    base.set_query(None);
+    base.set_fragment(None);
+    base.join(authorization_url)
+        .map(|url| url.to_string())
+        .map_err(|_| "Gateway pairing URL is invalid".to_string())
+}
+
+fn apply_guest_project(
+    runtime: &AgentGatewayRuntime<'_>,
+    session: &mut SessionSummary,
+    guest: &GuestProjectBootstrap,
+    persistence: &SessionPersistence,
+    guest_project_observer: Option<&GuestProjectObserver>,
+) -> Result<(), String> {
+    let guest_summary = guest_project_summary(guest);
+    session.guest_project = Some(guest_summary.clone());
+    session.resume_session_id = None;
+    persist_session(runtime, session, persistence)?;
+    print_guest_project(runtime.server_url, guest);
+    if let Some(observer) = guest_project_observer {
+        observer(&guest_summary);
+    }
+    Ok(())
+}
+
 fn guest_project_summary(guest: &GuestProjectBootstrap) -> GuestProjectSummary {
     GuestProjectSummary {
         project_id: guest.project.id,
@@ -366,27 +391,36 @@ fn guest_project_summary(guest: &GuestProjectBootstrap) -> GuestProjectSummary {
     }
 }
 
-fn should_sync_before_connect(
-    guest_bootstrap_allowed: bool,
-    guest_bootstrap_attempted: bool,
-    has_guest_project: bool,
-) -> bool {
-    !guest_bootstrap_allowed || guest_bootstrap_attempted || has_guest_project
-}
-
 fn print_guest_project(server_url: &str, guest: &GuestProjectBootstrap) {
     let endpoint = guest_endpoint_url(server_url, &guest.endpoint_path)
         .unwrap_or_else(|_| guest.endpoint_path.clone());
-    println!("Gateway registered");
-    println!("Project: {}", guest.project.slug);
-    println!("Deployment: {}", guest.deployment.name);
-    println!("Endpoint: {endpoint}");
-    println!("API key: {}", guest.api_key);
-    println!("Claim token: {}", guest.claim_token);
-    println!("Expires: {}", guest.expires_at);
+    println!();
+    println!("Project registered");
+    println!("  Project:  {}", guest.project.slug);
+    println!("  Endpoint: {endpoint}");
+    println!("  API key:  {}", guest.api_key);
+    println!("  Expires:  {}", guest.expires_at);
 }
 
-fn guest_endpoint_url(server_url: &str, endpoint_path: &str) -> Result<String, String> {
+pub fn guest_claim_url(dashboard_url: &str, claim_token: &str) -> Result<String, String> {
+    let mut url = Url::parse(dashboard_url.trim())
+        .map_err(|_| "gateway.dashboardUrl must be a valid HTTP or HTTPS URL".to_string())?;
+    if !matches!(url.scheme(), "http" | "https")
+        || !url.username().is_empty()
+        || url.password().is_some()
+    {
+        return Err("gateway.dashboardUrl must be a valid HTTP or HTTPS URL".to_string());
+    }
+    url.set_path("/pair");
+    url.set_query(None);
+    let fragment = url::form_urlencoded::Serializer::new(String::new())
+        .append_pair("claim_token", claim_token)
+        .finish();
+    url.set_fragment(Some(&fragment));
+    Ok(url.to_string())
+}
+
+pub fn guest_endpoint_url(server_url: &str, endpoint_path: &str) -> Result<String, String> {
     let mut url = Url::parse(server_url.trim())
         .map_err(|_| "gateway.serverUrl must be a valid HTTP or HTTPS URL".to_string())?;
     let base_path = url.path().trim_end_matches('/');
@@ -405,7 +439,11 @@ enum ConnectionOutcome {
 
 #[derive(Debug, PartialEq, Eq)]
 enum AgentGatewayConnectionError {
-    CredentialRejected,
+    PairingRequired {
+        request_id: Uuid,
+        auth_url: String,
+        retry_after: Duration,
+    },
     Failed(String),
 }
 
@@ -419,27 +457,58 @@ async fn run_connection(
     websocket_url: &str,
     runtime: &AgentGatewayRuntime<'_>,
     session: &mut SessionSummary,
+    persistence: &SessionPersistence,
+    guest_project_observer: Option<&GuestProjectObserver>,
+    authorization_observer: Option<&GatewayAuthorizationObserver>,
+    pairing_observer: Option<&GatewayPairingObserver>,
 ) -> Result<ConnectionOutcome, AgentGatewayConnectionError> {
-    let mut request = websocket_url
+    let request = websocket_url
         .into_client_request()
         .map_err(|error| error.to_string())?;
-    request.headers_mut().insert(
-        AUTHORIZATION,
-        HeaderValue::from_str(&format!("Bearer {}", session.gateway_credential)).map_err(|_| {
-            "agent gateway credential contains invalid header characters".to_string()
-        })?,
+    let websocket_config = WebSocketConfig::default()
+        .max_message_size(Some(gateway_frame::MAX_GATEWAY_FRAME_BYTES))
+        .max_frame_size(Some(gateway_frame::MAX_GATEWAY_FRAME_BYTES));
+    let (mut socket, _) = connect_async_with_config(request, Some(websocket_config), false)
+        .await
+        .map_err(|error| AgentGatewayConnectionError::Failed(error.to_string()))?;
+
+    let challenge = tokio::time::timeout(Duration::from_secs(10), receive_command(&mut socket))
+        .await
+        .map_err(|_| "server did not send a Gateway challenge in time".to_string())??;
+    let AgentGatewayCommand::Challenge {
+        nonce,
+        timestamp,
+        audience,
+    } = challenge
+    else {
+        return Err(
+            "server must send a Gateway challenge after WebSocket upgrade"
+                .to_string()
+                .into(),
+        );
+    };
+    let signed_at = unix_time_ms()?;
+    let followup = runtime
+        .enrollment_token
+        .as_deref()
+        .or(runtime.agent_gateway_bootstrap_token)
+        .map(str::to_string)
+        .or_else(|| {
+            session
+                .pairing
+                .as_ref()
+                .map(|pairing| pairing.request_id.to_string())
+        });
+    let signature_payload = protocol::gateway_signature_payload(
+        &audience,
+        &nonce,
+        timestamp,
+        signed_at,
+        &session.identity.machine_id,
+        followup.as_deref(),
+        session.device_token.as_deref(),
     );
-    let (mut socket, _) = connect_async(request).await.map_err(|error| {
-        if matches!(
-            &error,
-            tokio_tungstenite::tungstenite::Error::Http(response)
-                if is_credential_rejection_status(response.status())
-        ) {
-            AgentGatewayConnectionError::CredentialRejected
-        } else {
-            AgentGatewayConnectionError::Failed(error.to_string())
-        }
-    })?;
+    let signature = session.identity.sign(&signature_payload)?;
 
     send_command(
         &mut socket,
@@ -456,6 +525,16 @@ async fn run_connection(
                 })).collect::<Vec<_>>(),
                 "version": env!("CARGO_PKG_VERSION")
             }),
+            machine: protocol::GatewayMachineProof {
+                id: session.identity.machine_id.clone(),
+                public_key: session.identity.public_key.clone(),
+                signature,
+                signed_at,
+            },
+            auth: protocol::GatewayHelloAuth {
+                device_token: session.device_token.clone(),
+            },
+            followup,
         },
     )
     .await?;
@@ -463,29 +542,94 @@ async fn run_connection(
     let welcome = tokio::time::timeout(Duration::from_secs(10), receive_command(&mut socket))
         .await
         .map_err(|_| "server did not accept the agent gateway in time".to_string())??;
+    if let AgentGatewayCommand::PairingRequired {
+        request_id,
+        auth_url,
+        retryable: _,
+        recommended_next_step: _,
+        retry_after_ms,
+    } = welcome
+    {
+        return Err(AgentGatewayConnectionError::PairingRequired {
+            request_id,
+            auth_url,
+            retry_after: Duration::from_millis(retry_after_ms),
+        });
+    }
     let AgentGatewayCommand::Welcome {
         gateway_id,
-        connection_id,
+        connection_id: _,
         session_id,
         heartbeat_interval_ms: _,
-        resumed,
+        resumed: _,
+        auth,
     } = welcome
     else {
         return Err("server must send welcome after agent gateway hello"
             .to_string()
             .into());
     };
-    if gateway_id != session.gateway_id {
+    if session
+        .gateway_id
+        .as_deref()
+        .is_some_and(|stored| stored != gateway_id)
+    {
         return Err("server authenticated a different agent gateway identity"
             .to_string()
             .into());
     }
+    session.gateway_id = Some(gateway_id);
+    if let Some(auth) = auth {
+        session.device_token = Some(auth.device_token);
+        session.token_generation = Some(auth.generation);
+        session.token_expires_at = Some(auth.expires_at);
+    }
+    if session.device_token.is_none() {
+        return Err("server accepted the Gateway without a Device Token"
+            .to_string()
+            .into());
+    }
+    session.pairing = None;
+    if let Some(observer) = pairing_observer.as_ref() {
+        observer(None);
+    }
     session.resume_session_id = Some(session_id);
-    persist_session(runtime, session)?;
-    println!(
-        "Agent Gateway: connected as {} (connection {}, session {}, resumed: {})",
-        session.gateway_id, connection_id, session_id, resumed
-    );
+    persist_session(runtime, session, persistence)?;
+    if let Some(observer) = authorization_observer {
+        observer(&GatewayAuthorizationSummary {
+            gateway_id: session.authorized_gateway_id()?.to_string(),
+            device_token: session.device_token()?.to_string(),
+            generation: session.token_generation.unwrap_or(1),
+            expires_at: session.token_expires_at.clone().unwrap_or_default(),
+        });
+    }
+
+    if runtime.allow_guest_bootstrap
+        && runtime.enrollment_token.is_none()
+        && runtime.agent_gateway_bootstrap_token.is_none()
+        && session.guest_project.is_none()
+    {
+        let guest = RuntimeControlClient::bootstrap_guest_project(
+            runtime.server_url,
+            session.device_token()?,
+        )
+        .await?;
+        apply_guest_project(
+            runtime,
+            session,
+            &guest,
+            persistence,
+            guest_project_observer,
+        )?;
+    }
+    if let Err(error) = sync_runtime_state(runtime, session).await {
+        eprintln!(
+            "Runtime configuration sync is unavailable: {}",
+            sanitize_error(&error)
+        );
+    }
+    println!();
+    println!("Status: connected");
 
     let (outbound_sender, mut outbound_receiver) =
         mpsc::channel::<AgentGatewayCommand>(OUTBOUND_QUEUE_CAPACITY);
@@ -630,7 +774,7 @@ async fn run_connection(
                         code,
                         ..
                     } if code == "CREDENTIAL_REVOKED" => {
-                        return Err(AgentGatewayConnectionError::CredentialRejected);
+                        break ConnectionOutcome::Disconnected;
                     }
                     AgentGatewayCommand::Error {
                         request_id: None,
@@ -665,10 +809,15 @@ async fn run_connection(
 fn persist_session(
     runtime: &AgentGatewayRuntime<'_>,
     session: &SessionSummary,
+    persistence: &SessionPersistence,
 ) -> Result<(), String> {
-    match runtime.session_path {
-        Some(path) => session::write_session(path, session),
-        None => Ok(()),
+    match persistence {
+        SessionPersistence::LegacyFile => match runtime.session_path {
+            Some(path) => session::write_session(path, session),
+            None => Ok(()),
+        },
+        #[cfg(feature = "sqlite")]
+        SessionPersistence::Sqlite(persistence) => persistence.save(session),
     }
 }
 
@@ -677,9 +826,9 @@ async fn sync_runtime_state(
     runtime: &AgentGatewayRuntime<'_>,
     session: &SessionSummary,
 ) -> Result<(), String> {
-    let client = RuntimeControlClient::new(runtime.server_url, &session.gateway_credential)?;
+    let client = RuntimeControlClient::new(runtime.server_url, session.device_token()?)?;
     let configuration = client.configuration().await?;
-    if configuration.gateway_id != session.gateway_id {
+    if configuration.gateway_id != session.authorized_gateway_id()? {
         return Err("server returned configuration for another Agent Gateway".to_string());
     }
     let store = SqliteRuntimeStore::open(runtime.runtime_database_path)
@@ -745,16 +894,20 @@ async fn sync_runtime_state(
     Ok(())
 }
 
+fn unix_time_ms() -> Result<u64, String> {
+    let millis = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| "system clock is before the Unix epoch".to_string())?
+        .as_millis();
+    u64::try_from(millis).map_err(|_| "system clock timestamp is too large".to_string())
+}
+
 #[cfg(not(feature = "sqlite"))]
 async fn sync_runtime_state(
     _runtime: &AgentGatewayRuntime<'_>,
     _session: &SessionSummary,
 ) -> Result<(), String> {
     Ok(())
-}
-
-fn is_credential_rejection_status(status: StatusCode) -> bool {
-    matches!(status, StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN)
 }
 
 fn resolve_provider<'a>(
@@ -774,79 +927,6 @@ fn resolve_provider<'a>(
         None if providers.len() == 1 => providers.first(),
         None => None,
     }
-}
-
-#[derive(Debug, PartialEq, Eq)]
-enum RegisterAgentGatewayError {
-    Revoked,
-    Conflict,
-    Failed(String),
-}
-
-#[derive(Debug, Clone, Copy)]
-enum RegistrationEndpoint {
-    Bootstrap,
-    Enrollment,
-}
-
-async fn register_agent_gateway(
-    server_url: &str,
-    endpoint: RegistrationEndpoint,
-    registration_token: &str,
-    gateway_id: &str,
-    credential: &str,
-) -> Result<(), RegisterAgentGatewayError> {
-    let registration_url = agent_gateway_registration_url(server_url, endpoint)
-        .map_err(RegisterAgentGatewayError::Failed)?;
-    let response = reqwest::Client::new()
-        .post(registration_url)
-        .bearer_auth(registration_token)
-        .json(&serde_json::json!({
-            "gatewayId": gateway_id,
-            "credential": credential,
-        }))
-        .send()
-        .await
-        .map_err(|error| RegisterAgentGatewayError::Failed(error.to_string()))?;
-    if response.status().is_success() {
-        return Ok(());
-    }
-    let status = response.status();
-    let payload = response.json::<serde_json::Value>().await.ok();
-    let code = payload
-        .as_ref()
-        .and_then(|value| value.pointer("/error/code"))
-        .and_then(serde_json::Value::as_str);
-    if code == Some("gateway_credential_revoked") {
-        return Err(RegisterAgentGatewayError::Revoked);
-    }
-    if status == StatusCode::CONFLICT {
-        return Err(RegisterAgentGatewayError::Conflict);
-    }
-    let operation = match endpoint {
-        RegistrationEndpoint::Bootstrap => "registration",
-        RegistrationEndpoint::Enrollment => "enrollment",
-    };
-    Err(RegisterAgentGatewayError::Failed(format!(
-        "server rejected agent gateway {operation} (HTTP {})",
-        status.as_u16()
-    )))
-}
-
-fn agent_gateway_registration_url(
-    server_url: &str,
-    endpoint: RegistrationEndpoint,
-) -> Result<Url, String> {
-    let _ = agent_gateway_websocket_url(server_url)?;
-    let mut url = Url::parse(server_url.trim())
-        .map_err(|_| "gateway.serverUrl must be a valid HTTP or HTTPS URL".to_string())?;
-    let base_path = url.path().trim_end_matches('/');
-    let suffix = match endpoint {
-        RegistrationEndpoint::Bootstrap => "register",
-        RegistrationEndpoint::Enrollment => "enroll",
-    };
-    url.set_path(&format!("{base_path}/v1/agent-gateways/{suffix}"));
-    Ok(url)
 }
 
 pub fn agent_gateway_websocket_url(server_url: &str) -> Result<String, String> {
@@ -1009,12 +1089,12 @@ mod tests {
     use serde_json::json;
     use std::sync::Arc;
     use std::time::Duration;
+    use url::Url;
     use uuid::Uuid;
 
     use super::{
-        agent_gateway_websocket_url, decode_command, encode_command,
-        is_credential_rejection_status, resolve_provider, sanitize_error,
-        should_sync_before_connect, AgentGatewayProvider, InProcessGatewayProvider,
+        agent_gateway_websocket_url, decode_command, encode_command, guest_claim_url,
+        resolve_provider, sanitize_error, AgentGatewayProvider, InProcessGatewayProvider,
         OpenClawGatewayProvider,
     };
     use crate::gateway_frame;
@@ -1040,6 +1120,26 @@ mod tests {
             _cancellation: CancellationToken,
         ) -> ProviderFuture<'a> {
             Box::pin(async move { Ok(ProviderResponse::json(request.agent.metadata)) })
+        }
+    }
+
+    struct EmbeddingProvider;
+
+    impl AgentProvider for EmbeddingProvider {
+        fn supports(&self, capability: &str) -> bool {
+            capability == "embedding"
+        }
+
+        fn invoke<'a>(
+            &'a self,
+            request: ProviderRequest,
+            _cancellation: CancellationToken,
+        ) -> ProviderFuture<'a> {
+            Box::pin(async move {
+                Ok(ProviderResponse::json(json!({
+                    "capability": request.capability,
+                })))
+            })
         }
     }
 
@@ -1088,11 +1188,22 @@ mod tests {
         assert_eq!(output["instructions"], "Choose one safe action.");
     }
 
-    #[test]
-    fn new_guest_gateway_registers_before_runtime_sync() {
-        assert!(!should_sync_before_connect(true, false, false));
-        assert!(should_sync_before_connect(true, true, true));
-        assert!(should_sync_before_connect(false, false, false));
+    #[tokio::test]
+    async fn in_process_provider_routes_the_embedding_capability() {
+        let provider =
+            InProcessGatewayProvider::new("local-embedding", Arc::new(EmbeddingProvider)).unwrap();
+
+        let output = provider
+            .invoke(
+                "local-embedding",
+                &json!({ "capability": "embedding" }),
+                &json!({ "input": ["parsnip", "watering can"] }),
+                Duration::from_secs(1),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(output["capability"], "embedding");
     }
 
     #[test]
@@ -1132,21 +1243,27 @@ mod tests {
     }
 
     #[test]
-    fn sanitizes_agent_gateway_errors() {
-        assert_eq!(sanitize_error("bad\0token"), "bad token");
+    fn guest_claim_link_keeps_the_token_in_the_fragment() {
+        let claim_token = format!("vifu_gc_{}", "a".repeat(64));
+        let link = guest_claim_url("https://dashboard.vifu.ai", &claim_token).unwrap();
+        let url = Url::parse(&link).unwrap();
+
+        assert_eq!(url.path(), "/pair");
+        assert!(url.query().is_none());
+        assert_eq!(
+            url.fragment(),
+            Some(format!("claim_token={claim_token}").as_str())
+        );
     }
 
     #[test]
-    fn treats_rejected_credentials_as_fatal_connection_errors() {
-        assert!(is_credential_rejection_status(
-            tokio_tungstenite::tungstenite::http::StatusCode::UNAUTHORIZED
-        ));
-        assert!(is_credential_rejection_status(
-            tokio_tungstenite::tungstenite::http::StatusCode::FORBIDDEN
-        ));
-        assert!(!is_credential_rejection_status(
-            tokio_tungstenite::tungstenite::http::StatusCode::INTERNAL_SERVER_ERROR
-        ));
+    fn guest_claim_link_rejects_non_http_dashboard_urls() {
+        assert!(guest_claim_url("vifu://dashboard", "vifu_gc_invalid").is_err());
+    }
+
+    #[test]
+    fn sanitizes_agent_gateway_errors() {
+        assert_eq!(sanitize_error("bad\0token"), "bad token");
     }
 
     #[test]

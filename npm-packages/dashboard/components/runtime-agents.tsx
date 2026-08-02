@@ -354,6 +354,7 @@ function initials(name: string): string {
 
 function capabilityLabel(kind: string) {
   if (kind === "chat") return "Conversation";
+  if (kind === "embedding") return "Embeddings";
   if (kind === "speech") return "Voice";
   if (kind === "transcription") return "Listening";
   if (kind === "realtime") return "Live voice";

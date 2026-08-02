@@ -9,10 +9,13 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde_json::Value;
 use vifu_runtime::{InvocationData, InvocationInput, RuntimeManifest, VifuRuntime};
 
-use crate::protocol::{self, AgentDescriptor};
+use crate::identity::MachineIdentity;
+use crate::protocol::AgentDescriptor;
 use crate::relay::AgentGatewayProvider;
 use crate::relay::{self, AgentGatewayRuntime};
 use crate::session::SessionSummary;
+#[cfg(feature = "sqlite")]
+use crate::session_store::{gateway_session_state_key, GatewaySecretStorage, GatewaySessionStore};
 
 /// Exposes one logical provider in an embedded [`VifuRuntime`] to Vifu Server.
 ///
@@ -134,21 +137,22 @@ impl AgentGatewayProvider for EmbeddedRuntimeGatewayProvider {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EmbeddedRuntimeGatewayConfig {
     pub server_url: String,
-    pub gateway_id: String,
+    pub dashboard_url: Option<String>,
     pub runtime_database_path: PathBuf,
 }
 
 impl EmbeddedRuntimeGatewayConfig {
-    pub fn new(
-        server_url: impl Into<String>,
-        gateway_id: impl Into<String>,
-        runtime_database_path: impl Into<PathBuf>,
-    ) -> Self {
+    pub fn new(server_url: impl Into<String>, runtime_database_path: impl Into<PathBuf>) -> Self {
         Self {
             server_url: server_url.into(),
-            gateway_id: gateway_id.into(),
+            dashboard_url: None,
             runtime_database_path: runtime_database_path.into(),
         }
+    }
+
+    pub fn with_dashboard_url(mut self, dashboard_url: impl Into<String>) -> Self {
+        self.dashboard_url = Some(dashboard_url.into());
+        self
     }
 }
 
@@ -167,6 +171,28 @@ pub struct EmbeddedRuntimeGatewayStatus {
     pub last_error: Option<String>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EmbeddedGatewayAuthorization {
+    pub gateway_id: String,
+    pub device_token: String,
+    pub generation: u64,
+    pub expires_at: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EmbeddedGatewayPairing {
+    pub request_id: uuid::Uuid,
+    pub auth_url: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EmbeddedGuestProject {
+    pub project_slug: String,
+    pub endpoint_path: String,
+    pub claim_token: String,
+    pub expires_at: String,
+}
+
 struct EmbeddedGatewayTask {
     shutdown: tokio::sync::oneshot::Sender<()>,
     thread: JoinHandle<()>,
@@ -182,13 +208,15 @@ pub struct EmbeddedRuntimeGateway {
     config: EmbeddedRuntimeGatewayConfig,
     task: Mutex<Option<EmbeddedGatewayTask>>,
     status: Arc<Mutex<EmbeddedRuntimeGatewayStatus>>,
+    guest_project: Arc<Mutex<Option<EmbeddedGuestProject>>>,
+    authorization: Arc<Mutex<Option<EmbeddedGatewayAuthorization>>>,
+    pairing: Arc<Mutex<Option<EmbeddedGatewayPairing>>>,
 }
 
 impl EmbeddedRuntimeGateway {
     /// Creates a stopped gateway and validates its network identity.
     pub fn new(runtime: VifuRuntime, config: EmbeddedRuntimeGatewayConfig) -> Result<Self, String> {
         relay::agent_gateway_websocket_url(&config.server_url)?;
-        protocol::validate_identifier("agent gateway id", &config.gateway_id)?;
         if config.runtime_database_path.as_os_str().is_empty() {
             return Err("runtime database path is required".to_string());
         }
@@ -200,16 +228,23 @@ impl EmbeddedRuntimeGateway {
                 state: EmbeddedRuntimeGatewayState::Stopped,
                 last_error: None,
             })),
+            guest_project: Arc::new(Mutex::new(None)),
+            authorization: Arc::new(Mutex::new(None)),
+            pairing: Arc::new(Mutex::new(None)),
         })
     }
 
-    /// Starts the network gateway. The credential is kept in memory only.
+    /// Starts the network Gateway with host-managed Machine identity and token storage.
     pub fn start(
         &self,
-        gateway_credential: String,
+        identity: MachineIdentity,
+        device_token: Option<String>,
         enrollment_token: Option<String>,
     ) -> Result<(), String> {
-        crate::session::validate_gateway_credential(&gateway_credential)?;
+        identity.validate()?;
+        if let Some(device_token) = device_token.as_deref() {
+            crate::session::validate_device_token(device_token)?;
+        }
         let manifest = runtime_manifest(&self.runtime)?;
         let (providers, agents) = gateway_components(&self.runtime, &manifest);
         let mut task = self
@@ -227,12 +262,18 @@ impl EmbeddedRuntimeGateway {
         }
 
         let server_url = self.config.server_url.clone();
-        let gateway_id = self.config.gateway_id.clone();
+        let dashboard_url = self.config.dashboard_url.clone();
         let runtime_database_path = self.config.runtime_database_path.clone();
         let embedded_runtime = self.runtime.clone();
         let status = Arc::clone(&self.status);
+        let guest_project = Arc::clone(&self.guest_project);
+        #[cfg(feature = "sqlite")]
+        let authorization = Arc::clone(&self.authorization);
+        #[cfg(feature = "sqlite")]
+        let pairing = Arc::clone(&self.pairing);
         let (shutdown, shutdown_receiver) = tokio::sync::oneshot::channel();
         set_gateway_status(&status, EmbeddedRuntimeGatewayState::Running, None)?;
+        clear_guest_project(&guest_project)?;
         let thread = match std::thread::Builder::new()
             .name("vifu-embedded-gateway".to_string())
             .spawn(move || {
@@ -241,30 +282,98 @@ impl EmbeddedRuntimeGateway {
                     .build()
                     .map_err(|error| error.to_string())
                     .and_then(|tokio| {
-                        let mut session = SessionSummary {
-                            gateway_id,
-                            gateway_credential,
-                            resume_session_id: None,
-                            created_at_unix: SystemTime::now()
+                        #[cfg(feature = "sqlite")]
+                        let session_store = GatewaySessionStore::open(&runtime_database_path)?;
+                        #[cfg(feature = "sqlite")]
+                        let session_key = gateway_session_state_key("embedded", &server_url)?;
+                        #[cfg(feature = "sqlite")]
+                        let mut session = session_store
+                            .load(&session_key, Some(&identity), device_token.as_deref())?
+                            .unwrap_or_else(|| {
+                                SessionSummary::new(
+                                    identity.clone(),
+                                    SystemTime::now()
+                                        .duration_since(UNIX_EPOCH)
+                                        .map(|duration| duration.as_secs())
+                                        .unwrap_or(1),
+                                )
+                                .expect("generated Machine identity must be valid")
+                            });
+                        #[cfg(not(feature = "sqlite"))]
+                        let mut session = SessionSummary::new(
+                            identity,
+                            SystemTime::now()
                                 .duration_since(UNIX_EPOCH)
                                 .map(|duration| duration.as_secs())
                                 .unwrap_or(1),
-                            guest_project: None,
-                        };
+                        )?;
+                        #[cfg(feature = "sqlite")]
+                        let session_persistence =
+                            session_store.persistence(session_key, GatewaySecretStorage::External);
+                        #[cfg(feature = "sqlite")]
+                        session_persistence.save(&session)?;
                         tokio.block_on(async {
+                            let guest_project_for_observer = Arc::clone(&guest_project);
+                            let guest_project_observer =
+                                Arc::new(move |guest: &crate::session::GuestProjectSummary| {
+                                    let _ = set_guest_project(&guest_project_for_observer, guest);
+                                });
+                            if let Some(guest) = session.guest_project.as_ref() {
+                                guest_project_observer(guest);
+                            }
+                            #[cfg(feature = "sqlite")]
+                            let authorization_for_observer = Arc::clone(&authorization);
+                            #[cfg(feature = "sqlite")]
+                            let authorization_observer =
+                                Arc::new(move |value: &relay::GatewayAuthorizationSummary| {
+                                    if let Ok(mut stored) = authorization_for_observer.lock() {
+                                        *stored = Some(EmbeddedGatewayAuthorization {
+                                            gateway_id: value.gateway_id.clone(),
+                                            device_token: value.device_token.clone(),
+                                            generation: value.generation,
+                                            expires_at: value.expires_at.clone(),
+                                        });
+                                    }
+                                });
+                            #[cfg(feature = "sqlite")]
+                            let pairing_for_observer = Arc::clone(&pairing);
+                            #[cfg(feature = "sqlite")]
+                            let pairing_observer =
+                                Arc::new(move |value: Option<&crate::session::PairingSummary>| {
+                                    if let Ok(mut stored) = pairing_for_observer.lock() {
+                                        *stored = value.map(|value| EmbeddedGatewayPairing {
+                                            request_id: value.request_id,
+                                            auth_url: value.auth_url.clone(),
+                                        });
+                                    }
+                                });
+                            let allow_guest_bootstrap =
+                                cfg!(feature = "sqlite") && enrollment_token.is_none();
                             let gateway = AgentGatewayRuntime {
                                 server_url: &server_url,
+                                dashboard_url: dashboard_url.as_deref(),
                                 agent_gateway_bootstrap_token: None,
                                 enrollment_token,
-                                allow_guest_bootstrap: false,
+                                allow_guest_bootstrap,
                                 providers: &providers,
                                 agents: &agents,
                                 session_path: None,
                                 runtime_database_path: &runtime_database_path,
                                 embedded_runtime: Some(&embedded_runtime),
                             };
+                            #[cfg(feature = "sqlite")]
+                            let gateway_run = relay::run_agent_gateway_with_session_persistence(
+                                gateway,
+                                &mut session,
+                                session_persistence,
+                                Some(guest_project_observer),
+                                Some(authorization_observer),
+                                Some(pairing_observer),
+                            );
+                            #[cfg(not(feature = "sqlite"))]
+                            let gateway_run = relay::run_agent_gateway(gateway, &mut session);
                             tokio::select! {
-                                result = relay::run_agent_gateway(gateway, &mut session) => result,
+                                result = gateway_run => result,
                                 _ = shutdown_receiver => Ok(()),
                             }
                         })
@@ -308,6 +417,28 @@ impl EmbeddedRuntimeGateway {
             .lock()
             .map(|status| status.clone())
             .map_err(|_| "embedded gateway status is unavailable".to_string())
+    }
+
+    /// Returns a temporary guest project created for this Gateway, if any.
+    pub fn guest_project(&self) -> Result<Option<EmbeddedGuestProject>, String> {
+        self.guest_project
+            .lock()
+            .map(|guest| guest.clone())
+            .map_err(|_| "embedded gateway guest project is unavailable".to_string())
+    }
+
+    pub fn authorization(&self) -> Result<Option<EmbeddedGatewayAuthorization>, String> {
+        self.authorization
+            .lock()
+            .map(|authorization| authorization.clone())
+            .map_err(|_| "embedded Gateway authorization is unavailable".to_string())
+    }
+
+    pub fn pairing(&self) -> Result<Option<EmbeddedGatewayPairing>, String> {
+        self.pairing
+            .lock()
+            .map(|pairing| pairing.clone())
+            .map_err(|_| "embedded Gateway pairing is unavailable".to_string())
     }
 
     fn stop_inner(&self) -> Result<(), String> {
@@ -405,10 +536,34 @@ fn set_gateway_status(
     state: EmbeddedRuntimeGatewayState,
     last_error: Option<String>,
 ) -> Result<(), String> {
-    *status
+    let mut status = status
         .lock()
-        .map_err(|_| "embedded gateway status is unavailable".to_string())? =
-        EmbeddedRuntimeGatewayStatus { state, last_error };
+        .map_err(|_| "embedded gateway status is unavailable".to_string())?;
+    status.state = state;
+    status.last_error = last_error;
+    Ok(())
+}
+
+fn set_guest_project(
+    guest_project: &Mutex<Option<EmbeddedGuestProject>>,
+    guest: &crate::session::GuestProjectSummary,
+) -> Result<(), String> {
+    *guest_project
+        .lock()
+        .map_err(|_| "embedded gateway guest project is unavailable".to_string())? =
+        Some(EmbeddedGuestProject {
+            project_slug: guest.project_slug.clone(),
+            endpoint_path: guest.endpoint_path.clone(),
+            claim_token: guest.claim_token.clone(),
+            expires_at: guest.expires_at.clone(),
+        });
+    Ok(())
+}
+
+fn clear_guest_project(guest_project: &Mutex<Option<EmbeddedGuestProject>>) -> Result<(), String> {
+    *guest_project
+        .lock()
+        .map_err(|_| "embedded gateway guest project is unavailable".to_string())? = None;
     Ok(())
 }
 
@@ -545,6 +700,34 @@ mod tests {
         assert_eq!(
             runtime_manifest(&runtime).unwrap_err(),
             "embedded gateway requires an applied runtime manifest or active release"
+        );
+    }
+
+    #[test]
+    fn guest_project_updates_preserve_the_embedded_gateway_lifecycle() {
+        let status = Mutex::new(EmbeddedRuntimeGatewayStatus {
+            state: EmbeddedRuntimeGatewayState::Running,
+            last_error: None,
+        });
+        let guest_project = Mutex::new(None);
+        let guest = crate::session::GuestProjectSummary {
+            project_id: uuid::Uuid::new_v4(),
+            project_slug: "guest-demo".to_string(),
+            deployment_id: uuid::Uuid::new_v4(),
+            deployment: "development".to_string(),
+            endpoint_path: "/guest-demo/v1".to_string(),
+            api_key: "vifu_pk_secret".to_string(),
+            claim_token: format!("vifu_gc_{}", "a".repeat(64)),
+            expires_at: "2026-08-08T00:00:00Z".to_string(),
+        };
+
+        set_guest_project(&guest_project, &guest).unwrap();
+
+        let status = status.into_inner().unwrap();
+        assert_eq!(status.state, EmbeddedRuntimeGatewayState::Running);
+        assert_eq!(
+            guest_project.into_inner().unwrap().unwrap().project_slug,
+            guest.project_slug
         );
     }
 }

@@ -16,6 +16,8 @@ export const VIFU_AGENT_GATEWAY_METHODS = {
 } as const;
 
 export const VIFU_AGENT_GATEWAY_EVENTS = {
+  CHALLENGE: "gateway.challenge",
+  PAIRING_REQUIRED: "gateway.pairingRequired",
   CANCEL: "agent.cancel",
   HEARTBEAT: "gateway.heartbeat",
   HEARTBEAT_ACK: "gateway.heartbeatAck",
@@ -36,17 +38,52 @@ export interface AgentGatewayAgentDescriptor {
 
 export interface AgentGatewayHelloParams {
   protocol: typeof VIFU_AGENT_GATEWAY_PROTOCOL_VERSION;
-  gatewayId: string;
   resumeSessionId?: string;
   agents: AgentGatewayAgentDescriptor[];
   metadata?: JsonValue;
+  machine: AgentGatewayMachineProof;
+  auth?: AgentGatewayHelloAuth;
+  followup?: string;
+}
+
+export interface AgentGatewayMachineProof {
+  id: string;
+  publicKey: string;
+  signature: string;
+  signedAt: number;
+}
+
+export interface AgentGatewayHelloAuth {
+  deviceToken?: string;
+}
+
+export interface AgentGatewayWelcomeAuth {
+  deviceToken: string;
+  generation: number;
+  expiresAt: string;
 }
 
 export interface AgentGatewayWelcomePayload {
+  gatewayId: string;
   connectionId: string;
   sessionId: string;
   heartbeatIntervalMs: number;
   resumed: boolean;
+  auth?: AgentGatewayWelcomeAuth;
+}
+
+export interface AgentGatewayChallengePayload {
+  nonce: string;
+  timestamp: number;
+  audience: string;
+}
+
+export interface AgentGatewayPairingRequiredPayload {
+  requestId: string;
+  authUrl: string;
+  retryable: boolean;
+  recommendedNextStep: string;
+  retryAfterMs: number;
 }
 
 export interface AgentGatewayInvokeParams {
@@ -90,6 +127,16 @@ export type AgentGatewayHelloRequestFrame = RequestFrame<
 
 export type AgentGatewayWelcomeResponseFrame = ResponseFrame<
   AgentGatewayWelcomePayload
+>;
+
+export type AgentGatewayChallengeEventFrame = EventFrame<
+  typeof VIFU_AGENT_GATEWAY_EVENTS.CHALLENGE,
+  AgentGatewayChallengePayload
+>;
+
+export type AgentGatewayPairingRequiredEventFrame = EventFrame<
+  typeof VIFU_AGENT_GATEWAY_EVENTS.PAIRING_REQUIRED,
+  AgentGatewayPairingRequiredPayload
 >;
 
 export type AgentGatewayInvokeRequestFrame = RequestFrame<
@@ -140,25 +187,42 @@ export const AgentGatewayAgentDescriptorSchema = {
 
 export const AgentGatewayHelloParamsSchema = {
   type: "object",
-  required: ["protocol", "gatewayId", "agents"],
+  required: ["protocol", "agents", "machine"],
   additionalProperties: false,
   properties: {
     protocol: { const: VIFU_AGENT_GATEWAY_PROTOCOL_VERSION },
-    gatewayId: NonEmptyStringSchema,
     resumeSessionId: UuidStringSchema,
     agents: {
       type: "array",
       items: AgentGatewayAgentDescriptorSchema,
     },
     metadata: {},
+    machine: {
+      type: "object",
+      required: ["id", "publicKey", "signature", "signedAt"],
+      additionalProperties: false,
+      properties: {
+        id: NonEmptyStringSchema,
+        publicKey: NonEmptyStringSchema,
+        signature: NonEmptyStringSchema,
+        signedAt: { type: "integer", minimum: 1 },
+      },
+    },
+    auth: {
+      type: "object",
+      additionalProperties: false,
+      properties: { deviceToken: NonEmptyStringSchema },
+    },
+    followup: NonEmptyStringSchema,
   },
 } as const satisfies JsonSchema;
 
 export const AgentGatewayWelcomePayloadSchema = {
   type: "object",
-  required: ["connectionId", "sessionId", "heartbeatIntervalMs", "resumed"],
+  required: ["gatewayId", "connectionId", "sessionId", "heartbeatIntervalMs", "resumed"],
   additionalProperties: false,
   properties: {
+    gatewayId: NonEmptyStringSchema,
     connectionId: UuidStringSchema,
     sessionId: UuidStringSchema,
     heartbeatIntervalMs: {
@@ -167,6 +231,40 @@ export const AgentGatewayWelcomePayloadSchema = {
       maximum: 60000,
     },
     resumed: { type: "boolean" },
+    auth: {
+      type: "object",
+      required: ["deviceToken", "generation", "expiresAt"],
+      additionalProperties: false,
+      properties: {
+        deviceToken: NonEmptyStringSchema,
+        generation: { type: "integer", minimum: 1 },
+        expiresAt: NonEmptyStringSchema,
+      },
+    },
+  },
+} as const satisfies JsonSchema;
+
+export const AgentGatewayChallengePayloadSchema = {
+  type: "object",
+  required: ["nonce", "timestamp", "audience"],
+  additionalProperties: false,
+  properties: {
+    nonce: NonEmptyStringSchema,
+    timestamp: { type: "integer", minimum: 1 },
+    audience: NonEmptyStringSchema,
+  },
+} as const satisfies JsonSchema;
+
+export const AgentGatewayPairingRequiredPayloadSchema = {
+  type: "object",
+  required: ["requestId", "authUrl", "retryable", "recommendedNextStep", "retryAfterMs"],
+  additionalProperties: false,
+  properties: {
+    requestId: UuidStringSchema,
+    authUrl: NonEmptyStringSchema,
+    retryable: { type: "boolean" },
+    recommendedNextStep: NonEmptyStringSchema,
+    retryAfterMs: { type: "integer", minimum: 250, maximum: 60000 },
   },
 } as const satisfies JsonSchema;
 

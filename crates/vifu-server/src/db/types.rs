@@ -140,6 +140,29 @@ pub struct NewAgentGatewayEnrollment<'a> {
     pub expires_at: DateTime<Utc>,
 }
 
+pub struct NewAgentGatewayAuthorization<'a> {
+    pub gateway_id: &'a str,
+    pub machine_id: &'a str,
+    pub owner_user_id: Option<&'a str>,
+    pub token_prefix: &'a str,
+    pub token_hash: &'a [u8],
+    pub token_expires_at: DateTime<Utc>,
+}
+
+pub struct RotatedAgentGatewayAuthorization<'a> {
+    pub gateway_id: &'a str,
+    pub token_prefix: &'a str,
+    pub token_hash: &'a [u8],
+    pub token_expires_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone)]
+pub struct AgentGatewayEnrollmentAssignment {
+    pub project_id: Uuid,
+    pub deployment_id: Uuid,
+    pub owner_user_id: String,
+}
+
 pub struct NewGuestProject<'a> {
     pub project_id: Uuid,
     pub gateway_id: &'a str,

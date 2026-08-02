@@ -199,6 +199,21 @@ dispatch! {
     pub async fn resolve_endpoint_route(storage: &Storage, id_or_slug: &str) -> Result<EndpointRoute, ApiError>;
     pub async fn resolve_project_endpoint_route(storage: &Storage, project_slug: &str, id_or_slug: &str) -> Result<EndpointRoute, ApiError>;
     pub async fn resolve_project_model_route(storage: &Storage, project_id: Uuid, model: &str) -> Result<EndpointRoute, ApiError>;
+    pub async fn upsert_agent_gateway_machine(storage: &Storage, machine_id: &str, public_key: &str) -> Result<(), ApiError>;
+    pub async fn get_agent_gateway_authorization_for_machine(storage: &Storage, machine_id: &str) -> Result<Option<AgentGatewayAuthorization>, ApiError>;
+    pub async fn get_agent_gateway_authorization(storage: &Storage, gateway_id: &str) -> Result<AgentGatewayAuthorization, ApiError>;
+    pub async fn create_agent_gateway_authorization(storage: &Storage, input: NewAgentGatewayAuthorization<'_>) -> Result<AgentGatewayAuthorization, ApiError>;
+    pub async fn rotate_agent_gateway_authorization(storage: &Storage, input: RotatedAgentGatewayAuthorization<'_>) -> Result<AgentGatewayAuthorization, ApiError>;
+    pub async fn claim_agent_gateway_authorization_owner(storage: &Storage, gateway_id: &str, owner_user_id: &str) -> Result<AgentGatewayAuthorization, ApiError>;
+    pub async fn authenticate_agent_gateway_device_token(storage: &Storage, token_hash: &[u8]) -> Result<String, ApiError>;
+    pub async fn revoke_agent_gateway_authorization(storage: &Storage, gateway_id: &str) -> Result<AgentGatewayAuthorization, ApiError>;
+    pub async fn consume_agent_gateway_machine_enrollment(storage: &Storage, token_hash: &[u8], gateway_id: &str) -> Result<AgentGatewayEnrollmentAssignment, ApiError>;
+    pub async fn create_or_get_agent_gateway_pairing(storage: &Storage, machine_id: &str, expires_at: DateTime<Utc>) -> Result<AgentGatewayPairingRequest, ApiError>;
+    pub async fn get_agent_gateway_pairing(storage: &Storage, id: Uuid) -> Result<AgentGatewayPairingRequest, ApiError>;
+    pub async fn consume_agent_gateway_pairing(storage: &Storage, id: Uuid, machine_id: &str) -> Result<AgentGatewayPairingRequest, ApiError>;
+    pub async fn consume_approved_agent_gateway_pairing_for_machine(storage: &Storage, machine_id: &str) -> Result<Option<AgentGatewayPairingRequest>, ApiError>;
+    pub async fn list_agent_gateway_pairings(storage: &Storage) -> Result<Vec<AgentGatewayPairingRequest>, ApiError>;
+    pub async fn resolve_agent_gateway_pairing(storage: &Storage, id: Uuid, status: &str, owner_user_id: Option<&str>) -> Result<AgentGatewayPairingRequest, ApiError>;
     pub async fn register_agent_gateway_credential(storage: &Storage, gateway_id: &str, owner_user_id: Option<&str>, credential_prefix: &str, credential_hash: &[u8]) -> Result<AgentGatewayRegistration, ApiError>;
     pub async fn create_agent_gateway_enrollment(storage: &Storage, input: NewAgentGatewayEnrollment<'_>) -> Result<(), ApiError>;
     pub async fn consume_agent_gateway_enrollment(storage: &Storage, token_hash: &[u8], gateway_id: &str, credential_prefix: &str, credential_hash: &[u8]) -> Result<AgentGatewayRegistration, ApiError>;
@@ -387,15 +402,26 @@ mod tests {
         )
         .await
         .expect("profile should be created");
-        let capabilities = vec![ProfileCapabilityDraft {
-            kind: "chat".to_string(),
-            provider_type: "openai-compatible".to_string(),
-            provider_key: "openai-local".to_string(),
-            resource_id: Some("gpt-test".to_string()),
-            config: json!({}),
-            input_schema: json!({}),
-            output_schema: json!({}),
-        }];
+        let capabilities = vec![
+            ProfileCapabilityDraft {
+                kind: "chat".to_string(),
+                provider_type: "openai-compatible".to_string(),
+                provider_key: "openai-local".to_string(),
+                resource_id: Some("gpt-test".to_string()),
+                config: json!({}),
+                input_schema: json!({}),
+                output_schema: json!({}),
+            },
+            ProfileCapabilityDraft {
+                kind: "embedding".to_string(),
+                provider_type: "openai-compatible".to_string(),
+                provider_key: "openai-local".to_string(),
+                resource_id: Some("text-embedding-test".to_string()),
+                config: json!({}),
+                input_schema: json!({}),
+                output_schema: json!({}),
+            },
+        ];
         let version = create_profile_version(
             &storage,
             profile_id,
@@ -421,6 +447,20 @@ mod tests {
             )
             .await
             .expect("profile route should resolve")
+            .profile_version_id,
+            version.id
+        );
+        assert_eq!(
+            resolve_profile_route(
+                &storage,
+                project_id,
+                "mizuki",
+                "embedding",
+                Some("player-1"),
+                None,
+            )
+            .await
+            .expect("embedding profile route should resolve")
             .profile_version_id,
             version.id
         );
@@ -782,6 +822,49 @@ mod tests {
             Err(ApiError::Unauthorized)
         ));
 
+        revoke_agent_gateway_credential(&storage, "gateway-remote")
+            .await
+            .expect("gateway credential should be revoked");
+        assert!(matches!(
+            authenticate_agent_gateway_credential(&storage, b"remote-credential-hash").await,
+            Err(ApiError::Forbidden)
+        ));
+        create_agent_gateway_enrollment(
+            &storage,
+            NewAgentGatewayEnrollment {
+                id: Uuid::new_v4(),
+                project_id,
+                deployment_id: primary_deployment_id(&storage, project_id).await,
+                owner_user_id: "user-123",
+                token_hash: b"replacement-enrollment-hash",
+                expires_at: Utc::now() + ChronoDuration::minutes(5),
+            },
+        )
+        .await
+        .expect("replacement enrollment should be created");
+        assert_eq!(
+            consume_agent_gateway_enrollment(
+                &storage,
+                b"replacement-enrollment-hash",
+                "gateway-remote",
+                "vifu_gw_replacement",
+                b"replacement-credential-hash",
+            )
+            .await
+            .expect("authorized enrollment should rotate the gateway credential"),
+            AgentGatewayRegistration::Registered
+        );
+        assert_eq!(
+            authenticate_agent_gateway_credential(&storage, b"replacement-credential-hash")
+                .await
+                .expect("replacement credential should authenticate"),
+            "gateway-remote"
+        );
+        assert!(matches!(
+            authenticate_agent_gateway_credential(&storage, b"remote-credential-hash").await,
+            Err(ApiError::Forbidden)
+        ));
+
         close_and_remove(storage, &path).await;
     }
 
@@ -980,6 +1063,105 @@ mod tests {
                 .project
                 .gateway_id,
             "gateway-owner"
+        );
+
+        close_and_remove(storage, &path).await;
+    }
+
+    #[tokio::test]
+    async fn sqlite_device_token_rotation_keeps_a_short_grace_window() {
+        let (storage, path) = sqlite_storage().await;
+        let machine_id = format!("machine-{}", "a".repeat(64));
+        let public_key = format!("public-key-{}", Uuid::new_v4().simple());
+        upsert_agent_gateway_machine(&storage, &machine_id, &public_key)
+            .await
+            .expect("machine should be stored");
+        create_agent_gateway_authorization(
+            &storage,
+            NewAgentGatewayAuthorization {
+                gateway_id: "gateway-token-rotation",
+                machine_id: &machine_id,
+                owner_user_id: Some("token-owner"),
+                token_prefix: "vifu_gw_old",
+                token_hash: b"old-device-token-hash",
+                token_expires_at: Utc::now() + ChronoDuration::days(180),
+            },
+        )
+        .await
+        .expect("authorization should be created");
+
+        let rotated = rotate_agent_gateway_authorization(
+            &storage,
+            RotatedAgentGatewayAuthorization {
+                gateway_id: "gateway-token-rotation",
+                token_prefix: "vifu_gw_new",
+                token_hash: b"new-device-token-hash",
+                token_expires_at: Utc::now() + ChronoDuration::days(180),
+            },
+        )
+        .await
+        .expect("authorization should rotate");
+        assert_eq!(rotated.token_generation, 2);
+        for token_hash in [
+            b"old-device-token-hash".as_slice(),
+            b"new-device-token-hash".as_slice(),
+        ] {
+            assert_eq!(
+                authenticate_agent_gateway_device_token(&storage, token_hash)
+                    .await
+                    .expect("current and grace tokens should authenticate"),
+                "gateway-token-rotation"
+            );
+        }
+
+        revoke_agent_gateway_authorization(&storage, "gateway-token-rotation")
+            .await
+            .expect("authorization should be revoked");
+        for token_hash in [
+            b"old-device-token-hash".as_slice(),
+            b"new-device-token-hash".as_slice(),
+        ] {
+            assert!(matches!(
+                authenticate_agent_gateway_device_token(&storage, token_hash).await,
+                Err(ApiError::Forbidden)
+            ));
+        }
+
+        close_and_remove(storage, &path).await;
+    }
+
+    #[tokio::test]
+    async fn sqlite_consumes_approved_gateway_pairing_by_machine() {
+        let (storage, path) = sqlite_storage().await;
+        let machine_id = format!("machine-{}", "b".repeat(64));
+        let public_key = format!("public-key-{}", Uuid::new_v4().simple());
+        upsert_agent_gateway_machine(&storage, &machine_id, &public_key)
+            .await
+            .expect("machine should be stored");
+
+        let pairing = create_or_get_agent_gateway_pairing(
+            &storage,
+            &machine_id,
+            Utc::now() + ChronoDuration::minutes(5),
+        )
+        .await
+        .expect("pairing should be created");
+        resolve_agent_gateway_pairing(&storage, pairing.id, "approved", Some("user-123"))
+            .await
+            .expect("pairing should be approved");
+
+        let consumed = consume_approved_agent_gateway_pairing_for_machine(&storage, &machine_id)
+            .await
+            .expect("approved pairing should be consumable by machine")
+            .expect("approved pairing should exist");
+        assert_eq!(consumed.id, pairing.id);
+        assert_eq!(consumed.status, "consumed");
+        assert_eq!(consumed.owner_user_id.as_deref(), Some("user-123"));
+        assert!(
+            consume_approved_agent_gateway_pairing_for_machine(&storage, &machine_id)
+                .await
+                .expect("second consume should be safe")
+                .is_none()
         );
 
         close_and_remove(storage, &path).await;

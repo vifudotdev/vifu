@@ -1,7 +1,8 @@
 # vifu
 
-`vifu` is the complete Vifu Agent Runtime application. One executable runs
-Vifu Server, Agent Gateway, or both according to `~/.vifu/config.json`.
+`vifu` is the Vifu Agent Runtime application for operating agents behind stable
+product endpoints. One executable runs Vifu Server, Agent Gateway, or both
+according to `~/.vifu/config.json`.
 
 ## Install the binary
 
@@ -11,8 +12,10 @@ vifu
 ```
 
 The default binary runs Vifu Server and Agent Gateway according to the local
-Vifu configuration and stores local state in `~/.vifu/vifu.sqlite`. Local
-Whisper support is opt-in:
+Vifu configuration. Runtime and Gateway state use `~/.vifu/runtime.sqlite`; the
+local Server uses `~/.vifu/vifu.sqlite`. It includes
+the in-process llama.cpp Provider; configure GGUF models in
+`~/.vifu/providers.json`. Local Whisper support is opt-in:
 
 ```bash
 cargo install vifu --features local-whisper

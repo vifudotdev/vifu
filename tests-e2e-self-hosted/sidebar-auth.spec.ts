@@ -105,7 +105,7 @@ test("session remains valid across sidebar navigation on the bind address", asyn
   await editKeyDialog.getByRole("button", { name: "Save changes" }).click();
   const keyRow = page.getByRole("row").filter({ has: page.getByRole("cell", { name: keyName, exact: true }) });
   await expect(keyRow).toContainText("All agents");
-  await expect(keyRow).toContainText("Chat completions, Agents read, Project write");
+  await expect(keyRow).toContainText("Chat completions, Embeddings, Agents read, Project write");
 
   page.once("dialog", (dialog) => dialog.accept());
   await page.getByRole("button", { name: `Revoke ${keyName}` }).click();

@@ -1,4 +1,5 @@
 use std::fs;
+use std::io::{self, IsTerminal};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -8,21 +9,27 @@ use std::time::Instant;
 
 use tokio::sync::watch;
 
-use vifu_gateway::{config, openclaw, relay, session};
+use vifu_gateway::session_store::{
+    gateway_session_state_key, GatewaySecretStorage, GatewaySessionStore,
+};
+use vifu_gateway::{config, openclaw, providers, relay, session};
 
 #[cfg(feature = "local-llama")]
 use vifu_provider_llama::{LlamaProvider, LlamaProviderConfig};
 
 use config::{AgentProviderConfig, Config};
 use openclaw::ProbeStatus;
-use session::{SessionStatus, SessionSummary};
+use session::SessionSummary;
 
 const PROVIDER_RETRY_DELAY: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Clone)]
 pub struct GatewayRuntimeOptions {
     pub server_url: String,
+    pub dashboard_url: Option<String>,
+    pub allow_guest_bootstrap: bool,
     pub enrollment_token: Option<String>,
+    pub session_scope: String,
 }
 
 impl GatewayRuntimeOptions {
@@ -35,7 +42,7 @@ pub async fn run(
     options: GatewayRuntimeOptions,
     mut shutdown: watch::Receiver<bool>,
 ) -> Result<(), String> {
-    println!("Vifu Agent Gateway");
+    println!("Vifu");
     loop {
         if *shutdown.borrow() {
             return Ok(());
@@ -45,11 +52,18 @@ pub async fn run(
         print_server_config(&config)?;
         let openclaw_providers = config.openclaw_providers().cloned().collect::<Vec<_>>();
         let llama_providers = config.llama_providers().cloned().collect::<Vec<_>>();
+        let openai_compatible_providers = config
+            .openai_compatible_providers()
+            .cloned()
+            .collect::<Vec<_>>();
+        println!();
+        println!("Providers");
         if config.agent_providers.is_empty() {
             print_agent_provider_config(&config);
         }
-        let has_configured_providers =
-            !openclaw_providers.is_empty() || !llama_providers.is_empty();
+        let has_configured_providers = !openclaw_providers.is_empty()
+            || !llama_providers.is_empty()
+            || !openai_compatible_providers.is_empty();
         let mut runtime_providers: Vec<Arc<dyn relay::AgentGatewayProvider>> = Vec::new();
         let mut agents = Vec::new();
         for provider in llama_providers {
@@ -60,6 +74,17 @@ pub async fn run(
                     .parent()
                     .unwrap_or_else(|| Path::new(".")),
             )?;
+            runtime_providers.push(runtime_provider);
+            agents.push(agent);
+        }
+        for provider in openai_compatible_providers {
+            let probe =
+                providers::probe_openai_compatible(&provider.url, provider.token.as_deref()).await;
+            print_openai_compatible_report(&provider, &probe);
+            if probe.is_err() {
+                continue;
+            }
+            let (runtime_provider, agent) = load_openai_compatible_provider(provider)?;
             runtime_providers.push(runtime_provider);
             agents.push(agent);
         }
@@ -113,29 +138,50 @@ pub async fn run(
             continue;
         }
         println!(
-            "Providers: {} connected; agents: {} discovered",
+            "  Ready: {} providers, {} agents",
             runtime_providers.len(),
             agents.len()
         );
-        let mut session = load_or_create_session(&config)?;
-        print_session(&session);
-        let session_file = config.session_file();
         let runtime_database_file = config.runtime_database_file();
+        let session_store = GatewaySessionStore::open(&runtime_database_file)?;
+        let session_key = gateway_session_state_key(&options.session_scope, &config.server_url)?;
+        let mut session = load_or_create_session(&session_store, &session_key)?;
+        print_session(
+            &session,
+            &config.server_url,
+            options.dashboard_url.as_deref(),
+        );
+        let session_persistence =
+            session_store.persistence(session_key, GatewaySecretStorage::Persisted);
         let runtime = relay::AgentGatewayRuntime {
             server_url: &config.server_url,
+            dashboard_url: options.dashboard_url.as_deref(),
             agent_gateway_bootstrap_token: config.agent_gateway_bootstrap_token.as_deref(),
             enrollment_token: config.enrollment_token.take(),
-            allow_guest_bootstrap: true,
+            allow_guest_bootstrap: options.allow_guest_bootstrap,
             providers: &runtime_providers,
             agents: &agents,
-            session_path: Some(&session_file),
+            session_path: None,
             runtime_database_path: &runtime_database_file,
             embedded_runtime: None,
         };
+        let guest_project_observer = options.dashboard_url.as_ref().map(|dashboard_url| {
+            let dashboard_url = dashboard_url.clone();
+            Arc::new(move |guest: &session::GuestProjectSummary| {
+                print_guest_management_link(&dashboard_url, guest);
+            }) as relay::GuestProjectObserver
+        });
         let provider_file = config.agent_providers_file.clone();
         let provider_snapshot = fs::read(&provider_file).unwrap_or_default();
         let result = tokio::select! {
-            result = relay::run_agent_gateway(runtime, &mut session) => Some(result),
+            result = relay::run_agent_gateway_with_session_persistence(
+                runtime,
+                &mut session,
+                session_persistence,
+                guest_project_observer,
+                None,
+                None,
+            ) => Some(result),
             () = wait_for_provider_config_change(&provider_file, &provider_snapshot) => None,
             () = wait_for_shutdown(&mut shutdown) => return Ok(()),
         };
@@ -177,23 +223,43 @@ async fn wait_for_shutdown(shutdown: &mut watch::Receiver<bool>) {
     let _ = shutdown.changed().await;
 }
 
-pub async fn status(config: &Config) -> Result<(), String> {
+pub async fn status(
+    config: &Config,
+    dashboard_url: Option<&str>,
+    session_scope: &str,
+) -> Result<(), String> {
     println!("Vifu Agent Gateway status");
     println!("State: {}", config.home_dir.display());
-    print_llama_provider_status(config)?;
-    print_agent_provider_status(config).await;
     print_server_config(config)?;
-    print_stored_session(config);
+    println!();
+    println!("Providers");
+    if config.agent_providers.is_empty() || !has_supported_gateway_provider(config) {
+        print_agent_provider_config(config);
+    }
+    print_llama_provider_status(config)?;
+    print_openai_compatible_provider_status(config).await;
+    print_agent_provider_status(config).await;
+    print_stored_session(config, dashboard_url, session_scope)?;
     Ok(())
 }
 
-pub async fn doctor(config: &Config) -> Result<(), String> {
+pub async fn doctor(
+    config: &Config,
+    dashboard_url: Option<&str>,
+    session_scope: &str,
+) -> Result<(), String> {
     println!("Vifu Agent Gateway doctor");
     println!("State directory: {}", config.home_dir.display());
-    print_llama_provider_status(config)?;
-    let providers = print_agent_provider_status(config).await;
     print_server_config(config)?;
-    print_stored_session(config);
+    println!();
+    println!("Providers");
+    if config.agent_providers.is_empty() || !has_supported_gateway_provider(config) {
+        print_agent_provider_config(config);
+    }
+    print_llama_provider_status(config)?;
+    print_openai_compatible_provider_status(config).await;
+    let providers = print_agent_provider_status(config).await;
+    print_stored_session(config, dashboard_url, session_scope)?;
     for (provider, report) in providers {
         match report.status {
             ProbeStatus::Online => {
@@ -225,12 +291,121 @@ pub async fn doctor(config: &Config) -> Result<(), String> {
     Ok(())
 }
 
+fn load_openai_compatible_provider(
+    provider: AgentProviderConfig,
+) -> Result<
+    (
+        Arc<dyn relay::AgentGatewayProvider>,
+        vifu_gateway::protocol::AgentDescriptor,
+    ),
+    String,
+> {
+    let chat_model = provider_config_text(&provider.config, "chatModel")
+        .or_else(|| provider_config_text(&provider.config, "model"));
+    let embedding_model = provider_config_text(&provider.config, "embeddingModel")
+        .or_else(|| provider_config_text(&provider.config, "embModel"));
+    if chat_model.is_none() && embedding_model.is_none() {
+        return Err(format!(
+            "OpenAI-compatible provider {} requires config.chatModel or config.embeddingModel",
+            provider.id
+        ));
+    }
+
+    let mut http_provider =
+        providers::HttpCapabilityProvider::new(&provider.id, provider.url.clone(), provider.token)
+            .map_err(|error| error.public_message())?;
+    let mut capabilities = Vec::new();
+    if let Some(model) = chat_model {
+        http_provider
+            .add_route(
+                "chat",
+                providers::HttpCapabilityRoute::OpenAiChat {
+                    model: model.clone(),
+                    persona: serde_json::json!({}),
+                },
+            )
+            .map_err(|error| error.public_message())?;
+        capabilities.push("chat".to_string());
+    }
+    if let Some(model) = embedding_model {
+        http_provider
+            .add_route(
+                "embedding",
+                providers::HttpCapabilityRoute::OpenAiEmbedding { model },
+            )
+            .map_err(|error| error.public_message())?;
+        capabilities.push("embedding".to_string());
+    }
+
+    let runtime_provider =
+        relay::InProcessGatewayProvider::new(provider.id.clone(), Arc::new(http_provider))?;
+    let name = provider.name.unwrap_or_else(|| provider.id.clone());
+    let includes_chat = capabilities.iter().any(|capability| capability == "chat");
+    let input_modalities = provider_input_modalities(&provider.config, includes_chat)?;
+    let agent = vifu_gateway::protocol::AgentDescriptor {
+        id: provider.id.clone(),
+        name,
+        metadata: serde_json::json!({
+            "providerKey": provider.id,
+            "providerType": "vifu-runtime",
+            "localProviderType": "openai-compatible",
+            "capabilities": capabilities,
+            "inputModalities": input_modalities,
+        }),
+    };
+    Ok((Arc::new(runtime_provider), agent))
+}
+
+fn provider_config_text(config: &serde_json::Value, field: &str) -> Option<String> {
+    config
+        .get(field)
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+fn provider_input_modalities(
+    config: &serde_json::Value,
+    includes_chat: bool,
+) -> Result<serde_json::Value, String> {
+    let Some(value) = config.get("inputModalities") else {
+        return Ok(if includes_chat {
+            serde_json::json!(["text", "image"])
+        } else {
+            serde_json::json!(["text"])
+        });
+    };
+    let modalities = value
+        .as_array()
+        .ok_or_else(|| {
+            "OpenAI-compatible provider config.inputModalities must be an array".to_string()
+        })?
+        .iter()
+        .map(|item| {
+            item.as_str()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+                .ok_or_else(|| {
+                    "OpenAI-compatible provider config.inputModalities must contain strings"
+                        .to_string()
+                })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if modalities.is_empty() {
+        return Err(
+            "OpenAI-compatible provider config.inputModalities must not be empty".to_string(),
+        );
+    }
+    Ok(serde_json::json!(modalities))
+}
+
 async fn print_agent_provider_status(
     config: &Config,
 ) -> Vec<(AgentProviderConfig, openclaw::ProbeReport)> {
     let providers = config.openclaw_providers().cloned().collect::<Vec<_>>();
     if providers.is_empty() {
-        print_agent_provider_config(config);
         return Vec::new();
     }
     let mut reports = Vec::with_capacity(providers.len());
@@ -242,37 +417,20 @@ async fn print_agent_provider_status(
     reports
 }
 
-pub fn logout(config: &Config) -> Result<(), String> {
-    match session::read_session(&config.session_file()) {
-        SessionStatus::Ready(mut summary) | SessionStatus::UpgradeRequired(mut summary) => {
-            summary.resume_session_id = None;
-            session::write_session(&config.session_file(), &summary)?;
-            println!("Cleared the resumable Agent Gateway session.");
-        }
-        SessionStatus::Missing => println!("No local Agent Gateway session found."),
-        SessionStatus::Invalid(reason) => {
-            return Err(format!(
-                "local agent gateway state is invalid: {reason}. Run `vifu --reset` to replace it."
-            ));
-        }
-    }
-    Ok(())
+fn has_supported_gateway_provider(config: &Config) -> bool {
+    config.agent_providers.iter().any(|provider| {
+        matches!(
+            provider.provider_type.as_str(),
+            "llama" | "openclaw" | "openai-compatible"
+        )
+    })
 }
 
-pub fn reset(config: &Config) -> Result<(), String> {
-    if remove_gateway_identity(&config.session_file())? {
-        println!("Removed the local Agent Gateway identity.");
-    } else {
-        println!("No local Agent Gateway identity found.");
-    }
-    Ok(())
-}
-
-fn remove_gateway_identity(path: &Path) -> Result<bool, String> {
-    match fs::remove_file(path) {
-        Ok(()) => Ok(true),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
-        Err(error) => Err(error.to_string()),
+async fn print_openai_compatible_provider_status(config: &Config) {
+    for provider in config.openai_compatible_providers() {
+        let report =
+            providers::probe_openai_compatible(&provider.url, provider.token.as_deref()).await;
+        print_openai_compatible_report(provider, &report);
     }
 }
 
@@ -283,12 +441,12 @@ fn ensure_home_dir(config: &Config) -> Result<(), String> {
 fn print_agent_provider_config(config: &Config) {
     if config.agent_providers.is_empty() {
         println!(
-            "Agent providers: none configured ({})",
+            "  None configured ({})",
             config.agent_providers_file.display()
         );
     } else {
         println!(
-            "Agent providers: {} configured; no supported provider is available yet",
+            "  {} configured; no supported provider is available yet",
             config.agent_providers.len()
         );
     }
@@ -305,12 +463,15 @@ fn load_llama_provider(
     ),
     String,
 > {
-    let llama_config = LlamaProviderConfig::from_provider_config(&provider.config, base_dir)
-        .map_err(|error| format!("llama provider {}: {error}", provider.id))?;
-    println!("Llama provider {}: loading local model", provider.id);
+    println!("  {} (Llama): loading local model", provider.id);
     let started = Instant::now();
-    let llama = LlamaProvider::load(llama_config)
+    let llama = LlamaProvider::load_from_provider_config(&provider.config, base_dir)
         .map_err(|error| format!("llama provider {}: {error}", provider.id))?;
+    let input_modalities = if llama.supports_vision() {
+        serde_json::json!(["text", "image"])
+    } else {
+        serde_json::json!(["text"])
+    };
     let runtime_provider =
         relay::InProcessGatewayProvider::new(provider.id.clone(), Arc::new(llama))?;
     let name = provider.name.unwrap_or_else(|| provider.id.clone());
@@ -321,11 +482,12 @@ fn load_llama_provider(
             "providerKey": provider.id,
             "providerType": "vifu-runtime",
             "localProviderType": "llama",
-            "capabilities": ["chat"],
+            "capabilities": ["chat", "embedding"],
+            "inputModalities": input_modalities,
         }),
     };
     println!(
-        "Llama provider {}: ready in {}ms",
+        "  {} (Llama): ready in {}ms",
         agent.id,
         started.elapsed().as_millis()
     );
@@ -363,7 +525,7 @@ fn print_llama_provider_status(config: &Config) -> Result<(), String> {
         } else {
             "model file missing"
         };
-        println!("Llama provider {}: {status}", provider.id);
+        println!("  {} (Llama): {status}", provider.id);
     }
     Ok(())
 }
@@ -371,10 +533,7 @@ fn print_llama_provider_status(config: &Config) -> Result<(), String> {
 #[cfg(not(feature = "local-llama"))]
 fn print_llama_provider_status(config: &Config) -> Result<(), String> {
     for provider in config.llama_providers() {
-        println!(
-            "Llama provider {}: unavailable in this Vifu build",
-            provider.id
-        );
+        println!("  {} (Llama): unavailable in this Vifu build", provider.id);
     }
     Ok(())
 }
@@ -382,79 +541,149 @@ fn print_llama_provider_status(config: &Config) -> Result<(), String> {
 fn print_openclaw_report(provider: &AgentProviderConfig, report: &openclaw::ProbeReport) {
     match &report.status {
         ProbeStatus::Online => println!(
-            "OpenClaw provider {}: online at {}:{}",
+            "  {} (OpenClaw): connected at {}:{}",
             provider.id, report.endpoint.host, report.endpoint.port
         ),
-        ProbeStatus::Offline(reason) => println!(
-            "OpenClaw provider {}: offline at {}:{} ({reason})",
-            provider.id, report.endpoint.host, report.endpoint.port
-        ),
-        ProbeStatus::Unsupported(reason) => println!(
-            "OpenClaw provider {}: unsupported configuration ({reason})",
-            provider.id
-        ),
+        ProbeStatus::Offline(reason) => {
+            println!("  {} (OpenClaw): offline", provider.id);
+            tracing::debug!(
+                provider_id = %provider.id,
+                endpoint = %format!("{}:{}", report.endpoint.host, report.endpoint.port),
+                %reason,
+                "OpenClaw provider is offline"
+            );
+        }
+        ProbeStatus::Unsupported(reason) => {
+            println!("  {} (OpenClaw): needs configuration", provider.id);
+            tracing::debug!(
+                provider_id = %provider.id,
+                %reason,
+                "OpenClaw provider configuration is unsupported"
+            );
+        }
+    }
+}
+
+fn print_openai_compatible_report(provider: &AgentProviderConfig, report: &Result<(), String>) {
+    match report {
+        Ok(()) => println!("  {} (OpenAI-compatible): connected", provider.id),
+        Err(reason) => {
+            println!("  {} (OpenAI-compatible): offline", provider.id);
+            tracing::debug!(
+                provider_id = %provider.id,
+                %reason,
+                "OpenAI-compatible provider is offline"
+            );
+        }
     }
 }
 
 fn print_server_config(config: &Config) -> Result<(), String> {
-    println!("Server: {}", config.server_url);
-    println!(
-        "WebSocket: {}",
-        relay::agent_gateway_websocket_url(&config.server_url)?
+    println!("Runtime: {}", config.server_url);
+    tracing::debug!(
+        websocket = %relay::agent_gateway_websocket_url(&config.server_url)?,
+        "Agent Gateway transport"
     );
     Ok(())
 }
 
-fn print_stored_session(config: &Config) {
-    match session::read_session(&config.session_file()) {
-        SessionStatus::Ready(summary) => print_session(&summary),
-        SessionStatus::UpgradeRequired(summary) => {
-            println!("Session: upgrade pending ({})", summary.gateway_id);
-        }
-        SessionStatus::Missing => println!("Session: not established"),
-        SessionStatus::Invalid(reason) => println!("Session: invalid ({reason})"),
+fn print_stored_session(
+    config: &Config,
+    dashboard_url: Option<&str>,
+    session_scope: &str,
+) -> Result<(), String> {
+    let (store, key) = gateway_session_store(config, session_scope)?;
+    match store.load(&key, None, None)? {
+        Some(summary) => print_session(&summary, &config.server_url, dashboard_url),
+        None => println!("Session: not established"),
     }
+    Ok(())
 }
 
-fn print_session(session: &SessionSummary) {
-    match session.resume_session_id {
-        Some(session_id) => println!(
-            "Session: resumable ({}, {})",
-            session.gateway_id, session_id
-        ),
-        None => println!("Session: new ({})", session.gateway_id),
-    }
+fn print_session(session: &SessionSummary, server_url: &str, dashboard_url: Option<&str>) {
+    println!();
+    println!(
+        "Gateway: {}",
+        if session.resume_session_id.is_some() {
+            "ready"
+        } else {
+            "registering"
+        }
+    );
+    tracing::debug!(
+        gateway_id = ?session.gateway_id,
+        machine_id = %session.identity.machine_id,
+        resume_session_id = ?session.resume_session_id,
+        "Agent Gateway session"
+    );
     if let Some(guest) = session.guest_project.as_ref() {
-        println!("Project: {}", guest.project_slug);
-        println!("Deployment: {}", guest.deployment);
-        println!("Endpoint path: {}", guest.endpoint_path);
-        println!("Guest access expires: {}", guest.expires_at);
+        let endpoint = relay::guest_endpoint_url(server_url, &guest.endpoint_path)
+            .unwrap_or_else(|_| guest.endpoint_path.clone());
+        println!();
+        println!("Project");
+        println!("  Name:     {}", guest.project_slug);
+        println!("  Endpoint: {endpoint}");
+        println!("  Expires:  {}", guest.expires_at);
+        if let Some(dashboard_url) = dashboard_url {
+            print_guest_management_link(dashboard_url, guest);
+        }
     }
 }
 
-fn load_or_create_session(config: &Config) -> Result<SessionSummary, String> {
-    match session::read_session(&config.session_file()) {
-        SessionStatus::Ready(summary) => Ok(summary),
-        SessionStatus::UpgradeRequired(summary) => {
-            session::write_session(&config.session_file(), &summary)?;
-            println!("Upgraded the local Agent Gateway session.");
-            Ok(summary)
+fn print_guest_management_link(dashboard_url: &str, guest: &session::GuestProjectSummary) {
+    match relay::guest_claim_url(dashboard_url, &guest.claim_token) {
+        Ok(url) => {
+            println!();
+            println!("Dashboard");
+            println!("  {}", terminal_link(&url));
+            println!(
+                "  Sign in before {} to claim this project.",
+                guest.expires_at
+            );
         }
-        SessionStatus::Missing => {
-            let summary = SessionSummary {
-                gateway_id: session::generate_gateway_id(),
-                gateway_credential: session::generate_gateway_credential(),
-                resume_session_id: None,
-                created_at_unix: now_unix_seconds()?,
-                guest_project: None,
-            };
-            session::write_session(&config.session_file(), &summary)?;
-            Ok(summary)
-        }
-        SessionStatus::Invalid(reason) => Err(format!(
-            "local agent gateway session is invalid: {reason}. Run `vifu --reset` to replace it."
-        )),
+        Err(error) => eprintln!("Dashboard link is unavailable: {error}"),
     }
+}
+
+fn terminal_link(url: &str) -> String {
+    format_terminal_link(url, io::stdout().is_terminal())
+}
+
+fn format_terminal_link(url: &str, hyperlinks: bool) -> String {
+    if hyperlinks {
+        format!("\u{1b}]8;;{url}\u{1b}\\{url}\u{1b}]8;;\u{1b}\\")
+    } else {
+        url.to_string()
+    }
+}
+
+fn load_or_create_session(
+    store: &GatewaySessionStore,
+    state_key: &str,
+) -> Result<SessionSummary, String> {
+    match store.load(state_key, None, None)? {
+        Some(summary) => Ok(summary),
+        None => {
+            let summary = SessionSummary::new(
+                vifu_gateway::identity::MachineIdentity::generate()?,
+                now_unix_seconds()?,
+            )?;
+            store
+                .persistence(state_key, GatewaySecretStorage::Persisted)
+                .save(&summary)?;
+            Ok(summary)
+        }
+    }
+}
+
+fn gateway_session_store(
+    config: &Config,
+    session_scope: &str,
+) -> Result<(GatewaySessionStore, String), String> {
+    let path = config.runtime_database_file();
+    let store = GatewaySessionStore::open(path)?;
+    let key = gateway_session_state_key(session_scope, &config.server_url)?;
+    Ok((store, key))
 }
 
 fn now_unix_seconds() -> Result<u64, String> {
@@ -466,25 +695,45 @@ fn now_unix_seconds() -> Result<u64, String> {
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
-
-    use uuid::Uuid;
-
-    use super::remove_gateway_identity;
+    use super::{format_terminal_link, load_openai_compatible_provider, AgentProviderConfig};
+    use serde_json::json;
 
     #[test]
-    fn gateway_identity_reset_does_not_remove_provider_config() {
-        let directory = std::env::temp_dir().join(format!("vifu-reset-{}", Uuid::new_v4()));
-        fs::create_dir_all(&directory).unwrap();
-        let session = directory.join("agent-gateway-session");
-        let providers = directory.join("providers.json");
-        fs::write(&session, "session").unwrap();
-        fs::write(&providers, "{}").unwrap();
+    fn dashboard_links_are_clickable_in_supported_terminals() {
+        let url = "https://dashboard.vifu.ai/pair#claim_token=redacted";
 
-        assert!(remove_gateway_identity(&session).unwrap());
+        assert_eq!(format_terminal_link(url, false), url);
+        let linked = format_terminal_link(url, true);
+        assert!(linked.starts_with("\u{1b}]8;;https://"));
+        assert!(linked.contains(url));
+        assert!(linked.ends_with("\u{1b}]8;;\u{1b}\\"));
+    }
 
-        assert!(!session.exists());
-        assert!(providers.exists());
-        fs::remove_dir_all(directory).unwrap();
+    #[test]
+    fn openai_compatible_provider_is_exposed_through_gateway_runtime() {
+        let provider = AgentProviderConfig {
+            id: "cloudflare-ai-proxy".to_string(),
+            name: Some("Cloudflare AI Proxy".to_string()),
+            provider_type: "openai-compatible".to_string(),
+            url: "https://provider.example.com/openai/v1".to_string(),
+            token: None,
+            config: json!({
+                "chatModel": "gpt-5.5-mini",
+                "embeddingModel": "text-embedding-ada-002",
+                "inputModalities": ["text", "image"]
+            }),
+        };
+
+        let (runtime_provider, agent) = load_openai_compatible_provider(provider).unwrap();
+
+        assert_eq!(runtime_provider.id(), "cloudflare-ai-proxy");
+        assert_eq!(runtime_provider.provider_type(), "vifu-runtime");
+        assert_eq!(agent.id, "cloudflare-ai-proxy");
+        assert_eq!(agent.name, "Cloudflare AI Proxy");
+        assert_eq!(agent.metadata["providerKey"], "cloudflare-ai-proxy");
+        assert_eq!(agent.metadata["providerType"], "vifu-runtime");
+        assert_eq!(agent.metadata["localProviderType"], "openai-compatible");
+        assert_eq!(agent.metadata["capabilities"], json!(["chat", "embedding"]));
+        assert_eq!(agent.metadata["inputModalities"], json!(["text", "image"]));
     }
 }

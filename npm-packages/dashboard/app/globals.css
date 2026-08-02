@@ -21,6 +21,89 @@
   --font-mono: "IBM Plex Mono", ui-monospace, monospace;
 }
 
+.pair-page {
+  min-height: 100dvh;
+  display: grid;
+  place-items: center;
+  padding: 32px 20px;
+  background: #f7f7f5;
+  color: #171717;
+}
+
+.pair-card {
+  width: min(100%, 480px);
+  display: grid;
+  gap: 24px;
+  padding: 28px;
+  border: 1px solid #d9d9d4;
+  border-radius: 8px;
+  background: #fff;
+  box-shadow: 0 16px 44px rgb(0 0 0 / 7%);
+}
+
+.pair-mark {
+  width: 42px;
+  height: 42px;
+  display: grid;
+  place-items: center;
+  border: 1px solid #d4d4cf;
+  border-radius: 7px;
+  background: #f2f2ef;
+}
+
+.pair-mark svg { width: 20px; height: 20px; }
+.pair-card header { display: grid; gap: 8px; }
+.pair-card header p { margin: 0; color: #686863; font-size: 12px; font-weight: 600; text-transform: uppercase; }
+.pair-card h1 { margin: 0; font-size: 24px; line-height: 1.2; letter-spacing: 0; }
+.pair-card header span { color: #64645f; font-size: 14px; line-height: 1.55; }
+
+.pair-details {
+  margin: 0;
+  padding: 4px 0;
+  border-block: 1px solid #e4e4df;
+}
+
+.pair-details div {
+  min-height: 42px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.pair-details dt { color: #73736e; font-size: 13px; }
+.pair-details dd { margin: 0; font-family: "IBM Plex Mono", monospace; font-size: 12px; text-align: right; }
+.pair-details dd[data-status] { text-transform: capitalize; }
+.pair-card footer { display: flex; justify-content: flex-end; gap: 10px; }
+.pair-card footer button { min-height: 38px; }
+
+.pair-state,
+.pair-success,
+.pair-error {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 14px;
+  border-radius: 6px;
+  font-size: 13px;
+}
+
+.pair-state { background: #f2f2ef; color: #62625d; }
+.pair-error { border: 1px solid #e2b8b4; background: #fff7f6; color: #8b302a; }
+.pair-success { border: 1px solid #b9d9c2; background: #f5fbf6; color: #235b33; }
+.pair-success svg, .pair-state svg { width: 18px; height: 18px; flex: none; }
+.pair-success div { display: grid; gap: 2px; }
+.pair-success span { color: #54705c; }
+.spin { animation: pair-spin 800ms linear infinite; }
+
+@keyframes pair-spin { to { transform: rotate(360deg); } }
+
+@media (max-width: 520px) {
+  .pair-page { place-items: start center; padding: 20px 12px; }
+  .pair-card { padding: 22px 18px; }
+  .pair-card footer { display: grid; grid-template-columns: 1fr 1.4fr; }
+}
+
 * {
   box-sizing: border-box;
 }
@@ -6342,6 +6425,24 @@ button:disabled {
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
+}
+
+.deployment-gateways > div {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 28px 28px;
+  align-items: center;
+  gap: 4px;
+}
+
+.deployment-gateways .icon-button {
+  width: 28px;
+  height: 28px;
+}
+
+.deployment-gateways .icon-button svg {
+  width: 14px;
+  height: 14px;
 }
 
 .deployment-gateways code {

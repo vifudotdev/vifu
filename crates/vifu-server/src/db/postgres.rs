@@ -11,13 +11,14 @@ use uuid::Uuid;
 use super::types::*;
 use crate::error::{map_database_error, ApiError};
 use crate::models::{
-    slugify, validate_slug, AgentBinding, AgentEndpoint, AgentGatewayCredential,
-    AgentGatewaySession, AgentProfile, AgentProfileCapability, AgentProfileRollout,
-    AgentProfileVersion, ApiKeyAgentScope, ApiKeyPermissions, ApiKeyRecord, AvailableAgent,
-    CustomProvider, CustomProviderSecret, EndpointRoute, EndpointTrace, ProfileCapabilityDraft,
-    ProfileRoute, Project, ProjectRuntimeChannel, ProjectRuntimeExtension, ProjectRuntimeRelease,
-    ProjectWithBindings, ProviderConnection, ProviderConnectionSecret, PublicAgent,
-    RealtimeSession, RuntimeDeployment, TraceSpan,
+    slugify, validate_slug, AgentBinding, AgentEndpoint, AgentGatewayAuthorization,
+    AgentGatewayCredential, AgentGatewayPairingRequest, AgentGatewaySession, AgentProfile,
+    AgentProfileCapability, AgentProfileRollout, AgentProfileVersion, ApiKeyAgentScope,
+    ApiKeyPermissions, ApiKeyRecord, AvailableAgent, CustomProvider, CustomProviderSecret,
+    EndpointRoute, EndpointTrace, ProfileCapabilityDraft, ProfileRoute, Project,
+    ProjectRuntimeChannel, ProjectRuntimeExtension, ProjectRuntimeRelease, ProjectWithBindings,
+    ProviderConnection, ProviderConnectionSecret, PublicAgent, RealtimeSession, RuntimeDeployment,
+    TraceSpan,
 };
 
 #[derive(Debug, FromRow)]
@@ -626,7 +627,7 @@ pub async fn claim_guest_project(
         ));
     }
     sqlx::query(
-        "UPDATE agent_gateway_credentials
+        "UPDATE agent_gateway_authorizations
          SET owner_user_id = $2
          WHERE owner_user_id IS NULL
            AND gateway_id IN (
@@ -2965,6 +2966,391 @@ pub async fn resolve_project_model_route(
     .ok_or(ApiError::NotFound)
 }
 
+pub async fn upsert_agent_gateway_machine(
+    pool: &PgPool,
+    machine_id: &str,
+    public_key: &str,
+) -> Result<(), ApiError> {
+    let result = sqlx::query(
+        "INSERT INTO agent_gateway_machines(machine_id, public_key)
+         VALUES ($1, $2)
+         ON CONFLICT(machine_id) DO UPDATE
+         SET last_seen_at = NOW()
+         WHERE agent_gateway_machines.public_key = EXCLUDED.public_key",
+    )
+    .bind(machine_id)
+    .bind(public_key)
+    .execute(pool)
+    .await
+    .map_err(map_database_error)?;
+    if result.rows_affected() == 0 {
+        return Err(ApiError::Conflict(
+            "Gateway machine identity does not match its registered public key".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+pub async fn get_agent_gateway_authorization_for_machine(
+    pool: &PgPool,
+    machine_id: &str,
+) -> Result<Option<AgentGatewayAuthorization>, ApiError> {
+    sqlx::query_as::<_, AgentGatewayAuthorization>(
+        "SELECT gateway_id, machine_id, owner_user_id, status, token_prefix,
+                token_generation, token_expires_at, last_used_at, created_at, updated_at,
+                revoked_at
+         FROM agent_gateway_authorizations
+         WHERE machine_id = $1",
+    )
+    .bind(machine_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(ApiError::from)
+}
+
+pub async fn get_agent_gateway_authorization(
+    pool: &PgPool,
+    gateway_id: &str,
+) -> Result<AgentGatewayAuthorization, ApiError> {
+    sqlx::query_as::<_, AgentGatewayAuthorization>(
+        "SELECT gateway_id, machine_id, owner_user_id, status, token_prefix,
+                token_generation, token_expires_at, last_used_at, created_at, updated_at,
+                revoked_at
+         FROM agent_gateway_authorizations WHERE gateway_id = $1",
+    )
+    .bind(gateway_id)
+    .fetch_optional(pool)
+    .await?
+    .ok_or(ApiError::NotFound)
+}
+
+pub async fn create_agent_gateway_authorization(
+    pool: &PgPool,
+    input: NewAgentGatewayAuthorization<'_>,
+) -> Result<AgentGatewayAuthorization, ApiError> {
+    sqlx::query_as::<_, AgentGatewayAuthorization>(
+        "INSERT INTO agent_gateway_authorizations
+            (gateway_id, machine_id, owner_user_id, status, token_prefix, token_hash,
+             token_generation, token_expires_at)
+         VALUES ($1, $2, $3, 'active', $4, $5, 1, $6)
+         RETURNING gateway_id, machine_id, owner_user_id, status, token_prefix,
+                   token_generation, token_expires_at, last_used_at, created_at, updated_at,
+                   revoked_at",
+    )
+    .bind(input.gateway_id)
+    .bind(input.machine_id)
+    .bind(input.owner_user_id)
+    .bind(input.token_prefix)
+    .bind(input.token_hash)
+    .bind(input.token_expires_at)
+    .fetch_one(pool)
+    .await
+    .map_err(map_database_error)
+}
+
+pub async fn rotate_agent_gateway_authorization(
+    pool: &PgPool,
+    input: RotatedAgentGatewayAuthorization<'_>,
+) -> Result<AgentGatewayAuthorization, ApiError> {
+    sqlx::query_as::<_, AgentGatewayAuthorization>(
+        "UPDATE agent_gateway_authorizations
+         SET previous_token_hash = CASE WHEN status = 'active' THEN token_hash ELSE NULL END,
+             previous_token_expires_at = CASE WHEN status = 'active' THEN LEAST(token_expires_at, NOW() + INTERVAL '10 minutes') ELSE NULL END,
+             token_prefix = $2,
+             token_hash = $3,
+             token_generation = token_generation + 1,
+             token_expires_at = $4,
+             status = 'active',
+             revoked_at = NULL,
+             updated_at = NOW()
+         WHERE gateway_id = $1
+         RETURNING gateway_id, machine_id, owner_user_id, status, token_prefix,
+                   token_generation, token_expires_at, last_used_at, created_at, updated_at,
+                   revoked_at",
+    )
+    .bind(input.gateway_id)
+    .bind(input.token_prefix)
+    .bind(input.token_hash)
+    .bind(input.token_expires_at)
+    .fetch_optional(pool)
+    .await?
+    .ok_or(ApiError::NotFound)
+}
+
+pub async fn claim_agent_gateway_authorization_owner(
+    pool: &PgPool,
+    gateway_id: &str,
+    owner_user_id: &str,
+) -> Result<AgentGatewayAuthorization, ApiError> {
+    sqlx::query_as::<_, AgentGatewayAuthorization>(
+        "UPDATE agent_gateway_authorizations
+         SET owner_user_id = $2, updated_at = NOW()
+         WHERE gateway_id = $1 AND (owner_user_id IS NULL OR owner_user_id = $2)
+         RETURNING gateway_id, machine_id, owner_user_id, status, token_prefix,
+                   token_generation, token_expires_at, last_used_at, created_at, updated_at,
+                   revoked_at",
+    )
+    .bind(gateway_id)
+    .bind(owner_user_id)
+    .fetch_optional(pool)
+    .await?
+    .ok_or(ApiError::Conflict(
+        "Gateway is already owned by another account".to_string(),
+    ))
+}
+
+pub async fn authenticate_agent_gateway_device_token(
+    pool: &PgPool,
+    token_hash: &[u8],
+) -> Result<String, ApiError> {
+    sqlx::query_scalar::<_, String>(
+        "UPDATE agent_gateway_authorizations
+         SET last_used_at = NOW()
+         WHERE status = 'active'
+           AND (
+             (token_hash = $1 AND token_expires_at > NOW())
+             OR (previous_token_hash = $1 AND previous_token_expires_at > NOW())
+           )
+         RETURNING gateway_id",
+    )
+    .bind(token_hash)
+    .fetch_optional(pool)
+    .await?
+    .ok_or(ApiError::Forbidden)
+}
+
+pub async fn revoke_agent_gateway_authorization(
+    pool: &PgPool,
+    gateway_id: &str,
+) -> Result<AgentGatewayAuthorization, ApiError> {
+    sqlx::query_as::<_, AgentGatewayAuthorization>(
+        "UPDATE agent_gateway_authorizations
+         SET status = 'revoked',
+             revoked_at = COALESCE(revoked_at, NOW()),
+             previous_token_hash = NULL,
+             previous_token_expires_at = NULL,
+             updated_at = NOW()
+         WHERE gateway_id = $1
+         RETURNING gateway_id, machine_id, owner_user_id, status, token_prefix,
+                   token_generation, token_expires_at, last_used_at, created_at, updated_at,
+                   revoked_at",
+    )
+    .bind(gateway_id)
+    .fetch_optional(pool)
+    .await?
+    .ok_or(ApiError::NotFound)
+}
+
+pub async fn consume_agent_gateway_machine_enrollment(
+    pool: &PgPool,
+    token_hash: &[u8],
+    gateway_id: &str,
+) -> Result<AgentGatewayEnrollmentAssignment, ApiError> {
+    let mut transaction = pool.begin().await?;
+    let claimed = sqlx::query_as::<_, AgentGatewayEnrollmentSecret>(
+        "UPDATE agent_gateway_enrollments
+         SET gateway_id = $2, consumed_at = NOW()
+         WHERE token_hash = $1 AND consumed_at IS NULL AND revoked_at IS NULL AND expires_at > NOW()
+         RETURNING project_id, deployment_id, owner_user_id, gateway_id, consumed_at,
+                   revoked_at, expires_at",
+    )
+    .bind(token_hash)
+    .bind(gateway_id)
+    .fetch_optional(&mut *transaction)
+    .await?;
+    let enrollment = match claimed {
+        Some(enrollment) => enrollment,
+        None => {
+            let existing = sqlx::query_as::<_, AgentGatewayEnrollmentSecret>(
+                "SELECT project_id, deployment_id, owner_user_id, gateway_id, consumed_at,
+                        revoked_at, expires_at
+                 FROM agent_gateway_enrollments WHERE token_hash = $1 FOR UPDATE",
+            )
+            .bind(token_hash)
+            .fetch_optional(&mut *transaction)
+            .await?
+            .ok_or(ApiError::Unauthorized)?;
+            if existing.gateway_id.as_deref() != Some(gateway_id)
+                || existing.consumed_at.is_none()
+                || existing.revoked_at.is_some()
+                || existing.expires_at <= Utc::now()
+            {
+                return Err(ApiError::Unauthorized);
+            }
+            existing
+        }
+    };
+    sqlx::query(
+        "DELETE FROM runtime_deployment_gateways
+         WHERE gateway_id = $2 AND deployment_id <> $3
+           AND deployment_id IN (SELECT id FROM runtime_deployments WHERE project_id = $1)",
+    )
+    .bind(enrollment.project_id)
+    .bind(gateway_id)
+    .bind(enrollment.deployment_id)
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO runtime_deployment_gateways(deployment_id, gateway_id)
+         VALUES ($1, $2) ON CONFLICT DO NOTHING",
+    )
+    .bind(enrollment.deployment_id)
+    .bind(gateway_id)
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "UPDATE projects SET gateway_id = $1, updated_at = NOW()
+         WHERE id = $2 AND EXISTS(
+           SELECT 1 FROM runtime_deployments WHERE id = $3 AND project_id = $2 AND is_primary
+         )",
+    )
+    .bind(gateway_id)
+    .bind(enrollment.project_id)
+    .bind(enrollment.deployment_id)
+    .execute(&mut *transaction)
+    .await?;
+    transaction.commit().await?;
+    Ok(AgentGatewayEnrollmentAssignment {
+        project_id: enrollment.project_id,
+        deployment_id: enrollment.deployment_id,
+        owner_user_id: enrollment.owner_user_id,
+    })
+}
+
+pub async fn create_or_get_agent_gateway_pairing(
+    pool: &PgPool,
+    machine_id: &str,
+    expires_at: DateTime<Utc>,
+) -> Result<AgentGatewayPairingRequest, ApiError> {
+    let mut transaction = pool.begin().await?;
+    sqlx::query("SELECT machine_id FROM agent_gateway_machines WHERE machine_id = $1 FOR UPDATE")
+        .bind(machine_id)
+        .fetch_one(&mut *transaction)
+        .await?;
+    sqlx::query(
+        "UPDATE agent_gateway_pairing_requests
+         SET status = 'expired', resolved_at = NOW()
+         WHERE machine_id = $1 AND status = 'pending' AND expires_at <= NOW()",
+    )
+    .bind(machine_id)
+    .execute(&mut *transaction)
+    .await?;
+    let pairing = if let Some(existing) = sqlx::query_as::<_, AgentGatewayPairingRequest>(
+        "SELECT id, machine_id, status, owner_user_id, expires_at, created_at, resolved_at
+         FROM agent_gateway_pairing_requests
+         WHERE machine_id = $1 AND status = 'pending'",
+    )
+    .bind(machine_id)
+    .fetch_optional(&mut *transaction)
+    .await?
+    {
+        existing
+    } else {
+        sqlx::query_as::<_, AgentGatewayPairingRequest>(
+            "INSERT INTO agent_gateway_pairing_requests(id, machine_id, expires_at)
+             VALUES ($1, $2, $3)
+             RETURNING id, machine_id, status, owner_user_id, expires_at, created_at, resolved_at",
+        )
+        .bind(Uuid::new_v4())
+        .bind(machine_id)
+        .bind(expires_at)
+        .fetch_one(&mut *transaction)
+        .await?
+    };
+    transaction.commit().await?;
+    Ok(pairing)
+}
+
+pub async fn get_agent_gateway_pairing(
+    pool: &PgPool,
+    id: Uuid,
+) -> Result<AgentGatewayPairingRequest, ApiError> {
+    sqlx::query_as::<_, AgentGatewayPairingRequest>(
+        "SELECT id, machine_id, status, owner_user_id, expires_at, created_at, resolved_at
+         FROM agent_gateway_pairing_requests WHERE id = $1",
+    )
+    .bind(id)
+    .fetch_optional(pool)
+    .await?
+    .ok_or(ApiError::NotFound)
+}
+
+pub async fn consume_agent_gateway_pairing(
+    pool: &PgPool,
+    id: Uuid,
+    machine_id: &str,
+) -> Result<AgentGatewayPairingRequest, ApiError> {
+    sqlx::query_as::<_, AgentGatewayPairingRequest>(
+        "UPDATE agent_gateway_pairing_requests
+         SET status = 'consumed'
+         WHERE id = $1 AND machine_id = $2 AND status = 'approved' AND expires_at > NOW()
+         RETURNING id, machine_id, status, owner_user_id, expires_at, created_at, resolved_at",
+    )
+    .bind(id)
+    .bind(machine_id)
+    .fetch_optional(pool)
+    .await?
+    .ok_or(ApiError::Unauthorized)
+}
+
+pub async fn consume_approved_agent_gateway_pairing_for_machine(
+    pool: &PgPool,
+    machine_id: &str,
+) -> Result<Option<AgentGatewayPairingRequest>, ApiError> {
+    sqlx::query_as::<_, AgentGatewayPairingRequest>(
+        "UPDATE agent_gateway_pairing_requests
+         SET status = 'consumed'
+         WHERE id = (
+             SELECT id FROM agent_gateway_pairing_requests
+             WHERE machine_id = $1 AND status = 'approved' AND expires_at > NOW()
+             ORDER BY resolved_at ASC NULLS LAST, created_at ASC
+             LIMIT 1
+         )
+         RETURNING id, machine_id, status, owner_user_id, expires_at, created_at, resolved_at",
+    )
+    .bind(machine_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(ApiError::from)
+}
+
+pub async fn list_agent_gateway_pairings(
+    pool: &PgPool,
+) -> Result<Vec<AgentGatewayPairingRequest>, ApiError> {
+    sqlx::query_as::<_, AgentGatewayPairingRequest>(
+        "SELECT id, machine_id, status, owner_user_id, expires_at, created_at, resolved_at
+         FROM agent_gateway_pairing_requests ORDER BY created_at DESC LIMIT 200",
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(ApiError::from)
+}
+
+pub async fn resolve_agent_gateway_pairing(
+    pool: &PgPool,
+    id: Uuid,
+    status: &str,
+    owner_user_id: Option<&str>,
+) -> Result<AgentGatewayPairingRequest, ApiError> {
+    if !matches!(status, "approved" | "rejected") {
+        return Err(ApiError::Invalid("pairing status is invalid".to_string()));
+    }
+    sqlx::query_as::<_, AgentGatewayPairingRequest>(
+        "UPDATE agent_gateway_pairing_requests
+         SET status = $2, owner_user_id = $3, resolved_at = NOW()
+         WHERE id = $1 AND status = 'pending' AND expires_at > NOW()
+         RETURNING id, machine_id, status, owner_user_id, expires_at, created_at, resolved_at",
+    )
+    .bind(id)
+    .bind(status)
+    .bind(owner_user_id)
+    .fetch_optional(pool)
+    .await?
+    .ok_or(ApiError::Conflict(
+        "Gateway pairing request is no longer pending".to_string(),
+    ))
+}
+
 #[derive(Debug, FromRow)]
 struct AgentGatewayCredentialSecret {
     credential_hash: Vec<u8>,
@@ -3143,18 +3529,33 @@ pub async fn consume_agent_gateway_enrollment(
             AgentGatewayRegistration::Registered
         }
         Some(existing)
-            if existing.revoked_at.is_none()
-                && existing.credential_hash == credential_hash
-                && existing.owner_user_id.as_deref() == Some(enrollment.owner_user_id.as_str()) =>
+            if existing.owner_user_id.as_deref() != Some(enrollment.owner_user_id.as_str()) =>
         {
-            AgentGatewayRegistration::Existing
-        }
-        Some(existing) if existing.revoked_at.is_none() => {
             return Err(ApiError::Conflict(
                 "agent gateway id is already registered".to_string(),
             ));
         }
-        Some(_) => return Err(ApiError::AgentGatewayCredentialRevoked),
+        Some(existing)
+            if existing.revoked_at.is_none() && existing.credential_hash == credential_hash =>
+        {
+            AgentGatewayRegistration::Existing
+        }
+        Some(_) => {
+            sqlx::query(
+                "UPDATE agent_gateway_credentials
+                 SET credential_prefix = $2,
+                     credential_hash = $3,
+                     revoked_at = NULL,
+                     last_used_at = NULL
+                 WHERE gateway_id = $1",
+            )
+            .bind(gateway_id)
+            .bind(credential_prefix)
+            .bind(credential_hash)
+            .execute(&mut *transaction)
+            .await?;
+            AgentGatewayRegistration::Registered
+        }
     };
 
     sqlx::query(

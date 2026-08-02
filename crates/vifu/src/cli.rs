@@ -3,8 +3,6 @@ pub enum Command {
     Start,
     Status,
     Doctor,
-    Logout,
-    Reset,
     Help,
     Version,
 }
@@ -35,8 +33,6 @@ impl Options {
                 "-V" | "--version" => command = Command::Version,
                 "--status" => command = Command::Status,
                 "--doctor" => command = Command::Doctor,
-                "--logout" => command = Command::Logout,
-                "--reset" => command = Command::Reset,
                 "-p" | "--profile" => {
                     let value = args
                         .next()
@@ -98,9 +94,6 @@ Usage:
   vifu                   Start the configured Server, Agent Gateway, or both
   vifu --status          Show configured runtime and Agent Gateway state
   vifu --doctor          Diagnose local setup
-  vifu --logout          Remove the resumable Agent Gateway session
-  vifu --reset           Replace the local Agent Gateway identity
-
 Configuration:
   ~/.vifu/config.json    Created with local Server and Agent Gateway defaults
   ~/.vifu/providers.json Created empty; add providers in the Dashboard

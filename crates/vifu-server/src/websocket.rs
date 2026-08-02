@@ -12,29 +12,31 @@ use uuid::Uuid;
 use vifu_gateway::gateway_frame;
 use vifu_gateway::protocol::{self, AgentGatewayCommand};
 
-use crate::auth::{bearer_token, hash_agent_gateway_credential};
+use crate::auth::{hash_agent_gateway_credential, hash_agent_gateway_enrollment, is_secret_match};
 use crate::db;
 use crate::error::ApiError;
+use crate::models::AgentGatewayAuthorization;
 use crate::AppState;
+
+const DEVICE_TOKEN_LIFETIME_DAYS: i64 = 180;
+const DEVICE_TOKEN_ROTATION_WINDOW_DAYS: i64 = 30;
+const PAIRING_LIFETIME_MINUTES: i64 = 10;
 
 pub async fn upgrade(
     State(state): State<AppState>,
     headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> Result<Response, ApiError> {
-    let credential = bearer_token(&headers).ok_or(ApiError::Unauthorized)?;
-    let credential_hash = hash_agent_gateway_credential(credential, &state.config.api_key_pepper);
-    let gateway_id =
-        db::authenticate_agent_gateway_credential(&state.pool, &credential_hash).await?;
+    let audience = gateway_audience(&headers);
     Ok(ws
         .max_message_size(gateway_frame::MAX_GATEWAY_FRAME_BYTES)
         .max_frame_size(gateway_frame::MAX_GATEWAY_FRAME_BYTES)
-        .on_upgrade(move |socket| handle_socket(state, socket, gateway_id))
+        .on_upgrade(move |socket| handle_socket(state, socket, audience))
         .into_response())
 }
 
-async fn handle_socket(state: AppState, mut socket: WebSocket, gateway_id: String) {
-    if let Err(error) = run_socket(&state, &mut socket, &gateway_id).await {
+async fn handle_socket(state: AppState, mut socket: WebSocket, audience: String) {
+    if let Err(error) = run_socket(&state, &mut socket, &audience).await {
         warn!(error = %error, "agent gateway websocket closed with an error");
         let protocol_error = AgentGatewayCommand::Error {
             request_id: None,
@@ -52,8 +54,19 @@ async fn handle_socket(state: AppState, mut socket: WebSocket, gateway_id: Strin
 async fn run_socket(
     state: &AppState,
     socket: &mut WebSocket,
-    gateway_id: &str,
+    audience: &str,
 ) -> Result<(), String> {
+    let nonce = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
+    let challenge_timestamp = unix_time_ms()?;
+    send_command(
+        socket,
+        &AgentGatewayCommand::Challenge {
+            nonce: nonce.clone(),
+            timestamp: challenge_timestamp,
+            audience: audience.to_string(),
+        },
+    )
+    .await?;
     let hello = tokio::time::timeout(Duration::from_secs(5), receive_command(socket))
         .await
         .map_err(|_| "agent gateway did not send hello in time".to_string())??;
@@ -62,10 +75,62 @@ async fn run_socket(
         resume_session_id,
         agents,
         metadata,
+        machine,
+        auth,
+        followup,
     } = hello
     else {
         return Err("agent gateway must send hello first".to_string());
     };
+
+    vifu_gateway::identity::validate_signed_at(unix_time_ms()?, machine.signed_at)?;
+    let signature_payload = protocol::gateway_signature_payload(
+        audience,
+        &nonce,
+        challenge_timestamp,
+        machine.signed_at,
+        &machine.id,
+        followup.as_deref(),
+        auth.device_token.as_deref(),
+    );
+    vifu_gateway::identity::verify_machine_signature(
+        &machine.id,
+        &machine.public_key,
+        &machine.signature,
+        &signature_payload,
+    )?;
+    db::upsert_agent_gateway_machine(&state.pool, &machine.id, &machine.public_key)
+        .await
+        .map_err(|error| error.to_string())?;
+
+    let authorization = authorize_gateway_machine(
+        state,
+        &machine.id,
+        auth.device_token.as_deref(),
+        followup.as_deref(),
+    )
+    .await?;
+    let (authorization, device_token) = match authorization {
+        GatewayAuthorizationOutcome::Authorized {
+            authorization,
+            device_token,
+        } => (authorization, device_token),
+        GatewayAuthorizationOutcome::PairingRequired { request_id } => {
+            send_command(
+                socket,
+                &AgentGatewayCommand::PairingRequired {
+                    request_id,
+                    auth_url: format!("/pair?request={request_id}"),
+                    retryable: true,
+                    recommended_next_step: "approve-in-dashboard".to_string(),
+                    retry_after_ms: 2_000,
+                },
+            )
+            .await?;
+            return Ok(());
+        }
+    };
+    let gateway_id = authorization.gateway_id.as_str();
 
     let agents_json = serde_json::to_value(&agents).map_err(|error| error.to_string())?;
     let (session_id, resumed) = db::open_agent_gateway_session(
@@ -98,6 +163,11 @@ async fn run_socket(
             .try_into()
             .unwrap_or(60_000),
         resumed,
+        auth: device_token.map(|token| protocol::GatewayWelcomeAuth {
+            device_token: token,
+            generation: u64::try_from(authorization.token_generation).unwrap_or(1),
+            expires_at: authorization.token_expires_at.to_rfc3339(),
+        }),
     };
     send_command(socket, &welcome).await?;
     info!(%gateway_id, %connection_id, %session_id, resumed, "agent gateway connected");
@@ -181,6 +251,222 @@ async fn run_socket(
     }
     info!(%gateway_id, %connection_id, %session_id, "agent gateway disconnected");
     result
+}
+
+enum GatewayAuthorizationOutcome {
+    Authorized {
+        authorization: AgentGatewayAuthorization,
+        device_token: Option<String>,
+    },
+    PairingRequired {
+        request_id: Uuid,
+    },
+}
+
+async fn authorize_gateway_machine(
+    state: &AppState,
+    machine_id: &str,
+    device_token: Option<&str>,
+    followup: Option<&str>,
+) -> Result<GatewayAuthorizationOutcome, String> {
+    let mut authorization =
+        db::get_agent_gateway_authorization_for_machine(&state.pool, machine_id)
+            .await
+            .map_err(|error| error.to_string())?;
+    let mut approved_owner = None;
+    let mut explicitly_approved = false;
+    let mut preferred_gateway_id = None;
+
+    if let Some(enrollment_token) = followup.filter(|value| value.starts_with("vifu_ge_")) {
+        let gateway_id = authorization
+            .as_ref()
+            .map(|value| value.gateway_id.clone())
+            .unwrap_or_else(new_gateway_id);
+        let enrollment_hash =
+            hash_agent_gateway_enrollment(enrollment_token, &state.config.api_key_pepper);
+        let assignment = db::consume_agent_gateway_machine_enrollment(
+            &state.pool,
+            &enrollment_hash,
+            &gateway_id,
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+        approved_owner = Some(assignment.owner_user_id);
+        explicitly_approved = true;
+        preferred_gateway_id = Some(gateway_id);
+    } else if let Some(pairing_id) = followup.and_then(|value| Uuid::parse_str(value).ok()) {
+        if let Ok(pairing) =
+            db::consume_agent_gateway_pairing(&state.pool, pairing_id, machine_id).await
+        {
+            approved_owner = pairing.owner_user_id;
+            explicitly_approved = true;
+        }
+    } else if followup
+        .is_some_and(|value| is_secret_match(value, &state.config.agent_gateway_bootstrap_token))
+    {
+        explicitly_approved = true;
+    }
+
+    if !explicitly_approved {
+        if let Some(pairing) =
+            db::consume_approved_agent_gateway_pairing_for_machine(&state.pool, machine_id)
+                .await
+                .map_err(|error| error.to_string())?
+        {
+            approved_owner = pairing.owner_user_id;
+            explicitly_approved = true;
+        }
+    }
+
+    if authorization.is_none() {
+        if explicitly_approved || state.config.guest_bootstrap_enabled {
+            let issued = issue_device_token(&state.config.api_key_pepper);
+            let gateway_id = preferred_gateway_id.unwrap_or_else(new_gateway_id);
+            let created = db::create_agent_gateway_authorization(
+                &state.pool,
+                db::NewAgentGatewayAuthorization {
+                    gateway_id: &gateway_id,
+                    machine_id,
+                    owner_user_id: approved_owner.as_deref(),
+                    token_prefix: &issued.prefix,
+                    token_hash: &issued.hash,
+                    token_expires_at: issued.expires_at,
+                },
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+            return Ok(GatewayAuthorizationOutcome::Authorized {
+                authorization: created,
+                device_token: Some(issued.raw),
+            });
+        }
+        return pending_pairing(state, machine_id).await;
+    }
+
+    let current = authorization
+        .take()
+        .expect("authorization was checked above");
+    if let Some(owner_user_id) = approved_owner.as_deref() {
+        authorization = Some(
+            db::claim_agent_gateway_authorization_owner(
+                &state.pool,
+                &current.gateway_id,
+                owner_user_id,
+            )
+            .await
+            .map_err(|error| error.to_string())?,
+        );
+    } else {
+        authorization = Some(current);
+    }
+    let current = authorization.expect("authorization was assigned above");
+
+    if current.status == "revoked" && !explicitly_approved {
+        return pending_pairing(state, machine_id).await;
+    }
+
+    if current.status == "active" && !explicitly_approved {
+        if let Some(device_token) = device_token {
+            let token_hash =
+                hash_agent_gateway_credential(device_token, &state.config.api_key_pepper);
+            let authenticated =
+                db::authenticate_agent_gateway_device_token(&state.pool, &token_hash)
+                    .await
+                    .is_ok_and(|gateway_id| gateway_id == current.gateway_id);
+            if !authenticated {
+                return pending_pairing(state, machine_id).await;
+            }
+            if current.token_expires_at
+                > chrono::Utc::now() + chrono::Duration::days(DEVICE_TOKEN_ROTATION_WINDOW_DAYS)
+            {
+                return Ok(GatewayAuthorizationOutcome::Authorized {
+                    authorization: current,
+                    device_token: None,
+                });
+            }
+        } else {
+            return pending_pairing(state, machine_id).await;
+        }
+    }
+
+    let issued = issue_device_token(&state.config.api_key_pepper);
+    let rotated = db::rotate_agent_gateway_authorization(
+        &state.pool,
+        db::RotatedAgentGatewayAuthorization {
+            gateway_id: &current.gateway_id,
+            token_prefix: &issued.prefix,
+            token_hash: &issued.hash,
+            token_expires_at: issued.expires_at,
+        },
+    )
+    .await
+    .map_err(|error| error.to_string())?;
+    Ok(GatewayAuthorizationOutcome::Authorized {
+        authorization: rotated,
+        device_token: Some(issued.raw),
+    })
+}
+
+async fn pending_pairing(
+    state: &AppState,
+    machine_id: &str,
+) -> Result<GatewayAuthorizationOutcome, String> {
+    let pairing = db::create_or_get_agent_gateway_pairing(
+        &state.pool,
+        machine_id,
+        chrono::Utc::now() + chrono::Duration::minutes(PAIRING_LIFETIME_MINUTES),
+    )
+    .await
+    .map_err(|error| error.to_string())?;
+    Ok(GatewayAuthorizationOutcome::PairingRequired {
+        request_id: pairing.id,
+    })
+}
+
+struct IssuedDeviceToken {
+    raw: String,
+    prefix: String,
+    hash: Vec<u8>,
+    expires_at: chrono::DateTime<chrono::Utc>,
+}
+
+fn issue_device_token(pepper: &str) -> IssuedDeviceToken {
+    let raw = format!(
+        "vifu_gw_{}{}",
+        Uuid::new_v4().simple(),
+        Uuid::new_v4().simple()
+    );
+    IssuedDeviceToken {
+        prefix: raw.chars().take(20).collect(),
+        hash: hash_agent_gateway_credential(&raw, pepper),
+        raw,
+        expires_at: chrono::Utc::now() + chrono::Duration::days(DEVICE_TOKEN_LIFETIME_DAYS),
+    }
+}
+
+fn new_gateway_id() -> String {
+    format!("gateway-{}", Uuid::new_v4().simple())
+}
+
+fn gateway_audience(headers: &HeaderMap) -> String {
+    let scheme = headers
+        .get("x-forwarded-proto")
+        .and_then(|value| value.to_str().ok())
+        .filter(|value| matches!(*value, "http" | "https"))
+        .unwrap_or("http");
+    let host = headers
+        .get("host")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("vifu.local");
+    format!("{scheme}://{host}/v1/agent-gateway/connect")
+}
+
+fn unix_time_ms() -> Result<u64, String> {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let duration = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| "system clock is before the Unix epoch".to_string())?;
+    u64::try_from(duration.as_millis()).map_err(|_| "system clock is invalid".to_string())
 }
 
 async fn reconcile_project_agents(
@@ -317,15 +603,20 @@ mod tests {
     use vifu_gateway::gateway_frame::{
         self, GatewayFrame, RequestFrame, RequestFrameType, ResponseFrame, ResponseFrameType,
     };
+    use vifu_gateway::identity::MachineIdentity;
     use vifu_gateway::protocol::{
-        AgentDescriptor, AgentGatewayCommand, AGENT_GATEWAY_HELLO_METHOD,
+        self, AgentDescriptor, AgentGatewayCommand, AGENT_GATEWAY_HELLO_METHOD,
         AGENT_GATEWAY_HELLO_REQUEST_ID, AGENT_GATEWAY_INVOKE_METHOD, VERSION,
     };
 
-    use super::{decode_command, encode_command, reconcile_project_agents};
+    use super::{
+        authorize_gateway_machine, decode_command, encode_command, reconcile_project_agents,
+        GatewayAuthorizationOutcome,
+    };
     use crate::auth::hash_api_key;
     use crate::config::Config;
     use crate::db::{self, NewProject};
+    use crate::error::ApiError;
     use crate::models::{
         ApiKeyAgentScope, ApiKeyPermissions, EndpointPermission, ProfileCapabilityDraft,
         ResourcePermission,
@@ -340,6 +631,7 @@ mod tests {
             session_id: Uuid::new_v4(),
             heartbeat_interval_ms: 30_000,
             resumed: false,
+            auth: None,
         };
         let encoded = encode_command(&command).unwrap();
         let frame = gateway_frame::decode(&encoded).unwrap();
@@ -460,6 +752,103 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn unknown_machine_can_be_approved_through_pairing() {
+        let Some(pool) = maybe_test_pool().await else {
+            return;
+        };
+        let state = state_with_storage(Config::from_env().unwrap(), pool);
+        let machine = MachineIdentity::generate().unwrap();
+        db::upsert_agent_gateway_machine(&state.pool, &machine.machine_id, &machine.public_key)
+            .await
+            .unwrap();
+
+        let request_id = match authorize_gateway_machine(&state, &machine.machine_id, None, None)
+            .await
+            .unwrap()
+        {
+            GatewayAuthorizationOutcome::PairingRequired { request_id } => request_id,
+            GatewayAuthorizationOutcome::Authorized { .. } => {
+                panic!("an unknown machine must require pairing")
+            }
+        };
+        db::resolve_agent_gateway_pairing(
+            &state.pool,
+            request_id,
+            "approved",
+            Some("user-pairing-owner"),
+        )
+        .await
+        .unwrap();
+
+        let (authorization, device_token) = match authorize_gateway_machine(
+            &state,
+            &machine.machine_id,
+            None,
+            Some(&request_id.to_string()),
+        )
+        .await
+        .unwrap()
+        {
+            GatewayAuthorizationOutcome::Authorized {
+                authorization,
+                device_token,
+            } => (authorization, device_token.expect("new Device Token")),
+            GatewayAuthorizationOutcome::PairingRequired { .. } => {
+                panic!("approved pairing must authorize the machine")
+            }
+        };
+        assert_eq!(
+            authorization.owner_user_id.as_deref(),
+            Some("user-pairing-owner")
+        );
+        let token_hash =
+            crate::auth::hash_agent_gateway_credential(&device_token, &state.config.api_key_pepper);
+        assert_eq!(
+            db::authenticate_agent_gateway_device_token(&state.pool, &token_hash)
+                .await
+                .unwrap(),
+            authorization.gateway_id
+        );
+        assert!(matches!(
+            db::consume_agent_gateway_pairing(&state.pool, request_id, &machine.machine_id,).await,
+            Err(ApiError::Unauthorized)
+        ));
+
+        let missing_token_request =
+            match authorize_gateway_machine(&state, &machine.machine_id, None, None)
+                .await
+                .unwrap()
+            {
+                GatewayAuthorizationOutcome::PairingRequired { request_id } => request_id,
+                GatewayAuthorizationOutcome::Authorized { .. } => {
+                    panic!("an authorized machine still requires its Device Token")
+                }
+            };
+        let wrong_token = format!("vifu_gw_{}", "b".repeat(64));
+        assert!(matches!(
+            authorize_gateway_machine(
+                &state,
+                &machine.machine_id,
+                Some(&wrong_token),
+                None,
+            )
+            .await
+            .unwrap(),
+            GatewayAuthorizationOutcome::PairingRequired { request_id }
+                if request_id == missing_token_request
+        ));
+        assert!(matches!(
+            authorize_gateway_machine(&state, &machine.machine_id, Some(&device_token), None,)
+                .await
+                .unwrap(),
+            GatewayAuthorizationOutcome::Authorized {
+                device_token: None,
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
     async fn agent_gateway_websocket_uses_frame_transport_for_invocations() {
         let Some(pool) = maybe_test_pool().await else {
             return;
@@ -469,28 +858,31 @@ mod tests {
         let seeded = seed_endpoint(&pool, raw_api_key, &gateway_id).await;
         let mut config = Config::from_env().unwrap();
         config.heartbeat_interval = std::time::Duration::from_secs(30);
-        let bootstrap_token = config.agent_gateway_bootstrap_token.clone();
         let admin_key = config.admin_key.clone();
         let gateway_credential =
             "vifu_gw_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
         let state = state_with_storage(config, pool);
-        let registration = app(state.clone())
-            .oneshot(
-                Request::post("/v1/agent-gateways/register")
-                    .header(AUTHORIZATION, format!("Bearer {bootstrap_token}"))
-                    .header(CONTENT_TYPE, "application/json")
-                    .body(Body::from(
-                        json!({
-                            "gatewayId": gateway_id,
-                            "credential": gateway_credential,
-                        })
-                        .to_string(),
-                    ))
-                    .unwrap(),
-            )
+        let machine = MachineIdentity::generate().unwrap();
+        db::upsert_agent_gateway_machine(&state.pool, &machine.machine_id, &machine.public_key)
             .await
             .unwrap();
-        assert_eq!(registration.status(), StatusCode::CREATED);
+        let token_hash = crate::auth::hash_agent_gateway_credential(
+            gateway_credential,
+            &state.config.api_key_pepper,
+        );
+        db::create_agent_gateway_authorization(
+            &state.pool,
+            db::NewAgentGatewayAuthorization {
+                gateway_id: &gateway_id,
+                machine_id: &machine.machine_id,
+                owner_user_id: None,
+                token_prefix: &gateway_credential.chars().take(20).collect::<String>(),
+                token_hash: &token_hash,
+                token_expires_at: chrono::Utc::now() + chrono::Duration::days(180),
+            },
+        )
+        .await
+        .unwrap();
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let server_state = state.clone();
@@ -498,7 +890,25 @@ mod tests {
             axum::serve(listener, app(server_state)).await.unwrap();
         });
 
-        let mut socket = connect_agent_gateway(addr, gateway_credential).await;
+        let mut socket = connect_agent_gateway(addr).await;
+        let challenge = receive_json_frame(&mut socket).await;
+        assert_eq!(challenge["type"], "event");
+        assert_eq!(challenge["event"], protocol::AGENT_GATEWAY_CHALLENGE_EVENT);
+        let nonce = challenge["payload"]["nonce"].as_str().unwrap();
+        let timestamp = challenge["payload"]["timestamp"].as_u64().unwrap();
+        let audience = challenge["payload"]["audience"].as_str().unwrap();
+        let signed_at = super::unix_time_ms().unwrap();
+        let signature = machine
+            .sign(&protocol::gateway_signature_payload(
+                audience,
+                nonce,
+                timestamp,
+                signed_at,
+                &machine.machine_id,
+                None,
+                Some(gateway_credential),
+            ))
+            .unwrap();
         send_gateway_frame(
             &mut socket,
             GatewayFrame::Request(RequestFrame {
@@ -521,6 +931,15 @@ mod tests {
                     ],
                     "metadata": {
                         "adapter": "test"
+                    },
+                    "machine": {
+                        "id": machine.machine_id,
+                        "publicKey": machine.public_key,
+                        "signature": signature,
+                        "signedAt": signed_at
+                    },
+                    "auth": {
+                        "deviceToken": gateway_credential
                     }
                 })),
             }),
@@ -623,6 +1042,7 @@ mod tests {
                 agent_scope: &ApiKeyAgentScope::All,
                 permissions: &ApiKeyPermissions {
                     chat_completions: EndpointPermission::None,
+                    embeddings: EndpointPermission::None,
                     speech: EndpointPermission::None,
                     transcriptions: EndpointPermission::None,
                     realtime: EndpointPermission::None,
@@ -733,28 +1153,10 @@ mod tests {
         assert_eq!(revoked["type"], "event");
         assert_eq!(revoked["event"], "gateway.error");
         assert_eq!(revoked["payload"]["code"], "CREDENTIAL_REVOKED");
-        let reenrollment = app(state.clone())
-            .oneshot(
-                Request::post("/v1/agent-gateways/register")
-                    .header(AUTHORIZATION, format!("Bearer {bootstrap_token}"))
-                    .header(CONTENT_TYPE, "application/json")
-                    .body(Body::from(
-                        json!({
-                            "gatewayId": seeded.gateway_id,
-                            "credential": "vifu_gw_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-                        })
-                        .to_string(),
-                    ))
-                    .unwrap(),
-            )
+        let authorization = db::get_agent_gateway_authorization(&state.pool, &seeded.gateway_id)
             .await
             .unwrap();
-        assert_api_error(
-            reenrollment,
-            StatusCode::CONFLICT,
-            "gateway_credential_revoked",
-        )
-        .await;
+        assert_eq!(authorization.status, "revoked");
 
         let _ = socket.close(None).await;
         server.abort();
@@ -965,15 +1367,11 @@ mod tests {
 
     async fn connect_agent_gateway(
         addr: std::net::SocketAddr,
-        token: &str,
     ) -> tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>
     {
-        let mut request = format!("ws://{addr}/v1/agent-gateway/connect")
+        let request = format!("ws://{addr}/v1/agent-gateway/connect")
             .into_client_request()
             .unwrap();
-        request
-            .headers_mut()
-            .insert(AUTHORIZATION, format!("Bearer {token}").parse().unwrap());
         connect_async(request).await.unwrap().0
     }
 

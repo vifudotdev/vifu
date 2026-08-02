@@ -20,7 +20,7 @@ use uuid::Uuid;
 use vifu_gateway::config::{
     AgentProviderAuthDefinition, AgentProviderDefinition, AgentProvidersFile,
 };
-use vifu_gateway::protocol::validate_identifier;
+use vifu_gateway::protocol::{validate_identifier, MAX_INVOCATION_BODY_BYTES};
 use vifu_runtime::{
     AgentDefinition, AgentProvider, EndpointDefinition, HttpCapabilityProvider,
     HttpCapabilityRoute, InvocationData, InvocationInput, RuntimeError, RuntimeManifest,
@@ -51,6 +51,9 @@ use crate::models::{
 use crate::openclaw_device;
 use crate::relay::RelayAgentProvider;
 use crate::AppState;
+
+const MAX_CHAT_REQUEST_BYTES: usize = MAX_INVOCATION_BODY_BYTES;
+const MAX_CHAT_IMAGES: usize = 16;
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -109,16 +112,16 @@ pub async fn exchange_deployment_credential(
 
 pub async fn bootstrap_guest_project(
     State(state): State<AppState>,
-    Json(input): Json<RegisterAgentGateway>,
+    headers: HeaderMap,
 ) -> Result<(StatusCode, Json<Value>), ApiError> {
     if !state.config.guest_bootstrap_enabled {
         return Err(ApiError::Forbidden);
     }
-    let gateway_id = required_identifier("agent gateway id", &input.gateway_id)?;
-    let credential = validate_agent_gateway_credential(&input.credential)?;
+    let credential = bearer_token(&headers).ok_or(ApiError::Unauthorized)?;
+    let gateway_id = authenticated_agent_gateway(&state, &headers).await?;
     db::prune_expired_guest_projects(&state.pool).await?;
     if let Some((project, expires_at)) =
-        db::get_active_guest_project_for_gateway(&state.pool, gateway_id).await?
+        db::get_active_guest_project_for_gateway(&state.pool, &gateway_id).await?
     {
         let response = guest_project_response(&state, project, expires_at, credential).await?;
         return Ok((StatusCode::OK, Json(response)));
@@ -132,7 +135,7 @@ pub async fn bootstrap_guest_project(
     }
 
     let project_id = Uuid::new_v4();
-    let slug = guest_project_slug(gateway_id);
+    let slug = guest_project_slug(&gateway_id);
     let project = db::create_project(
         &state.pool,
         NewProject {
@@ -141,7 +144,7 @@ pub async fn bootstrap_guest_project(
             slug: &slug,
             name: "Guest project",
             description: None,
-            gateway_id,
+            gateway_id: &gateway_id,
             binding_ids: &[],
         },
     )
@@ -155,7 +158,7 @@ pub async fn bootstrap_guest_project(
         &state.pool,
         db::NewGuestProject {
             project_id,
-            gateway_id,
+            gateway_id: &gateway_id,
             claim_token_hash: &claim_token_hash,
             expires_at,
         },
@@ -164,7 +167,7 @@ pub async fn bootstrap_guest_project(
     {
         let _ = db::delete_project(&state.pool, project_id).await;
         if let Some((existing, existing_expires_at)) =
-            db::get_active_guest_project_for_gateway(&state.pool, gateway_id).await?
+            db::get_active_guest_project_for_gateway(&state.pool, &gateway_id).await?
         {
             let response =
                 guest_project_response(&state, existing, existing_expires_at, credential).await?;
@@ -197,13 +200,25 @@ async fn guest_project_response(
     expires_at: chrono::DateTime<Utc>,
     gateway_credential: &str,
 ) -> Result<Value, ApiError> {
-    ensure_guest_gateway_credential(state, &project, gateway_credential).await?;
     let project_key = ensure_guest_project_key(state, &project, gateway_credential).await?;
-    let deployment = db::list_runtime_deployments(&state.pool, project.project.id)
+    let mut deployment = db::list_runtime_deployments(&state.pool, project.project.id)
         .await?
         .into_iter()
         .find(|deployment| deployment.is_primary)
         .ok_or(ApiError::Internal)?;
+    if !deployment.remote_invocation_enabled {
+        deployment = db::update_runtime_deployment(
+            &state.pool,
+            project.project.id,
+            &deployment.name,
+            db::RuntimeDeploymentPatch {
+                config_sync_enabled: None,
+                trace_mode: None,
+                remote_invocation_enabled: Some(true),
+            },
+        )
+        .await?;
+    }
     Ok(json!({
         "project": {
             "id": project.project.id,
@@ -221,24 +236,6 @@ async fn guest_project_response(
         ),
         "expiresAt": expires_at,
     }))
-}
-
-async fn ensure_guest_gateway_credential(
-    state: &AppState,
-    project: &crate::models::ProjectWithBindings,
-    credential: &str,
-) -> Result<(), ApiError> {
-    let prefix = credential.chars().take(20).collect::<String>();
-    let hash = hash_agent_gateway_credential(credential, &state.config.api_key_pepper);
-    db::register_agent_gateway_credential(
-        &state.pool,
-        &project.project.gateway_id,
-        None,
-        &prefix,
-        &hash,
-    )
-    .await?;
-    Ok(())
 }
 
 async fn ensure_guest_project_key(
@@ -1285,6 +1282,8 @@ pub async fn test_project_profile(
         Some(gateway_id) => state.relay.session_for(gateway_id).await,
         None => None,
     };
+    let trace_request = chat_trace_request(&request);
+    let input_summary = chat_request_summary(&request);
     let trace_id = db::create_trace(
         &state.pool,
         db::NewTrace {
@@ -1298,15 +1297,15 @@ pub async fn test_project_profile(
             provider_key: Some(&route.provider_key),
             capability_kind: Some(&route.capability_kind),
             selection_key: selection_key.as_deref(),
-            request: &request,
+            request: &trace_request,
         },
     )
     .await?;
-    let input_summary = json!({
-        "model": profile.slug,
-        "messageCount": request.get("messages").and_then(Value::as_array).map_or(0, Vec::len),
-        "previewMode": preview_mode,
-    });
+    let mut input_summary = input_summary;
+    input_summary["model"] = Value::String(profile.slug.clone());
+    input_summary["previewMode"] = preview_mode
+        .map(|mode| Value::String(mode.to_string()))
+        .unwrap_or(Value::Null);
     let span_id = db::create_trace_span(
         &state.pool,
         db::NewTraceSpan {
@@ -2088,6 +2087,82 @@ pub async fn create_runtime_deployment_agent_gateway_enrollment(
     create_agent_gateway_enrollment_for_deployment(&state, &headers, project, deployment).await
 }
 
+pub async fn assign_runtime_deployment_agent_gateway(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((slug, deployment, gateway_id)): Path<(String, String, String)>,
+) -> Result<Json<Value>, ApiError> {
+    let project = db::get_project_by_slug(&state.pool, &slug).await?;
+    let identity = state
+        .auth
+        .authorize_project(
+            &headers,
+            Operation::ProjectWrite,
+            project.project.owner_user_id.as_deref(),
+        )
+        .await?;
+    let deployment_name = validate_explicit_slug(&deployment)?;
+    let deployment =
+        db::get_runtime_deployment(&state.pool, project.project.id, &deployment_name).await?;
+    authorize_gateway_owner(&state, &identity, &gateway_id).await?;
+    db::assign_runtime_deployment_gateway(
+        &state.pool,
+        project.project.id,
+        deployment.id,
+        &gateway_id,
+    )
+    .await?;
+    Ok(Json(json!({ "assigned": true, "gatewayId": gateway_id })))
+}
+
+pub async fn unassign_runtime_deployment_agent_gateway(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((slug, deployment, gateway_id)): Path<(String, String, String)>,
+) -> Result<StatusCode, ApiError> {
+    let project = db::get_project_by_slug(&state.pool, &slug).await?;
+    let identity = state
+        .auth
+        .authorize_project(
+            &headers,
+            Operation::ProjectWrite,
+            project.project.owner_user_id.as_deref(),
+        )
+        .await?;
+    let deployment_name = validate_explicit_slug(&deployment)?;
+    let deployment =
+        db::get_runtime_deployment(&state.pool, project.project.id, &deployment_name).await?;
+    authorize_gateway_owner(&state, &identity, &gateway_id).await?;
+    db::unassign_runtime_deployment_gateway(
+        &state.pool,
+        project.project.id,
+        deployment.id,
+        &gateway_id,
+    )
+    .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn authorize_gateway_owner(
+    state: &AppState,
+    identity: &Identity,
+    gateway_id: &str,
+) -> Result<(), ApiError> {
+    let authorization = db::get_agent_gateway_authorization(&state.pool, gateway_id).await?;
+    if authorization.status != "active" {
+        return Err(ApiError::Forbidden);
+    }
+    match identity {
+        Identity::DeploymentAdmin => Ok(()),
+        Identity::ActingUser { subject, .. }
+            if authorization.owner_user_id.as_deref() == Some(subject.as_str()) =>
+        {
+            Ok(())
+        }
+        Identity::ActingUser { .. } => Err(ApiError::Forbidden),
+    }
+}
+
 async fn create_agent_gateway_enrollment_for_deployment(
     state: &AppState,
     headers: &HeaderMap,
@@ -2144,14 +2219,91 @@ pub async fn revoke_agent_gateway(
     headers: HeaderMap,
     Path(gateway_id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
-    deployment_admin(&state, &headers, Operation::DeploymentWrite).await?;
     let gateway_id = required_identifier("agent gateway id", &gateway_id)?;
-    let credential = db::revoke_agent_gateway_credential(&state.pool, gateway_id).await?;
+    let identity = deployment_identity(&state, &headers, Operation::DeploymentWrite).await?;
+    let current = db::get_agent_gateway_authorization(&state.pool, gateway_id).await?;
+    if let Identity::ActingUser { subject, .. } = identity {
+        if current.owner_user_id.as_deref() != Some(subject.as_str()) {
+            return Err(ApiError::Forbidden);
+        }
+    }
+    let authorization = db::revoke_agent_gateway_authorization(&state.pool, gateway_id).await?;
     state
         .relay
         .disconnect(gateway_id, "CREDENTIAL_REVOKED")
         .await;
-    Ok(Json(json!({ "agentGatewayCredential": credential })))
+    Ok(Json(json!({ "agentGatewayAuthorization": authorization })))
+}
+
+pub async fn get_agent_gateway_pairing(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Value>, ApiError> {
+    deployment_identity(&state, &headers, Operation::DeploymentRead).await?;
+    let pairing = db::get_agent_gateway_pairing(&state.pool, id).await?;
+    Ok(Json(json!({ "pairing": pairing })))
+}
+
+pub async fn list_agent_gateway_pairings(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    deployment_admin(&state, &headers, Operation::DeploymentRead).await?;
+    Ok(Json(json!({
+        "pairings": db::list_agent_gateway_pairings(&state.pool).await?
+    })))
+}
+
+pub async fn approve_agent_gateway_pairing(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Value>, ApiError> {
+    let identity = deployment_identity(&state, &headers, Operation::ProjectWrite).await?;
+    let request = db::get_agent_gateway_pairing(&state.pool, id).await?;
+    let authorization =
+        db::get_agent_gateway_authorization_for_machine(&state.pool, &request.machine_id).await?;
+    let owner_user_id = match identity {
+        Identity::ActingUser { subject, .. } => {
+            if authorization
+                .as_ref()
+                .and_then(|value| value.owner_user_id.as_deref())
+                .is_some_and(|owner| owner != subject)
+            {
+                return Err(ApiError::Forbidden);
+            }
+            Some(subject)
+        }
+        Identity::DeploymentAdmin => authorization.and_then(|value| value.owner_user_id),
+    };
+    let pairing =
+        db::resolve_agent_gateway_pairing(&state.pool, id, "approved", owner_user_id.as_deref())
+            .await?;
+    Ok(Json(json!({ "pairing": pairing })))
+}
+
+pub async fn reject_agent_gateway_pairing(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Value>, ApiError> {
+    let identity = deployment_identity(&state, &headers, Operation::ProjectWrite).await?;
+    let request = db::get_agent_gateway_pairing(&state.pool, id).await?;
+    if let Identity::ActingUser { subject, .. } = identity {
+        let authorization =
+            db::get_agent_gateway_authorization_for_machine(&state.pool, &request.machine_id)
+                .await?;
+        if authorization
+            .as_ref()
+            .and_then(|value| value.owner_user_id.as_deref())
+            .is_some_and(|owner| owner != subject)
+        {
+            return Err(ApiError::Forbidden);
+        }
+    }
+    let pairing = db::resolve_agent_gateway_pairing(&state.pool, id, "rejected", None).await?;
+    Ok(Json(json!({ "pairing": pairing })))
 }
 
 pub async fn list_available_agents(
@@ -3415,6 +3567,7 @@ pub async fn connect_realtime(
 
 #[derive(Clone, Copy)]
 enum ProfileEndpointPermission {
+    Embeddings,
     Speech,
     Transcriptions,
     Realtime,
@@ -3463,6 +3616,7 @@ fn assert_endpoint_permission(
         return Err(ApiError::AgentAccessDenied);
     }
     let allowed = match permission {
+        ProfileEndpointPermission::Embeddings => key.permissions.embeddings_allowed(),
         ProfileEndpointPermission::Speech => key.permissions.speech_allowed(),
         ProfileEndpointPermission::Transcriptions => key.permissions.transcriptions_allowed(),
         ProfileEndpointPermission::Realtime => key.permissions.realtime_allowed(),
@@ -4086,6 +4240,142 @@ pub async fn create_project_chat_completion(
     create_chat_completion_for_project(state, headers, Some(project_slug), request).await
 }
 
+pub async fn create_project_embeddings(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(project_slug): Path<String>,
+    Json(request): Json<Value>,
+) -> Result<Json<Value>, ApiError> {
+    validate_embedding_request(&request)?;
+    let model = request
+        .get("model")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or(ApiError::ModelRequired)?;
+    let selection_key = request
+        .get("user")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let (_authority, project, route) = resolve_authorized_profile_route(
+        &state,
+        &headers,
+        &project_slug,
+        model,
+        "embedding",
+        selection_key,
+        ProfileEndpointPermission::Embeddings,
+    )
+    .await?;
+    let request_id = Uuid::new_v4();
+    let gateway_id = profile_gateway_id(&route);
+    let gateway_session_id = match gateway_id.as_deref() {
+        Some(gateway_id) => state.relay.session_for(gateway_id).await,
+        None => None,
+    };
+    let request_summary = embedding_request_summary(&request);
+    let trace_id = db::create_trace(
+        &state.pool,
+        db::NewTrace {
+            request_id,
+            endpoint_id: None,
+            project_id: Some(project.project.id),
+            gateway_session_id,
+            profile_id: Some(route.profile_id),
+            profile_version_id: Some(route.profile_version_id),
+            operation: "embeddings",
+            provider_key: Some(&route.provider_key),
+            capability_kind: Some("embedding"),
+            selection_key,
+            request: &request_summary,
+        },
+    )
+    .await?;
+    let span_id = db::create_trace_span(
+        &state.pool,
+        db::NewTraceSpan {
+            trace_id,
+            parent_span_id: None,
+            name: "embedding.create",
+            kind: "provider",
+            provider_key: Some(&route.provider_key),
+            capability_kind: Some("embedding"),
+            input_summary: Some(&request_summary),
+            attributes: &json!({
+                "profileId": route.profile_id,
+                "profileVersionId": route.profile_version_id,
+                "version": route.version_number,
+                "capabilityId": route.capability_id,
+            }),
+        },
+    )
+    .await?;
+    let timeout = profile_timeout(&route.runtime, state.config.request_timeout);
+    let started_at = Instant::now();
+    let result = invoke_profile_embedding(
+        &state,
+        project.project.id,
+        &project.project.slug,
+        &route,
+        request_id,
+        request,
+        timeout,
+    )
+    .await
+    .and_then(|(output, metadata)| {
+        embedding_response(&route.profile_slug, output).map(|response| (response, metadata))
+    });
+    match result {
+        Ok((response, metadata)) => {
+            let response_summary = embedding_response_summary(&response, &metadata);
+            let duration = db::elapsed_millis(started_at);
+            db::complete_trace_span(
+                &state.pool,
+                span_id,
+                "completed",
+                duration,
+                Some(&response_summary),
+                None,
+            )
+            .await?;
+            persist_trace(
+                &state,
+                request_id,
+                "completed",
+                started_at,
+                Some(&response_summary),
+                None,
+            )
+            .await;
+            Ok(Json(response))
+        }
+        Err(error) => {
+            let message = error.to_string();
+            let duration = db::elapsed_millis(started_at);
+            db::complete_trace_span(
+                &state.pool,
+                span_id,
+                "failed",
+                duration,
+                None,
+                Some(&message),
+            )
+            .await?;
+            persist_trace(
+                &state,
+                request_id,
+                api_error_trace_status(&error),
+                started_at,
+                None,
+                Some(&message),
+            )
+            .await;
+            Err(error)
+        }
+    }
+}
+
 async fn create_chat_completion_for_project(
     state: AppState,
     headers: HeaderMap,
@@ -4126,6 +4416,7 @@ async fn create_chat_completion_for_project(
     let route = resolve_chat_route(&state, &authority, project.as_ref(), model.as_deref()).await?;
     let request_id = Uuid::new_v4();
     let gateway_session_id = state.relay.session_for(&route.gateway_id).await;
+    let trace_request = chat_trace_request(&request);
     db::create_trace(
         &state.pool,
         db::NewTrace {
@@ -4139,7 +4430,7 @@ async fn create_chat_completion_for_project(
             provider_key: Some("agent-gateway"),
             capability_kind: Some("chat"),
             selection_key: None,
-            request: &request,
+            request: &trace_request,
         },
     )
     .await?;
@@ -4229,6 +4520,8 @@ async fn create_profile_chat_completion(
         Some(gateway_id) => state.relay.session_for(gateway_id).await,
         None => None,
     };
+    let trace_request = chat_trace_request(&request);
+    let input_summary = chat_request_summary(&request);
     let trace_id = db::create_trace(
         &state.pool,
         db::NewTrace {
@@ -4242,14 +4535,10 @@ async fn create_profile_chat_completion(
             provider_key: Some(&route.provider_key),
             capability_kind: Some(&route.capability_kind),
             selection_key,
-            request: &request,
+            request: &trace_request,
         },
     )
     .await?;
-    let input_summary = json!({
-        "model": model,
-        "messageCount": request.get("messages").and_then(Value::as_array).map_or(0, Vec::len),
-    });
     let span_id = db::create_trace_span(
         &state.pool,
         db::NewTraceSpan {
@@ -4466,6 +4755,7 @@ fn runtime_profile_tool_is_available(config: &Value, tool: &str) -> bool {
 fn gateway_binding_config(
     mut capability_config: Value,
     provider_key: &str,
+    capability: &str,
     persona: &Value,
 ) -> Result<Value, ApiError> {
     let binding = capability_config.as_object_mut().ok_or_else(|| {
@@ -4474,6 +4764,10 @@ fn gateway_binding_config(
     binding.insert(
         "providerKey".to_string(),
         Value::String(provider_key.to_string()),
+    );
+    binding.insert(
+        "capability".to_string(),
+        Value::String(capability.to_string()),
     );
     binding.insert("persona".to_string(), persona.clone());
     Ok(capability_config)
@@ -4518,6 +4812,7 @@ async fn invoke_profile_chat(
             let binding_config = gateway_binding_config(
                 route.capability_config.clone(),
                 &route.provider_key,
+                "chat",
                 &route.persona,
             )?;
             let endpoint_route = EndpointRoute {
@@ -4586,6 +4881,107 @@ async fn invoke_profile_chat(
     .await?;
     match output {
         InvocationData::Json(output) => Ok(output),
+        InvocationData::Binary(_) => Err(ApiError::Internal),
+    }
+}
+
+async fn invoke_profile_embedding(
+    state: &AppState,
+    project_id: Uuid,
+    project_slug: &str,
+    route: &crate::models::ProfileRoute,
+    request_id: Uuid,
+    request: Value,
+    timeout: Duration,
+) -> Result<(Value, Value), ApiError> {
+    let provider: Arc<dyn AgentProvider> = match route.provider_type.as_str() {
+        "vifu-runtime" => {
+            let gateway_id = profile_gateway_id(route).ok_or_else(|| {
+                ApiError::Invalid("Gateway capability is missing gatewayId".to_string())
+            })?;
+            if !db::runtime_deployment_allows_remote_invocation(
+                &state.pool,
+                project_id,
+                &gateway_id,
+            )
+            .await?
+            {
+                return Err(ApiError::Forbidden);
+            }
+            let agent_id = route.resource_id.as_deref().ok_or_else(|| {
+                ApiError::Invalid("embedding capability is missing resourceId".to_string())
+            })?;
+            let binding_config = gateway_binding_config(
+                route.capability_config.clone(),
+                &route.provider_key,
+                "embedding",
+                &route.persona,
+            )?;
+            let endpoint_route = EndpointRoute {
+                endpoint_id: route.capability_id,
+                endpoint_slug: route.profile_slug.clone(),
+                endpoint_name: route.profile_name.clone(),
+                request_timeout_ms: i32::try_from(timeout.as_millis()).unwrap_or(i32::MAX),
+                profile_id: route.profile_id,
+                binding_id: route.capability_id,
+                gateway_id,
+                agent_id: agent_id.to_string(),
+                binding_config,
+            };
+            Arc::new(RelayAgentProvider::new(
+                "agent-gateway",
+                "embedding",
+                state.relay.clone(),
+                endpoint_route,
+                request_id,
+                timeout,
+            ))
+        }
+        "openai-compatible" => {
+            let provider =
+                resolve_runtime_provider(state, project_slug, &route.provider_key).await?;
+            if provider.provider_type != "openai-compatible" {
+                return Err(ApiError::Invalid(
+                    "embedding capability does not match its configured provider".to_string(),
+                ));
+            }
+            let model = route.resource_id.as_deref().ok_or_else(|| {
+                ApiError::Invalid("embedding capability is missing a provider model".to_string())
+            })?;
+            Arc::new(
+                HttpCapabilityProvider::new("http-provider", provider.base_url, provider.token)
+                    .map_err(map_runtime_error)?
+                    .with_route(
+                        "embedding",
+                        HttpCapabilityRoute::OpenAiEmbedding {
+                            model: model.to_string(),
+                        },
+                    )
+                    .map_err(map_runtime_error)?,
+            )
+        }
+        provider => {
+            return Err(ApiError::Invalid(format!(
+                "provider type {provider} does not support embedding"
+            )))
+        }
+    };
+    let (output, metadata) = invoke_registered_provider(
+        RegisteredInvocation {
+            project_id: project_slug,
+            agent_id: route.profile_id,
+            agent_name: &route.profile_name,
+            endpoint: &route.profile_slug,
+            capability: "embedding",
+            timeout,
+            request_id,
+        },
+        provider,
+        InvocationData::Json(request),
+    )
+    .await?;
+    match output {
+        InvocationData::Json(output) => Ok((output, metadata)),
         InvocationData::Binary(_) => Err(ApiError::Internal),
     }
 }
@@ -4825,6 +5221,151 @@ fn validate_chat_completion_request(request: &Value) -> Result<(), ApiError> {
             ));
         }
     }
+    if chat_image_parts(request).len() > MAX_CHAT_IMAGES {
+        return Err(ApiError::Invalid(format!(
+            "chat requests support at most {MAX_CHAT_IMAGES} images"
+        )));
+    }
+    if serde_json::to_vec(request)
+        .map_err(|_| ApiError::Internal)?
+        .len()
+        > MAX_CHAT_REQUEST_BYTES
+    {
+        return Err(ApiError::Invalid("request body is too large".to_string()));
+    }
+    Ok(())
+}
+
+fn chat_image_parts(request: &Value) -> Vec<&Value> {
+    request
+        .get("messages")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|message| message.get("content").and_then(Value::as_array))
+        .flatten()
+        .filter(|part| part.get("type").and_then(Value::as_str) == Some("image_url"))
+        .collect()
+}
+
+fn chat_request_summary(request: &Value) -> Value {
+    let images = chat_image_parts(request);
+    let media_bytes = images
+        .iter()
+        .filter_map(|part| {
+            part.get("image_url")
+                .and_then(|image| image.get("url"))
+                .and_then(Value::as_str)
+        })
+        .filter_map(data_url_parts)
+        .map(|(_media_type, encoded)| estimated_base64_bytes(encoded))
+        .sum::<usize>();
+    json!({
+        "model": request.get("model").and_then(Value::as_str),
+        "messageCount": request.get("messages").and_then(Value::as_array).map_or(0, Vec::len),
+        "imageCount": images.len(),
+        "mediaBytes": media_bytes,
+    })
+}
+
+fn chat_trace_request(request: &Value) -> Value {
+    let mut trace = request.clone();
+    let Some(messages) = trace.get_mut("messages").and_then(Value::as_array_mut) else {
+        return trace;
+    };
+    for part in messages
+        .iter_mut()
+        .filter_map(|message| message.get_mut("content").and_then(Value::as_array_mut))
+        .flatten()
+        .filter(|part| part.get("type").and_then(Value::as_str) == Some("image_url"))
+    {
+        let Some(image) = part.get_mut("image_url").and_then(Value::as_object_mut) else {
+            continue;
+        };
+        let url = image
+            .get("url")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        image.insert(
+            "url".to_string(),
+            Value::String("[image content omitted]".to_string()),
+        );
+        image.insert("trace".to_string(), chat_image_trace_metadata(&url));
+    }
+    trace
+}
+
+fn chat_image_trace_metadata(url: &str) -> Value {
+    if let Some((media_type, encoded)) = data_url_parts(url) {
+        let decoded = base64::engine::general_purpose::STANDARD.decode(encoded);
+        let digest_input = decoded.as_deref().unwrap_or(encoded.as_bytes());
+        return json!({
+            "source": "data",
+            "mediaType": media_type,
+            "encodedBytes": encoded.len(),
+            "decodedBytes": decoded.as_ref().ok().map(|bytes| bytes.len()),
+            "sha256": base64::engine::general_purpose::STANDARD_NO_PAD.encode(Sha256::digest(digest_input)),
+        });
+    }
+    json!({
+        "source": "reference",
+        "sha256": base64::engine::general_purpose::STANDARD_NO_PAD.encode(Sha256::digest(url.as_bytes())),
+    })
+}
+
+fn data_url_parts(url: &str) -> Option<(&str, &str)> {
+    let data = url.strip_prefix("data:")?;
+    let (metadata, encoded) = data.split_once(',')?;
+    let media_type = metadata.split(';').next()?;
+    metadata
+        .split(';')
+        .any(|part| part == "base64")
+        .then_some((media_type, encoded))
+}
+
+fn estimated_base64_bytes(encoded: &str) -> usize {
+    let padding = encoded
+        .as_bytes()
+        .iter()
+        .rev()
+        .take_while(|byte| **byte == b'=')
+        .take(2)
+        .count();
+    (encoded.len() / 4 * 3).saturating_sub(padding)
+}
+
+fn validate_embedding_request(request: &Value) -> Result<(), ApiError> {
+    let object = request
+        .as_object()
+        .ok_or_else(|| ApiError::Invalid("request body must be an object".to_string()))?;
+    required_text(
+        "model",
+        object.get("model").and_then(Value::as_str).unwrap_or(""),
+        128,
+    )?;
+    let input = object
+        .get("input")
+        .ok_or_else(|| ApiError::Invalid("input is required".to_string()))?;
+    if !valid_embedding_input(input) {
+        return Err(ApiError::Invalid(
+            "input must be text, text arrays, token arrays, or arrays of token arrays".to_string(),
+        ));
+    }
+    if let Some(format) = object.get("encoding_format") {
+        if !matches!(format.as_str(), Some("float" | "base64")) {
+            return Err(ApiError::Invalid(
+                "encoding_format must be float or base64".to_string(),
+            ));
+        }
+    }
+    if let Some(dimensions) = object.get("dimensions") {
+        if dimensions.as_u64().is_none_or(|value| value == 0) {
+            return Err(ApiError::Invalid(
+                "dimensions must be a positive integer".to_string(),
+            ));
+        }
+    }
     if serde_json::to_vec(request)
         .map_err(|_| ApiError::Internal)?
         .len()
@@ -4833,6 +5374,110 @@ fn validate_chat_completion_request(request: &Value) -> Result<(), ApiError> {
         return Err(ApiError::Invalid("request body is too large".to_string()));
     }
     Ok(())
+}
+
+fn valid_embedding_input(input: &Value) -> bool {
+    if input.is_string() {
+        return true;
+    }
+    let Some(items) = input.as_array() else {
+        return false;
+    };
+    if items.is_empty() {
+        return false;
+    }
+    items.iter().all(Value::is_string)
+        || items.iter().all(valid_embedding_token)
+        || items.iter().all(|item| {
+            item.as_array().is_some_and(|tokens| {
+                !tokens.is_empty() && tokens.iter().all(valid_embedding_token)
+            })
+        })
+}
+
+fn valid_embedding_token(value: &Value) -> bool {
+    value.as_i64().is_some_and(|token| token >= 0)
+}
+
+fn embedding_request_summary(request: &Value) -> Value {
+    let input = &request["input"];
+    let (input_count, input_format, text_bytes, supplied_tokens) =
+        if let Some(text) = input.as_str() {
+            (1, "text", text.len(), 0)
+        } else if let Some(items) = input.as_array() {
+            if items.iter().all(Value::is_string) {
+                (
+                    items.len(),
+                    "text_batch",
+                    items.iter().filter_map(Value::as_str).map(str::len).sum(),
+                    0,
+                )
+            } else if items.iter().all(Value::is_number) {
+                (1, "tokens", 0, items.len())
+            } else {
+                (
+                    items.len(),
+                    "token_batches",
+                    0,
+                    items.iter().filter_map(Value::as_array).map(Vec::len).sum(),
+                )
+            }
+        } else {
+            (0, "invalid", 0, 0)
+        };
+    json!({
+        "model": request.get("model").and_then(Value::as_str),
+        "inputCount": input_count,
+        "inputFormat": input_format,
+        "textBytes": text_bytes,
+        "suppliedTokens": supplied_tokens,
+        "encodingFormat": request.get("encoding_format").and_then(Value::as_str).unwrap_or("float"),
+    })
+}
+
+fn embedding_response(model: &str, output: Value) -> Result<Value, ApiError> {
+    let mut object = output
+        .as_object()
+        .cloned()
+        .ok_or_else(|| ApiError::Provider("embedding response must be an object".to_string()))?;
+    let data = object
+        .get("data")
+        .and_then(Value::as_array)
+        .ok_or_else(|| ApiError::Provider("embedding response is missing data".to_string()))?;
+    if data.is_empty()
+        || data.iter().any(|item| {
+            !item
+                .get("embedding")
+                .is_some_and(|embedding| embedding.is_array() || embedding.is_string())
+        })
+    {
+        return Err(ApiError::Provider(
+            "embedding response data is invalid".to_string(),
+        ));
+    }
+    object.insert("object".to_string(), Value::String("list".to_string()));
+    object.insert("model".to_string(), Value::String(model.to_string()));
+    Ok(Value::Object(object))
+}
+
+fn embedding_response_summary(response: &Value, metadata: &Value) -> Value {
+    let data = response
+        .get("data")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    let dimensions = data
+        .first()
+        .and_then(|item| item.get("embedding"))
+        .and_then(Value::as_array)
+        .map(Vec::len);
+    json!({
+        "model": response.get("model").and_then(Value::as_str),
+        "inputCount": data.len(),
+        "dimensions": dimensions,
+        "usage": response.get("usage").cloned().unwrap_or(Value::Null),
+        "provider": metadata,
+    })
 }
 
 fn chat_completion_response(request_id: Uuid, endpoint_slug: &str, output: Value) -> Value {
@@ -5318,6 +5963,7 @@ fn provider_adapters() -> Vec<ProviderAdapter> {
             description: "Connect any provider that implements the OpenAI HTTP API.".to_string(),
             capabilities: vec![
                 "chat".to_string(),
+                "embedding".to_string(),
                 "transcription".to_string(),
                 "realtime".to_string(),
             ],
@@ -5492,6 +6138,7 @@ fn provider_auth_from_secrets(
     }
     Ok(AgentProviderAuthDefinition {
         token: optional_secret_string(secrets, "token")?,
+        token_env: None,
     })
 }
 
@@ -6103,7 +6750,7 @@ async fn authenticated_agent_gateway(
     let credential = bearer_token(headers).ok_or(ApiError::Unauthorized)?;
     validate_agent_gateway_credential(credential)?;
     let credential_hash = hash_agent_gateway_credential(credential, &state.config.api_key_pepper);
-    db::authenticate_agent_gateway_credential(&state.pool, &credential_hash).await
+    db::authenticate_agent_gateway_device_token(&state.pool, &credential_hash).await
 }
 
 fn runtime_trace_uuid(kind: &str, gateway_id: &str, trace_id: &str) -> Uuid {
@@ -6319,7 +6966,7 @@ fn validate_profile_version_input(
     for capability in capabilities {
         if !matches!(
             capability.kind.as_str(),
-            "chat" | "speech" | "transcription" | "realtime" | "tool"
+            "chat" | "embedding" | "speech" | "transcription" | "realtime" | "tool"
         ) {
             return Err(ApiError::Invalid(format!(
                 "unsupported profile capability {}",
@@ -6442,9 +7089,11 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        api_error_trace_status, file_provider_connection, gateway_binding_config,
-        merge_json_objects, patch_text, profile_slug, project_slug, validate_profile_version_input,
-        validate_timeout,
+        api_error_trace_status, chat_request_summary, chat_trace_request,
+        embedding_request_summary, embedding_response, file_provider_connection,
+        gateway_binding_config, merge_json_objects, patch_text, profile_slug, project_slug,
+        validate_chat_completion_request, validate_embedding_request,
+        validate_profile_version_input, validate_timeout,
     };
     use crate::error::ApiError;
     use crate::models::ProfileCapabilityDraft;
@@ -6518,6 +7167,7 @@ mod tests {
         let binding = gateway_binding_config(
             json!({ "temperature": 0 }),
             "local-qwen",
+            "chat",
             &json!({ "instructions": "Choose one safe action." }),
         )
         .unwrap();
@@ -6526,6 +7176,7 @@ mod tests {
             binding["persona"]["instructions"],
             "Choose one safe action."
         );
+        assert_eq!(binding["capability"], "chat");
     }
 
     #[test]
@@ -6576,5 +7227,120 @@ mod tests {
         .unwrap_err();
 
         assert!(error.to_string().contains("chat is duplicated"));
+    }
+
+    #[test]
+    fn accepts_embedding_profile_capabilities() {
+        let capability = ProfileCapabilityDraft {
+            kind: "embedding".to_string(),
+            provider_type: "openai-compatible".to_string(),
+            provider_key: "local-embeddings".to_string(),
+            resource_id: Some("small-embedding-model".to_string()),
+            config: json!({}),
+            input_schema: json!({}),
+            output_schema: json!({}),
+        };
+
+        validate_profile_version_input(
+            &json!({}),
+            &json!({}),
+            &json!({}),
+            &json!({}),
+            &[capability],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn validates_and_summarizes_embedding_requests_without_retaining_text() {
+        let request = json!({
+            "model": "farm-embedding",
+            "input": ["parsnip", "watering can"],
+            "encoding_format": "float",
+        });
+
+        validate_embedding_request(&request).unwrap();
+        let summary = embedding_request_summary(&request);
+
+        assert_eq!(summary["inputCount"], 2);
+        assert_eq!(summary["textBytes"], 19);
+        assert!(!summary.to_string().contains("parsnip"));
+    }
+
+    #[test]
+    fn normalizes_embedding_responses_to_the_project_profile_model() {
+        let response = embedding_response(
+            "stardew-valley-farming-0",
+            json!({
+                "data": [{"object": "embedding", "index": 0, "embedding": [0.6, 0.8]}],
+                "model": "physical-model",
+                "usage": {"prompt_tokens": 2, "total_tokens": 2}
+            }),
+        )
+        .unwrap();
+
+        assert_eq!(response["object"], "list");
+        assert_eq!(response["model"], "stardew-valley-farming-0");
+    }
+
+    #[test]
+    fn accepts_bounded_multimodal_chat_requests_larger_than_the_text_limit() {
+        let image = "A".repeat(600 * 1024);
+        let request = json!({
+            "model": "farm-vision",
+            "messages": [{
+                "role": "user",
+                "content": [{
+                    "type": "image_url",
+                    "image_url": { "url": format!("data:image/jpeg;base64,{image}") }
+                }]
+            }]
+        });
+
+        validate_chat_completion_request(&request).unwrap();
+    }
+
+    #[test]
+    fn omits_image_payloads_from_chat_traces() {
+        let request = json!({
+            "model": "farm-vision",
+            "messages": [{
+                "role": "user",
+                "content": [
+                    { "type": "text", "text": "What is here?" },
+                    {
+                        "type": "image_url",
+                        "image_url": { "url": "data:image/png;base64,AQID" }
+                    }
+                ]
+            }]
+        });
+
+        let trace = chat_trace_request(&request);
+
+        assert!(!trace.to_string().contains("AQID"));
+        assert_eq!(
+            trace["messages"][0]["content"][1]["image_url"]["trace"]["decodedBytes"],
+            3
+        );
+    }
+
+    #[test]
+    fn summarizes_multimodal_chat_without_retaining_image_data() {
+        let request = json!({
+            "model": "farm-vision",
+            "messages": [{
+                "role": "user",
+                "content": [{
+                    "type": "image_url",
+                    "image_url": { "url": "data:image/png;base64,AQID" }
+                }]
+            }]
+        });
+
+        let summary = chat_request_summary(&request);
+
+        assert_eq!(summary["imageCount"], 1);
+        assert_eq!(summary["mediaBytes"], 3);
     }
 }

@@ -2,16 +2,23 @@
 
 use std::fmt;
 use std::num::NonZeroU32;
+use std::ops::Range;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
-use llama_cpp_2::context::params::LlamaContextParams;
+use llama_cpp_2::context::params::{LlamaContextParams, LlamaPoolingType};
+use llama_cpp_2::context::LlamaContext;
 use llama_cpp_2::json_schema_to_grammar;
 use llama_cpp_2::llama_backend::LlamaBackend;
 use llama_cpp_2::llama_batch::LlamaBatch;
 use llama_cpp_2::model::params::LlamaModelParams;
 use llama_cpp_2::model::{AddBos, LlamaChatMessage, LlamaModel};
+use llama_cpp_2::mtmd::{
+    mtmd_default_marker, MtmdBitmap, MtmdContext, MtmdContextParams, MtmdInputText,
+};
 use llama_cpp_2::sampling::LlamaSampler;
+use llama_cpp_2::token::LlamaToken;
+use llama_cpp_2::{send_logs_to_tracing, LogOptions};
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
 use tokio::sync::Semaphore;
@@ -29,6 +36,11 @@ const DEFAULT_MAX_CONCURRENCY: usize = 1;
 const MAX_CONCURRENCY: usize = 64;
 const MAX_JSON_SCHEMA_BYTES: usize = 64 * 1024;
 const MAX_JSON_SCHEMA_NAME_BYTES: usize = 64;
+const MAX_EMBEDDING_INPUTS: usize = 256;
+const DEFAULT_MAX_IMAGES: usize = 8;
+const MAX_IMAGES: usize = 16;
+const DEFAULT_MAX_MEDIA_BYTES: usize = 16 * 1024 * 1024;
+const MAX_MEDIA_BYTES: usize = 32 * 1024 * 1024;
 const THINK_OPEN_TAG: &str = "<think>";
 const THINK_CLOSE_TAG: &str = "</think>";
 
@@ -41,6 +53,80 @@ pub struct LlamaProviderConfig {
     pub gpu_layers: u32,
     pub default_max_tokens: u32,
     pub max_concurrency: usize,
+}
+
+#[derive(Clone)]
+pub struct LlamaMultimodalConfig {
+    pub mmproj_path: PathBuf,
+    pub use_gpu: bool,
+    pub image_min_tokens: i32,
+    pub image_max_tokens: i32,
+    pub max_images: usize,
+    pub max_media_bytes: usize,
+}
+
+impl LlamaMultimodalConfig {
+    pub fn new(mmproj_path: impl Into<PathBuf>) -> Self {
+        Self {
+            mmproj_path: mmproj_path.into(),
+            use_gpu: true,
+            image_min_tokens: -1,
+            image_max_tokens: -1,
+            max_images: DEFAULT_MAX_IMAGES,
+            max_media_bytes: DEFAULT_MAX_MEDIA_BYTES,
+        }
+    }
+
+    fn validate(&self) -> Result<(), LlamaProviderError> {
+        if self.mmproj_path.as_os_str().is_empty() {
+            return Err(LlamaProviderError::InvalidConfig(
+                "mmprojPath must not be empty".to_string(),
+            ));
+        }
+        if self.image_min_tokens == 0 || self.image_min_tokens < -1 {
+            return Err(LlamaProviderError::InvalidConfig(
+                "imageMinTokens must be -1 or greater than zero".to_string(),
+            ));
+        }
+        if self.image_max_tokens == 0 || self.image_max_tokens < -1 {
+            return Err(LlamaProviderError::InvalidConfig(
+                "imageMaxTokens must be -1 or greater than zero".to_string(),
+            ));
+        }
+        if self.image_min_tokens > 0
+            && self.image_max_tokens > 0
+            && self.image_min_tokens > self.image_max_tokens
+        {
+            return Err(LlamaProviderError::InvalidConfig(
+                "imageMinTokens must not exceed imageMaxTokens".to_string(),
+            ));
+        }
+        if !(1..=MAX_IMAGES).contains(&self.max_images) {
+            return Err(LlamaProviderError::InvalidConfig(format!(
+                "maxImages must be between 1 and {MAX_IMAGES}"
+            )));
+        }
+        if !(1..=MAX_MEDIA_BYTES).contains(&self.max_media_bytes) {
+            return Err(LlamaProviderError::InvalidConfig(format!(
+                "maxMediaBytes must be between 1 and {MAX_MEDIA_BYTES}"
+            )));
+        }
+        Ok(())
+    }
+}
+
+impl fmt::Debug for LlamaMultimodalConfig {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("LlamaMultimodalConfig")
+            .field("mmproj_path", &"[REDACTED]")
+            .field("use_gpu", &self.use_gpu)
+            .field("image_min_tokens", &self.image_min_tokens)
+            .field("image_max_tokens", &self.image_max_tokens)
+            .field("max_images", &self.max_images)
+            .field("max_media_bytes", &self.max_media_bytes)
+            .finish()
+    }
 }
 
 impl fmt::Debug for LlamaProviderConfig {
@@ -56,7 +142,7 @@ impl fmt::Debug for LlamaProviderConfig {
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 struct LlamaProviderFileConfig {
     model_path: PathBuf,
@@ -68,6 +154,18 @@ struct LlamaProviderFileConfig {
     default_max_tokens: Option<u32>,
     #[serde(default)]
     max_concurrency: Option<usize>,
+    #[serde(default)]
+    mmproj_path: Option<PathBuf>,
+    #[serde(default)]
+    mmproj_use_gpu: Option<bool>,
+    #[serde(default)]
+    image_min_tokens: Option<i32>,
+    #[serde(default)]
+    image_max_tokens: Option<i32>,
+    #[serde(default)]
+    max_images: Option<usize>,
+    #[serde(default)]
+    max_media_bytes: Option<usize>,
 }
 
 impl LlamaProviderConfig {
@@ -85,17 +183,22 @@ impl LlamaProviderConfig {
         value: &Value,
         base_dir: &Path,
     ) -> Result<Self, LlamaProviderError> {
-        let file = serde_json::from_value::<LlamaProviderFileConfig>(value.clone())
-            .map_err(|error| LlamaProviderError::InvalidConfig(error.to_string()))?;
+        provider_configs(value, base_dir).map(|(config, _multimodal)| config)
+    }
+
+    fn from_file_config(
+        file: &LlamaProviderFileConfig,
+        base_dir: &Path,
+    ) -> Result<Self, LlamaProviderError> {
         if file.model_path.as_os_str().is_empty() {
             return Err(LlamaProviderError::InvalidConfig(
                 "modelPath must not be empty".to_string(),
             ));
         }
         let model_path = if file.model_path.is_absolute() {
-            file.model_path
+            file.model_path.clone()
         } else {
-            base_dir.join(file.model_path)
+            base_dir.join(&file.model_path)
         };
         let config = Self {
             model_path,
@@ -138,6 +241,31 @@ pub enum LlamaProviderError {
     Backend(String),
     #[error("GGUF model could not be loaded: {0}")]
     Model(String),
+    #[error("multimodal projector file does not exist")]
+    ProjectorNotFound,
+    #[error("multimodal projector could not be loaded: {0}")]
+    Multimodal(String),
+}
+
+struct MultimodalRuntime {
+    context: Mutex<MtmdContext>,
+    max_images: usize,
+    max_media_bytes: usize,
+}
+
+#[derive(Clone, Copy)]
+struct ImageInputLimits {
+    max_images: usize,
+    max_media_bytes: usize,
+}
+
+impl MultimodalRuntime {
+    fn input_limits(&self) -> ImageInputLimits {
+        ImageInputLimits {
+            max_images: self.max_images,
+            max_media_bytes: self.max_media_bytes,
+        }
+    }
 }
 
 pub struct LlamaProvider {
@@ -146,17 +274,52 @@ pub struct LlamaProvider {
     context_size: NonZeroU32,
     default_max_tokens: u32,
     concurrency: Arc<Semaphore>,
+    multimodal: Option<Arc<MultimodalRuntime>>,
 }
 
 impl LlamaProvider {
     pub fn load(config: LlamaProviderConfig) -> Result<Self, LlamaProviderError> {
+        Self::load_with_multimodal(config, None)
+    }
+
+    pub fn load_multimodal(
+        config: LlamaProviderConfig,
+        multimodal: LlamaMultimodalConfig,
+    ) -> Result<Self, LlamaProviderError> {
+        Self::load_with_multimodal(config, Some(multimodal))
+    }
+
+    pub fn load_from_provider_config(
+        value: &Value,
+        base_dir: &Path,
+    ) -> Result<Self, LlamaProviderError> {
+        let (config, multimodal) = provider_configs(value, base_dir)?;
+        Self::load_with_multimodal(config, multimodal)
+    }
+
+    #[must_use]
+    pub fn supports_vision(&self) -> bool {
+        self.multimodal.is_some()
+    }
+
+    fn load_with_multimodal(
+        config: LlamaProviderConfig,
+        multimodal: Option<LlamaMultimodalConfig>,
+    ) -> Result<Self, LlamaProviderError> {
         config.validate()?;
         if !Path::new(&config.model_path).is_file() {
             return Err(LlamaProviderError::ModelNotFound);
         }
+        if let Some(multimodal) = multimodal.as_ref() {
+            multimodal.validate()?;
+            if !multimodal.mmproj_path.is_file() {
+                return Err(LlamaProviderError::ProjectorNotFound);
+            }
+        }
         let context_size =
             NonZeroU32::new(config.context_size).ok_or(LlamaProviderError::InvalidContextSize)?;
         let backend = match LLAMA_BACKEND.get_or_init(|| {
+            send_logs_to_tracing(LogOptions::default());
             LlamaBackend::init()
                 .map(Arc::new)
                 .map_err(|error| error.to_string())
@@ -165,21 +328,77 @@ impl LlamaProvider {
             Err(message) => return Err(LlamaProviderError::Backend(message.clone())),
         };
         let model_params = LlamaModelParams::default().with_n_gpu_layers(config.gpu_layers);
-        let model = LlamaModel::load_from_file(&backend, &config.model_path, &model_params)
-            .map_err(|error| LlamaProviderError::Model(error.to_string()))?;
+        let model = Arc::new(
+            LlamaModel::load_from_file(&backend, &config.model_path, &model_params)
+                .map_err(|error| LlamaProviderError::Model(error.to_string()))?,
+        );
+        let multimodal = multimodal
+            .map(|multimodal| {
+                let mmproj_path = multimodal.mmproj_path.to_str().ok_or_else(|| {
+                    LlamaProviderError::InvalidConfig("mmprojPath must be valid UTF-8".to_string())
+                })?;
+                let params = MtmdContextParams {
+                    use_gpu: multimodal.use_gpu,
+                    print_timings: false,
+                    image_min_tokens: multimodal.image_min_tokens,
+                    image_max_tokens: multimodal.image_max_tokens,
+                    ..MtmdContextParams::default()
+                };
+                let context = MtmdContext::init_from_file(mmproj_path, &model, &params)
+                    .map_err(|error| LlamaProviderError::Multimodal(error.to_string()))?;
+                if !context.support_vision() {
+                    return Err(LlamaProviderError::Multimodal(
+                        "projector does not support image input".to_string(),
+                    ));
+                }
+                Ok(Arc::new(MultimodalRuntime {
+                    context: Mutex::new(context),
+                    max_images: multimodal.max_images,
+                    max_media_bytes: multimodal.max_media_bytes,
+                }))
+            })
+            .transpose()?;
         Ok(Self {
             backend,
-            model: Arc::new(model),
+            model,
             context_size,
             default_max_tokens: config.default_max_tokens,
             concurrency: Arc::new(Semaphore::new(config.max_concurrency)),
+            multimodal,
         })
     }
 }
 
+fn provider_configs(
+    value: &Value,
+    base_dir: &Path,
+) -> Result<(LlamaProviderConfig, Option<LlamaMultimodalConfig>), LlamaProviderError> {
+    let file = serde_json::from_value::<LlamaProviderFileConfig>(value.clone())
+        .map_err(|error| LlamaProviderError::InvalidConfig(error.to_string()))?;
+    let config = LlamaProviderConfig::from_file_config(&file, base_dir)?;
+    let use_mmproj_gpu = file.mmproj_use_gpu.unwrap_or(config.gpu_layers > 0);
+    let multimodal = file.mmproj_path.map(|mmproj_path| {
+        let mut multimodal = LlamaMultimodalConfig::new(if mmproj_path.is_absolute() {
+            mmproj_path
+        } else {
+            base_dir.join(mmproj_path)
+        });
+        multimodal.use_gpu = use_mmproj_gpu;
+        multimodal.image_min_tokens = file.image_min_tokens.unwrap_or(-1);
+        multimodal.image_max_tokens = file.image_max_tokens.unwrap_or(-1);
+        multimodal.max_images = file.max_images.unwrap_or(DEFAULT_MAX_IMAGES);
+        multimodal.max_media_bytes = file.max_media_bytes.unwrap_or(DEFAULT_MAX_MEDIA_BYTES);
+        multimodal
+    });
+    if let Some(multimodal) = multimodal.as_ref() {
+        multimodal.validate()?;
+    }
+    Ok((config, multimodal))
+}
+
 impl AgentProvider for LlamaProvider {
     fn supports(&self, capability: &str) -> bool {
-        capability == "chat"
+        matches!(capability, "chat" | "embedding")
     }
 
     fn invoke<'a>(
@@ -201,21 +420,33 @@ impl AgentProvider for LlamaProvider {
         let concurrency = Arc::clone(&self.concurrency);
         let context_size = self.context_size;
         let default_max_tokens = self.default_max_tokens;
+        let multimodal = self.multimodal.clone();
         Box::pin(async move {
             let permit = concurrency
                 .try_acquire_owned()
                 .map_err(|_error| provider_error("local model concurrency limit reached"))?;
             let task = tokio::task::spawn_blocking(move || {
                 let _permit = permit;
-                generate(
-                    &backend,
-                    &model,
-                    context_size,
-                    default_max_tokens,
-                    request,
-                    &cancellation,
-                    &events,
-                )
+                match request.capability.as_str() {
+                    "chat" => generate_chat(
+                        ChatRuntime {
+                            backend: &backend,
+                            model: &model,
+                            context_size,
+                            default_max_tokens,
+                            multimodal: multimodal.as_deref(),
+                        },
+                        request,
+                        &cancellation,
+                        &events,
+                    ),
+                    "embedding" => {
+                        generate_embeddings(&backend, &model, context_size, request, &cancellation)
+                    }
+                    capability => Err(provider_error(&format!(
+                        "capability {capability} is not supported"
+                    ))),
+                }
             });
             task.await
                 .map_err(|_error| RuntimeError::provider("llama", "local model task stopped"))?
@@ -243,6 +474,26 @@ struct ChatRequest {
 struct ChatMessage {
     role: String,
     content: Value,
+}
+
+#[derive(Deserialize)]
+struct EmbeddingRequest {
+    input: EmbeddingInput,
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    dimensions: Option<usize>,
+    #[serde(default, alias = "encoding_format")]
+    encoding_format: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum EmbeddingInput {
+    Text(String),
+    Texts(Vec<String>),
+    Tokens(Vec<i32>),
+    TokenBatches(Vec<Vec<i32>>),
 }
 
 #[derive(Debug, PartialEq)]
@@ -312,15 +563,27 @@ impl VisibleOutput {
     }
 }
 
-fn generate(
-    backend: &LlamaBackend,
-    model: &LlamaModel,
+struct ChatRuntime<'a> {
+    backend: &'a LlamaBackend,
+    model: &'a LlamaModel,
     context_size: NonZeroU32,
     default_max_tokens: u32,
+    multimodal: Option<&'a MultimodalRuntime>,
+}
+
+fn generate_chat(
+    runtime: ChatRuntime<'_>,
     request: ProviderRequest,
     cancellation: &CancellationToken,
     events: &ProviderEventSink,
 ) -> Result<ProviderResponse, RuntimeError> {
+    let ChatRuntime {
+        backend,
+        model,
+        context_size,
+        default_max_tokens,
+        multimodal,
+    } = runtime;
     let input = match request.data {
         InvocationData::Json(value) => serde_json::from_value::<ChatRequest>(value)
             .map_err(|_error| provider_error("chat input is invalid"))?,
@@ -346,6 +609,7 @@ fn generate(
         })
         .transpose()?;
     let mut messages = Vec::with_capacity(input.messages.len() + 1);
+    let mut image_buffers = Vec::new();
     if let Some(instructions) = agent_instructions(&request.agent.metadata) {
         messages.push(
             LlamaChatMessage::new("system".to_string(), instructions)
@@ -356,7 +620,11 @@ fn generate(
         if !matches!(message.role.as_str(), "system" | "user" | "assistant") {
             return Err(provider_error("chat message role is unsupported"));
         }
-        let content = chat_message_content(&message.content)?;
+        let content = chat_message_content(
+            &message.content,
+            multimodal.map(MultimodalRuntime::input_limits),
+            &mut image_buffers,
+        )?;
         messages.push(
             LlamaChatMessage::new(message.role, content)
                 .map_err(|_error| provider_error("chat message is invalid"))?,
@@ -369,41 +637,35 @@ fn generate(
     let prompt = model
         .apply_chat_template(&template, &messages, true)
         .map_err(|_error| provider_error("model chat template could not be applied"))?;
-    let tokens = model
-        .str_to_token(&prompt, AddBos::Always)
-        .map_err(|_error| provider_error("chat prompt could not be tokenized"))?;
-    if tokens.is_empty() {
-        return Err(provider_error("chat prompt produced no tokens"));
-    }
+    let image_count = image_buffers.len();
 
     let max_tokens = input
         .max_tokens
         .unwrap_or(default_max_tokens)
         .clamp(1, MAX_GENERATED_TOKENS);
-    let context_tokens = usize::try_from(context_size.get())
-        .map_err(|_error| provider_error("context size is unsupported"))?;
-    if tokens.len().saturating_add(max_tokens as usize) > context_tokens {
-        return Err(provider_error(
-            "chat prompt exceeds the configured context size",
-        ));
-    }
     let mut context = model
         .new_context(
             backend,
             LlamaContextParams::default().with_n_ctx(Some(context_size)),
         )
         .map_err(|_error| provider_error("model context could not be created"))?;
-    let mut batch = LlamaBatch::new(tokens.len().max(1), 1);
-    let last_index = i32::try_from(tokens.len() - 1)
-        .map_err(|_error| provider_error("chat prompt is too long"))?;
-    for (position, token) in (0_i32..).zip(tokens) {
-        batch
-            .add(token, position, &[0], position == last_index)
-            .map_err(|_error| provider_error("chat prompt could not be prepared"))?;
-    }
-    context
-        .decode(&mut batch)
-        .map_err(|_error| provider_error("chat prompt inference failed"))?;
+    let (input_tokens, mut position) = if image_buffers.is_empty() {
+        evaluate_text_prompt(model, &mut context, context_size, max_tokens, &prompt)?
+    } else {
+        let multimodal = multimodal.ok_or_else(|| {
+            provider_error("local text model does not accept image message content")
+        })?;
+        evaluate_multimodal_prompt(
+            &mut context,
+            context_size,
+            max_tokens,
+            multimodal,
+            &prompt,
+            &image_buffers,
+            cancellation,
+        )?
+    };
+    let mut batch = LlamaBatch::new(1, 1);
 
     let temperature = input
         .temperature
@@ -428,15 +690,13 @@ fn generate(
     let mut output = String::new();
     let mut visible_output = VisibleOutput::default();
     let mut generated_tokens = 0_u32;
-    let mut position = batch.n_tokens();
-    let input_tokens = position;
     let mut stopped_on_eog = false;
     let mut stopped_on_valid_json = false;
     while generated_tokens < max_tokens {
         if cancellation.is_cancelled() {
             return Err(RuntimeError::Cancelled);
         }
-        let token = sampler.sample(&context, batch.n_tokens() - 1);
+        let token = sampler.sample(&context, -1);
         if model.is_eog_token(token) {
             stopped_on_eog = true;
             break;
@@ -526,10 +786,352 @@ fn generate(
         metadata: json!({
             "inputTokens": input_tokens,
             "outputTokens": generated_tokens,
+            "imageCount": image_count,
             "finishReason": finish_reason,
         }),
         state: None,
     })
+}
+
+fn evaluate_text_prompt(
+    model: &LlamaModel,
+    context: &mut LlamaContext<'_>,
+    context_size: NonZeroU32,
+    max_tokens: u32,
+    prompt: &str,
+) -> Result<(i32, i32), RuntimeError> {
+    let tokens = model
+        .str_to_token(prompt, AddBos::Always)
+        .map_err(|_error| provider_error("chat prompt could not be tokenized"))?;
+    if tokens.is_empty() {
+        return Err(provider_error("chat prompt produced no tokens"));
+    }
+    ensure_prompt_fits_context(tokens.len(), context_size, max_tokens)?;
+    let prompt_ranges = prompt_chunk_ranges(tokens.len(), context.n_batch())?;
+    let prompt_batch_size = prompt_ranges.first().map_or(1, |range| range.len()).max(1);
+    let mut batch = LlamaBatch::new(prompt_batch_size, 1);
+    for range in prompt_ranges {
+        batch.clear();
+        for (offset, token) in tokens[range.clone()].iter().copied().enumerate() {
+            let absolute_position = range.start + offset;
+            let position = i32::try_from(absolute_position)
+                .map_err(|_error| provider_error("chat prompt is too long"))?;
+            batch
+                .add(token, position, &[0], absolute_position + 1 == tokens.len())
+                .map_err(|_error| provider_error("chat prompt could not be prepared"))?;
+        }
+        context
+            .decode(&mut batch)
+            .map_err(|_error| provider_error("chat prompt inference failed"))?;
+    }
+    let input_tokens =
+        i32::try_from(tokens.len()).map_err(|_error| provider_error("chat prompt is too long"))?;
+    Ok((input_tokens, input_tokens))
+}
+
+fn evaluate_multimodal_prompt(
+    context: &mut LlamaContext<'_>,
+    context_size: NonZeroU32,
+    max_tokens: u32,
+    multimodal: &MultimodalRuntime,
+    prompt: &str,
+    image_buffers: &[Vec<u8>],
+    cancellation: &CancellationToken,
+) -> Result<(i32, i32), RuntimeError> {
+    if cancellation.is_cancelled() {
+        return Err(RuntimeError::Cancelled);
+    }
+    let mtmd = multimodal
+        .context
+        .lock()
+        .map_err(|_error| provider_error("multimodal context stopped"))?;
+    let bitmaps = image_buffers
+        .iter()
+        .map(|image| {
+            MtmdBitmap::from_buffer(&mtmd, image, false)
+                .map_err(|_error| provider_error("image content could not be decoded"))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let bitmap_refs = bitmaps.iter().collect::<Vec<_>>();
+    let chunks = mtmd
+        .tokenize(
+            MtmdInputText {
+                text: prompt.to_string(),
+                add_special: true,
+                parse_special: true,
+            },
+            &bitmap_refs,
+        )
+        .map_err(|_error| provider_error("multimodal prompt could not be tokenized"))?;
+    ensure_prompt_fits_context(chunks.total_tokens(), context_size, max_tokens)?;
+    let input_tokens = i32::try_from(chunks.total_tokens())
+        .map_err(|_error| provider_error("multimodal prompt is too long"))?;
+    let n_batch = i32::try_from(context.n_batch())
+        .map_err(|_error| provider_error("model batch size is unsupported"))?;
+    let next_position = chunks
+        .eval_chunks(&mtmd, context, 0, 0, n_batch, true)
+        .map_err(|_error| provider_error("multimodal prompt inference failed"))?;
+    if cancellation.is_cancelled() {
+        return Err(RuntimeError::Cancelled);
+    }
+    Ok((input_tokens, next_position))
+}
+
+fn ensure_prompt_fits_context(
+    input_tokens: usize,
+    context_size: NonZeroU32,
+    max_tokens: u32,
+) -> Result<(), RuntimeError> {
+    let context_tokens = usize::try_from(context_size.get())
+        .map_err(|_error| provider_error("context size is unsupported"))?;
+    if input_tokens.saturating_add(max_tokens as usize) > context_tokens {
+        return Err(provider_error(
+            "chat prompt exceeds the configured context size",
+        ));
+    }
+    Ok(())
+}
+
+fn generate_embeddings(
+    backend: &LlamaBackend,
+    model: &LlamaModel,
+    context_size: NonZeroU32,
+    request: ProviderRequest,
+    cancellation: &CancellationToken,
+) -> Result<ProviderResponse, RuntimeError> {
+    let input = match request.data {
+        InvocationData::Json(value) => serde_json::from_value::<EmbeddingRequest>(value)
+            .map_err(|_error| provider_error("embedding input is invalid"))?,
+        InvocationData::Binary(_) => {
+            return Err(provider_error("embedding input must be JSON"));
+        }
+    };
+    let encode_base64 = match input.encoding_format.as_deref() {
+        None | Some("float") => false,
+        Some("base64") => true,
+        Some(_format) => {
+            return Err(provider_error(
+                "local embeddings support encoding_format float or base64",
+            ));
+        }
+    };
+    let requested_dimensions = input.dimensions;
+    let sequences = embedding_sequences(model, input.input)?;
+    if sequences.is_empty() {
+        return Err(provider_error("at least one embedding input is required"));
+    }
+    if sequences.len() > MAX_EMBEDDING_INPUTS {
+        return Err(provider_error("too many embedding inputs"));
+    }
+    let context_tokens = usize::try_from(context_size.get())
+        .map_err(|_error| provider_error("context size is unsupported"))?;
+    if sequences.iter().any(|tokens| tokens.len() > context_tokens) {
+        return Err(provider_error(
+            "embedding input exceeds the configured context size",
+        ));
+    }
+
+    let mut prompt_tokens = 0_usize;
+    let mut data = Vec::with_capacity(sequences.len());
+    let mut dimensions = 0_usize;
+    for (index, tokens) in sequences.iter().enumerate() {
+        if cancellation.is_cancelled() {
+            return Err(RuntimeError::Cancelled);
+        }
+        prompt_tokens = prompt_tokens.saturating_add(tokens.len());
+        let mut batch = LlamaBatch::new(tokens.len().max(1), 1);
+        batch
+            .add_sequence(tokens, 0, false)
+            .map_err(|_error| provider_error("embedding input could not be prepared"))?;
+        let params = || {
+            LlamaContextParams::default()
+                .with_n_ctx(Some(context_size))
+                .with_n_batch(context_size.get())
+                .with_embeddings(true)
+                .with_pooling_type(LlamaPoolingType::Mean)
+        };
+        let mut context = model
+            .new_context(backend, params())
+            .map_err(|_error| provider_error("embedding context could not be created"))?;
+        if model_uses_encoder(model) {
+            context
+                .encode(&mut batch)
+                .map_err(|_error| provider_error("embedding inference failed"))?;
+        } else {
+            context
+                .decode(&mut batch)
+                .map_err(|_error| provider_error("embedding inference failed"))?;
+        }
+        let embedding = normalize_embedding(
+            context
+                .embeddings_seq_ith(0)
+                .map_err(|_error| provider_error("model did not produce an embedding"))?,
+        )?;
+        if let Some(requested_dimensions) = requested_dimensions {
+            if requested_dimensions != embedding.len() {
+                return Err(provider_error(
+                    "requested embedding dimensions do not match the local model",
+                ));
+            }
+        }
+        dimensions = dimensions.max(embedding.len());
+        let embedding = if encode_base64 {
+            Value::String(encode_embedding_base64(&embedding))
+        } else {
+            json!(embedding)
+        };
+        data.push(json!({
+            "object": "embedding",
+            "index": index,
+            "embedding": embedding,
+        }));
+    }
+
+    let model_name = input.model.unwrap_or_else(|| request.agent.id.clone());
+    Ok(ProviderResponse {
+        data: InvocationData::Json(json!({
+            "object": "list",
+            "data": data,
+            "model": model_name,
+            "usage": {
+                "prompt_tokens": prompt_tokens,
+                "total_tokens": prompt_tokens,
+            },
+        })),
+        metadata: json!({
+            "inputTokens": prompt_tokens,
+            "inputCount": sequences.len(),
+            "embeddingDimensions": dimensions,
+        }),
+        state: None,
+    })
+}
+
+fn model_uses_encoder(model: &LlamaModel) -> bool {
+    model
+        .meta_val_str("general.architecture")
+        .is_ok_and(|architecture| architecture_uses_encoder(&architecture))
+}
+
+fn architecture_uses_encoder(architecture: &str) -> bool {
+    matches!(architecture, "t5" | "t5encoder")
+}
+
+fn embedding_sequences(
+    model: &LlamaModel,
+    input: EmbeddingInput,
+) -> Result<Vec<Vec<LlamaToken>>, RuntimeError> {
+    match input {
+        EmbeddingInput::Text(text) => Ok(vec![tokenize_embedding_text(model, &text)?]),
+        EmbeddingInput::Texts(texts) => texts
+            .iter()
+            .map(|text| tokenize_embedding_text(model, text))
+            .collect(),
+        EmbeddingInput::Tokens(tokens) => Ok(vec![embedding_tokens(model, tokens)?]),
+        EmbeddingInput::TokenBatches(batches) => batches
+            .into_iter()
+            .map(|tokens| embedding_tokens(model, tokens))
+            .collect(),
+    }
+}
+
+fn tokenize_embedding_text(
+    model: &LlamaModel,
+    text: &str,
+) -> Result<Vec<LlamaToken>, RuntimeError> {
+    let tokens = model
+        .str_to_token(text, AddBos::Always)
+        .map_err(|_error| provider_error("embedding input could not be tokenized"))?;
+    if tokens.is_empty() {
+        return Err(provider_error("embedding input produced no tokens"));
+    }
+    Ok(tokens)
+}
+
+fn embedding_tokens(model: &LlamaModel, tokens: Vec<i32>) -> Result<Vec<LlamaToken>, RuntimeError> {
+    if tokens.is_empty() {
+        return Err(provider_error("embedding token input is invalid"));
+    }
+    tokenize_embedding_text(model, &openai_token_fallback_text(&tokens))
+}
+
+fn openai_token_fallback_text(tokens: &[i32]) -> String {
+    let mut text = String::from("openai token ids:");
+    for token in tokens {
+        text.push(' ');
+        text.push_str(&token.to_string());
+    }
+    text
+}
+
+fn normalize_embedding(embedding: &[f32]) -> Result<Vec<f32>, RuntimeError> {
+    let norm = embedding
+        .iter()
+        .map(|value| value * value)
+        .sum::<f32>()
+        .sqrt();
+    if !norm.is_finite() || norm <= f32::EPSILON {
+        return Err(provider_error("model produced an invalid embedding"));
+    }
+    embedding
+        .iter()
+        .map(|value| value / norm)
+        .map(|value| {
+            value
+                .is_finite()
+                .then_some(value)
+                .ok_or_else(|| provider_error("model produced an invalid embedding"))
+        })
+        .collect()
+}
+
+fn encode_embedding_base64(embedding: &[f32]) -> String {
+    let mut bytes = Vec::with_capacity(embedding.len() * std::mem::size_of::<f32>());
+    for value in embedding {
+        bytes.extend_from_slice(&value.to_le_bytes());
+    }
+    encode_standard_base64(&bytes)
+}
+
+fn encode_standard_base64(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+    let mut encoded = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let first = chunk[0];
+        let second = chunk.get(1).copied().unwrap_or(0);
+        let third = chunk.get(2).copied().unwrap_or(0);
+        let buffer = ((first as u32) << 16) | ((second as u32) << 8) | third as u32;
+
+        encoded.push(ALPHABET[((buffer >> 18) & 0x3f) as usize] as char);
+        encoded.push(ALPHABET[((buffer >> 12) & 0x3f) as usize] as char);
+        if chunk.len() > 1 {
+            encoded.push(ALPHABET[((buffer >> 6) & 0x3f) as usize] as char);
+        } else {
+            encoded.push('=');
+        }
+        if chunk.len() > 2 {
+            encoded.push(ALPHABET[(buffer & 0x3f) as usize] as char);
+        } else {
+            encoded.push('=');
+        }
+    }
+    encoded
+}
+
+fn prompt_chunk_ranges(
+    token_count: usize,
+    batch_size: u32,
+) -> Result<Vec<Range<usize>>, RuntimeError> {
+    let batch_size = usize::try_from(batch_size)
+        .map_err(|_error| provider_error("model batch size is unsupported"))?;
+    if batch_size == 0 {
+        return Err(provider_error("model batch size must be greater than zero"));
+    }
+    Ok((0..token_count)
+        .step_by(batch_size)
+        .map(|start| start..start.saturating_add(batch_size).min(token_count))
+        .collect())
 }
 
 fn parse_structured_output(value: &Value) -> Result<StructuredOutput, RuntimeError> {
@@ -579,8 +1181,13 @@ fn parse_structured_output(value: &Value) -> Result<StructuredOutput, RuntimeErr
     })
 }
 
-fn chat_message_content(value: &Value) -> Result<String, RuntimeError> {
+fn chat_message_content(
+    value: &Value,
+    image_limits: Option<ImageInputLimits>,
+    image_buffers: &mut Vec<Vec<u8>>,
+) -> Result<String, RuntimeError> {
     if let Some(content) = value.as_str() {
+        validate_reserved_media_marker(content, image_limits)?;
         return Ok(content.to_string());
     }
     let parts = value
@@ -592,20 +1199,124 @@ fn chat_message_content(value: &Value) -> Result<String, RuntimeError> {
             .as_object()
             .ok_or_else(|| provider_error("chat message content part is invalid"))?;
         match part.get("type").and_then(Value::as_str) {
-            Some("text") => content.push(
-                part.get("text")
+            Some("text") => {
+                let text = part
+                    .get("text")
                     .and_then(Value::as_str)
-                    .ok_or_else(|| provider_error("chat text content is invalid"))?,
-            ),
+                    .ok_or_else(|| provider_error("chat text content is invalid"))?;
+                validate_reserved_media_marker(text, image_limits)?;
+                content.push(text);
+            }
             Some("image_url") => {
-                return Err(provider_error(
-                    "local text model does not accept image message content",
-                ));
+                let image_limits = image_limits.ok_or_else(|| {
+                    provider_error("local text model does not accept image message content")
+                })?;
+                if image_buffers.len() >= image_limits.max_images {
+                    return Err(provider_error("chat request contains too many images"));
+                }
+                let image_url = part
+                    .get("image_url")
+                    .and_then(Value::as_object)
+                    .and_then(|image| image.get("url"))
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| provider_error("chat image URL is invalid"))?;
+                let remaining_bytes = image_limits
+                    .max_media_bytes
+                    .saturating_sub(image_buffers.iter().map(Vec::len).sum::<usize>());
+                let image = decode_image_data_url(image_url, remaining_bytes)?;
+                image_buffers.push(image);
+                content.push(mtmd_default_marker());
             }
             _ => return Err(provider_error("chat message content type is unsupported")),
         }
     }
     Ok(content.join("\n"))
+}
+
+fn validate_reserved_media_marker(
+    text: &str,
+    image_limits: Option<ImageInputLimits>,
+) -> Result<(), RuntimeError> {
+    if image_limits.is_some() && text.contains(mtmd_default_marker()) {
+        return Err(provider_error(
+            "chat text contains the reserved multimodal marker",
+        ));
+    }
+    Ok(())
+}
+
+fn decode_image_data_url(url: &str, max_bytes: usize) -> Result<Vec<u8>, RuntimeError> {
+    let data = url
+        .strip_prefix("data:")
+        .ok_or_else(|| provider_error("local vision model accepts only base64 data image URLs"))?;
+    let (metadata, encoded) = data
+        .split_once(',')
+        .ok_or_else(|| provider_error("chat image data URL is invalid"))?;
+    let mut metadata_parts = metadata.split(';');
+    let media_type = metadata_parts
+        .next()
+        .filter(|media_type| media_type.starts_with("image/"))
+        .ok_or_else(|| provider_error("chat image data URL must contain an image"))?;
+    if media_type.len() > 64 || !metadata_parts.any(|part| part == "base64") {
+        return Err(provider_error("chat image data URL is invalid"));
+    }
+    decode_standard_base64(encoded, max_bytes)
+}
+
+fn decode_standard_base64(encoded: &str, max_bytes: usize) -> Result<Vec<u8>, RuntimeError> {
+    if encoded.is_empty() || !encoded.len().is_multiple_of(4) {
+        return Err(provider_error("chat image base64 data is invalid"));
+    }
+    let max_encoded_bytes = max_bytes.saturating_add(2) / 3 * 4;
+    if encoded.len() > max_encoded_bytes.saturating_add(4) {
+        return Err(provider_error("chat image data exceeds maxMediaBytes"));
+    }
+    let chunks = encoded.as_bytes().chunks_exact(4);
+    if !chunks.remainder().is_empty() {
+        return Err(provider_error("chat image base64 data is invalid"));
+    }
+    let chunk_count = encoded.len() / 4;
+    let mut decoded = Vec::with_capacity(encoded.len() / 4 * 3);
+    for (index, chunk) in chunks.enumerate() {
+        let last = index + 1 == chunk_count;
+        let first = base64_value(chunk[0])?;
+        let second = base64_value(chunk[1])?;
+        let third_padding = chunk[2] == b'=';
+        let fourth_padding = chunk[3] == b'=';
+        if third_padding {
+            if !last || !fourth_padding {
+                return Err(provider_error("chat image base64 data is invalid"));
+            }
+            decoded.push((first << 2) | (second >> 4));
+            continue;
+        }
+        let third = base64_value(chunk[2])?;
+        decoded.push((first << 2) | (second >> 4));
+        decoded.push(((second & 0x0f) << 4) | (third >> 2));
+        if fourth_padding {
+            if !last {
+                return Err(provider_error("chat image base64 data is invalid"));
+            }
+            continue;
+        }
+        let fourth = base64_value(chunk[3])?;
+        decoded.push(((third & 0x03) << 6) | fourth);
+    }
+    if decoded.len() > max_bytes {
+        return Err(provider_error("chat image data exceeds maxMediaBytes"));
+    }
+    Ok(decoded)
+}
+
+fn base64_value(byte: u8) -> Result<u8, RuntimeError> {
+    match byte {
+        b'A'..=b'Z' => Ok(byte - b'A'),
+        b'a'..=b'z' => Ok(byte - b'a' + 26),
+        b'0'..=b'9' => Ok(byte - b'0' + 52),
+        b'+' => Ok(62),
+        b'/' => Ok(63),
+        _ => Err(provider_error("chat image base64 data is invalid")),
+    }
 }
 
 fn agent_instructions(metadata: &Value) -> Option<String> {
@@ -617,6 +1328,9 @@ fn agent_instructions(metadata: &Value) -> Option<String> {
 }
 
 fn provider_error(message: &str) -> RuntimeError {
+    if std::env::var_os("VIFU_LLAMA_DIAGNOSTICS").is_some() {
+        eprintln!("local llama provider request rejected: {message}");
+    }
     RuntimeError::provider("llama", message)
 }
 
@@ -631,6 +1345,61 @@ fn non_empty(value: String) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn accepts_openai_embedding_input_shapes() {
+        let text = serde_json::from_value::<EmbeddingRequest>(json!({
+            "model": "farm-embedding",
+            "input": "parsnip",
+        }))
+        .unwrap();
+        let batch = serde_json::from_value::<EmbeddingRequest>(json!({
+            "model": "farm-embedding",
+            "input": ["parsnip", "watering can"],
+            "encoding_format": "float",
+        }))
+        .unwrap();
+
+        assert!(matches!(text.input, EmbeddingInput::Text(_)));
+        assert!(matches!(batch.input, EmbeddingInput::Texts(_)));
+    }
+
+    #[test]
+    fn converts_openai_token_ids_to_stable_text_for_local_fallback() {
+        assert_eq!(
+            openai_token_fallback_text(&[646, 321, 12]),
+            "openai token ids: 646 321 12"
+        );
+    }
+
+    #[test]
+    fn encodes_embedding_base64_as_float32_bytes() {
+        assert_eq!(encode_embedding_base64(&[1.0]), "AACAPw==");
+    }
+
+    #[test]
+    fn normalizes_embeddings_for_cosine_similarity() {
+        let embedding = normalize_embedding(&[3.0, 4.0]).unwrap();
+
+        assert!((embedding[0] - 0.6).abs() < f32::EPSILON);
+        assert!((embedding[1] - 0.8).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn selects_embedding_inference_for_the_model_architecture() {
+        assert!(architecture_uses_encoder("t5"));
+        assert!(architecture_uses_encoder("t5encoder"));
+        assert!(!architecture_uses_encoder("qwen3"));
+        assert!(!architecture_uses_encoder("llama"));
+    }
+
+    #[test]
+    fn splits_long_prompts_into_context_decode_batches() {
+        assert_eq!(
+            prompt_chunk_ranges(4_097, 2_048).unwrap(),
+            vec![0..2_048, 2_048..4_096, 4_096..4_097]
+        );
+    }
 
     #[test]
     fn extracts_portable_agent_instructions() {
@@ -753,24 +1522,76 @@ mod tests {
 
     #[test]
     fn joins_openai_text_content_parts() {
-        let content = chat_message_content(&json!([
-            { "type": "text", "text": "Current task" },
-            { "type": "text", "text": "Clear five stones" }
-        ]))
+        let mut images = Vec::new();
+        let content = chat_message_content(
+            &json!([
+                { "type": "text", "text": "Current task" },
+                { "type": "text", "text": "Clear five stones" }
+            ]),
+            None,
+            &mut images,
+        )
         .unwrap();
         assert_eq!(content, "Current task\nClear five stones");
     }
 
     #[test]
     fn rejects_image_content_for_a_text_only_model() {
-        let error = chat_message_content(&json!([{
-            "type": "image_url",
-            "image_url": { "url": "data:image/png;base64,abc" }
-        }]))
+        let mut images = Vec::new();
+        let error = chat_message_content(
+            &json!([{
+                "type": "image_url",
+                "image_url": { "url": "data:image/png;base64,abc" }
+            }]),
+            None,
+            &mut images,
+        )
         .unwrap_err();
         assert!(error
             .to_string()
             .contains("local text model does not accept image message content"));
+    }
+
+    #[test]
+    fn converts_openai_data_images_to_multimodal_markers() {
+        let mut images = Vec::new();
+        let content = chat_message_content(
+            &json!([
+                { "type": "text", "text": "What is here?" },
+                {
+                    "type": "image_url",
+                    "image_url": { "url": "data:image/png;base64,AQID" }
+                }
+            ]),
+            Some(ImageInputLimits {
+                max_images: 2,
+                max_media_bytes: 16,
+            }),
+            &mut images,
+        )
+        .unwrap();
+
+        assert_eq!(content, format!("What is here?\n{}", mtmd_default_marker()));
+        assert_eq!(images, vec![vec![1, 2, 3]]);
+    }
+
+    #[test]
+    fn rejects_remote_images_for_an_in_process_model() {
+        let mut images = Vec::new();
+        let error = chat_message_content(
+            &json!([{
+                "type": "image_url",
+                "image_url": { "url": "https://example.invalid/frame.jpg" }
+            }]),
+            Some(ImageInputLimits {
+                max_images: 2,
+                max_media_bytes: 16,
+            }),
+            &mut images,
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("base64 data image URLs"));
     }
 
     #[test]
@@ -788,6 +1609,26 @@ mod tests {
         .unwrap();
 
         assert_eq!(config.model_path, Path::new("/opt/vifu/models/qwen.gguf"));
+    }
+
+    #[test]
+    fn provider_config_accepts_multimodal_model_fields() {
+        let (_config, multimodal) = provider_configs(
+            &json!({
+                "modelPath": "models/qwen-vl.gguf",
+                "mmprojPath": "models/mmproj-qwen-vl.gguf",
+                "imageMaxTokens": 512
+            }),
+            Path::new("/opt/vifu"),
+        )
+        .unwrap();
+
+        let multimodal = multimodal.unwrap();
+        assert_eq!(
+            multimodal.mmproj_path,
+            Path::new("/opt/vifu/models/mmproj-qwen-vl.gguf")
+        );
+        assert_eq!(multimodal.image_max_tokens, 512);
     }
 
     #[test]

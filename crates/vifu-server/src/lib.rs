@@ -38,10 +38,23 @@ pub struct AppState {
 }
 
 pub async fn connect(config: Config) -> Result<AppState, ApiError> {
-    let pool = db::connect(&config.database_url, config.database_max_connections).await?;
-    db::migrate(&pool).await?;
-    db::mark_agent_gateway_sessions_disconnected(&pool).await?;
+    let pool = db::connect(&config.database_url, config.database_max_connections)
+        .await
+        .map_err(|error| diagnose_startup_error("connect", error))?;
+    db::migrate(&pool)
+        .await
+        .map_err(|error| diagnose_startup_error("migrate", error))?;
+    db::mark_agent_gateway_sessions_disconnected(&pool)
+        .await
+        .map_err(|error| diagnose_startup_error("mark gateway sessions disconnected", error))?;
     Ok(state_with_storage(config, pool))
+}
+
+fn diagnose_startup_error(stage: &str, error: ApiError) -> ApiError {
+    if std::env::var_os("VIFU_SERVER_DIAGNOSTICS").is_some() {
+        eprintln!("vifu server startup failed during {stage}: {error:?}");
+    }
+    error
 }
 
 pub async fn serve<F>(config: Config, shutdown: F) -> Result<(), String>
@@ -145,6 +158,11 @@ pub fn app(state: AppState) -> Router {
         .route(
             "/v1/project/{slug}/deployments/{deployment}/agent-gateway-enrollments",
             post(api::create_runtime_deployment_agent_gateway_enrollment),
+        )
+        .route(
+            "/v1/project/{slug}/deployments/{deployment}/agent-gateways/{gateway_id}",
+            post(api::assign_runtime_deployment_agent_gateway)
+                .delete(api::unassign_runtime_deployment_agent_gateway),
         )
         .route(
             "/v1/project/{slug}/runtime-releases",
@@ -340,6 +358,10 @@ pub fn app(state: AppState) -> Router {
             "/{project_slug}/v1/chat/completions",
             post(api::create_project_chat_completion),
         )
+        .route(
+            "/{project_slug}/v1/embeddings",
+            post(api::create_project_embeddings),
+        )
         .route("/{project_slug}/v1/agents", get(api::list_project_agents))
         .route(
             "/{project_slug}/v1/audio/speech",
@@ -377,10 +399,21 @@ pub fn app(state: AppState) -> Router {
         .route("/v1/agents", get(api::list_available_agents))
         .route("/v1/agent-gateways", get(api::list_agent_gateways))
         .route(
-            "/v1/agent-gateways/register",
-            post(api::register_agent_gateway),
+            "/v1/agent-gateway-pairings",
+            get(api::list_agent_gateway_pairings),
         )
-        .route("/v1/agent-gateways/enroll", post(api::enroll_agent_gateway))
+        .route(
+            "/v1/agent-gateway-pairings/{id}",
+            get(api::get_agent_gateway_pairing),
+        )
+        .route(
+            "/v1/agent-gateway-pairings/{id}/approve",
+            post(api::approve_agent_gateway_pairing),
+        )
+        .route(
+            "/v1/agent-gateway-pairings/{id}/reject",
+            post(api::reject_agent_gateway_pairing),
+        )
         .route(
             "/v1/agent-gateway/runtime-config",
             get(api::get_agent_gateway_runtime_config),
@@ -664,6 +697,7 @@ mod tests {
             .unwrap();
         crate::db::migrate(&storage).await.unwrap();
         let config = Config::from_env().unwrap();
+        let api_key_pepper = config.api_key_pepper.clone();
         let (owner_state, owner_credential) = state_with_storage_access_token_auth(
             config,
             storage.clone(),
@@ -702,35 +736,35 @@ mod tests {
         let enrollment: Value = serde_json::from_slice(&body).unwrap();
         let token = enrollment["enrollmentToken"].as_str().unwrap();
 
-        let wrong_endpoint = owner_app
-            .clone()
-            .oneshot(
-                Request::post("/v1/agent-gateways/register")
-                    .header("authorization", format!("Bearer {token}"))
-                    .header("content-type", "application/json")
-                    .body(Body::from(
-                        r#"{"gatewayId":"gateway-account","credential":"vifu_gw_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}"#,
-                    ))
-                    .unwrap(),
-            )
+        let machine = vifu_gateway::identity::MachineIdentity::generate().unwrap();
+        crate::db::upsert_agent_gateway_machine(&storage, &machine.machine_id, &machine.public_key)
             .await
             .unwrap();
-        assert_eq!(wrong_endpoint.status(), StatusCode::FORBIDDEN);
-
-        let registered = owner_app
-            .clone()
-            .oneshot(
-                Request::post("/v1/agent-gateways/enroll")
-                    .header("authorization", format!("Bearer {token}"))
-                    .header("content-type", "application/json")
-                    .body(Body::from(
-                        r#"{"gatewayId":"gateway-account","credential":"vifu_gw_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}"#,
-                    ))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(registered.status(), StatusCode::CREATED);
+        let enrollment_hash = crate::auth::hash_agent_gateway_enrollment(token, &api_key_pepper);
+        let assignment = crate::db::consume_agent_gateway_machine_enrollment(
+            &storage,
+            &enrollment_hash,
+            "gateway-account",
+        )
+        .await
+        .unwrap();
+        let device_token =
+            "vifu_gw_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let device_token_hash =
+            crate::auth::hash_agent_gateway_credential(device_token, &api_key_pepper);
+        crate::db::create_agent_gateway_authorization(
+            &storage,
+            crate::db::NewAgentGatewayAuthorization {
+                gateway_id: "gateway-account",
+                machine_id: &machine.machine_id,
+                owner_user_id: Some(&assignment.owner_user_id),
+                token_prefix: &device_token.chars().take(20).collect::<String>(),
+                token_hash: &device_token_hash,
+                token_expires_at: chrono::Utc::now() + chrono::Duration::days(180),
+            },
+        )
+        .await
+        .unwrap();
         assert_eq!(
             crate::db::get_project_by_slug(&storage, slug)
                 .await
@@ -958,20 +992,14 @@ mod tests {
             .unwrap();
         assert_eq!(imported.status(), StatusCode::CREATED);
 
-        let retried = owner_app
-            .clone()
-            .oneshot(
-                Request::post("/v1/agent-gateways/enroll")
-                    .header("authorization", format!("Bearer {token}"))
-                    .header("content-type", "application/json")
-                    .body(Body::from(
-                        r#"{"gatewayId":"gateway-account","credential":"vifu_gw_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}"#,
-                    ))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(retried.status(), StatusCode::OK);
+        let retried = crate::db::consume_agent_gateway_machine_enrollment(
+            &storage,
+            &enrollment_hash,
+            "gateway-account",
+        )
+        .await
+        .unwrap();
+        assert_eq!(retried.project_id, project_id);
 
         let staging = owner_app
             .clone()
@@ -1002,20 +1030,15 @@ mod tests {
             .unwrap();
         let staging_enrollment: Value = serde_json::from_slice(&body).unwrap();
         let staging_token = staging_enrollment["enrollmentToken"].as_str().unwrap();
-        let moved = owner_app
-            .clone()
-            .oneshot(
-                Request::post("/v1/agent-gateways/enroll")
-                    .header("authorization", format!("Bearer {staging_token}"))
-                    .header("content-type", "application/json")
-                    .body(Body::from(
-                        r#"{"gatewayId":"gateway-account","credential":"vifu_gw_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}"#,
-                    ))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(moved.status(), StatusCode::OK);
+        let staging_hash =
+            crate::auth::hash_agent_gateway_enrollment(staging_token, &api_key_pepper);
+        crate::db::consume_agent_gateway_machine_enrollment(
+            &storage,
+            &staging_hash,
+            "gateway-account",
+        )
+        .await
+        .unwrap();
         let runtime_config = owner_app
             .clone()
             .oneshot(
@@ -1043,19 +1066,15 @@ mod tests {
         .await
         .unwrap());
 
-        let replayed = owner_app
-            .oneshot(
-                Request::post("/v1/agent-gateways/enroll")
-                    .header("authorization", format!("Bearer {token}"))
-                    .header("content-type", "application/json")
-                    .body(Body::from(
-                        r#"{"gatewayId":"gateway-replay","credential":"vifu_gw_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}"#,
-                    ))
-                    .unwrap(),
+        assert!(matches!(
+            crate::db::consume_agent_gateway_machine_enrollment(
+                &storage,
+                &enrollment_hash,
+                "gateway-replay",
             )
-            .await
-            .unwrap();
-        assert_eq!(replayed.status(), StatusCode::UNAUTHORIZED);
+            .await,
+            Err(ApiError::Unauthorized)
+        ));
 
         match storage {
             Storage::Postgres(pool) => pool.close().await,
@@ -1078,6 +1097,7 @@ mod tests {
         config
             .apply_guest_bootstrap(true, std::time::Duration::from_secs(7 * 24 * 60 * 60), 10)
             .unwrap();
+        let api_key_pepper = config.api_key_pepper.clone();
         let (owner_state, owner_credential) = state_with_storage_access_token_auth(
             config,
             storage.clone(),
@@ -1086,17 +1106,34 @@ mod tests {
         )
         .await;
         let guest_app = app(owner_state);
-        let gateway_request = r#"{
-            "gatewayId":"gateway-guest",
-            "credential":"vifu_gw_cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
-        }"#;
+        let gateway_credential =
+            "vifu_gw_cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+        let machine = vifu_gateway::identity::MachineIdentity::generate().unwrap();
+        crate::db::upsert_agent_gateway_machine(&storage, &machine.machine_id, &machine.public_key)
+            .await
+            .unwrap();
+        let credential_hash =
+            crate::auth::hash_agent_gateway_credential(gateway_credential, &api_key_pepper);
+        crate::db::create_agent_gateway_authorization(
+            &storage,
+            crate::db::NewAgentGatewayAuthorization {
+                gateway_id: "gateway-guest",
+                machine_id: &machine.machine_id,
+                owner_user_id: None,
+                token_prefix: &gateway_credential.chars().take(20).collect::<String>(),
+                token_hash: &credential_hash,
+                token_expires_at: chrono::Utc::now() + chrono::Duration::days(180),
+            },
+        )
+        .await
+        .unwrap();
 
         let created = guest_app
             .clone()
             .oneshot(
                 Request::post("/v1/guest/bootstrap")
-                    .header("content-type", "application/json")
-                    .body(Body::from(gateway_request))
+                    .header("authorization", format!("Bearer {gateway_credential}"))
+                    .body(Body::empty())
                     .unwrap(),
             )
             .await
@@ -1118,8 +1155,8 @@ mod tests {
             .clone()
             .oneshot(
                 Request::post("/v1/guest/bootstrap")
-                    .header("content-type", "application/json")
-                    .body(Body::from(gateway_request))
+                    .header("authorization", format!("Bearer {gateway_credential}"))
+                    .body(Body::empty())
                     .unwrap(),
             )
             .await
@@ -1152,6 +1189,10 @@ mod tests {
         assert_eq!(
             runtime_config["deployments"][0]["projectSlug"],
             project_slug
+        );
+        assert_eq!(
+            runtime_config["deployments"][0]["policies"]["remoteInvocation"],
+            true
         );
 
         let claimed = guest_app
@@ -1364,6 +1405,25 @@ mod tests {
             .oneshot(
                 Request::delete(format!("/v1/project/test/profiles/{profile_id}"))
                     .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn project_embeddings_route_is_registered() {
+        let config = Config::from_env().unwrap();
+        let pool = PgPoolOptions::new()
+            .connect_lazy("postgres://vifu@127.0.0.1:1/vifu")
+            .unwrap();
+        let response = app(state(config, pool))
+            .oneshot(
+                Request::post("/test/v1/embeddings")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"model":"guide","input":"hello"}"#))
                     .unwrap(),
             )
             .await

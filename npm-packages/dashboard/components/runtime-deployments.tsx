@@ -8,7 +8,9 @@ import {
   Plus,
   RotateCcw,
   Settings2,
+  ShieldOff,
   Star,
+  Unplug,
 } from "lucide-react";
 import { useMemo, useState, type FormEvent } from "react";
 import { useRouter } from "next/navigation";
@@ -125,6 +127,26 @@ export function RuntimeDeploymentsView({
     );
   }
 
+  async function detachGateway(deployment: RuntimeDeployment, gatewayId: string) {
+    await action(
+      `detach-${deployment.id}-${gatewayId}`,
+      () => runtimeBrowserRequest(
+        `project/${project.slug}/deployments/${deployment.name}/agent-gateways/${gatewayId}`,
+        "DELETE",
+      ),
+      "Gateway detached from this deployment.",
+    );
+  }
+
+  async function revokeGateway(gatewayId: string) {
+    if (!window.confirm("Revoke this Gateway? It will disconnect and require approval before it can reconnect.")) return;
+    await action(
+      `revoke-${gatewayId}`,
+      () => runtimeBrowserRequest(`agent-gateways/${gatewayId}/revoke`, "POST"),
+      "Gateway access revoked.",
+    );
+  }
+
   async function updatePolicies(deployment: RuntimeDeployment, event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const data = new FormData(event.currentTarget);
@@ -189,7 +211,13 @@ export function RuntimeDeploymentsView({
             </dl>
             {deployment.gatewayIds.length > 0 ? (
               <div className="deployment-gateways">
-                {deployment.gatewayIds.map((gatewayId) => <code key={gatewayId}>{gatewayId}</code>)}
+                {deployment.gatewayIds.map((gatewayId) => (
+                  <div key={gatewayId}>
+                    <code>{gatewayId}</code>
+                    <button className="icon-button" type="button" title="Detach from deployment" aria-label={`Detach ${gatewayId}`} onClick={() => detachGateway(deployment, gatewayId)} disabled={pending !== null}><Unplug aria-hidden="true" /></button>
+                    <button className="icon-button danger" type="button" title="Revoke gateway" aria-label={`Revoke ${gatewayId}`} onClick={() => revokeGateway(gatewayId)} disabled={pending !== null}><ShieldOff aria-hidden="true" /></button>
+                  </div>
+                ))}
               </div>
             ) : null}
             <form className="deployment-policy-form" onSubmit={(event) => updatePolicies(deployment, event)}>

@@ -114,15 +114,6 @@ impl Config {
         })
     }
 
-    pub fn session_file(&self) -> PathBuf {
-        if is_local_server_url(&self.server_url) {
-            return self.home_dir.join("agent-gateway-session");
-        }
-        self.home_dir
-            .join("agent-gateway-sessions")
-            .join(format!("{:016x}", stable_server_hash(&self.server_url)))
-    }
-
     pub fn runtime_database_file(&self) -> PathBuf {
         self.home_dir.join("runtime.sqlite")
     }
@@ -143,6 +134,12 @@ impl Config {
         self.agent_providers
             .iter()
             .filter(|provider| provider.provider_type == "llama")
+    }
+
+    pub fn openai_compatible_providers(&self) -> impl Iterator<Item = &AgentProviderConfig> {
+        self.agent_providers
+            .iter()
+            .filter(|provider| provider.provider_type == "openai-compatible")
     }
 }
 
@@ -168,15 +165,6 @@ fn is_local_server_url(server_url: &str) -> bool {
             .parse::<std::net::IpAddr>()
             .is_ok_and(|address| address.is_loopback())
         || (!host.is_empty() && !host.contains('.'))
-}
-
-fn stable_server_hash(server_url: &str) -> u64 {
-    let mut hash = 0xcbf29ce484222325_u64;
-    for byte in server_url.trim().trim_end_matches('/').bytes() {
-        hash ^= u64::from(byte.to_ascii_lowercase());
-        hash = hash.wrapping_mul(0x100000001b3);
-    }
-    hash
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -210,11 +198,14 @@ pub struct AgentProviderDefinition {
 pub struct AgentProviderAuthDefinition {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_env: Option<String>,
 }
 
 impl AgentProviderAuthDefinition {
     pub fn is_empty(&self) -> bool {
         self.token.as_deref().is_none_or(str::is_empty)
+            && self.token_env.as_deref().is_none_or(str::is_empty)
     }
 }
 
@@ -353,7 +344,25 @@ pub fn resolve_provider_token(
     provider_id: &str,
     auth: &AgentProviderAuthDefinition,
 ) -> Result<Option<String>, String> {
-    if let Some(token) = normalize_secret(auth.token.clone()) {
+    let inline_token = normalize_secret(auth.token.clone());
+    let token_env = normalize_secret(auth.token_env.clone());
+    if inline_token.is_some() && token_env.is_some() {
+        return Err(format!(
+            "agent provider {provider_id} auth cannot set both token and tokenEnv"
+        ));
+    }
+    if let Some(token) = inline_token {
+        validate_provider_token(provider_id, &token)?;
+        return Ok(Some(token));
+    }
+    if let Some(env_name) = token_env {
+        validate_env_var_name(provider_id, "tokenEnv", &env_name)?;
+        let token = std::env::var(&env_name).map_err(|_| {
+            format!("agent provider {provider_id} auth.tokenEnv {env_name} is not set")
+        })?;
+        let token = normalize_secret(Some(token)).ok_or_else(|| {
+            format!("agent provider {provider_id} auth.tokenEnv {env_name} is empty")
+        })?;
         validate_provider_token(provider_id, &token)?;
         return Ok(Some(token));
     }
@@ -378,6 +387,23 @@ fn validate_provider_token(provider_id: &str, token: &str) -> Result<(), String>
     if token.len() > 4096 || token.chars().any(char::is_control) {
         return Err(format!(
             "agent provider {provider_id} token contains invalid characters"
+        ));
+    }
+    Ok(())
+}
+
+fn validate_env_var_name(provider_id: &str, field: &str, name: &str) -> Result<(), String> {
+    let mut chars = name.chars();
+    let Some(first) = chars.next() else {
+        return Err(format!(
+            "agent provider {provider_id} auth.{field} is empty"
+        ));
+    };
+    if !(first == '_' || first.is_ascii_alphabetic())
+        || chars.any(|character| !(character == '_' || character.is_ascii_alphanumeric()))
+    {
+        return Err(format!(
+            "agent provider {provider_id} auth.{field} must be an environment variable name"
         ));
     }
     Ok(())
@@ -432,30 +458,6 @@ mod tests {
     fn default_urls_target_local_services() {
         assert_eq!(DEFAULT_OPENCLAW_URL, "http://127.0.0.1:18789");
         assert_eq!(DEFAULT_SERVER_URL, "http://127.0.0.1:6790");
-    }
-
-    #[test]
-    fn remote_servers_use_independent_gateway_sessions() {
-        let home_dir = unique_directory("vifu-gateway-session-scope");
-        let local = Config {
-            home_dir: home_dir.clone(),
-            agent_providers_file: home_dir.join("providers.json"),
-            agent_providers: Vec::new(),
-            server_url: DEFAULT_SERVER_URL.to_string(),
-            agent_gateway_bootstrap_token: Some("local-registration-token".to_string()),
-            enrollment_token: None,
-        };
-        let remote = Config {
-            server_url: "https://api.example.com".to_string(),
-            ..local.clone()
-        };
-
-        assert_eq!(local.session_file(), home_dir.join("agent-gateway-session"));
-        assert_ne!(remote.session_file(), local.session_file());
-        assert_eq!(
-            remote.session_file().parent(),
-            Some(home_dir.join("agent-gateway-sessions").as_path())
-        );
     }
 
     #[test]
@@ -640,6 +642,42 @@ mod tests {
     }
 
     #[test]
+    fn loads_openai_compatible_provider_with_env_token() {
+        let _guard = env_lock().lock().unwrap();
+        let previous_provider_token = std::env::var_os("VIFU_TEST_OPENAI_PROVIDER_TOKEN");
+        let previous_token_file = std::env::var_os("VIFU_AGENT_GATEWAY_BOOTSTRAP_TOKEN_FILE");
+        let dir = unique_directory("vifu-gateway-openai-compatible-provider");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("providers.json"),
+            r#"{"providers":[{"key":"cloudflare-proxy","type":"openai-compatible","url":"https://provider.example.com/openai/v1","auth":{"tokenEnv":"VIFU_TEST_OPENAI_PROVIDER_TOKEN"},"config":{"chatModel":"gpt-5.5-mini","embeddingModel":"text-embedding-ada-002"}}]}"#,
+        )
+        .unwrap();
+        std::env::set_var(
+            "VIFU_TEST_OPENAI_PROVIDER_TOKEN",
+            "synthetic-provider-token",
+        );
+        std::env::remove_var("VIFU_AGENT_GATEWAY_BOOTSTRAP_TOKEN_FILE");
+
+        let config =
+            Config::load_from_home_dir(dir.clone(), DEFAULT_SERVER_URL.to_string(), None).unwrap();
+
+        let provider = config.openai_compatible_providers().next().unwrap();
+        assert_eq!(provider.id, "cloudflare-proxy");
+        assert_eq!(provider.provider_type, "openai-compatible");
+        assert_eq!(provider.token.as_deref(), Some("synthetic-provider-token"));
+        assert_eq!(provider.config["chatModel"], "gpt-5.5-mini");
+        assert_eq!(provider.config["embeddingModel"], "text-embedding-ada-002");
+
+        restore_env("VIFU_TEST_OPENAI_PROVIDER_TOKEN", previous_provider_token);
+        restore_env(
+            "VIFU_AGENT_GATEWAY_BOOTSTRAP_TOKEN_FILE",
+            previous_token_file,
+        );
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn external_provider_still_requires_a_url() {
         let _guard = env_lock().lock().unwrap();
         let previous_token_file = std::env::var_os("VIFU_AGENT_GATEWAY_BOOTSTRAP_TOKEN_FILE");
@@ -702,6 +740,7 @@ mod tests {
                     enabled: Some(true),
                     auth: AgentProviderAuthDefinition {
                         token: Some("synthetic-provider-token".to_string()),
+                        token_env: None,
                     },
                     config: json!({}),
                 },

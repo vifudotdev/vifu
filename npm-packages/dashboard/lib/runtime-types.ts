@@ -145,7 +145,7 @@ export type AgentProfileVersion = {
   createdAt: string;
 };
 
-export type ProfileCapabilityKind = "chat" | "speech" | "transcription" | "realtime" | "tool";
+export type ProfileCapabilityKind = "chat" | "embedding" | "speech" | "transcription" | "realtime" | "tool";
 
 export type AgentProfileCapability = {
   id: string;
@@ -208,6 +208,7 @@ export type ApiKeyAgentScope =
 
 export type ApiKeyPermissions = {
   chatCompletions: "none" | "access";
+  embeddings: "none" | "access";
   speech: "none" | "access";
   transcriptions: "none" | "access";
   realtime: "none" | "access";
@@ -238,6 +239,16 @@ export type AgentGateway = {
   connectedAt: string;
   lastSeenAt: string;
   disconnectedAt: string | null;
+};
+
+export type AgentGatewayPairing = {
+  id: string;
+  machineId: string;
+  status: "pending" | "approved" | "consumed" | "rejected" | "expired";
+  ownerUserId: string | null;
+  expiresAt: string;
+  createdAt: string;
+  resolvedAt: string | null;
 };
 
 export type AvailableAgent = {
