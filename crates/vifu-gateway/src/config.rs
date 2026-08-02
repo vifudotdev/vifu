@@ -173,6 +173,19 @@ fn is_local_server_url(server_url: &str) -> bool {
         || (!host.is_empty() && !host.contains('.'))
 }
 
+/// Returns true when a configured HTTP provider resolves to this machine.
+pub fn is_local_provider_url(provider_url: &str) -> bool {
+    let Ok(url) = url::Url::parse(provider_url.trim()) else {
+        return false;
+    };
+    url.host_str().is_some_and(|host| {
+        host.eq_ignore_ascii_case("localhost")
+            || host
+                .parse::<std::net::IpAddr>()
+                .is_ok_and(|address| address.is_loopback())
+    })
+}
+
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct AgentProvidersFile {

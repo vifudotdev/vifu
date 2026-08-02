@@ -278,11 +278,23 @@ dispatch! {
     pub async fn create_trace(storage: &Storage, trace: NewTrace<'_>) -> Result<Uuid, ApiError>;
     pub async fn create_uploaded_runtime_trace(storage: &Storage, trace: NewUploadedRuntimeTrace<'_>) -> Result<bool, ApiError>;
     pub async fn create_trace_span(storage: &Storage, span: NewTraceSpan<'_>) -> Result<Uuid, ApiError>;
+    pub async fn create_trace_span_with_id(storage: &Storage, span_id: Uuid, span: NewTraceSpan<'_>) -> Result<Uuid, ApiError>;
+    pub async fn upsert_runtime_trace_observation(storage: &Storage, observation: RuntimeTraceObservation<'_>) -> Result<(), ApiError>;
+    pub async fn update_trace_generation(storage: &Storage, span_id: Uuid, completion_start_ms: Option<i64>, usage: Option<&Value>) -> Result<(), ApiError>;
+    pub async fn get_runtime_trace_target(storage: &Storage, request_id: Uuid) -> Result<Option<RuntimeTraceTarget>, ApiError>;
+    pub async fn get_runtime_trace_gateway_id(storage: &Storage, request_id: Uuid) -> Result<Option<String>, ApiError>;
+    pub async fn update_trace_runtime_identity(storage: &Storage, request_id: Uuid, provider_key: &str, capability_kind: &str, model: Option<&str>) -> Result<(), ApiError>;
+    pub async fn merge_trace_runtime_generation(storage: &Storage, request_id: Uuid, completion_start_ms: Option<i64>, input_tokens: Option<i64>, output_tokens: Option<i64>) -> Result<(), ApiError>;
+    pub async fn update_trace_runtime_io_summaries(storage: &Storage, request_id: Uuid, input_summary: Option<&Value>, input_truncated: bool, output_summary: Option<&Value>, output_truncated: bool) -> Result<(), ApiError>;
     pub async fn complete_trace_span(storage: &Storage, span_id: Uuid, status: &str, duration_ms: i64, output_summary: Option<&Value>, error: Option<&str>) -> Result<(), ApiError>;
+    pub async fn upsert_trace_score(storage: &Storage, score: NewTraceScore<'_>) -> Result<TraceScore, ApiError>;
     pub async fn complete_trace(storage: &Storage, request_id: Uuid, status: &str, latency_ms: i64, response: Option<&Value>, error: Option<&str>) -> Result<(), ApiError>;
-    pub async fn list_traces(storage: &Storage, endpoint_id: Option<Uuid>, project_id: Option<Uuid>, limit: i64) -> Result<Vec<EndpointTrace>, ApiError>;
+    pub async fn list_traces(storage: &Storage, endpoint_id: Option<Uuid>, project_id: Option<Uuid>, request_id: Option<Uuid>, trace_id: Option<Uuid>, allowed_profile_ids: Option<&[Uuid]>, limit: i64) -> Result<Vec<EndpointTrace>, ApiError>;
     pub async fn get_trace_project_id(storage: &Storage, trace_id: Uuid) -> Result<Option<Uuid>, ApiError>;
+    pub async fn get_trace_identity(storage: &Storage, trace_id: Uuid) -> Result<TraceIdentity, ApiError>;
     pub async fn list_trace_spans(storage: &Storage, trace_id: Uuid) -> Result<Vec<TraceSpan>, ApiError>;
+    pub async fn list_trace_scores(storage: &Storage, trace_id: Uuid) -> Result<Vec<TraceScore>, ApiError>;
+    pub async fn trace_feedback_target(storage: &Storage, project_id: Uuid, request_id: Uuid) -> Result<TraceFeedbackTarget, ApiError>;
 }
 
 #[cfg(test)]
@@ -392,6 +404,335 @@ mod tests {
                 .expect("deployment Gateways should list"),
             vec!["gateway-new"]
         );
+        close_and_remove(storage, &path).await;
+    }
+
+    #[tokio::test]
+    async fn sqlite_trace_profile_scope_excludes_unprofiled_and_other_profile_traces() {
+        let (storage, path) = sqlite_storage().await;
+        let project_id = Uuid::new_v4();
+        create_project(
+            &storage,
+            NewProject {
+                id: project_id,
+                owner_user_id: None,
+                slug: "trace-scope",
+                name: "Trace scope",
+                description: None,
+                gateway_id: "gateway-trace-scope",
+                binding_ids: &[],
+            },
+        )
+        .await
+        .expect("project should be created");
+        let allowed_profile_id = Uuid::new_v4();
+        let other_profile_id = Uuid::new_v4();
+        create_profile(
+            &storage,
+            allowed_profile_id,
+            project_id,
+            "allowed-agent",
+            "Allowed agent",
+            None,
+        )
+        .await
+        .expect("allowed profile should be created");
+        create_profile(
+            &storage,
+            other_profile_id,
+            project_id,
+            "other-agent",
+            "Other agent",
+            None,
+        )
+        .await
+        .expect("other profile should be created");
+
+        let allowed_trace_id = create_trace(
+            &storage,
+            NewTrace {
+                request_id: Uuid::new_v4(),
+                endpoint_id: None,
+                project_id: Some(project_id),
+                gateway_session_id: None,
+                profile_id: Some(allowed_profile_id),
+                profile_version_id: None,
+                operation: "runtime.invoke",
+                provider_key: None,
+                capability_kind: Some("chat"),
+                selection_key: None,
+                request: &json!({}),
+            },
+        )
+        .await
+        .expect("allowed trace should be created");
+        for profile_id in [Some(other_profile_id), None] {
+            create_trace(
+                &storage,
+                NewTrace {
+                    request_id: Uuid::new_v4(),
+                    endpoint_id: None,
+                    project_id: Some(project_id),
+                    gateway_session_id: None,
+                    profile_id,
+                    profile_version_id: None,
+                    operation: "runtime.invoke",
+                    provider_key: None,
+                    capability_kind: Some("chat"),
+                    selection_key: None,
+                    request: &json!({}),
+                },
+            )
+            .await
+            .expect("out-of-scope trace should be created");
+        }
+
+        let scoped = list_traces(
+            &storage,
+            None,
+            Some(project_id),
+            None,
+            None,
+            Some(&[allowed_profile_id]),
+            10,
+        )
+        .await
+        .expect("scoped traces should list");
+        assert_eq!(scoped.len(), 1);
+        assert_eq!(scoped[0].id, allowed_trace_id);
+        assert!(
+            list_traces(&storage, None, Some(project_id), None, None, Some(&[]), 10)
+                .await
+                .expect("empty scope should list")
+                .is_empty()
+        );
+        assert_eq!(
+            get_trace_identity(&storage, allowed_trace_id)
+                .await
+                .expect("trace identity should resolve"),
+            TraceIdentity {
+                project_id: Some(project_id),
+                profile_id: Some(allowed_profile_id),
+            }
+        );
+
+        close_and_remove(storage, &path).await;
+    }
+
+    async fn sqlite_trace_with_root(storage: &Storage, slug: &str) -> (Uuid, Uuid, Uuid) {
+        let project_id = Uuid::new_v4();
+        create_project(
+            storage,
+            NewProject {
+                id: project_id,
+                owner_user_id: None,
+                slug,
+                name: "Trace observation identity",
+                description: None,
+                gateway_id: "gateway-trace-observation-identity",
+                binding_ids: &[],
+            },
+        )
+        .await
+        .expect("project should be created");
+        let request_id = Uuid::new_v4();
+        let trace_id = create_trace(
+            storage,
+            NewTrace {
+                request_id,
+                endpoint_id: None,
+                project_id: Some(project_id),
+                gateway_session_id: None,
+                profile_id: None,
+                profile_version_id: None,
+                operation: "runtime.invoke",
+                provider_key: Some("local-provider"),
+                capability_kind: Some("chat"),
+                selection_key: None,
+                request: &json!({}),
+            },
+        )
+        .await
+        .expect("trace should be created");
+        let root_id = request_id;
+        create_trace_span_with_id(
+            storage,
+            root_id,
+            NewTraceSpan {
+                trace_id,
+                parent_span_id: None,
+                name: "runtime.invoke",
+                kind: "agent_gateway",
+                observation_type: "generation",
+                provider_key: Some("local-provider"),
+                capability_kind: Some("chat"),
+                model: Some("local-model"),
+                model_parameters: None,
+                input_summary: None,
+                attributes: &json!({}),
+            },
+        )
+        .await
+        .expect("root observation should be created");
+        (trace_id, request_id, root_id)
+    }
+
+    #[tokio::test]
+    async fn sqlite_runtime_observation_rejects_root_uuid_collision() {
+        let (storage, path) = sqlite_storage().await;
+        let (trace_id, _request_id, root_id) =
+            sqlite_trace_with_root(&storage, "root-observation-collision").await;
+
+        let result = upsert_runtime_trace_observation(
+            &storage,
+            RuntimeTraceObservation {
+                id: root_id,
+                trace_id,
+                parent_span_id: Some(root_id),
+                name: "Queue",
+                kind: "provider_stage",
+                observation_type: "span",
+                provider_key: Some("local-provider"),
+                capability_kind: Some("chat"),
+                model: Some("local-model"),
+                status: "pending",
+                duration_ms: None,
+                attributes: &json!({"stage": "queue"}),
+                error: None,
+            },
+        )
+        .await;
+
+        assert!(matches!(result, Err(ApiError::Invalid(message))
+            if message == "trace observation ID conflicts with an existing observation"));
+        let spans = list_trace_spans(&storage, trace_id)
+            .await
+            .expect("trace observations should list");
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0].name, "runtime.invoke");
+        assert_eq!(spans[0].observation_type, "generation");
+        close_and_remove(storage, &path).await;
+    }
+
+    #[tokio::test]
+    async fn sqlite_runtime_observation_rejects_uuid_reuse_for_another_stage() {
+        let (storage, path) = sqlite_storage().await;
+        let (trace_id, _request_id, root_id) =
+            sqlite_trace_with_root(&storage, "stage-observation-collision").await;
+        let observation_id = Uuid::new_v4();
+        upsert_runtime_trace_observation(
+            &storage,
+            RuntimeTraceObservation {
+                id: observation_id,
+                trace_id,
+                parent_span_id: Some(root_id),
+                name: "Queue",
+                kind: "provider_stage",
+                observation_type: "span",
+                provider_key: Some("local-provider"),
+                capability_kind: Some("chat"),
+                model: Some("local-model"),
+                status: "pending",
+                duration_ms: None,
+                attributes: &json!({"stage": "queue"}),
+                error: None,
+            },
+        )
+        .await
+        .expect("initial observation should be inserted");
+
+        let result = upsert_runtime_trace_observation(
+            &storage,
+            RuntimeTraceObservation {
+                id: observation_id,
+                trace_id,
+                parent_span_id: Some(root_id),
+                name: "Load",
+                kind: "provider_stage",
+                observation_type: "span",
+                provider_key: Some("local-provider"),
+                capability_kind: Some("chat"),
+                model: Some("local-model"),
+                status: "completed",
+                duration_ms: Some(5),
+                attributes: &json!({"stage": "load"}),
+                error: None,
+            },
+        )
+        .await;
+
+        assert!(matches!(result, Err(ApiError::Invalid(message))
+            if message == "trace observation ID conflicts with an existing observation"));
+        let spans = list_trace_spans(&storage, trace_id)
+            .await
+            .expect("trace observations should list");
+        let observation = spans
+            .iter()
+            .find(|span| span.id == observation_id)
+            .expect("original observation should remain");
+        assert_eq!(observation.name, "Queue");
+        assert_eq!(observation.status, "pending");
+        close_and_remove(storage, &path).await;
+    }
+
+    #[tokio::test]
+    async fn sqlite_runtime_observation_allows_idempotent_started_to_completed_update() {
+        let (storage, path) = sqlite_storage().await;
+        let (trace_id, _request_id, root_id) =
+            sqlite_trace_with_root(&storage, "stage-observation-update").await;
+        let observation_id = Uuid::new_v4();
+        for (status, duration_ms) in [("pending", None), ("completed", Some(5))] {
+            upsert_runtime_trace_observation(
+                &storage,
+                RuntimeTraceObservation {
+                    id: observation_id,
+                    trace_id,
+                    parent_span_id: Some(root_id),
+                    name: "Queue",
+                    kind: "provider_stage",
+                    observation_type: "span",
+                    provider_key: Some("local-provider"),
+                    capability_kind: Some("chat"),
+                    model: Some("local-model"),
+                    status,
+                    duration_ms,
+                    attributes: &json!({"stage": "queue"}),
+                    error: None,
+                },
+            )
+            .await
+            .expect("matching observation update should succeed");
+        }
+        upsert_runtime_trace_observation(
+            &storage,
+            RuntimeTraceObservation {
+                id: observation_id,
+                trace_id,
+                parent_span_id: Some(root_id),
+                name: "Queue",
+                kind: "provider_stage",
+                observation_type: "span",
+                provider_key: Some("local-provider"),
+                capability_kind: Some("chat"),
+                model: Some("local-model"),
+                status: "completed",
+                duration_ms: Some(5),
+                attributes: &json!({"stage": "queue"}),
+                error: None,
+            },
+        )
+        .await
+        .expect("completed observation retry should be idempotent");
+
+        let spans = list_trace_spans(&storage, trace_id)
+            .await
+            .expect("trace observations should list");
+        let observation = spans
+            .iter()
+            .find(|span| span.id == observation_id)
+            .expect("provider observation should remain");
+        assert_eq!(observation.status, "completed");
+        assert_eq!(observation.duration_ms, Some(5));
         close_and_remove(storage, &path).await;
     }
 
@@ -696,8 +1037,11 @@ mod tests {
                 parent_span_id: None,
                 name: "provider.call",
                 kind: "provider",
+                observation_type: "generation",
                 provider_key: Some("openai-local"),
                 capability_kind: Some("chat"),
+                model: Some("test-model"),
+                model_parameters: Some(&json!({"temperature": 0.2})),
                 input_summary: Some(&json!({"messages": 0})),
                 attributes: &json!({}),
             },
@@ -714,6 +1058,33 @@ mod tests {
         )
         .await
         .expect("trace span should complete");
+        update_trace_generation(
+            &storage,
+            span_id,
+            Some(3),
+            Some(&json!({"promptTokens": 4, "completionTokens": 1})),
+        )
+        .await
+        .expect("generation details should update");
+        let feedback_target = trace_feedback_target(&storage, project_id, request_id)
+            .await
+            .expect("feedback target should resolve");
+        assert_eq!(feedback_target.parent_span_id, Some(span_id));
+        assert_eq!(feedback_target.capability_kind.as_deref(), Some("chat"));
+        let score = upsert_trace_score(
+            &storage,
+            NewTraceScore {
+                trace_id,
+                span_id: Some(span_id),
+                name: "OUTPUT_ACCEPTED",
+                data_type: "categorical",
+                value: &json!("pass"),
+                source: "application",
+            },
+        )
+        .await
+        .expect("trace score should be created");
+        assert_eq!(score.value, json!("pass"));
         complete_trace(
             &storage,
             request_id,
@@ -732,13 +1103,11 @@ mod tests {
                 .profile_id,
             profile_id
         );
-        assert_eq!(
-            list_traces(&storage, None, Some(project_id), 10)
-                .await
-                .expect("traces should list")
-                .len(),
-            1
-        );
+        let traces = list_traces(&storage, None, Some(project_id), None, None, None, 10)
+            .await
+            .expect("traces should list");
+        assert_eq!(traces.len(), 1);
+        assert_eq!(traces[0].app_outcome.as_deref(), Some("unknown"));
         assert_eq!(
             get_trace_project_id(&storage, trace_id)
                 .await
@@ -749,6 +1118,14 @@ mod tests {
             list_trace_spans(&storage, trace_id)
                 .await
                 .expect("trace spans should list")
+                .first()
+                .and_then(|span| span.completion_start_ms),
+            Some(3)
+        );
+        assert_eq!(
+            list_trace_scores(&storage, trace_id)
+                .await
+                .expect("trace scores should list")
                 .len(),
             1
         );

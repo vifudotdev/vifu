@@ -1,5 +1,6 @@
 pub mod api;
 pub mod auth;
+pub mod comparisons;
 pub mod config;
 pub mod console;
 pub mod db;
@@ -8,6 +9,8 @@ pub mod models;
 mod openclaw_device;
 pub mod relay;
 pub mod runtime_extensions;
+mod telemetry;
+mod trace_redaction;
 pub mod websocket;
 
 use std::future::Future;
@@ -107,6 +110,7 @@ pub fn app(state: AppState) -> Router {
             CONTENT_TYPE,
             HeaderName::from_static("last-event-id"),
         ])
+        .expose_headers([HeaderName::from_static("x-vifu-invocation-id")])
         .allow_methods([
             Method::GET,
             Method::POST,
@@ -338,6 +342,10 @@ pub fn app(state: AppState) -> Router {
             get(api::list_project_agent_gateways),
         )
         .route(
+            "/v1/project/{slug}/comparisons",
+            get(comparisons::list_project_runtime_comparisons),
+        )
+        .route(
             "/v1/project/{slug}/agents",
             get(api::list_project_available_agents),
         )
@@ -345,6 +353,10 @@ pub fn app(state: AppState) -> Router {
         .route(
             "/v1/project/{slug}/traces/{id}/spans",
             get(api::list_project_trace_spans),
+        )
+        .route(
+            "/v1/project/{slug}/traces/{id}/scores",
+            get(api::list_project_trace_scores),
         )
         .route(
             "/v1/bindings",
@@ -377,6 +389,10 @@ pub fn app(state: AppState) -> Router {
         .route(
             "/{project_slug}/v1/embeddings",
             post(api::create_project_embeddings),
+        )
+        .route(
+            "/{project_slug}/v1/traces/{invocation_id}/feedback",
+            post(api::create_app_feedback).layer(DefaultBodyLimit::max(16 * 1024)),
         )
         .route("/{project_slug}/v1/agents", get(api::list_project_agents))
         .route(
@@ -439,6 +455,17 @@ pub fn app(state: AppState) -> Router {
             post(api::upload_agent_gateway_runtime_traces),
         )
         .route(
+            "/v1/agent-gateway/runtime-trace-observations",
+            post(api::upload_agent_gateway_runtime_trace_observations)
+                .layer(DefaultBodyLimit::max(128 * 1024)),
+        )
+        .route(
+            "/v1/agent-gateway/runtime-comparisons",
+            post(comparisons::upload_runtime_comparison).layer(DefaultBodyLimit::max(
+                vifu_gateway::optimization::MAX_COMPARISON_UPLOAD_BYTES,
+            )),
+        )
+        .route(
             "/v1/agent-gateway/runtime-releases/bootstrap",
             post(api::bootstrap_agent_gateway_runtime_release),
         )
@@ -452,6 +479,7 @@ pub fn app(state: AppState) -> Router {
         )
         .route("/v1/traces", get(api::list_traces))
         .route("/v1/traces/{id}/spans", get(api::list_trace_spans))
+        .route("/v1/traces/{id}/scores", get(api::list_trace_scores))
         .route("/v1/agent-gateway/connect", get(websocket::upgrade))
         .fallback(api::fallback)
         .layer(PropagateRequestIdLayer::new(request_id_header.clone()))
@@ -993,6 +1021,9 @@ mod tests {
                         .project
                         .id,
                 ),
+                None,
+                None,
+                None,
                 10,
             )
             .await
@@ -1490,6 +1521,335 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn project_trace_feedback_route_is_registered_and_authenticated() {
+        let config = Config::from_env().unwrap();
+        let pool = PgPoolOptions::new()
+            .connect_lazy("postgres://vifu@127.0.0.1:1/vifu")
+            .unwrap();
+        let invocation_id = uuid::Uuid::new_v4();
+        let response = app(state(config, pool))
+            .oneshot(
+                Request::post(format!("/test/v1/traces/{invocation_id}/feedback"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"event":"OUTPUT_ACCEPTED","outcome":"fail","path":"$.action"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn project_trace_feedback_rejects_oversized_body_before_authentication() {
+        let config = Config::from_env().unwrap();
+        let pool = PgPoolOptions::new()
+            .connect_lazy("postgres://vifu@127.0.0.1:1/vifu")
+            .unwrap();
+        let invocation_id = uuid::Uuid::new_v4();
+        let response = app(state(config, pool))
+            .oneshot(
+                Request::post(format!("/test/v1/traces/{invocation_id}/feedback"))
+                    .header("content-type", "application/json")
+                    .body(Body::from("x".repeat(16 * 1024 + 1)))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
+    #[tokio::test]
+    async fn selected_project_key_only_observes_its_profile_traces() {
+        let (storage, path) = temp_sqlite_storage("selected-trace-scope").await;
+        let config = Config::from_env().unwrap();
+        let project_id = create_test_project(&storage, "trace-auth", "gateway-trace-auth").await;
+        let allowed_profile_id = uuid::Uuid::new_v4();
+        let other_profile_id = uuid::Uuid::new_v4();
+        crate::db::create_profile(
+            &storage,
+            allowed_profile_id,
+            project_id,
+            "allowed-agent",
+            "Allowed agent",
+            None,
+        )
+        .await
+        .unwrap();
+        crate::db::create_profile(
+            &storage,
+            other_profile_id,
+            project_id,
+            "other-agent",
+            "Other agent",
+            None,
+        )
+        .await
+        .unwrap();
+
+        let mut trace_ids = Vec::new();
+        for profile_id in [Some(allowed_profile_id), Some(other_profile_id), None] {
+            let request_id = uuid::Uuid::new_v4();
+            let trace_id = crate::db::create_trace(
+                &storage,
+                crate::db::NewTrace {
+                    request_id,
+                    endpoint_id: None,
+                    project_id: Some(project_id),
+                    gateway_session_id: None,
+                    profile_id,
+                    profile_version_id: None,
+                    operation: "runtime.invoke",
+                    provider_key: None,
+                    capability_kind: Some("chat"),
+                    selection_key: None,
+                    request: &json!({}),
+                },
+            )
+            .await
+            .unwrap();
+            trace_ids.push((trace_id, request_id));
+        }
+
+        let raw_key = "vifu_pk_selected_trace_scope_test";
+        let key_hash = crate::auth::hash_api_key(raw_key, &config.api_key_pepper);
+        let permissions = crate::models::ApiKeyPermissions {
+            project: crate::models::ResourcePermission::Read,
+            ..Default::default()
+        };
+        crate::db::create_api_key(
+            &storage,
+            crate::db::NewApiKey {
+                id: uuid::Uuid::new_v4(),
+                project_id,
+                name: "Selected trace reader",
+                agent_scope: &crate::models::ApiKeyAgentScope::Selected {
+                    profile_ids: vec![allowed_profile_id],
+                },
+                permissions: &permissions,
+                key_prefix: "vifu_pk_selected_t",
+                key_hash: &key_hash,
+            },
+        )
+        .await
+        .unwrap();
+
+        let no_endpoint_raw_key = "vifu_pk_selected_trace_no_endpoint_access";
+        let no_endpoint_key_hash =
+            crate::auth::hash_api_key(no_endpoint_raw_key, &config.api_key_pepper);
+        let no_endpoint_permissions = crate::models::ApiKeyPermissions {
+            chat_completions: crate::models::EndpointPermission::None,
+            embeddings: crate::models::EndpointPermission::None,
+            speech: crate::models::EndpointPermission::None,
+            transcriptions: crate::models::EndpointPermission::None,
+            realtime: crate::models::EndpointPermission::None,
+            runtime: crate::models::EndpointPermission::None,
+            agents: crate::models::ResourcePermission::None,
+            project: crate::models::ResourcePermission::Read,
+        };
+        crate::db::create_api_key(
+            &storage,
+            crate::db::NewApiKey {
+                id: uuid::Uuid::new_v4(),
+                project_id,
+                name: "Trace reader without endpoint access",
+                agent_scope: &crate::models::ApiKeyAgentScope::Selected {
+                    profile_ids: vec![allowed_profile_id],
+                },
+                permissions: &no_endpoint_permissions,
+                key_prefix: "vifu_pk_selected_n",
+                key_hash: &no_endpoint_key_hash,
+            },
+        )
+        .await
+        .unwrap();
+
+        let runtime_app = app(state_with_storage(config.clone(), storage.clone()));
+        let selected_list = runtime_app
+            .clone()
+            .oneshot(
+                Request::get("/v1/project/trace-auth/traces")
+                    .header("authorization", format!("Bearer {raw_key}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(selected_list.status(), StatusCode::OK);
+        let selected_list = response_json(selected_list).await;
+        let traces = selected_list["traces"].as_array().unwrap();
+        assert_eq!(traces.len(), 1);
+        assert_eq!(traces[0]["id"], trace_ids[0].0.to_string());
+
+        let exact_allowed = runtime_app
+            .clone()
+            .oneshot(
+                Request::get(format!(
+                    "/v1/project/trace-auth/traces?requestId={}&limit=1",
+                    trace_ids[0].1
+                ))
+                .header("authorization", format!("Bearer {raw_key}"))
+                .body(Body::empty())
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(exact_allowed.status(), StatusCode::OK);
+        assert_eq!(
+            response_json(exact_allowed).await["traces"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        let exact_hidden = runtime_app
+            .clone()
+            .oneshot(
+                Request::get(format!(
+                    "/v1/project/trace-auth/traces?requestId={}&limit=1",
+                    trace_ids[1].1
+                ))
+                .header("authorization", format!("Bearer {raw_key}"))
+                .body(Body::empty())
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(exact_hidden.status(), StatusCode::OK);
+        assert!(response_json(exact_hidden).await["traces"]
+            .as_array()
+            .unwrap()
+            .is_empty());
+
+        let exact_trace_allowed = runtime_app
+            .clone()
+            .oneshot(
+                Request::get(format!(
+                    "/v1/project/trace-auth/traces?traceId={}&limit=1",
+                    trace_ids[0].0
+                ))
+                .header("authorization", format!("Bearer {raw_key}"))
+                .body(Body::empty())
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(exact_trace_allowed.status(), StatusCode::OK);
+        assert_eq!(
+            response_json(exact_trace_allowed).await["traces"][0]["id"],
+            trace_ids[0].0.to_string()
+        );
+        let exact_trace_hidden = runtime_app
+            .clone()
+            .oneshot(
+                Request::get(format!(
+                    "/v1/project/trace-auth/traces?traceId={}&limit=1",
+                    trace_ids[1].0
+                ))
+                .header("authorization", format!("Bearer {raw_key}"))
+                .body(Body::empty())
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(exact_trace_hidden.status(), StatusCode::OK);
+        assert!(response_json(exact_trace_hidden).await["traces"]
+            .as_array()
+            .unwrap()
+            .is_empty());
+
+        for suffix in ["spans", "scores"] {
+            let allowed = runtime_app
+                .clone()
+                .oneshot(
+                    Request::get(format!(
+                        "/v1/project/trace-auth/traces/{}/{suffix}",
+                        trace_ids[0].0
+                    ))
+                    .header("authorization", format!("Bearer {raw_key}"))
+                    .body(Body::empty())
+                    .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(allowed.status(), StatusCode::OK);
+            for (trace_id, _) in &trace_ids[1..] {
+                let hidden = runtime_app
+                    .clone()
+                    .oneshot(
+                        Request::get(format!("/v1/project/trace-auth/traces/{trace_id}/{suffix}"))
+                            .header("authorization", format!("Bearer {raw_key}"))
+                            .body(Body::empty())
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(hidden.status(), StatusCode::NOT_FOUND);
+            }
+        }
+
+        for (_, request_id) in &trace_ids[1..] {
+            let denied_feedback = runtime_app
+                .clone()
+                .oneshot(
+                    Request::post(format!("/trace-auth/v1/traces/{request_id}/feedback"))
+                        .header("authorization", format!("Bearer {raw_key}"))
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            r#"{"event":"OUTPUT_ACCEPTED","outcome":"pass"}"#,
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(denied_feedback.status(), StatusCode::FORBIDDEN);
+        }
+
+        let denied_without_endpoint_access = runtime_app
+            .clone()
+            .oneshot(
+                Request::post(format!("/trace-auth/v1/traces/{}/feedback", trace_ids[0].1))
+                    .header("authorization", format!("Bearer {no_endpoint_raw_key}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"event":"OUTPUT_ACCEPTED","outcome":"pass"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            denied_without_endpoint_access.status(),
+            StatusCode::FORBIDDEN
+        );
+
+        let admin_list = runtime_app
+            .clone()
+            .oneshot(
+                Request::get("/v1/project/trace-auth/traces")
+                    .header("authorization", admin_authorization(&config))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(admin_list.status(), StatusCode::OK);
+        assert_eq!(
+            response_json(admin_list).await["traces"]
+                .as_array()
+                .unwrap()
+                .len(),
+            3
+        );
+
+        drop(runtime_app);
+        close_temp_storage(storage, path).await;
     }
 
     #[tokio::test]

@@ -202,10 +202,64 @@ pub struct NewTraceSpan<'a> {
     pub parent_span_id: Option<Uuid>,
     pub name: &'a str,
     pub kind: &'a str,
+    pub observation_type: &'a str,
     pub provider_key: Option<&'a str>,
     pub capability_kind: Option<&'a str>,
+    pub model: Option<&'a str>,
+    pub model_parameters: Option<&'a Value>,
     pub input_summary: Option<&'a Value>,
     pub attributes: &'a Value,
+}
+
+pub struct RuntimeTraceObservation<'a> {
+    pub id: Uuid,
+    pub trace_id: Uuid,
+    pub parent_span_id: Option<Uuid>,
+    pub name: &'a str,
+    pub kind: &'a str,
+    pub observation_type: &'a str,
+    pub provider_key: Option<&'a str>,
+    pub capability_kind: Option<&'a str>,
+    pub model: Option<&'a str>,
+    pub status: &'a str,
+    pub duration_ms: Option<i64>,
+    pub attributes: &'a Value,
+    pub error: Option<&'a str>,
+}
+
+pub struct NewTraceScore<'a> {
+    pub trace_id: Uuid,
+    pub span_id: Option<Uuid>,
+    pub name: &'a str,
+    pub data_type: &'a str,
+    pub value: &'a Value,
+    pub source: &'a str,
+}
+
+#[derive(Debug, Clone)]
+pub struct TraceFeedbackTarget {
+    pub trace_id: Uuid,
+    pub project_id: Uuid,
+    pub profile_id: Option<Uuid>,
+    pub parent_span_id: Option<Uuid>,
+    pub gateway_session_id: Option<Uuid>,
+    pub capability_kind: Option<String>,
+    pub trace_created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct RuntimeTraceTarget {
+    pub trace_id: Uuid,
+    pub parent_span_id: Option<Uuid>,
+    pub provider_key: Option<String>,
+    pub capability_kind: Option<String>,
+    pub model: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TraceIdentity {
+    pub project_id: Option<Uuid>,
+    pub profile_id: Option<Uuid>,
 }
 
 pub fn elapsed_millis(started_at: std::time::Instant) -> i64 {

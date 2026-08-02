@@ -51,6 +51,7 @@ use crate::AppState;
 
 const MAX_CHAT_REQUEST_BYTES: usize = MAX_INVOCATION_BODY_BYTES;
 const MAX_CHAT_IMAGES: usize = 16;
+const VIFU_INVOCATION_ID_HEADER: &str = "x-vifu-invocation-id";
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -1303,15 +1304,19 @@ pub async fn test_project_profile(
     input_summary["previewMode"] = preview_mode
         .map(|mode| Value::String(mode.to_string()))
         .unwrap_or(Value::Null);
-    let span_id = db::create_trace_span(
+    let span_id = db::create_trace_span_with_id(
         &state.pool,
+        request_id,
         db::NewTraceSpan {
             trace_id,
             parent_span_id: None,
             name: "agent.test",
             kind: "provider",
+            observation_type: "generation",
             provider_key: Some(&route.provider_key),
             capability_kind: Some("chat"),
+            model: route.resource_id.as_deref().or(Some(&route.profile_slug)),
+            model_parameters: Some(&trace_model_parameters(&route.capability_config)),
             input_summary: Some(&input_summary),
             attributes: &json!({
                 "profileId": route.profile_id,
@@ -1334,9 +1339,16 @@ pub async fn test_project_profile(
     )
     .await;
     match result {
-        Ok(output) => {
+        Ok((output, provider_metadata)) => {
             let response = chat_completion_response(request_id, &profile.slug, output);
             let duration = db::elapsed_millis(started_at);
+            db::update_trace_generation(
+                &state.pool,
+                span_id,
+                completion_start_ms(&provider_metadata),
+                response.get("usage"),
+            )
+            .await?;
             db::complete_trace_span(
                 &state.pool,
                 span_id,
@@ -1873,6 +1885,7 @@ pub async fn get_agent_gateway_runtime_config(
             "projectSlug": project.project.slug,
             "projectName": project.project.name,
             "isPrimary": deployment.is_primary,
+            "bindingIds": project.binding_ids,
             "policies": {
                 "configSync": deployment.config_sync_enabled,
                 "traceMode": deployment.trace_mode,
@@ -1935,10 +1948,11 @@ pub async fn upload_agent_gateway_runtime_traces(
             "agent": trace.agent,
         });
         let request_id = runtime_trace_uuid("request", &gateway_id, &trace.id);
-        db::create_uploaded_runtime_trace(
+        let trace_id = runtime_trace_uuid("trace", &gateway_id, &trace.id);
+        let inserted = db::create_uploaded_runtime_trace(
             &state.pool,
             db::NewUploadedRuntimeTrace {
-                id: runtime_trace_uuid("trace", &gateway_id, &trace.id),
+                id: trace_id,
                 request_id,
                 project_id: project.project.id,
                 operation: "runtime.invoke",
@@ -1951,11 +1965,81 @@ pub async fn upload_agent_gateway_runtime_traces(
             },
         )
         .await?;
+        if inserted {
+            let span_id = db::create_trace_span_with_id(
+                &state.pool,
+                request_id,
+                db::NewTraceSpan {
+                    trace_id,
+                    parent_span_id: None,
+                    name: "runtime.invoke",
+                    kind: "embedded_runtime",
+                    observation_type: "generation",
+                    provider_key: trace.provider.as_deref(),
+                    capability_kind: trace.capability.as_deref(),
+                    model: None,
+                    model_parameters: None,
+                    input_summary: Some(&request),
+                    attributes: &json!({ "deploymentId": deployment.id }),
+                },
+            )
+            .await?;
+            db::complete_trace_span(&state.pool, span_id, &trace.status, latency_ms, None, None)
+                .await?;
+        }
         accepted.push(trace.id);
     }
     Ok(Json(json!({
         "acceptedTraceIds": accepted,
     })))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct UploadRuntimeTraceObservations {
+    request_id: Uuid,
+    events: Vec<vifu_gateway::protocol::TraceTelemetry>,
+    #[serde(default)]
+    dropped_events: u32,
+    #[serde(default)]
+    root_input_summary: Option<vifu_gateway::protocol::TraceIoSummary>,
+    #[serde(default)]
+    root_output_summary: Option<vifu_gateway::protocol::TraceIoSummary>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UploadRuntimeTraceObservationsAck {
+    accepted_request_id: Uuid,
+}
+
+pub async fn upload_agent_gateway_runtime_trace_observations(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<UploadRuntimeTraceObservations>,
+) -> Result<Json<UploadRuntimeTraceObservationsAck>, ApiError> {
+    let gateway_id = authenticated_agent_gateway(&state, &headers).await?;
+    if db::get_runtime_trace_gateway_id(&state.pool, input.request_id)
+        .await?
+        .as_deref()
+        != Some(gateway_id.as_str())
+    {
+        return Err(ApiError::Forbidden);
+    }
+    crate::telemetry::persist_batch(
+        &state.pool,
+        input.request_id,
+        vifu_gateway::protocol::TraceTelemetryBatch {
+            events: input.events,
+            dropped_events: input.dropped_events,
+            root_input_summary: input.root_input_summary,
+            root_output_summary: input.root_output_summary,
+        },
+    )
+    .await?;
+    Ok(Json(UploadRuntimeTraceObservationsAck {
+        accepted_request_id: input.request_id,
+    }))
 }
 
 pub async fn bootstrap_agent_gateway_runtime_release(
@@ -2718,7 +2802,100 @@ pub async fn restore_project_agent(
 pub struct TraceQuery {
     endpoint_id: Option<Uuid>,
     project_id: Option<Uuid>,
+    request_id: Option<Uuid>,
+    trace_id: Option<Uuid>,
     limit: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum TraceProfileScope {
+    All,
+    Selected(Vec<Uuid>),
+}
+
+impl TraceProfileScope {
+    fn from_agent_scope(scope: &ApiKeyAgentScope) -> Self {
+        match scope {
+            ApiKeyAgentScope::All => Self::All,
+            ApiKeyAgentScope::Selected { profile_ids } => Self::Selected(profile_ids.clone()),
+        }
+    }
+
+    fn allowed_profile_ids(&self) -> Option<&[Uuid]> {
+        match self {
+            Self::All => None,
+            Self::Selected(profile_ids) => Some(profile_ids),
+        }
+    }
+
+    fn allows(&self, profile_id: Option<Uuid>) -> bool {
+        match self {
+            Self::All => true,
+            Self::Selected(profile_ids) => {
+                profile_id.is_some_and(|profile_id| profile_ids.contains(&profile_id))
+            }
+        }
+    }
+}
+
+struct AuthorizedProjectTraceRead {
+    project: crate::models::ProjectWithBindings,
+    profile_scope: TraceProfileScope,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum AppFeedbackEvent {
+    OutputAccepted,
+    ActionApplied,
+    FramePresented,
+}
+
+impl AppFeedbackEvent {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::OutputAccepted => "OUTPUT_ACCEPTED",
+            Self::ActionApplied => "ACTION_APPLIED",
+            Self::FramePresented => "FRAME_PRESENTED",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum AppFeedbackOutcome {
+    Pass,
+    Fail,
+    Unknown,
+    NotApplicable,
+}
+
+impl AppFeedbackOutcome {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Pass => "pass",
+            Self::Fail => "fail",
+            Self::Unknown => "unknown",
+            Self::NotApplicable => "notApplicable",
+        }
+    }
+
+    fn observation_status(self) -> &'static str {
+        match self {
+            Self::Pass | Self::NotApplicable => "completed",
+            Self::Fail => "failed",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AppFeedbackInput {
+    event: AppFeedbackEvent,
+    outcome: AppFeedbackOutcome,
+    message: Option<String>,
+    path: Option<String>,
 }
 
 pub async fn list_traces(
@@ -2734,7 +2911,15 @@ pub async fn list_traces(
     }
     let limit = query.limit.unwrap_or(100).clamp(1, 500);
     Ok(Json(json!({
-        "traces": db::list_traces(&state.pool, query.endpoint_id, query.project_id, limit).await?
+        "traces": db::list_traces(
+            &state.pool,
+            query.endpoint_id,
+            query.project_id,
+            query.request_id,
+            query.trace_id,
+            None,
+            limit,
+        ).await?
     })))
 }
 
@@ -2746,6 +2931,17 @@ pub async fn list_trace_spans(
     deployment_admin(&state, &headers, Operation::DeploymentRead).await?;
     Ok(Json(json!({
         "spans": db::list_trace_spans(&state.pool, trace_id).await?
+    })))
+}
+
+pub async fn list_trace_scores(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(trace_id): Path<Uuid>,
+) -> Result<Json<Value>, ApiError> {
+    deployment_admin(&state, &headers, Operation::DeploymentRead).await?;
+    Ok(Json(json!({
+        "scores": db::list_trace_scores(&state.pool, trace_id).await?
     })))
 }
 
@@ -2978,7 +3174,8 @@ pub async fn list_project_traces(
     Path(slug): Path<String>,
     Query(query): Query<TraceQuery>,
 ) -> Result<Json<Value>, ApiError> {
-    let project = authorized_project_by_slug(&state, &headers, &slug, ProjectAccess::Read).await?;
+    let authorized = authorized_project_trace_read(&state, &headers, &slug).await?;
+    let project = &authorized.project;
     if query
         .project_id
         .is_some_and(|project_id| project_id != project.project.id)
@@ -2996,6 +3193,9 @@ pub async fn list_project_traces(
             &state.pool,
             query.endpoint_id,
             Some(project.project.id),
+            query.request_id,
+            query.trace_id,
+            authorized.profile_scope.allowed_profile_ids(),
             limit,
         ).await?
     })))
@@ -3006,13 +3206,283 @@ pub async fn list_project_trace_spans(
     headers: HeaderMap,
     Path((slug, trace_id)): Path<(String, Uuid)>,
 ) -> Result<Json<Value>, ApiError> {
-    let project = authorized_project_by_slug(&state, &headers, &slug, ProjectAccess::Read).await?;
-    if db::get_trace_project_id(&state.pool, trace_id).await? != Some(project.project.id) {
+    let authorized = authorized_project_trace_read(&state, &headers, &slug).await?;
+    let identity = db::get_trace_identity(&state.pool, trace_id).await?;
+    if identity.project_id != Some(authorized.project.project.id)
+        || !authorized.profile_scope.allows(identity.profile_id)
+    {
         return Err(ApiError::NotFound);
     }
     Ok(Json(json!({
         "spans": db::list_trace_spans(&state.pool, trace_id).await?
     })))
+}
+
+pub async fn list_project_trace_scores(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((slug, trace_id)): Path<(String, Uuid)>,
+) -> Result<Json<Value>, ApiError> {
+    let authorized = authorized_project_trace_read(&state, &headers, &slug).await?;
+    let identity = db::get_trace_identity(&state.pool, trace_id).await?;
+    if identity.project_id != Some(authorized.project.project.id)
+        || !authorized.profile_scope.allows(identity.profile_id)
+    {
+        return Err(ApiError::NotFound);
+    }
+    Ok(Json(json!({
+        "scores": db::list_trace_scores(&state.pool, trace_id).await?
+    })))
+}
+
+pub async fn create_app_feedback(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((project_slug, invocation_id)): Path<(String, Uuid)>,
+    Json(input): Json<AppFeedbackInput>,
+) -> Result<(StatusCode, Json<Value>), ApiError> {
+    let authority = api_request_authority(&state, &headers).await?;
+    let project = db::get_project_by_slug(&state.pool, &project_slug).await?;
+    let target = db::trace_feedback_target(&state.pool, project.project.id, invocation_id).await?;
+    match &authority {
+        ApiRequestAuthority::Admin => {}
+        ApiRequestAuthority::Key(key) => {
+            if key.project_id != target.project_id
+                || !TraceProfileScope::from_agent_scope(&key.agent_scope).allows(target.profile_id)
+            {
+                return Err(ApiError::AgentAccessDenied);
+            }
+            if !feedback_endpoint_permission_allowed(
+                &key.permissions,
+                target.capability_kind.as_deref(),
+            ) {
+                return Err(ApiError::EndpointAccessDenied);
+            }
+        }
+    }
+    let message = optional_feedback_message(input.message.as_deref())?;
+    let path = optional_feedback_path(input.path.as_deref())?;
+    let event = input.event.as_str();
+    let outcome = input.outcome.as_str();
+    let feedback = json!({
+        "event": event,
+        "outcome": outcome,
+        "message": message.as_deref(),
+        "path": path.as_deref(),
+    });
+    let feedback_offset_ms = u64::try_from(
+        Utc::now()
+            .signed_duration_since(target.trace_created_at)
+            .num_milliseconds()
+            .max(0),
+    )
+    .unwrap_or_default()
+    .min(vifu_gateway::protocol::MAX_TRACE_DURATION_MS);
+    let observation_id = db::create_trace_span(
+        &state.pool,
+        db::NewTraceSpan {
+            trace_id: target.trace_id,
+            parent_span_id: target.parent_span_id,
+            name: event,
+            kind: "app_feedback",
+            observation_type: "event",
+            provider_key: None,
+            capability_kind: None,
+            model: None,
+            model_parameters: None,
+            input_summary: None,
+            attributes: &json!({
+                "source": "application",
+                "path": path.as_deref(),
+                "startOffsetMs": feedback_offset_ms,
+                "endOffsetMs": feedback_offset_ms,
+            }),
+        },
+    )
+    .await?;
+    db::complete_trace_span(
+        &state.pool,
+        observation_id,
+        input.outcome.observation_status(),
+        0,
+        Some(&feedback),
+        (input.outcome == AppFeedbackOutcome::Fail).then_some(message.as_deref().unwrap_or(event)),
+    )
+    .await?;
+    let score = db::upsert_trace_score(
+        &state.pool,
+        db::NewTraceScore {
+            trace_id: target.trace_id,
+            span_id: Some(observation_id),
+            name: event,
+            data_type: "categorical",
+            value: &json!(outcome),
+            source: "application",
+        },
+    )
+    .await?;
+    let live_forwarded = state
+        .relay
+        .notify_application_feedback(
+            target.gateway_session_id,
+            invocation_id,
+            observation_id,
+            feedback_offset_ms,
+            feedback_offset_ms,
+            vifu_gateway::protocol::ApplicationFeedback {
+                event: match input.event {
+                    AppFeedbackEvent::OutputAccepted => {
+                        vifu_gateway::protocol::ApplicationFeedbackEvent::OutputAccepted
+                    }
+                    AppFeedbackEvent::ActionApplied => {
+                        vifu_gateway::protocol::ApplicationFeedbackEvent::ActionApplied
+                    }
+                    AppFeedbackEvent::FramePresented => {
+                        vifu_gateway::protocol::ApplicationFeedbackEvent::FramePresented
+                    }
+                },
+                outcome: match input.outcome {
+                    AppFeedbackOutcome::Pass => {
+                        vifu_gateway::protocol::ApplicationFeedbackOutcome::Pass
+                    }
+                    AppFeedbackOutcome::Fail => {
+                        vifu_gateway::protocol::ApplicationFeedbackOutcome::Fail
+                    }
+                    AppFeedbackOutcome::Unknown => {
+                        vifu_gateway::protocol::ApplicationFeedbackOutcome::Unknown
+                    }
+                    AppFeedbackOutcome::NotApplicable => {
+                        vifu_gateway::protocol::ApplicationFeedbackOutcome::NotApplicable
+                    }
+                },
+                message,
+                path,
+            },
+        )
+        .await;
+    Ok((
+        StatusCode::CREATED,
+        Json(json!({
+            "invocationId": invocation_id,
+            "traceId": target.trace_id,
+            "observationId": observation_id,
+            "score": score,
+            "liveForwarded": live_forwarded,
+        })),
+    ))
+}
+
+fn feedback_endpoint_permission_allowed(
+    permissions: &ApiKeyPermissions,
+    capability: Option<&str>,
+) -> bool {
+    match capability {
+        Some("chat" | "tool") => permissions.chat_completions_allowed(),
+        Some("embedding") => permissions.embeddings_allowed(),
+        Some("speech") => permissions.speech_allowed(),
+        Some("transcription") => permissions.transcriptions_allowed(),
+        Some("realtime") => permissions.realtime_allowed(),
+        Some(_) | None => false,
+    }
+}
+
+fn optional_feedback_text<'a>(
+    name: &str,
+    value: Option<&'a str>,
+) -> Result<Option<&'a str>, ApiError> {
+    let value = value.map(str::trim).filter(|value| !value.is_empty());
+    if value.is_some_and(|value| value.len() > 512 || value.chars().any(char::is_control)) {
+        return Err(ApiError::Invalid(format!(
+            "feedback {name} must be at most 512 printable bytes"
+        )));
+    }
+    Ok(value)
+}
+
+fn optional_feedback_message(value: Option<&str>) -> Result<Option<String>, ApiError> {
+    let value = optional_feedback_text("message", value)?;
+    Ok(value.map(|value| {
+        if contains_sensitive_marker(value) {
+            "Application feedback contained sensitive details; message was redacted".to_string()
+        } else {
+            value.to_string()
+        }
+    }))
+}
+
+fn optional_feedback_path(value: Option<&str>) -> Result<Option<String>, ApiError> {
+    let Some(value) = optional_feedback_text("path", value)? else {
+        return Ok(None);
+    };
+    if !safe_feedback_json_path(value) || contains_sensitive_marker(value) {
+        return Err(ApiError::Invalid(
+            "feedback path must be a bounded JSONPath such as $.actions or $.actions[0]"
+                .to_string(),
+        ));
+    }
+    Ok(Some(value.to_string()))
+}
+
+fn safe_feedback_json_path(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    if bytes.first() != Some(&b'$') {
+        return false;
+    }
+    let mut index = 1;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'.' => {
+                index += 1;
+                if index >= bytes.len()
+                    || !(bytes[index].is_ascii_alphabetic() || bytes[index] == b'_')
+                {
+                    return false;
+                }
+                index += 1;
+                while index < bytes.len()
+                    && (bytes[index].is_ascii_alphanumeric() || matches!(bytes[index], b'_' | b'-'))
+                {
+                    index += 1;
+                }
+            }
+            b'[' => {
+                index += 1;
+                let digits_start = index;
+                while index < bytes.len() && bytes[index].is_ascii_digit() {
+                    index += 1;
+                }
+                if index == digits_start || bytes.get(index) != Some(&b']') {
+                    return false;
+                }
+                index += 1;
+            }
+            _ => return false,
+        }
+    }
+    true
+}
+
+fn contains_sensitive_marker(value: &str) -> bool {
+    let lower = value.to_ascii_lowercase();
+    [
+        "authorization",
+        "bearer ",
+        "api key",
+        "api_key",
+        "apikey",
+        "access token",
+        "access_token",
+        "secret",
+        "token=",
+        "token:",
+        "password",
+        "credential",
+        "cookie",
+        "session=",
+        "session:",
+    ]
+    .iter()
+    .any(|marker| lower.contains(marker))
 }
 
 pub async fn list_openai_models(
@@ -3183,15 +3653,19 @@ pub async fn create_project_speech(
         },
     )
     .await?;
-    let span_id = db::create_trace_span(
+    let span_id = db::create_trace_span_with_id(
         &state.pool,
+        request_id,
         db::NewTraceSpan {
             trace_id,
             parent_span_id: None,
             name: "speech.synthesize",
             kind: "provider",
+            observation_type: "generation",
             provider_key: Some(&route.provider_key),
             capability_kind: Some("speech"),
+            model: route.resource_id.as_deref().or(Some(&route.profile_slug)),
+            model_parameters: Some(&trace_model_parameters(&route.capability_config)),
             input_summary: Some(&request_summary),
             attributes: &json!({ "voiceId": voice_id }),
         },
@@ -3265,6 +3739,11 @@ pub async fn create_project_speech(
                 HeaderValue::from_str(&content_type)
                     .unwrap_or_else(|_| HeaderValue::from_static("application/octet-stream")),
             );
+            response.headers_mut().insert(
+                VIFU_INVOCATION_ID_HEADER,
+                HeaderValue::from_str(&request_id.to_string())
+                    .map_err(|_error| ApiError::Internal)?,
+            );
             Ok(response)
         }
         Err(error) => {
@@ -3297,7 +3776,7 @@ pub async fn create_project_transcription(
     headers: HeaderMap,
     Path(project_slug): Path<String>,
     mut multipart: Multipart,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Response, ApiError> {
     let authority = api_request_authority(&state, &headers).await?;
     let project = db::get_project_by_slug(&state.pool, &project_slug).await?;
     assert_endpoint_permission(
@@ -3388,15 +3867,19 @@ pub async fn create_project_transcription(
         },
     )
     .await?;
-    let span_id = db::create_trace_span(
+    let span_id = db::create_trace_span_with_id(
         &state.pool,
+        request_id,
         db::NewTraceSpan {
             trace_id,
             parent_span_id: None,
             name: "audio.transcribe",
             kind: "provider",
+            observation_type: "generation",
             provider_key: Some(&route.provider_key),
             capability_kind: Some("transcription"),
+            model: route.resource_id.as_deref().or(Some(&route.profile_slug)),
+            model_parameters: Some(&trace_model_parameters(&route.capability_config)),
             input_summary: Some(&request_summary),
             attributes: &json!({}),
         },
@@ -3440,7 +3923,7 @@ pub async fn create_project_transcription(
                 None,
             )
             .await;
-            Ok(Json(response))
+            invocation_json_response(request_id, response)
         }
         Err(error) => {
             let message = error.to_string();
@@ -4136,15 +4619,19 @@ async fn invoke_realtime_response(
     )
     .await?;
     let summary = json!({ "messageCount": messages.len() });
-    let span_id = db::create_trace_span(
+    let span_id = db::create_trace_span_with_id(
         &state.pool,
+        request_id,
         db::NewTraceSpan {
             trace_id,
             parent_span_id: None,
             name: "realtime.response",
             kind: "provider",
+            observation_type: "generation",
             provider_key: Some(&route.provider_key),
             capability_kind: Some("realtime"),
+            model: route.resource_id.as_deref().or(Some(&route.profile_slug)),
+            model_parameters: Some(&trace_model_parameters(&route.capability_config)),
             input_summary: Some(&summary),
             attributes: &json!({}),
         },
@@ -4162,12 +4649,19 @@ async fn invoke_realtime_response(
     )
     .await;
     match result {
-        Ok(response) => {
+        Ok((response, provider_metadata)) => {
             let text = response
                 .pointer("/choices/0/message/content")
                 .and_then(Value::as_str)
                 .map(str::to_string)
                 .unwrap_or_else(|| response.to_string());
+            db::update_trace_generation(
+                &state.pool,
+                span_id,
+                completion_start_ms(&provider_metadata),
+                response.get("usage"),
+            )
+            .await?;
             db::complete_trace_span(
                 &state.pool,
                 span_id,
@@ -4274,7 +4768,7 @@ pub async fn create_chat_completion(
     State(state): State<AppState>,
     headers: HeaderMap,
     Json(request): Json<Value>,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Response, ApiError> {
     create_chat_completion_for_project(state, headers, None, request).await
 }
 
@@ -4283,7 +4777,7 @@ pub async fn create_project_chat_completion(
     headers: HeaderMap,
     Path(project_slug): Path<String>,
     Json(request): Json<Value>,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Response, ApiError> {
     create_chat_completion_for_project(state, headers, Some(project_slug), request).await
 }
 
@@ -4292,7 +4786,7 @@ pub async fn create_project_embeddings(
     headers: HeaderMap,
     Path(project_slug): Path<String>,
     Json(request): Json<Value>,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Response, ApiError> {
     validate_embedding_request(&request)?;
     let model = request
         .get("model")
@@ -4339,15 +4833,19 @@ pub async fn create_project_embeddings(
         },
     )
     .await?;
-    let span_id = db::create_trace_span(
+    let span_id = db::create_trace_span_with_id(
         &state.pool,
+        request_id,
         db::NewTraceSpan {
             trace_id,
             parent_span_id: None,
             name: "embedding.create",
             kind: "provider",
+            observation_type: "generation",
             provider_key: Some(&route.provider_key),
             capability_kind: Some("embedding"),
+            model: route.resource_id.as_deref().or(Some(&route.profile_slug)),
+            model_parameters: Some(&trace_model_parameters(&route.capability_config)),
             input_summary: Some(&request_summary),
             attributes: &json!({
                 "profileId": route.profile_id,
@@ -4377,6 +4875,7 @@ pub async fn create_project_embeddings(
         Ok((response, metadata)) => {
             let response_summary = embedding_response_summary(&response, &metadata);
             let duration = db::elapsed_millis(started_at);
+            db::update_trace_generation(&state.pool, span_id, None, response.get("usage")).await?;
             db::complete_trace_span(
                 &state.pool,
                 span_id,
@@ -4395,7 +4894,7 @@ pub async fn create_project_embeddings(
                 None,
             )
             .await;
-            Ok(Json(response))
+            invocation_json_response(request_id, response)
         }
         Err(error) => {
             let message = error.to_string();
@@ -4428,7 +4927,7 @@ async fn create_chat_completion_for_project(
     headers: HeaderMap,
     project_slug: Option<String>,
     mut request: Value,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Response, ApiError> {
     let authority = api_request_authority(&state, &headers).await?;
     validate_chat_completion_request(&request)?;
     let model = request
@@ -4464,7 +4963,8 @@ async fn create_chat_completion_for_project(
     let request_id = Uuid::new_v4();
     let gateway_session_id = state.relay.session_for(&route.gateway_id).await;
     let trace_request = chat_trace_request(&request);
-    db::create_trace(
+    let input_summary = chat_request_summary(&request);
+    let trace_id = db::create_trace(
         &state.pool,
         db::NewTrace {
             request_id,
@@ -4481,6 +4981,37 @@ async fn create_chat_completion_for_project(
         },
     )
     .await?;
+    let configured_model = route
+        .binding_config
+        .get("model")
+        .or_else(|| route.binding_config.get("resourceId"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let span_id = db::create_trace_span_with_id(
+        &state.pool,
+        request_id,
+        db::NewTraceSpan {
+            trace_id,
+            parent_span_id: None,
+            name: "agent.invoke",
+            kind: "provider",
+            observation_type: "generation",
+            provider_key: Some("agent-gateway"),
+            capability_kind: Some("chat"),
+            model: configured_model,
+            model_parameters: Some(&trace_model_parameters(&route.binding_config)),
+            input_summary: Some(&input_summary),
+            attributes: &json!({
+                "endpointId": route.endpoint_id,
+                "profileId": route.profile_id,
+                "bindingId": route.binding_id,
+                "gatewayId": route.gateway_id,
+                "agentId": route.agent_id,
+            }),
+        },
+    )
+    .await?;
 
     let timeout = Duration::from_millis(
         u64::try_from(route.request_timeout_ms)
@@ -4491,6 +5022,19 @@ async fn create_chat_completion_for_project(
     match invoke_endpoint_chat(&state, &route, request_id, request, timeout).await {
         Ok(output) => {
             let response = chat_completion_response(request_id, &route.endpoint_slug, output);
+            let duration = db::elapsed_millis(started_at);
+            db::update_trace_generation(&state.pool, span_id, None, response.get("usage")).await?;
+            db::complete_trace_span(
+                &state.pool,
+                span_id,
+                "completed",
+                duration,
+                Some(&json!({
+                    "choiceCount": response.get("choices").and_then(Value::as_array).map_or(0, Vec::len)
+                })),
+                None,
+            )
+            .await?;
             persist_trace(
                 &state,
                 request_id,
@@ -4500,10 +5044,19 @@ async fn create_chat_completion_for_project(
                 None,
             )
             .await;
-            Ok(Json(response))
+            invocation_json_response(request_id, response)
         }
         Err(error) => {
             let message = error.to_string();
+            db::complete_trace_span(
+                &state.pool,
+                span_id,
+                "failed",
+                db::elapsed_millis(started_at),
+                None,
+                Some(&message),
+            )
+            .await?;
             persist_trace(
                 &state,
                 request_id,
@@ -4524,7 +5077,7 @@ async fn create_profile_chat_completion(
     project: &crate::models::ProjectWithBindings,
     request: Value,
     model: Option<&str>,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Response, ApiError> {
     let model = model.ok_or(ApiError::ModelRequired)?;
     if let ApiRequestAuthority::Key(key) = authority {
         if key.project_id != project.project.id {
@@ -4586,15 +5139,19 @@ async fn create_profile_chat_completion(
         },
     )
     .await?;
-    let span_id = db::create_trace_span(
+    let span_id = db::create_trace_span_with_id(
         &state.pool,
+        request_id,
         db::NewTraceSpan {
             trace_id,
             parent_span_id: None,
             name: "agent.invoke",
             kind: "provider",
+            observation_type: "generation",
             provider_key: Some(&route.provider_key),
             capability_kind: Some("chat"),
+            model: route.resource_id.as_deref().or(Some(&route.profile_slug)),
+            model_parameters: Some(&trace_model_parameters(&route.capability_config)),
             input_summary: Some(&input_summary),
             attributes: &json!({
                 "profileId": route.profile_id,
@@ -4618,9 +5175,16 @@ async fn create_profile_chat_completion(
     )
     .await
     {
-        Ok(output) => {
+        Ok((output, provider_metadata)) => {
             let response = chat_completion_response(request_id, &route.profile_slug, output);
             let duration = db::elapsed_millis(started_at);
+            db::update_trace_generation(
+                &state.pool,
+                span_id,
+                completion_start_ms(&provider_metadata),
+                response.get("usage"),
+            )
+            .await?;
             db::complete_trace_span(
                 &state.pool,
                 span_id,
@@ -4641,7 +5205,7 @@ async fn create_profile_chat_completion(
                 None,
             )
             .await;
-            Ok(Json(response))
+            invocation_json_response(request_id, response)
         }
         Err(error) => {
             let message = error.to_string();
@@ -4705,7 +5269,7 @@ pub(crate) async fn invoke_runtime_extension_profile(
                 timeout,
             )
             .await
-            .map(normalize_runtime_agent_output)
+            .map(|(output, _metadata)| normalize_runtime_agent_output(output))
         }
         "tool" => {
             let tool = input
@@ -4828,7 +5392,7 @@ async fn invoke_profile_chat(
     request_id: Uuid,
     mut request: Value,
     timeout: Duration,
-) -> Result<Value, ApiError> {
+) -> Result<(Value, Value), ApiError> {
     let provider: Arc<dyn AgentProvider> = match route.provider_type.as_str() {
         "openclaw" | "vifu-runtime" => {
             if route.provider_type == "openclaw"
@@ -4912,7 +5476,7 @@ async fn invoke_profile_chat(
             )))
         }
     };
-    let (output, _) = invoke_registered_provider(
+    let (output, metadata) = invoke_registered_provider(
         RegisteredInvocation {
             project_id: project_slug,
             agent_id: route.profile_id,
@@ -4927,7 +5491,7 @@ async fn invoke_profile_chat(
     )
     .await?;
     match output {
-        InvocationData::Json(output) => Ok(output),
+        InvocationData::Json(output) => Ok((output, metadata)),
         InvocationData::Binary(_) => Err(ApiError::Internal),
     }
 }
@@ -5172,6 +5736,46 @@ fn profile_timeout(runtime: &Value, server_timeout: Duration) -> Duration {
         .unwrap_or(30_000)
         .clamp(500, 120_000);
     Duration::from_millis(configured.min(server_timeout.as_millis() as u64))
+}
+
+fn completion_start_ms(metadata: &Value) -> Option<i64> {
+    metadata
+        .get("completionStartMs")
+        .and_then(Value::as_u64)
+        .and_then(|value| i64::try_from(value).ok())
+}
+
+fn trace_model_parameters(config: &Value) -> Value {
+    const SAFE_KEYS: [&str; 14] = [
+        "backend",
+        "contextSize",
+        "dimensions",
+        "gpuLayers",
+        "maxTokens",
+        "max_tokens",
+        "model",
+        "quantization",
+        "responseFormat",
+        "response_format",
+        "temperature",
+        "topP",
+        "top_p",
+        "voice",
+    ];
+    let Some(config) = config.as_object() else {
+        return json!({});
+    };
+    Value::Object(
+        SAFE_KEYS
+            .into_iter()
+            .filter_map(|key| {
+                config
+                    .get(key)
+                    .filter(|value| value.is_boolean() || value.is_number() || value.is_string())
+                    .map(|value| (key.to_string(), value.clone()))
+            })
+            .collect(),
+    )
 }
 
 #[derive(Debug)]
@@ -5587,6 +6191,16 @@ fn chat_completion_text_response(request_id: Uuid, endpoint_slug: &str, content:
 
 fn chat_completion_id(request_id: Uuid) -> String {
     format!("chatcmpl-{request_id}")
+}
+
+fn invocation_json_response(request_id: Uuid, value: Value) -> Result<Response, ApiError> {
+    let mut response = Json(value).into_response();
+    let invocation_id =
+        HeaderValue::from_str(&request_id.to_string()).map_err(|_error| ApiError::Internal)?;
+    response
+        .headers_mut()
+        .insert(VIFU_INVOCATION_ID_HEADER, invocation_id);
+    Ok(response)
 }
 
 async fn persist_trace(
@@ -6761,6 +7375,51 @@ async fn authorized_project_by_slug(
     Ok(project)
 }
 
+async fn authorized_project_trace_read(
+    state: &AppState,
+    headers: &HeaderMap,
+    slug: &str,
+) -> Result<AuthorizedProjectTraceRead, ApiError> {
+    deployment_credential(headers).ok_or(ApiError::Unauthorized)?;
+    let project = db::get_project_by_slug(&state.pool, slug).await?;
+    let deployment_error = match state
+        .auth
+        .authorize_project(
+            headers,
+            Operation::ProjectRead,
+            project.project.owner_user_id.as_deref(),
+        )
+        .await
+    {
+        Ok(_) => {
+            return Ok(AuthorizedProjectTraceRead {
+                project,
+                profile_scope: TraceProfileScope::All,
+            });
+        }
+        Err(error) => error,
+    };
+
+    let Some(token) = bearer_token(headers).filter(|token| token.starts_with("vifu_pk_")) else {
+        return Err(deployment_error);
+    };
+    let key_hash = hash_api_key(token, &state.config.api_key_pepper);
+    let key = db::active_api_key_by_hash(&state.pool, &key_hash).await?;
+    if key.project_id != project.project.id {
+        return Err(ApiError::AgentAccessDenied);
+    }
+    if !matches!(
+        key.permissions.project,
+        crate::models::ResourcePermission::Read | crate::models::ResourcePermission::Write
+    ) {
+        return Err(ApiError::EndpointAccessDenied);
+    }
+    Ok(AuthorizedProjectTraceRead {
+        project,
+        profile_scope: TraceProfileScope::from_agent_scope(&key.agent_scope),
+    })
+}
+
 async fn project_binding(
     state: &AppState,
     project_id: Uuid,
@@ -7154,17 +7813,125 @@ mod tests {
 
     use super::{
         api_error_trace_status, chat_request_summary, chat_trace_request,
-        embedding_request_summary, embedding_response, gateway_binding_config, merge_json_objects,
-        patch_text, prepare_project_provider_assignment_with_secret_key, profile_slug,
-        project_slug, validate_chat_completion_request, validate_embedding_request,
+        embedding_request_summary, embedding_response, feedback_endpoint_permission_allowed,
+        gateway_binding_config, invocation_json_response, merge_json_objects,
+        optional_feedback_message, optional_feedback_path, optional_feedback_text, patch_text,
+        prepare_project_provider_assignment_with_secret_key, profile_slug, project_slug,
+        trace_model_parameters, validate_chat_completion_request, validate_embedding_request,
         validate_profile_version_input, validate_timeout, validated_provider_base_url,
+        AppFeedbackInput,
     };
     use crate::error::ApiError;
-    use crate::models::ProfileCapabilityDraft;
+    use crate::models::{ApiKeyPermissions, EndpointPermission, ProfileCapabilityDraft};
 
     #[test]
     fn derives_profile_slugs() {
         assert_eq!(profile_slug(None, "Town Guide").unwrap(), "town-guide");
+    }
+
+    #[test]
+    fn invocation_response_exposes_the_canonical_uuid() {
+        let request_id = uuid::Uuid::new_v4();
+        let response = invocation_json_response(request_id, json!({ "id": request_id }))
+            .expect("invocation response should be valid");
+        let expected = request_id.to_string();
+
+        assert_eq!(
+            response
+                .headers()
+                .get("x-vifu-invocation-id")
+                .and_then(|value| value.to_str().ok()),
+            Some(expected.as_str())
+        );
+    }
+
+    #[test]
+    fn feedback_text_rejects_control_characters() {
+        assert!(optional_feedback_text("path", Some("/action\nsecret")).is_err());
+    }
+
+    #[test]
+    fn feedback_redacts_credentials_and_rejects_unsafe_paths() {
+        let message = optional_feedback_message(Some(
+            "Authorization: Bearer vifu_pk_this_must_never_be_persisted",
+        ))
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            message,
+            "Application feedback contained sensitive details; message was redacted"
+        );
+        assert!(!message.contains("vifu_pk_"));
+        assert_eq!(
+            optional_feedback_path(Some("$.actions[0].type")).unwrap(),
+            Some("$.actions[0].type".to_string())
+        );
+        assert!(optional_feedback_path(Some("$.actions?token=secret")).is_err());
+        assert!(optional_feedback_path(Some("https://example.com/action")).is_err());
+        assert!(optional_feedback_path(Some("$..credential")).is_err());
+    }
+
+    #[test]
+    fn feedback_contract_accepts_the_documented_event_and_outcome_names() {
+        let input = serde_json::from_value::<AppFeedbackInput>(json!({
+            "event": "OUTPUT_ACCEPTED",
+            "outcome": "notApplicable",
+            "message": "No action was requested",
+            "path": "$.action"
+        }));
+
+        assert!(input.is_ok());
+    }
+
+    #[test]
+    fn feedback_requires_the_permission_for_the_trace_capability() {
+        let permissions = ApiKeyPermissions {
+            chat_completions: EndpointPermission::Access,
+            embeddings: EndpointPermission::None,
+            speech: EndpointPermission::None,
+            transcriptions: EndpointPermission::None,
+            realtime: EndpointPermission::None,
+            runtime: EndpointPermission::None,
+            agents: crate::models::ResourcePermission::None,
+            project: crate::models::ResourcePermission::None,
+        };
+
+        assert!(feedback_endpoint_permission_allowed(
+            &permissions,
+            Some("chat")
+        ));
+        assert!(feedback_endpoint_permission_allowed(
+            &permissions,
+            Some("tool")
+        ));
+        for capability in [
+            Some("embedding"),
+            Some("speech"),
+            Some("transcription"),
+            Some("realtime"),
+            Some("unknown"),
+            None,
+        ] {
+            assert!(!feedback_endpoint_permission_allowed(
+                &permissions,
+                capability
+            ));
+        }
+    }
+
+    #[test]
+    fn trace_model_parameters_never_copy_credentials() {
+        let parameters = trace_model_parameters(&json!({
+            "temperature": 0.2,
+            "contextSize": 4096,
+            "token": "secret",
+            "apiKey": "secret"
+        }));
+
+        assert_eq!(
+            parameters,
+            json!({ "temperature": 0.2, "contextSize": 4096 })
+        );
     }
 
     #[test]

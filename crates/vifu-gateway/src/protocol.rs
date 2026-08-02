@@ -2,6 +2,7 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use uuid::Uuid;
+use vifu_runtime::ProviderStage;
 
 use crate::gateway_frame::{
     self, ErrorShape, EventFrame, EventFrameType, GatewayFrame, RequestFrame, RequestFrameType,
@@ -14,6 +15,15 @@ pub const MAX_BODY_BYTES: usize = 512 * 1024;
 pub const MAX_INVOCATION_BODY_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_PATH_BYTES: usize = 2 * 1024;
 pub const MAX_AGENTS: usize = 256;
+pub const MAX_TRACE_DURATION_MS: u64 = 24 * 60 * 60 * 1_000;
+pub const MAX_TRACE_TOKEN_COUNT: u64 = 1_000_000_000;
+pub const MAX_TRACE_TELEMETRY_EVENTS: usize = 32;
+pub const MAX_TRACE_DROPPED_EVENTS: u32 = 10_000;
+pub const MAX_TRACE_IO_SUMMARY_BYTES: usize = 8 * 1024;
+
+const MAX_TRACE_IO_DEPTH: usize = 5;
+const MAX_TRACE_IO_ITEMS: usize = 16;
+const MAX_TRACE_IO_STRING_CHARS: usize = 512;
 
 pub const AGENT_GATEWAY_HELLO_METHOD: &str = "gateway.hello";
 pub const AGENT_GATEWAY_HELLO_REQUEST_ID: &str = "gateway.hello";
@@ -25,6 +35,8 @@ pub const AGENT_GATEWAY_HEARTBEAT_EVENT: &str = "gateway.heartbeat";
 pub const AGENT_GATEWAY_HEARTBEAT_ACK_EVENT: &str = "gateway.heartbeatAck";
 pub const AGENT_GATEWAY_ERROR_EVENT: &str = "gateway.error";
 pub const RUNTIME_CONFIG_CHANGED_EVENT: &str = "runtime.config.changed";
+pub const APPLICATION_FEEDBACK_EVENT: &str = "trace.applicationFeedback";
+pub const APPLICATION_FEEDBACK_FEATURE: &str = "trace.application-feedback.v1";
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -57,6 +69,136 @@ pub struct GatewayWelcomeAuth {
     pub device_token: String,
     pub generation: u64,
     pub expires_at: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum TraceStageStatus {
+    Started,
+    Completed,
+    Failed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum TraceDeliveryStatus {
+    Delivered,
+    Failed,
+}
+
+/// Payload-safe telemetry emitted by an Agent Gateway. It intentionally carries
+/// only resolved identity, timings, counters, and a bounded public error.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "camelCase", deny_unknown_fields)]
+pub enum TraceTelemetry {
+    InvocationStarted {
+        provider_key: String,
+        capability: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model: Option<String>,
+    },
+    ProviderStage {
+        observation_id: Uuid,
+        stage: ProviderStage,
+        status: TraceStageStatus,
+        start_offset_ms: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        end_offset_ms: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        elapsed_ms: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_elapsed_ms: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        input_tokens: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        output_tokens: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        resident: Option<bool>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+    },
+    Delivery {
+        observation_id: Uuid,
+        status: TraceDeliveryStatus,
+        start_offset_ms: u64,
+        end_offset_ms: u64,
+        elapsed_ms: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum ApplicationFeedbackEvent {
+    OutputAccepted,
+    ActionApplied,
+    FramePresented,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ApplicationFeedbackOutcome {
+    Pass,
+    Fail,
+    Unknown,
+    NotApplicable,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ApplicationFeedback {
+    pub event: ApplicationFeedbackEvent,
+    pub outcome: ApplicationFeedbackOutcome,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TraceIoSummary {
+    pub value: Value,
+    pub truncated: bool,
+}
+
+impl TraceIoSummary {
+    pub fn effective_truncated(&self) -> bool {
+        self.truncated || trace_io_summary_requires_truncation(&self.value)
+    }
+}
+
+/// Produces the single bounded, redacted I/O representation used by both the
+/// live runtime monitor and persisted root Generation observations.
+pub fn canonical_trace_io_summary(value: &Value) -> TraceIoSummary {
+    let mut truncated = false;
+    let mut summary = redact_trace_io_value(value, 0, None, &mut truncated);
+    if serde_json::to_vec(&summary)
+        .map_or(true, |encoded| encoded.len() > MAX_TRACE_IO_SUMMARY_BYTES)
+    {
+        truncated = true;
+        summary = json!({
+            "summary": trace_value_shape(value),
+            "truncated": true,
+        });
+    }
+    TraceIoSummary {
+        value: summary,
+        truncated,
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TraceTelemetryBatch {
+    pub events: Vec<TraceTelemetry>,
+    #[serde(default)]
+    pub dropped_events: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub root_input_summary: Option<TraceIoSummary>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub root_output_summary: Option<TraceIoSummary>,
 }
 
 /// Internal semantic command for relay state machines.
@@ -127,6 +269,13 @@ pub enum AgentGatewayCommand {
     },
     RuntimeConfigChanged {
         deployment_ids: Vec<Uuid>,
+    },
+    ApplicationFeedback {
+        request_id: Uuid,
+        observation_id: Uuid,
+        start_offset_ms: u64,
+        end_offset_ms: u64,
+        feedback: ApplicationFeedback,
     },
 }
 
@@ -226,6 +375,16 @@ struct ErrorEventPayload {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct RuntimeConfigChangedPayload {
     deployment_ids: Vec<Uuid>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ApplicationFeedbackPayload {
+    request_id: Uuid,
+    observation_id: Uuid,
+    start_offset_ms: u64,
+    end_offset_ms: u64,
+    feedback: ApplicationFeedback,
 }
 
 pub fn to_gateway_frame(command: &AgentGatewayCommand) -> Result<GatewayFrame, String> {
@@ -394,6 +553,22 @@ pub fn to_gateway_frame(command: &AgentGatewayCommand) -> Result<GatewayFrame, S
                 deployment_ids: deployment_ids.clone(),
             },
         ),
+        AgentGatewayCommand::ApplicationFeedback {
+            request_id,
+            observation_id,
+            start_offset_ms,
+            end_offset_ms,
+            feedback,
+        } => event_frame(
+            APPLICATION_FEEDBACK_EVENT,
+            &ApplicationFeedbackPayload {
+                request_id: *request_id,
+                observation_id: *observation_id,
+                start_offset_ms: *start_offset_ms,
+                end_offset_ms: *end_offset_ms,
+                feedback: feedback.clone(),
+            },
+        ),
     }
 }
 
@@ -553,6 +728,19 @@ fn from_event_frame(event: EventFrame) -> Result<AgentGatewayCommand, String> {
             )?;
             Ok(AgentGatewayCommand::RuntimeConfigChanged {
                 deployment_ids: payload.deployment_ids,
+            })
+        }
+        APPLICATION_FEEDBACK_EVENT => {
+            let payload = decode_required::<ApplicationFeedbackPayload>(
+                event.payload,
+                "trace.applicationFeedback payload",
+            )?;
+            Ok(AgentGatewayCommand::ApplicationFeedback {
+                request_id: payload.request_id,
+                observation_id: payload.observation_id,
+                start_offset_ms: payload.start_offset_ms,
+                end_offset_ms: payload.end_offset_ms,
+                feedback: payload.feedback,
             })
         }
         _ => Err(format!("unsupported agent gateway event: {}", event.event)),
@@ -741,7 +929,340 @@ pub fn validate_command(command: &AgentGatewayCommand) -> Result<(), String> {
                 Err("runtime configuration notification contains duplicates".to_string())
             }
         }
+        AgentGatewayCommand::ApplicationFeedback {
+            start_offset_ms,
+            end_offset_ms,
+            feedback,
+            ..
+        } => {
+            if start_offset_ms > end_offset_ms || *end_offset_ms > MAX_TRACE_DURATION_MS {
+                return Err("application feedback offsets are out of range".to_string());
+            }
+            if let Some(message) = feedback.message.as_deref() {
+                validate_text("application feedback message", message, 1, 512)?;
+            }
+            if let Some(path) = feedback.path.as_deref() {
+                validate_text("application feedback path", path, 1, 512)?;
+            }
+            Ok(())
+        }
     }
+}
+
+pub fn validate_trace_telemetry_batch(batch: &TraceTelemetryBatch) -> Result<(), String> {
+    if batch.events.is_empty() || batch.events.len() > MAX_TRACE_TELEMETRY_EVENTS {
+        return Err("trace telemetry batch size is out of range".to_string());
+    }
+    if batch.dropped_events > MAX_TRACE_DROPPED_EVENTS {
+        return Err("trace telemetry dropped event count is out of range".to_string());
+    }
+    for telemetry in &batch.events {
+        validate_trace_telemetry(telemetry)?;
+    }
+    for (name, summary) in [
+        ("root input summary", batch.root_input_summary.as_ref()),
+        ("root output summary", batch.root_output_summary.as_ref()),
+    ] {
+        let Some(summary) = summary else {
+            continue;
+        };
+        validate_json(name, &summary.value, MAX_TRACE_IO_SUMMARY_BYTES)?;
+        if canonical_trace_io_summary(&summary.value).value != summary.value {
+            return Err(format!("trace {name} is not canonical"));
+        }
+        if summary.effective_truncated() != summary.truncated {
+            return Err(format!("trace {name} under-reports truncation"));
+        }
+    }
+    Ok(())
+}
+
+fn redact_trace_io_value(
+    value: &Value,
+    depth: usize,
+    key_hint: Option<&str>,
+    truncated: &mut bool,
+) -> Value {
+    if depth >= MAX_TRACE_IO_DEPTH {
+        *truncated = true;
+        return Value::String(format!("<{} omitted>", trace_value_shape(value)));
+    }
+    match value {
+        Value::Object(object) => {
+            if object
+                .get("_vifuBinary")
+                .is_some_and(|marker| marker.as_bool() == Some(true) || !marker.is_null())
+            {
+                *truncated = true;
+                return Value::String("<_vifuBinary object omitted>".to_string());
+            }
+            if object.len() >= MAX_TRACE_IO_ITEMS {
+                *truncated = true;
+            }
+            let mut output = serde_json::Map::new();
+            for (index, (key, value)) in object.iter().enumerate() {
+                if index >= MAX_TRACE_IO_ITEMS {
+                    *truncated = true;
+                    output.insert("…".to_string(), Value::String("<more fields>".to_string()));
+                    break;
+                }
+                output.insert(
+                    key.clone(),
+                    if trace_sensitive_key(key) {
+                        *truncated = true;
+                        Value::String("[REDACTED]".to_string())
+                    } else {
+                        redact_trace_io_value(value, depth + 1, Some(key), truncated)
+                    },
+                );
+            }
+            Value::Object(output)
+        }
+        Value::Array(values) => {
+            if values.len() >= MAX_TRACE_IO_ITEMS {
+                *truncated = true;
+            }
+            Value::Array(
+                values
+                    .iter()
+                    .take(MAX_TRACE_IO_ITEMS)
+                    .map(|value| redact_trace_io_value(value, depth + 1, key_hint, truncated))
+                    .collect(),
+            )
+        }
+        Value::String(text) => {
+            let character_count = text.chars().count();
+            if canonical_trace_placeholder(text) {
+                *truncated = true;
+                value.clone()
+            } else if trace_sensitive_value_string(text) {
+                *truncated = true;
+                Value::String("[REDACTED sensitive value]".to_string())
+            } else if key_hint.is_some_and(trace_media_or_binary_key)
+                || text.trim_start().to_ascii_lowercase().starts_with("data:")
+                || trace_looks_like_base64(text)
+            {
+                *truncated = true;
+                Value::String(format!("<media/binary omitted: {character_count} chars>"))
+            } else if character_count >= MAX_TRACE_IO_STRING_CHARS {
+                *truncated = true;
+                if character_count == MAX_TRACE_IO_STRING_CHARS {
+                    return value.clone();
+                }
+                let suffix = format!("… <{character_count} chars total>");
+                let prefix_chars = MAX_TRACE_IO_STRING_CHARS.saturating_sub(suffix.chars().count());
+                Value::String(format!(
+                    "{}{}",
+                    text.chars().take(prefix_chars).collect::<String>(),
+                    suffix
+                ))
+            } else {
+                value.clone()
+            }
+        }
+        _ => value.clone(),
+    }
+}
+
+fn canonical_trace_placeholder(value: &str) -> bool {
+    value == "[REDACTED]"
+        || value == "[REDACTED sensitive value]"
+        || value == "<_vifuBinary object omitted>"
+        || value == "<more fields>"
+        || (value.starts_with('<') && value.ends_with(" omitted>"))
+        || (value.starts_with("<media/binary omitted: ") && value.ends_with(" chars>"))
+}
+
+fn trace_io_summary_requires_truncation(value: &Value) -> bool {
+    match value {
+        Value::Object(object) => {
+            object.len() >= MAX_TRACE_IO_ITEMS
+                || object.get("truncated").and_then(Value::as_bool) == Some(true)
+                || object.values().any(trace_io_summary_requires_truncation)
+        }
+        Value::Array(values) => {
+            values.len() >= MAX_TRACE_IO_ITEMS
+                || values.iter().any(trace_io_summary_requires_truncation)
+        }
+        Value::String(text) => {
+            text.chars().count() >= MAX_TRACE_IO_STRING_CHARS
+                || canonical_trace_placeholder(text)
+                || text.contains(" chars total>")
+        }
+        Value::Null | Value::Bool(_) | Value::Number(_) => false,
+    }
+}
+
+fn trace_sensitive_value_string(value: &str) -> bool {
+    let normalized = value.trim().to_ascii_lowercase();
+    [
+        "authorization:",
+        "authorization=",
+        "bearer ",
+        "basic ",
+        "api_key=",
+        "api-key=",
+        "apikey=",
+        "access_token=",
+        "refresh_token=",
+        "token=",
+        "password=",
+        "password:",
+        "secret=",
+        "secret:",
+        "credential=",
+        "cookie:",
+        "session=",
+    ]
+    .iter()
+    .any(|marker| normalized.contains(marker))
+}
+
+fn trace_sensitive_key(key: &str) -> bool {
+    let normalized = key
+        .chars()
+        .filter(|character| character.is_ascii_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect::<String>();
+    [
+        "authorization",
+        "apikey",
+        "accesstoken",
+        "refreshtoken",
+        "token",
+        "secret",
+        "password",
+        "credential",
+        "cookie",
+        "session",
+        "sessionid",
+    ]
+    .iter()
+    .any(|candidate| normalized == *candidate || normalized.ends_with(candidate))
+}
+
+fn trace_media_or_binary_key(key: &str) -> bool {
+    let normalized = key
+        .chars()
+        .filter(|character| character.is_ascii_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect::<String>();
+    normalized == "data"
+        || ["image", "audio", "media", "binary", "base64"]
+            .iter()
+            .any(|marker| normalized.contains(marker))
+}
+
+fn trace_looks_like_base64(value: &str) -> bool {
+    let compact = value.trim();
+    compact.len() >= 128
+        && compact.len().is_multiple_of(4)
+        && compact
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'/' | b'='))
+}
+
+fn trace_value_shape(value: &Value) -> &'static str {
+    match value {
+        Value::Null => "null",
+        Value::Bool(_) => "boolean",
+        Value::Number(_) => "number",
+        Value::String(_) => "string",
+        Value::Array(_) => "array",
+        Value::Object(_) => "object",
+    }
+}
+
+fn validate_trace_telemetry(telemetry: &TraceTelemetry) -> Result<(), String> {
+    match telemetry {
+        TraceTelemetry::InvocationStarted {
+            provider_key,
+            capability,
+            model,
+        } => {
+            validate_identifier("trace provider key", provider_key)?;
+            validate_identifier("trace capability", capability)?;
+            if let Some(model) = model {
+                validate_text("trace model", model, 1, 512)?;
+            }
+        }
+        TraceTelemetry::ProviderStage {
+            status,
+            start_offset_ms,
+            end_offset_ms,
+            elapsed_ms,
+            request_elapsed_ms,
+            input_tokens,
+            output_tokens,
+            error,
+            ..
+        } => {
+            if *status == TraceStageStatus::Started && elapsed_ms.is_some() {
+                return Err("started trace stage cannot have elapsed time".to_string());
+            }
+            if *status != TraceStageStatus::Started && elapsed_ms.is_none() {
+                return Err("completed trace stage requires elapsed time".to_string());
+            }
+            if *status == TraceStageStatus::Failed && error.is_none() {
+                return Err("failed trace stage requires an error".to_string());
+            }
+            if let Some(error) = error {
+                validate_text("trace stage error", error, 1, 512)?;
+            }
+            if *start_offset_ms > MAX_TRACE_DURATION_MS {
+                return Err("trace stage startOffsetMs is out of range".to_string());
+            }
+            match (status, end_offset_ms) {
+                (TraceStageStatus::Started, None) => {}
+                (TraceStageStatus::Started, Some(_)) => {
+                    return Err("started trace stage cannot have an end offset".to_string())
+                }
+                (_, Some(end_offset_ms))
+                    if *end_offset_ms >= *start_offset_ms
+                        && *end_offset_ms <= MAX_TRACE_DURATION_MS => {}
+                (_, Some(_)) => return Err("trace stage endOffsetMs is out of range".to_string()),
+                (_, None) => return Err("completed trace stage requires an end offset".to_string()),
+            }
+            for (name, value) in [
+                ("trace stage elapsedMs", *elapsed_ms),
+                ("trace stage requestElapsedMs", *request_elapsed_ms),
+            ] {
+                if value.is_some_and(|value| value > MAX_TRACE_DURATION_MS) {
+                    return Err(format!("{name} is out of range"));
+                }
+            }
+            for (name, value) in [
+                ("trace stage inputTokens", *input_tokens),
+                ("trace stage outputTokens", *output_tokens),
+            ] {
+                if value.is_some_and(|value| value > MAX_TRACE_TOKEN_COUNT) {
+                    return Err(format!("{name} is out of range"));
+                }
+            }
+        }
+        TraceTelemetry::Delivery {
+            status,
+            start_offset_ms,
+            end_offset_ms,
+            elapsed_ms,
+            error,
+            ..
+        } => {
+            if *start_offset_ms > *end_offset_ms || *end_offset_ms > MAX_TRACE_DURATION_MS {
+                return Err("trace delivery offsets are out of range".to_string());
+            }
+            if *elapsed_ms > MAX_TRACE_DURATION_MS {
+                return Err("trace delivery elapsedMs is out of range".to_string());
+            }
+            if *status == TraceDeliveryStatus::Failed && error.is_none() {
+                return Err("failed trace delivery requires an error".to_string());
+            }
+            if let Some(error) = error {
+                validate_text("trace delivery error", error, 1, 512)?;
+            }
+        }
+    }
+    Ok(())
 }
 
 pub fn gateway_signature_payload(
@@ -872,10 +1393,14 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        from_gateway_frame, to_gateway_frame, AgentDescriptor, AgentGatewayCommand,
-        GatewayHelloAuth, GatewayMachineProof, VERSION,
+        canonical_trace_io_summary, from_gateway_frame, to_gateway_frame,
+        validate_trace_telemetry_batch, AgentDescriptor, AgentGatewayCommand, ApplicationFeedback,
+        ApplicationFeedbackEvent, ApplicationFeedbackOutcome, GatewayHelloAuth,
+        GatewayMachineProof, TraceIoSummary, TraceStageStatus, TraceTelemetry, TraceTelemetryBatch,
+        MAX_TRACE_IO_SUMMARY_BYTES, VERSION,
     };
     use crate::gateway_frame;
+    use vifu_runtime::ProviderStage;
 
     #[test]
     fn round_trips_multiplexed_invoke_command_over_gateway_frame() {
@@ -1010,6 +1535,22 @@ mod tests {
             value["payload"]["deploymentIds"][0],
             deployment_id.to_string()
         );
+
+        let feedback = AgentGatewayCommand::ApplicationFeedback {
+            request_id,
+            observation_id: Uuid::new_v4(),
+            start_offset_ms: 23,
+            end_offset_ms: 23,
+            feedback: ApplicationFeedback {
+                event: ApplicationFeedbackEvent::OutputAccepted,
+                outcome: ApplicationFeedbackOutcome::Pass,
+                message: None,
+                path: Some("$.action".to_string()),
+            },
+        };
+        let value = round_trip_command_over_gateway_frame(&feedback);
+        assert_eq!(value["payload"]["startOffsetMs"], 23);
+        assert_eq!(value["payload"]["endOffsetMs"], 23);
     }
 
     #[test]
@@ -1037,6 +1578,94 @@ mod tests {
         assert!(to_gateway_frame(&command)
             .unwrap_err()
             .contains("unsupported"));
+    }
+
+    #[test]
+    fn rejects_hostile_trace_telemetry_before_it_reaches_runtime_or_storage() {
+        let batch = TraceTelemetryBatch {
+            events: vec![TraceTelemetry::ProviderStage {
+                observation_id: Uuid::new_v4(),
+                stage: ProviderStage::Decode,
+                status: TraceStageStatus::Completed,
+                start_offset_ms: 0,
+                end_offset_ms: Some(u64::MAX),
+                elapsed_ms: Some(u64::MAX),
+                request_elapsed_ms: Some(u64::MAX),
+                input_tokens: Some(u64::MAX),
+                output_tokens: Some(u64::MAX),
+                resident: Some(true),
+                error: Some("x".repeat(513)),
+            }],
+            dropped_events: 0,
+            root_input_summary: None,
+            root_output_summary: None,
+        };
+
+        let error = validate_trace_telemetry_batch(&batch).unwrap_err();
+        assert!(error.contains("trace stage"));
+    }
+
+    #[test]
+    fn canonical_trace_io_is_bounded_redacted_and_idempotent() {
+        let summary = canonical_trace_io_summary(&json!({
+            "authorization": "Bearer private-token",
+            "providerError": "Basic cHJpdmF0ZS11c2VyOnByaXZhdGUtcGFzcw==",
+            "image": format!("data:image/png;base64,{}", "A".repeat(12_000)),
+            "nested": {"message": "password=hunter2"},
+        }));
+
+        assert!(summary.truncated);
+        assert!(serde_json::to_vec(&summary.value).unwrap().len() <= MAX_TRACE_IO_SUMMARY_BYTES);
+        let serialized = summary.value.to_string();
+        assert!(!serialized.contains("private-token"));
+        assert!(!serialized.contains("cHJpdmF0ZS11c2Vy"));
+        assert!(!serialized.contains("hunter2"));
+        assert!(!serialized.contains(&"A".repeat(128)));
+        assert_eq!(
+            canonical_trace_io_summary(&summary.value).value,
+            summary.value
+        );
+    }
+
+    #[test]
+    fn trace_telemetry_rejects_noncanonical_root_io() {
+        let batch = TraceTelemetryBatch {
+            events: vec![TraceTelemetry::InvocationStarted {
+                provider_key: "local-llama".to_string(),
+                capability: "chat".to_string(),
+                model: None,
+            }],
+            dropped_events: 0,
+            root_input_summary: Some(TraceIoSummary {
+                value: json!({"apiKey": "private"}),
+                truncated: false,
+            }),
+            root_output_summary: None,
+        };
+
+        assert!(validate_trace_telemetry_batch(&batch)
+            .unwrap_err()
+            .contains("not canonical"));
+    }
+
+    #[test]
+    fn trace_telemetry_rejects_underreported_root_io_truncation() {
+        let mut summary = canonical_trace_io_summary(&json!({"token": "private"}));
+        summary.truncated = false;
+        let batch = TraceTelemetryBatch {
+            events: vec![TraceTelemetry::InvocationStarted {
+                provider_key: "local-llama".to_string(),
+                capability: "chat".to_string(),
+                model: None,
+            }],
+            dropped_events: 0,
+            root_input_summary: Some(summary),
+            root_output_summary: None,
+        };
+
+        assert!(validate_trace_telemetry_batch(&batch)
+            .unwrap_err()
+            .contains("under-reports truncation"));
     }
 
     fn round_trip_command_over_gateway_frame(command: &AgentGatewayCommand) -> Value {

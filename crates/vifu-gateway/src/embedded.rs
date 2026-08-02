@@ -11,8 +11,8 @@ use vifu_runtime::{InvocationData, InvocationInput, RuntimeManifest, VifuRuntime
 
 use crate::identity::MachineIdentity;
 use crate::protocol::AgentDescriptor;
-use crate::relay::AgentGatewayProvider;
 use crate::relay::{self, AgentGatewayRuntime};
+use crate::relay::{AgentGatewayProvider, GatewayProviderError};
 use crate::session::SessionSummary;
 #[cfg(feature = "sqlite")]
 use crate::session_store::{gateway_session_state_key, GatewaySecretStorage, GatewaySessionStore};
@@ -93,19 +93,25 @@ impl AgentGatewayProvider for EmbeddedRuntimeGatewayProvider {
         binding: &'a Value,
         input: &'a Value,
         timeout: Duration,
-    ) -> Pin<Box<dyn Future<Output = Result<Value, String>> + Send + 'a>> {
+    ) -> Pin<Box<dyn Future<Output = Result<Value, GatewayProviderError>> + Send + 'a>> {
         Box::pin(async move {
             let agent = self
                 .runtime
                 .agent_definitions()
-                .map_err(|error| error.public_message())?
+                .map_err(|error| GatewayProviderError::failed(error.public_message()))?
                 .into_iter()
                 .find(|agent| agent.id == agent_id)
-                .ok_or_else(|| "the embedded agent is not registered".to_string())?;
+                .ok_or_else(|| {
+                    GatewayProviderError::failed("the embedded agent is not registered")
+                })?;
             if agent.provider != self.provider_id {
-                return Err("the embedded agent belongs to another provider".to_string());
+                return Err(GatewayProviderError::failed(
+                    "the embedded agent belongs to another provider",
+                ));
             }
-            let endpoint = self.endpoint_for(agent_id, binding)?;
+            let endpoint = self
+                .endpoint_for(agent_id, binding)
+                .map_err(GatewayProviderError::failed)?;
             let session_id = binding
                 .get("sessionId")
                 .and_then(Value::as_str)
@@ -120,8 +126,8 @@ impl AgentGatewayProvider for EmbeddedRuntimeGatewayProvider {
             });
             let output = tokio::time::timeout(timeout, invocation)
                 .await
-                .map_err(|_| "embedded runtime request timed out".to_string())?
-                .map_err(|error| error.public_message())?;
+                .map_err(|_| GatewayProviderError::timed_out("embedded runtime request timed out"))?
+                .map_err(|error| GatewayProviderError::failed(error.public_message()))?;
             match output.data {
                 InvocationData::Json(value) => Ok(value),
                 InvocationData::Binary(bytes) => Ok(serde_json::json!({
@@ -357,9 +363,15 @@ impl EmbeddedRuntimeGateway {
                                 allow_guest_bootstrap,
                                 providers: &providers,
                                 agents: &agents,
+                                route_overrides: None,
+                                runtime_observer: None,
+                                capture_sender: None,
+                                config_epoch: 0,
+                                provider_models: None,
                                 session_path: None,
                                 runtime_database_path: &runtime_database_path,
                                 embedded_runtime: Some(&embedded_runtime),
+                                output_policy: relay::GatewayOutputPolicy::Terminal,
                             };
                             #[cfg(feature = "sqlite")]
                             let gateway_run = relay::run_agent_gateway_with_session_persistence(

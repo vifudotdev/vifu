@@ -246,6 +246,46 @@ pub enum InvocationEventKind {
     Cancelled,
 }
 
+/// A provider stage that can be rendered as an observation in a live trace.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ProviderStage {
+    Queue,
+    Load,
+    Tokenize,
+    Prefill,
+    FirstToken,
+    Decode,
+    Validate,
+}
+
+/// A typed provider event emitted while an invocation is running.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "camelCase")]
+pub enum ProviderEvent {
+    OutputDelta {
+        data: InvocationData,
+    },
+    StageStarted {
+        stage: ProviderStage,
+        #[serde(default, skip_serializing_if = "is_null")]
+        metadata: Value,
+    },
+    StageCompleted {
+        stage: ProviderStage,
+        elapsed_ms: u64,
+        #[serde(default, skip_serializing_if = "is_null")]
+        metadata: Value,
+    },
+    StageFailed {
+        stage: ProviderStage,
+        elapsed_ms: u64,
+        error: String,
+        #[serde(default, skip_serializing_if = "is_null")]
+        metadata: Value,
+    },
+}
+
 /// One ordered event produced by an invocation.
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -277,22 +317,54 @@ impl fmt::Debug for InvocationEvent {
 /// while their invocation is running.
 #[derive(Clone)]
 pub struct ProviderEventSink {
-    output_delta: Arc<dyn Fn(InvocationData) + Send + Sync>,
+    emit: Arc<dyn Fn(ProviderEvent) + Send + Sync>,
 }
 
 impl ProviderEventSink {
-    fn new(output_delta: impl Fn(InvocationData) + Send + Sync + 'static) -> Self {
+    fn new(emit: impl Fn(ProviderEvent) + Send + Sync + 'static) -> Self {
         Self {
-            output_delta: Arc::new(output_delta),
+            emit: Arc::new(emit),
         }
     }
 
+    /// Creates a sink that forwards every typed provider event to `emit`.
+    pub fn from_fn(emit: impl Fn(ProviderEvent) + Send + Sync + 'static) -> Self {
+        Self::new(emit)
+    }
+
     pub fn discard() -> Self {
-        Self::new(|_data| {})
+        Self::new(|_event| {})
     }
 
     pub fn output_delta(&self, data: InvocationData) {
-        (self.output_delta)(data);
+        (self.emit)(ProviderEvent::OutputDelta { data });
+    }
+
+    pub fn stage_started(&self, stage: ProviderStage, metadata: Value) {
+        (self.emit)(ProviderEvent::StageStarted { stage, metadata });
+    }
+
+    pub fn stage_completed(&self, stage: ProviderStage, elapsed_ms: u64, metadata: Value) {
+        (self.emit)(ProviderEvent::StageCompleted {
+            stage,
+            elapsed_ms,
+            metadata,
+        });
+    }
+
+    pub fn stage_failed(
+        &self,
+        stage: ProviderStage,
+        elapsed_ms: u64,
+        error: impl Into<String>,
+        metadata: Value,
+    ) {
+        (self.emit)(ProviderEvent::StageFailed {
+            stage,
+            elapsed_ms,
+            error: error.into(),
+            metadata,
+        });
     }
 }
 
@@ -935,12 +1007,20 @@ impl InvocationRegistry {
         Ok(poll)
     }
 
-    fn push_output_delta(&mut self, handle: &InvocationHandle, data: InvocationData) {
-        if let Some(entry) = self.entries.get_mut(&handle.0) {
-            if entry.poll.status != InvocationStatus::Running {
-                return;
+    fn push_provider_event(&mut self, handle: &InvocationHandle, event: ProviderEvent) {
+        let Some(entry) = self.entries.get_mut(&handle.0) else {
+            return;
+        };
+        if entry.poll.status != InvocationStatus::Running {
+            return;
+        }
+        match event {
+            ProviderEvent::OutputDelta { data } => {
+                entry.push_event(InvocationEventKind::OutputDelta, Some(data), None);
             }
-            entry.push_event(InvocationEventKind::OutputDelta, Some(data), None);
+            ProviderEvent::StageStarted { .. }
+            | ProviderEvent::StageCompleted { .. }
+            | ProviderEvent::StageFailed { .. } => {}
         }
     }
 
@@ -1199,10 +1279,14 @@ impl RuntimeCore {
         let handle = handle.clone();
         ProviderEventSink::new(move |data| {
             if let Ok(mut invocations) = core.invocations.lock() {
-                invocations.push_output_delta(&handle, data);
+                invocations.push_provider_event(&handle, data);
             }
         })
     }
+}
+
+fn is_null(value: &Value) -> bool {
+    value.is_null()
 }
 
 fn merge_invocation_data(previous: &mut InvocationData, next: &InvocationData) -> bool {
@@ -1966,7 +2050,7 @@ mod tests {
             request: ProviderRequest,
             cancellation: CancellationToken,
         ) -> ProviderFuture<'a> {
-            self.invoke_with_events(request, cancellation, ProviderEventSink::new(|_data| {}))
+            self.invoke_with_events(request, cancellation, ProviderEventSink::discard())
         }
 
         fn invoke_with_events<'a>(
@@ -1979,6 +2063,8 @@ mod tests {
                 if cancellation.is_cancelled() {
                     return Err(RuntimeError::Cancelled);
                 }
+                events.stage_started(ProviderStage::Tokenize, Value::Null);
+                events.stage_completed(ProviderStage::Tokenize, 2, json!({ "inputTokens": 4 }));
                 events.output_delta(InvocationData::Json(Value::String("Hello".to_string())));
                 events.output_delta(InvocationData::Json(Value::String(", world".to_string())));
                 Ok(ProviderResponse::json(json!({ "text": "Hello, world" })))
@@ -2218,7 +2304,7 @@ mod tests {
     }
 
     #[test]
-    fn game_loop_api_drains_ordered_streaming_events() {
+    fn game_loop_v1_event_stream_ignores_provider_stages() {
         let runtime = configured_runtime(Arc::new(StreamingTestProvider));
         let handle = runtime
             .start_invoke(InvocationInput::json("chat", json!({})))
@@ -2269,9 +2355,11 @@ mod tests {
             Some("provider failed".to_string()),
         );
 
-        registry.push_output_delta(
+        registry.push_provider_event(
             &handle,
-            InvocationData::Json(Value::String("too late".to_string())),
+            ProviderEvent::OutputDelta {
+                data: InvocationData::Json(Value::String("too late".to_string())),
+            },
         );
 
         let events = registry

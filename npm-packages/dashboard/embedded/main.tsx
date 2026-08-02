@@ -72,8 +72,11 @@ function EmbeddedRuntimeConsole() {
     const controller = new AbortController();
     setLoading(true);
     setError(null);
-    void loadEmbeddedDashboardData(route.projectSlug, controller.signal)
-      .then((nextData) => setData(nextData))
+    setData(null);
+    void loadEmbeddedDashboardData(route.projectSlug, route.section, controller.signal)
+      .then((nextData) => {
+        if (!controller.signal.aborted) setData(nextData);
+      })
       .catch((nextError: unknown) => {
         if (controller.signal.aborted) return;
         setError(errorMessage(nextError));
@@ -82,7 +85,7 @@ function EmbeddedRuntimeConsole() {
         if (!controller.signal.aborted) setLoading(false);
       });
     return () => controller.abort();
-  }, [refreshVersion, route.projectSlug]);
+  }, [refreshVersion, route.projectSlug, route.section]);
 
   const host = useMemo(() => ({
     Link: EmbeddedLink,
@@ -246,6 +249,7 @@ function routeHref(route: ConsoleRoute): string {
 
 async function loadEmbeddedDashboardData(
   projectSlug: string | undefined,
+  section: DashboardSection,
   signal: AbortSignal,
 ): Promise<RuntimeConsoleData> {
   const status = await runtimeBrowserRequest<RuntimeStatus>("status", "GET", undefined, signal);
@@ -254,6 +258,19 @@ async function loadEmbeddedDashboardData(
     displayName: "Local deployment",
     status: { ...status, auth: { required: false, mode: "none" } } satisfies DeploymentStatus,
   };
+  if (section === "logs") {
+    const projects = status.capabilities.projects
+      ? await requestList<RuntimeProject>("projects", "projects", signal)
+      : [];
+    return {
+      authority,
+      runtime: emptyRuntimeSnapshot(projects),
+      profileDetails: [],
+      projectProviders: [],
+      providerCatalog: { registry: [], custom: [] },
+      agentCandidates: [],
+    };
+  }
   const runtime = await loadRuntimeSnapshot(authority.status, projectSlug, signal);
   const [projectProviders, providerCatalog, agentCandidates] = projectSlug
     ? await Promise.all([
@@ -278,6 +295,22 @@ async function loadEmbeddedDashboardData(
     projectProviders,
     providerCatalog,
     agentCandidates,
+  };
+}
+
+function emptyRuntimeSnapshot(projects: RuntimeProject[]): RuntimeSnapshot {
+  return {
+    projects,
+    profiles: [],
+    bindings: [],
+    endpoints: [],
+    apiKeys: [],
+    agentGateways: [],
+    availableAgents: [],
+    providerAdapters: [],
+    traces: [],
+    deployments: [],
+    releases: [],
   };
 }
 

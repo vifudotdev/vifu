@@ -31,6 +31,7 @@ struct AgentGatewayConnection {
     connection_id: Uuid,
     session_id: Uuid,
     sender: mpsc::Sender<AgentGatewayCommand>,
+    application_feedback_supported: bool,
 }
 
 struct PendingCall {
@@ -204,6 +205,7 @@ impl RelayHub {
         connection_id: Uuid,
         session_id: Uuid,
         sender: mpsc::Sender<AgentGatewayCommand>,
+        application_feedback_supported: bool,
     ) {
         let replaced = {
             let mut state = self.inner.lock().await;
@@ -213,6 +215,7 @@ impl RelayHub {
                     connection_id,
                     session_id,
                     sender,
+                    application_feedback_supported,
                 },
             )
         };
@@ -298,6 +301,43 @@ impl RelayHub {
         connection
             .sender
             .try_send(AgentGatewayCommand::RuntimeConfigChanged { deployment_ids })
+            .is_ok()
+    }
+
+    pub async fn notify_application_feedback(
+        &self,
+        session_id: Option<Uuid>,
+        request_id: Uuid,
+        observation_id: Uuid,
+        start_offset_ms: u64,
+        end_offset_ms: u64,
+        feedback: vifu_gateway::protocol::ApplicationFeedback,
+    ) -> bool {
+        let Some(session_id) = session_id else {
+            return false;
+        };
+        let connection = self
+            .inner
+            .lock()
+            .await
+            .connections
+            .values()
+            .find(|connection| {
+                connection.session_id == session_id && connection.application_feedback_supported
+            })
+            .cloned();
+        let Some(connection) = connection else {
+            return false;
+        };
+        connection
+            .sender
+            .try_send(AgentGatewayCommand::ApplicationFeedback {
+                request_id,
+                observation_id,
+                start_offset_ms,
+                end_offset_ms,
+                feedback,
+            })
             .is_ok()
     }
 
@@ -464,7 +504,10 @@ mod tests {
 
     use serde_json::json;
     use uuid::Uuid;
-    use vifu_gateway::protocol::AgentGatewayCommand;
+    use vifu_gateway::protocol::{
+        AgentGatewayCommand, ApplicationFeedback, ApplicationFeedbackEvent,
+        ApplicationFeedbackOutcome,
+    };
 
     use super::{RelayCallError, RelayHub};
     use crate::models::EndpointRoute;
@@ -480,6 +523,7 @@ mod tests {
             connection_id,
             Uuid::new_v4(),
             sender,
+            false,
         )
         .await;
         let route = route();
@@ -531,6 +575,7 @@ mod tests {
             Uuid::new_v4(),
             Uuid::new_v4(),
             sender,
+            false,
         )
         .await;
 
@@ -560,6 +605,89 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn forwards_application_feedback_only_to_the_matching_supported_session() {
+        let hub = RelayHub::new(4);
+        let supported_session_id = Uuid::new_v4();
+        let (supported_sender, mut supported_receiver) = hub.channel();
+        hub.register(
+            "supported".to_string(),
+            Uuid::new_v4(),
+            supported_session_id,
+            supported_sender,
+            true,
+        )
+        .await;
+        let unsupported_session_id = Uuid::new_v4();
+        let (unsupported_sender, mut unsupported_receiver) = hub.channel();
+        hub.register(
+            "unsupported".to_string(),
+            Uuid::new_v4(),
+            unsupported_session_id,
+            unsupported_sender,
+            false,
+        )
+        .await;
+        let request_id = Uuid::new_v4();
+        let observation_id = Uuid::new_v4();
+        let feedback = ApplicationFeedback {
+            event: ApplicationFeedbackEvent::ActionApplied,
+            outcome: ApplicationFeedbackOutcome::Fail,
+            message: Some("action rejected".to_string()),
+            path: Some("$.action".to_string()),
+        };
+
+        assert!(
+            hub.notify_application_feedback(
+                Some(supported_session_id),
+                request_id,
+                observation_id,
+                41,
+                41,
+                feedback.clone(),
+            )
+            .await
+        );
+        assert_eq!(
+            supported_receiver.recv().await,
+            Some(AgentGatewayCommand::ApplicationFeedback {
+                request_id,
+                observation_id,
+                start_offset_ms: 41,
+                end_offset_ms: 41,
+                feedback: feedback.clone(),
+            })
+        );
+        assert!(
+            !hub.notify_application_feedback(
+                Some(unsupported_session_id),
+                request_id,
+                observation_id,
+                41,
+                41,
+                feedback
+            )
+            .await
+        );
+        assert!(unsupported_receiver.try_recv().is_err());
+        assert!(
+            !hub.notify_application_feedback(
+                Some(Uuid::new_v4()),
+                request_id,
+                observation_id,
+                41,
+                41,
+                ApplicationFeedback {
+                    event: ApplicationFeedbackEvent::OutputAccepted,
+                    outcome: ApplicationFeedbackOutcome::Pass,
+                    message: None,
+                    path: None,
+                }
+            )
+            .await
+        );
+    }
+
+    #[tokio::test]
     async fn cancelling_a_call_removes_it_and_notifies_the_agent_gateway() {
         let hub = RelayHub::new(4);
         let (sender, mut receiver) = hub.channel();
@@ -569,6 +697,7 @@ mod tests {
             connection_id,
             Uuid::new_v4(),
             sender,
+            false,
         )
         .await;
         let request_id = Uuid::new_v4();

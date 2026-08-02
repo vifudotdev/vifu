@@ -17,8 +17,9 @@ use crate::models::{
     ApiKeyPermissions, ApiKeyRecord, AvailableAgent, EndpointRoute, EndpointTrace,
     ProfileCapabilityDraft, ProfileRoute, Project, ProjectRuntimeChannel, ProjectRuntimeExtension,
     ProjectRuntimeRelease, ProjectWithBindings, ProviderConnection, ProviderConnectionSecret,
-    PublicAgent, RealtimeSession, RuntimeDeployment, TraceSpan,
+    PublicAgent, RealtimeSession, RuntimeDeployment, TraceScore, TraceSpan,
 };
+use crate::trace_redaction::{redact_trace_text, redact_trace_value};
 
 #[derive(Debug, FromRow)]
 struct ApiKeyRow {
@@ -3745,6 +3746,7 @@ pub async fn list_available_agents(pool: &PgPool) -> Result<Vec<AvailableAgent>,
 
 pub async fn create_trace(pool: &PgPool, trace: NewTrace<'_>) -> Result<Uuid, ApiError> {
     let trace_id = Uuid::new_v4();
+    let request = redact_trace_value(trace.request);
     sqlx::query(
         "INSERT INTO endpoint_traces
             (id, request_id, endpoint_id, project_id, gateway_session_id, profile_id,
@@ -3763,7 +3765,7 @@ pub async fn create_trace(pool: &PgPool, trace: NewTrace<'_>) -> Result<Uuid, Ap
     .bind(trace.provider_key)
     .bind(trace.capability_kind)
     .bind(trace.selection_key)
-    .bind(trace.request)
+    .bind(request)
     .execute(pool)
     .await
     .map_err(map_database_error)?;
@@ -3774,6 +3776,7 @@ pub async fn create_uploaded_runtime_trace(
     pool: &PgPool,
     trace: NewUploadedRuntimeTrace<'_>,
 ) -> Result<bool, ApiError> {
+    let request = redact_trace_value(trace.request);
     let result = sqlx::query(
         "INSERT INTO endpoint_traces
             (id, request_id, project_id, operation, provider_key, capability_kind,
@@ -3789,7 +3792,7 @@ pub async fn create_uploaded_runtime_trace(
     .bind(trace.capability_kind)
     .bind(trace.status)
     .bind(trace.latency_ms)
-    .bind(trace.request)
+    .bind(request)
     .bind(trace.created_at)
     .execute(pool)
     .await?;
@@ -3797,25 +3800,345 @@ pub async fn create_uploaded_runtime_trace(
 }
 
 pub async fn create_trace_span(pool: &PgPool, span: NewTraceSpan<'_>) -> Result<Uuid, ApiError> {
-    let span_id = Uuid::new_v4();
+    create_trace_span_with_id(pool, Uuid::new_v4(), span).await
+}
+
+pub async fn create_trace_span_with_id(
+    pool: &PgPool,
+    span_id: Uuid,
+    span: NewTraceSpan<'_>,
+) -> Result<Uuid, ApiError> {
+    let model_parameters = span.model_parameters.map(redact_trace_value);
+    let input_summary = span.input_summary.map(redact_trace_value);
+    let attributes = redact_trace_value(span.attributes);
     sqlx::query(
         "INSERT INTO trace_spans
-            (id, trace_id, parent_span_id, name, kind, status, provider_key,
-             capability_kind, input_summary, attributes)
-         VALUES ($1, $2, $3, $4, $5, 'pending', $6, $7, $8, $9)",
+            (id, trace_id, parent_span_id, name, kind, observation_type, status, provider_key,
+             capability_kind, model, model_parameters, input_summary, attributes)
+         VALUES ($1, $2, $3, $4, $5, $6, 'pending', $7, $8, $9, $10, $11, $12)",
     )
     .bind(span_id)
     .bind(span.trace_id)
     .bind(span.parent_span_id)
     .bind(span.name)
     .bind(span.kind)
+    .bind(span.observation_type)
     .bind(span.provider_key)
     .bind(span.capability_kind)
-    .bind(span.input_summary)
-    .bind(span.attributes)
+    .bind(span.model)
+    .bind(model_parameters)
+    .bind(input_summary)
+    .bind(attributes)
     .execute(pool)
     .await?;
     Ok(span_id)
+}
+
+pub async fn upsert_runtime_trace_observation(
+    pool: &PgPool,
+    observation: RuntimeTraceObservation<'_>,
+) -> Result<(), ApiError> {
+    let attributes = redact_trace_value(observation.attributes);
+    let error = observation.error.map(redact_trace_text);
+    let result = sqlx::query(
+        "INSERT INTO trace_spans
+            (id, trace_id, parent_span_id, name, kind, observation_type, status, provider_key,
+             capability_kind, model, duration_ms, attributes, error, completed_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
+                 CASE WHEN $7 = 'pending' THEN NULL ELSE NOW() END)
+         ON CONFLICT(id) DO UPDATE SET
+            status = EXCLUDED.status,
+            provider_key = EXCLUDED.provider_key,
+            capability_kind = EXCLUDED.capability_kind,
+            model = EXCLUDED.model,
+            duration_ms = EXCLUDED.duration_ms,
+            attributes = EXCLUDED.attributes,
+            error = EXCLUDED.error,
+            completed_at = EXCLUDED.completed_at
+         WHERE trace_spans.trace_id = EXCLUDED.trace_id
+           AND trace_spans.parent_span_id IS NOT DISTINCT FROM EXCLUDED.parent_span_id
+           AND trace_spans.name = EXCLUDED.name
+           AND trace_spans.kind = EXCLUDED.kind
+           AND trace_spans.observation_type = EXCLUDED.observation_type",
+    )
+    .bind(observation.id)
+    .bind(observation.trace_id)
+    .bind(observation.parent_span_id)
+    .bind(observation.name)
+    .bind(observation.kind)
+    .bind(observation.observation_type)
+    .bind(observation.status)
+    .bind(observation.provider_key)
+    .bind(observation.capability_kind)
+    .bind(observation.model)
+    .bind(observation.duration_ms)
+    .bind(attributes)
+    .bind(error.as_deref())
+    .execute(pool)
+    .await?;
+    if result.rows_affected() == 0 {
+        return Err(ApiError::Invalid(
+            "trace observation ID conflicts with an existing observation".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+pub async fn update_trace_generation(
+    pool: &PgPool,
+    span_id: Uuid,
+    completion_start_ms: Option<i64>,
+    usage: Option<&Value>,
+) -> Result<(), ApiError> {
+    sqlx::query(
+        "UPDATE trace_spans
+         SET completion_start_ms = COALESCE($2, completion_start_ms),
+             usage = COALESCE($3, usage)
+         WHERE id = $1",
+    )
+    .bind(span_id)
+    .bind(completion_start_ms)
+    .bind(usage)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+pub async fn get_runtime_trace_target(
+    pool: &PgPool,
+    request_id: Uuid,
+) -> Result<Option<RuntimeTraceTarget>, ApiError> {
+    sqlx::query_as::<_, RuntimeTraceTarget>(
+        "SELECT trace.id AS trace_id,
+                root.id AS parent_span_id,
+                COALESCE(root.provider_key, trace.provider_key) AS provider_key,
+                COALESCE(root.capability_kind, trace.capability_kind) AS capability_kind,
+                root.model
+         FROM endpoint_traces trace
+         LEFT JOIN LATERAL (
+             SELECT span.id, span.provider_key, span.capability_kind, span.model
+             FROM trace_spans span
+             WHERE span.trace_id = trace.id AND span.parent_span_id IS NULL
+             ORDER BY span.created_at ASC, span.id ASC
+             LIMIT 1
+         ) root ON TRUE
+         WHERE trace.request_id = $1",
+    )
+    .bind(request_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(ApiError::from)
+}
+
+pub async fn get_runtime_trace_gateway_id(
+    pool: &PgPool,
+    request_id: Uuid,
+) -> Result<Option<String>, ApiError> {
+    sqlx::query_scalar(
+        "SELECT session.gateway_id
+         FROM endpoint_traces trace
+         JOIN agent_gateway_sessions session ON session.session_id = trace.gateway_session_id
+         WHERE trace.request_id = $1",
+    )
+    .bind(request_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(ApiError::from)
+}
+
+pub async fn update_trace_runtime_identity(
+    pool: &PgPool,
+    request_id: Uuid,
+    provider_key: &str,
+    capability_kind: &str,
+    model: Option<&str>,
+) -> Result<(), ApiError> {
+    let mut transaction = pool.begin().await?;
+    sqlx::query(
+        "UPDATE endpoint_traces
+         SET provider_key = $2, capability_kind = $3
+         WHERE request_id = $1",
+    )
+    .bind(request_id)
+    .bind(provider_key)
+    .bind(capability_kind)
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "UPDATE trace_spans
+         SET provider_key = $2, capability_kind = $3, model = COALESCE($4, model)
+         WHERE id = (
+             SELECT span.id FROM trace_spans span
+             JOIN endpoint_traces trace ON trace.id = span.trace_id
+             WHERE trace.request_id = $1 AND span.parent_span_id IS NULL
+             ORDER BY span.created_at ASC, span.id ASC LIMIT 1
+         )",
+    )
+    .bind(request_id)
+    .bind(provider_key)
+    .bind(capability_kind)
+    .bind(model)
+    .execute(&mut *transaction)
+    .await?;
+    transaction.commit().await?;
+    Ok(())
+}
+
+pub async fn merge_trace_runtime_generation(
+    pool: &PgPool,
+    request_id: Uuid,
+    completion_start_ms: Option<i64>,
+    input_tokens: Option<i64>,
+    output_tokens: Option<i64>,
+) -> Result<(), ApiError> {
+    sqlx::query(
+        "UPDATE trace_spans
+         SET completion_start_ms = COALESCE($2, completion_start_ms),
+             usage = COALESCE(usage, '{}'::jsonb)
+                || jsonb_strip_nulls(jsonb_build_object(
+                    'inputTokens', $3::bigint,
+                    'outputTokens', $4::bigint
+                ))
+         WHERE id = (
+             SELECT span.id FROM trace_spans span
+             JOIN endpoint_traces trace ON trace.id = span.trace_id
+             WHERE trace.request_id = $1 AND span.parent_span_id IS NULL
+             ORDER BY span.created_at ASC, span.id ASC LIMIT 1
+         )",
+    )
+    .bind(request_id)
+    .bind(completion_start_ms)
+    .bind(input_tokens)
+    .bind(output_tokens)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+pub async fn update_trace_runtime_io_summaries(
+    pool: &PgPool,
+    request_id: Uuid,
+    input_summary: Option<&Value>,
+    input_truncated: bool,
+    output_summary: Option<&Value>,
+    output_truncated: bool,
+) -> Result<(), ApiError> {
+    let mut io_marker = serde_json::Map::new();
+    if input_summary.is_some() {
+        io_marker.insert("inputCanonical".to_string(), Value::Bool(true));
+        io_marker.insert("inputTruncated".to_string(), Value::Bool(input_truncated));
+    }
+    if output_summary.is_some() {
+        io_marker.insert("outputCanonical".to_string(), Value::Bool(true));
+        io_marker.insert("outputTruncated".to_string(), Value::Bool(output_truncated));
+    }
+    let marker = json!({"_vifuTraceIo": io_marker});
+    sqlx::query(
+        "UPDATE trace_spans
+         SET input_summary = COALESCE($2, input_summary),
+             output_summary = COALESCE($3, output_summary),
+             attributes = jsonb_set(
+                 COALESCE(attributes, '{}'::jsonb),
+                 '{_vifuTraceIo}',
+                 COALESCE(attributes -> '_vifuTraceIo', '{}'::jsonb)
+                     || ($4::jsonb -> '_vifuTraceIo'),
+                 TRUE
+             )
+         WHERE id = (
+             SELECT span.id FROM trace_spans span
+             JOIN endpoint_traces trace ON trace.id = span.trace_id
+             WHERE trace.request_id = $1 AND span.parent_span_id IS NULL
+             ORDER BY span.created_at ASC, span.id ASC LIMIT 1
+         )",
+    )
+    .bind(request_id)
+    .bind(input_summary)
+    .bind(output_summary)
+    .bind(marker)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+pub async fn upsert_trace_score(
+    pool: &PgPool,
+    score: NewTraceScore<'_>,
+) -> Result<TraceScore, ApiError> {
+    sqlx::query_as::<_, TraceScore>(
+        "INSERT INTO trace_scores
+            (id, trace_id, span_id, name, data_type, value, source)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)
+         ON CONFLICT (trace_id, name, source) DO UPDATE SET
+            span_id = EXCLUDED.span_id,
+            data_type = EXCLUDED.data_type,
+            value = EXCLUDED.value,
+            created_at = NOW()
+         RETURNING id, trace_id, span_id, name, data_type, value, source, created_at",
+    )
+    .bind(Uuid::new_v4())
+    .bind(score.trace_id)
+    .bind(score.span_id)
+    .bind(score.name)
+    .bind(score.data_type)
+    .bind(score.value)
+    .bind(score.source)
+    .fetch_one(pool)
+    .await
+    .map_err(ApiError::from)
+}
+
+pub async fn list_trace_scores(pool: &PgPool, trace_id: Uuid) -> Result<Vec<TraceScore>, ApiError> {
+    sqlx::query_as::<_, TraceScore>(
+        "SELECT id, trace_id, span_id, name, data_type, value, source, created_at
+         FROM trace_scores
+         WHERE trace_id = $1
+         ORDER BY created_at ASC, id ASC",
+    )
+    .bind(trace_id)
+    .fetch_all(pool)
+    .await
+    .map_err(ApiError::from)
+}
+
+pub async fn trace_feedback_target(
+    pool: &PgPool,
+    project_id: Uuid,
+    request_id: Uuid,
+) -> Result<TraceFeedbackTarget, ApiError> {
+    let row = sqlx::query_as::<
+        _,
+        (
+            Uuid,
+            Uuid,
+            Option<Uuid>,
+            Option<Uuid>,
+            Option<Uuid>,
+            Option<String>,
+            DateTime<Utc>,
+        ),
+    >(
+        "SELECT trace.id, trace.project_id, trace.profile_id,
+                (SELECT span.id FROM trace_spans span
+                 WHERE span.trace_id = trace.id AND span.parent_span_id IS NULL
+                 ORDER BY span.created_at ASC, span.id ASC LIMIT 1),
+                trace.gateway_session_id, trace.capability_kind, trace.created_at
+         FROM endpoint_traces trace
+         WHERE trace.project_id = $1 AND trace.request_id = $2",
+    )
+    .bind(project_id)
+    .bind(request_id)
+    .fetch_optional(pool)
+    .await?
+    .ok_or(ApiError::NotFound)?;
+    Ok(TraceFeedbackTarget {
+        trace_id: row.0,
+        project_id: row.1,
+        profile_id: row.2,
+        parent_span_id: row.3,
+        gateway_session_id: row.4,
+        capability_kind: row.5,
+        trace_created_at: row.6,
+    })
 }
 
 pub async fn complete_trace_span(
@@ -3826,9 +4149,18 @@ pub async fn complete_trace_span(
     output_summary: Option<&Value>,
     error: Option<&str>,
 ) -> Result<(), ApiError> {
+    let output_summary = output_summary.map(redact_trace_value);
+    let error = error.map(redact_trace_text);
     sqlx::query(
         "UPDATE trace_spans
-         SET status = $2, duration_ms = $3, output_summary = $4, error = $5,
+         SET status = $2, duration_ms = $3,
+             output_summary = CASE
+                 WHEN COALESCE(attributes, '{}'::jsonb)
+                     @> '{\"_vifuTraceIo\":{\"outputCanonical\":true}}'::jsonb
+                     THEN output_summary
+                 ELSE $4
+             END,
+             error = $5,
              completed_at = NOW()
          WHERE id = $1",
     )
@@ -3836,7 +4168,7 @@ pub async fn complete_trace_span(
     .bind(status)
     .bind(duration_ms)
     .bind(output_summary)
-    .bind(error)
+    .bind(error.as_deref())
     .execute(pool)
     .await?;
     Ok(())
@@ -3850,6 +4182,8 @@ pub async fn complete_trace(
     response: Option<&Value>,
     error: Option<&str>,
 ) -> Result<(), ApiError> {
+    let response = response.map(redact_trace_value);
+    let error = error.map(redact_trace_text);
     sqlx::query(
         "UPDATE endpoint_traces SET status = $2, latency_ms = $3, response = $4,
                 error = $5, completed_at = NOW()
@@ -3859,7 +4193,7 @@ pub async fn complete_trace(
     .bind(status)
     .bind(latency_ms)
     .bind(response)
-    .bind(error)
+    .bind(error.as_deref())
     .execute(pool)
     .await?;
     Ok(())
@@ -3869,6 +4203,9 @@ pub async fn list_traces(
     pool: &PgPool,
     endpoint_id: Option<Uuid>,
     project_id: Option<Uuid>,
+    request_id: Option<Uuid>,
+    trace_id: Option<Uuid>,
+    allowed_profile_ids: Option<&[Uuid]>,
     limit: i64,
 ) -> Result<Vec<EndpointTrace>, ApiError> {
     let mut query = QueryBuilder::<Postgres>::new(
@@ -3879,20 +4216,99 @@ pub async fn list_traces(
                 profile_version.version_number AS profile_version_number,
                 trace.operation, trace.provider_key,
                 trace.capability_kind, trace.selection_key, trace.status, trace.latency_ms,
+                (SELECT span.model FROM trace_spans span
+                 WHERE span.trace_id = trace.id AND span.parent_span_id IS NULL
+                 ORDER BY span.created_at ASC, span.id ASC LIMIT 1) AS model,
+                (SELECT span.completion_start_ms FROM trace_spans span
+                 WHERE span.trace_id = trace.id AND span.parent_span_id IS NULL
+                 ORDER BY span.created_at ASC, span.id ASC LIMIT 1) AS completion_start_ms,
+                (SELECT span.usage FROM trace_spans span
+                 WHERE span.trace_id = trace.id AND span.parent_span_id IS NULL
+                 ORDER BY span.created_at ASC, span.id ASC LIMIT 1) AS usage,
+                (SELECT span.duration_ms FROM trace_spans span
+                 WHERE span.trace_id = trace.id AND span.kind = 'provider_stage'
+                       AND span.name = 'Decode'
+                 ORDER BY span.created_at DESC, span.id DESC LIMIT 1) AS decode_ms,
+                CASE
+                    WHEN EXISTS (
+                        SELECT 1 FROM trace_scores score
+                        WHERE score.trace_id = trace.id AND score.source = 'application'
+                              AND score.name IN ('OUTPUT_ACCEPTED', 'ACTION_APPLIED', 'FRAME_PRESENTED')
+                              AND score.value #>> '{}' = 'fail'
+                    ) THEN 'fail'
+                    WHEN EXISTS (
+                        SELECT 1 FROM trace_scores score
+                        WHERE score.trace_id = trace.id AND score.source = 'application'
+                              AND score.name IN ('OUTPUT_ACCEPTED', 'ACTION_APPLIED', 'FRAME_PRESENTED')
+                              AND score.value #>> '{}' = 'unknown'
+                    ) THEN 'unknown'
+                    WHEN (
+                        SELECT COUNT(DISTINCT score.name) FROM trace_scores score
+                        WHERE score.trace_id = trace.id AND score.source = 'application'
+                              AND score.name IN ('OUTPUT_ACCEPTED', 'ACTION_APPLIED', 'FRAME_PRESENTED')
+                    ) = 3 AND EXISTS (
+                        SELECT 1 FROM trace_scores score
+                        WHERE score.trace_id = trace.id AND score.source = 'application'
+                              AND score.name IN ('OUTPUT_ACCEPTED', 'ACTION_APPLIED', 'FRAME_PRESENTED')
+                              AND score.value #>> '{}' = 'pass'
+                    ) THEN 'pass'
+                    WHEN (
+                        SELECT COUNT(DISTINCT score.name) FROM trace_scores score
+                        WHERE score.trace_id = trace.id AND score.source = 'application'
+                              AND score.name IN ('OUTPUT_ACCEPTED', 'ACTION_APPLIED', 'FRAME_PRESENTED')
+                    ) = 3 AND NOT EXISTS (
+                        SELECT 1 FROM trace_scores score
+                        WHERE score.trace_id = trace.id AND score.source = 'application'
+                              AND score.name IN ('OUTPUT_ACCEPTED', 'ACTION_APPLIED', 'FRAME_PRESENTED')
+                              AND score.value #>> '{}' <> 'notApplicable'
+                    ) THEN 'notApplicable'
+                    WHEN EXISTS (
+                        SELECT 1 FROM trace_scores score
+                        WHERE score.trace_id = trace.id AND score.source = 'application'
+                              AND score.name IN ('OUTPUT_ACCEPTED', 'ACTION_APPLIED', 'FRAME_PRESENTED')
+                    ) THEN 'unknown'
+                    ELSE NULL
+                END AS app_outcome,
                 trace.request, trace.response, trace.error, trace.created_at, trace.completed_at
          FROM endpoint_traces trace
          LEFT JOIN agent_profiles profile ON profile.id = trace.profile_id
          LEFT JOIN agent_profile_versions profile_version
             ON profile_version.id = trace.profile_version_id",
     );
+    let mut filtered = false;
     if let Some(endpoint_id) = endpoint_id {
         query
             .push(" WHERE trace.endpoint_id = ")
             .push_bind(endpoint_id);
+        filtered = true;
     } else if let Some(project_id) = project_id {
         query
             .push(" WHERE trace.project_id = ")
             .push_bind(project_id);
+        filtered = true;
+    }
+    if let Some(request_id) = request_id {
+        query.push(if filtered { " AND " } else { " WHERE " });
+        query.push("trace.request_id = ").push_bind(request_id);
+        filtered = true;
+    }
+    if let Some(trace_id) = trace_id {
+        query.push(if filtered { " AND " } else { " WHERE " });
+        query.push("trace.id = ").push_bind(trace_id);
+        filtered = true;
+    }
+    if let Some(profile_ids) = allowed_profile_ids {
+        query.push(if filtered { " AND " } else { " WHERE " });
+        if profile_ids.is_empty() {
+            query.push("FALSE");
+        } else {
+            query.push("trace.profile_id IN (");
+            let mut profiles = query.separated(", ");
+            for profile_id in profile_ids {
+                profiles.push_bind(*profile_id);
+            }
+            profiles.push_unseparated(")");
+        }
     }
     query
         .push(" ORDER BY trace.created_at DESC LIMIT ")
@@ -3906,9 +4322,9 @@ pub async fn list_traces(
 
 pub async fn list_trace_spans(pool: &PgPool, trace_id: Uuid) -> Result<Vec<TraceSpan>, ApiError> {
     sqlx::query_as::<_, TraceSpan>(
-        "SELECT id, trace_id, parent_span_id, name, kind, status, provider_key,
-                capability_kind, duration_ms, input_summary, output_summary, attributes,
-                error, created_at, completed_at
+        "SELECT id, trace_id, parent_span_id, name, kind, observation_type, status, provider_key,
+                capability_kind, model, model_parameters, completion_start_ms, usage,
+                duration_ms, input_summary, output_summary, attributes, error, created_at, completed_at
          FROM trace_spans
          WHERE trace_id = $1
          ORDER BY created_at ASC",
@@ -3926,6 +4342,19 @@ pub async fn get_trace_project_id(pool: &PgPool, trace_id: Uuid) -> Result<Optio
         .await
         .map_err(ApiError::Database)?
         .ok_or(ApiError::NotFound)
+}
+
+pub async fn get_trace_identity(pool: &PgPool, trace_id: Uuid) -> Result<TraceIdentity, ApiError> {
+    let (project_id, profile_id) =
+        sqlx::query_as("SELECT project_id, profile_id FROM endpoint_traces WHERE id = $1")
+            .bind(trace_id)
+            .fetch_optional(pool)
+            .await?
+            .ok_or(ApiError::NotFound)?;
+    Ok(TraceIdentity {
+        project_id,
+        profile_id,
+    })
 }
 
 async fn delete_by_id(pool: &PgPool, table: &str, id: Uuid) -> Result<(), ApiError> {

@@ -21,7 +21,7 @@ export default async function ProjectViewPage({ params }: {
   const { projectSlug, view } = await params;
   if (!VIEWS.has(view as DashboardSection)) notFound();
   const section = view as DashboardSection;
-  const data = await loadDashboardData(`/project/${projectSlug}/${view}`, projectSlug);
+  const data = await loadDashboardData(`/project/${projectSlug}/${view}`, projectSlug, section);
   return (
     <RuntimeConsole
       section={section}

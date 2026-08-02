@@ -1,4 +1,5 @@
 import type { RuntimeConsoleData } from "@vifu/runtime-console";
+import type { DashboardSection } from "../components/runtime-console-host";
 import { loadRuntimeSnapshot, resolveAuthority } from "./authority";
 import type {
   AgentProfileDetail,
@@ -19,8 +20,26 @@ export type DashboardData = RuntimeConsoleData & {
 export async function loadDashboardData(
   returnTo: string,
   projectSlug?: string,
+  section: DashboardSection = "overview",
 ): Promise<DashboardData> {
   const authority = await resolveAuthority({ returnTo });
+  if (section === "logs") {
+    const projects = authority.status.capabilities.projects
+      ? await authority.deployment.projects()
+      : [];
+    return {
+      authority: {
+        kind: authority.kind,
+        status: authority.status,
+        displayName: authority.displayName,
+      },
+      runtime: emptyRuntimeSnapshot(projects),
+      profileDetails: [],
+      projectProviders: [],
+      providerCatalog: { registry: [], custom: [] },
+      agentCandidates: [],
+    };
+  }
   const [
     runtime,
     projectProviders,
@@ -46,5 +65,21 @@ export async function loadDashboardData(
     projectProviders,
     providerCatalog,
     agentCandidates,
+  };
+}
+
+function emptyRuntimeSnapshot(projects: RuntimeSnapshot["projects"]): RuntimeSnapshot {
+  return {
+    projects,
+    profiles: [],
+    bindings: [],
+    endpoints: [],
+    apiKeys: [],
+    agentGateways: [],
+    availableAgents: [],
+    providerAdapters: [],
+    traces: [],
+    deployments: [],
+    releases: [],
   };
 }

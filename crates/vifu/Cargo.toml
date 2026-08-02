@@ -23,6 +23,9 @@ local-llama = ["dep:vifu-provider-llama"]
 local-whisper = ["vifu-gateway/local-whisper", "vifu-server/local-whisper"]
 
 [dependencies]
+crossterm = "0.28"
+libc = "0.2"
+ratatui = "0.29"
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "sync", "time"] }

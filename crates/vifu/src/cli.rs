@@ -108,7 +108,9 @@ Configuration:
                          parsed as JSON, or used as strings when unquoted.
 
 Options:
-  --no-browser           Print the local Console URL without opening a browser
+  --no-browser           Compatibility option. Interactive Start opens the
+                         Dashboard only when you press B; headless Start never
+                         opens it automatically.
   -h, --help             Show help
   -V, --version          Show version
 "
@@ -116,7 +118,7 @@ Options:
 
 #[cfg(test)]
 mod tests {
-    use super::{Command, Options};
+    use super::{help_text, Command, Options};
 
     #[test]
     fn defaults_to_start() {
@@ -138,6 +140,15 @@ mod tests {
         let options = Options::parse(["vifu", "--no-browser"]).unwrap();
         assert_eq!(options.command, Command::Start);
         assert!(!options.open_browser);
+    }
+
+    #[test]
+    fn help_keeps_no_browser_as_an_explicit_compatibility_option() {
+        let help = help_text();
+
+        assert!(help.contains("--no-browser"));
+        assert!(help.contains("Compatibility option"));
+        assert!(help.contains("headless Start never"));
     }
 
     #[test]

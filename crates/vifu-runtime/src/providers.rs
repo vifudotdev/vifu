@@ -1,13 +1,14 @@
 use std::collections::HashMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 use reqwest::header::{HeaderMap, CONTENT_TYPE};
 use serde_json::{json, Value};
 
 use crate::{
-    AgentProvider, CancellationToken, InvocationData, ProviderFuture, ProviderRequest,
-    ProviderResponse, RuntimeError,
+    AgentProvider, CancellationToken, InvocationData, ProviderEventSink, ProviderFuture,
+    ProviderRequest, ProviderResponse, ProviderStage, RuntimeError,
 };
 
 const PROVIDER_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
@@ -175,6 +176,15 @@ impl AgentProvider for HttpCapabilityProvider {
         request: ProviderRequest,
         cancellation: CancellationToken,
     ) -> ProviderFuture<'a> {
+        self.invoke_with_events(request, cancellation, ProviderEventSink::discard())
+    }
+
+    fn invoke_with_events<'a>(
+        &'a self,
+        request: ProviderRequest,
+        cancellation: CancellationToken,
+        events: ProviderEventSink,
+    ) -> ProviderFuture<'a> {
         Box::pin(async move {
             let route = self.routes.get(&request.capability).ok_or_else(|| {
                 RuntimeError::CapabilityUnavailable {
@@ -192,18 +202,27 @@ impl AgentProvider for HttpCapabilityProvider {
                             "chat capability requires JSON input".to_string(),
                         ));
                     };
+                    let data = provider_json_result(
+                        &self.name,
+                        &events,
+                        "chat",
+                        openai_chat_completion_result(
+                            &self.base_url,
+                            self.token.as_deref(),
+                            model,
+                            payload,
+                            persona,
+                        )
+                        .await,
+                    )?;
+                    if cancellation.is_cancelled() {
+                        return Err(RuntimeError::Cancelled);
+                    }
+                    validate_with_events(&self.name, &events, "chat", || {
+                        validate_openai_chat_response(&data)
+                    })?;
                     ProviderResponse {
-                        data: InvocationData::Json(
-                            openai_chat_completion(
-                                &self.base_url,
-                                self.token.as_deref(),
-                                model,
-                                payload,
-                                persona,
-                            )
-                            .await
-                            .map_err(|message| RuntimeError::provider(&self.name, message))?,
-                        ),
+                        data: InvocationData::Json(data),
                         metadata: json!({ "contentType": "application/json" }),
                         state: None,
                     }
@@ -214,17 +233,26 @@ impl AgentProvider for HttpCapabilityProvider {
                             "embedding capability requires JSON input".to_string(),
                         ));
                     };
+                    let data = provider_json_result(
+                        &self.name,
+                        &events,
+                        "embedding",
+                        openai_embeddings_result(
+                            &self.base_url,
+                            self.token.as_deref(),
+                            model,
+                            payload,
+                        )
+                        .await,
+                    )?;
+                    if cancellation.is_cancelled() {
+                        return Err(RuntimeError::Cancelled);
+                    }
+                    validate_with_events(&self.name, &events, "embedding", || {
+                        validate_openai_embedding_response(&data)
+                    })?;
                     ProviderResponse {
-                        data: InvocationData::Json(
-                            openai_embeddings(
-                                &self.base_url,
-                                self.token.as_deref(),
-                                model,
-                                payload,
-                            )
-                            .await
-                            .map_err(|message| RuntimeError::provider(&self.name, message))?,
-                        ),
+                        data: InvocationData::Json(data),
                         metadata: json!({ "contentType": "application/json" }),
                         state: None,
                     }
@@ -255,19 +283,28 @@ impl AgentProvider for HttpCapabilityProvider {
                             "transcription capability requires binary input".to_string(),
                         ));
                     };
+                    let data = provider_json_result(
+                        &self.name,
+                        &events,
+                        "transcription",
+                        openai_audio_transcription_result(
+                            &self.base_url,
+                            self.token.as_deref(),
+                            model,
+                            audio.clone(),
+                            file_name,
+                            content_type,
+                        )
+                        .await,
+                    )?;
+                    if cancellation.is_cancelled() {
+                        return Err(RuntimeError::Cancelled);
+                    }
+                    validate_with_events(&self.name, &events, "transcription", || {
+                        validate_transcription_response(&data)
+                    })?;
                     ProviderResponse {
-                        data: InvocationData::Json(
-                            openai_audio_transcription(
-                                &self.base_url,
-                                self.token.as_deref(),
-                                model,
-                                audio.clone(),
-                                file_name,
-                                content_type,
-                            )
-                            .await
-                            .map_err(|message| RuntimeError::provider(&self.name, message))?,
-                        ),
+                        data: InvocationData::Json(data),
                         metadata: json!({ "contentType": "application/json" }),
                         state: None,
                     }
@@ -282,19 +319,26 @@ impl AgentProvider for HttpCapabilityProvider {
                             "transcription capability requires binary input".to_string(),
                         ));
                     };
+                    let data = json!({
+                        "text": local_whisper_transcription(
+                            model_path,
+                            audio,
+                            request
+                                .metadata
+                                .pointer("/binding/language")
+                                .and_then(Value::as_str)
+                                .or(language.as_deref()),
+                        )
+                        .map_err(|message| RuntimeError::provider(&self.name, message))?,
+                    });
+                    if cancellation.is_cancelled() {
+                        return Err(RuntimeError::Cancelled);
+                    }
+                    validate_with_events(&self.name, &events, "transcription", || {
+                        validate_transcription_response(&data)
+                    })?;
                     ProviderResponse {
-                        data: InvocationData::Json(json!({
-                            "text": local_whisper_transcription(
-                                model_path,
-                                audio,
-                                request
-                                    .metadata
-                                    .pointer("/binding/language")
-                                    .and_then(Value::as_str)
-                                    .or(language.as_deref()),
-                            )
-                            .map_err(|message| RuntimeError::provider(&self.name, message))?,
-                        })),
+                        data: InvocationData::Json(data),
                         metadata: json!({ "contentType": "application/json" }),
                         state: None,
                     }
@@ -315,21 +359,37 @@ pub async fn openai_chat_completion(
     request: &Value,
     persona: &Value,
 ) -> Result<Value, String> {
+    openai_chat_completion_result(base_url, token, model, request, persona)
+        .await
+        .map_err(JsonProviderError::into_message)
+}
+
+async fn openai_chat_completion_result(
+    base_url: &str,
+    token: Option<&str>,
+    model: &str,
+    request: &Value,
+    persona: &Value,
+) -> Result<Value, JsonProviderError> {
     let mut request = request.clone();
-    apply_persona_to_chat_request(&mut request, persona)?;
+    apply_persona_to_chat_request(&mut request, persona).map_err(JsonProviderError::Provider)?;
     request
         .as_object_mut()
-        .ok_or_else(|| "chat completion request must be an object".to_string())?
+        .ok_or_else(|| {
+            JsonProviderError::Provider("chat completion request must be an object".to_string())
+        })?
         .insert("model".to_string(), Value::String(model.to_string()));
 
+    let client = provider_http_client(None).map_err(JsonProviderError::Provider)?;
     let response = authorized(
-        reqwest::Client::new().post(provider_url(base_url, "chat/completions")?),
+        client
+            .post(provider_url(base_url, "chat/completions").map_err(JsonProviderError::Provider)?),
         token,
     )
     .json(&request)
     .send()
     .await
-    .map_err(|error| format!("provider request failed: {error}"))?;
+    .map_err(|error| JsonProviderError::Provider(format!("provider request failed: {error}")))?;
     decode_json_response(response, "chat completion").await
 }
 
@@ -339,20 +399,36 @@ pub async fn openai_embeddings(
     model: &str,
     request: &Value,
 ) -> Result<Value, String> {
+    openai_embeddings_result(base_url, token, model, request)
+        .await
+        .map_err(JsonProviderError::into_message)
+}
+
+async fn openai_embeddings_result(
+    base_url: &str,
+    token: Option<&str>,
+    model: &str,
+    request: &Value,
+) -> Result<Value, JsonProviderError> {
     let mut request = request.clone();
     request
         .as_object_mut()
-        .ok_or_else(|| "embedding request must be an object".to_string())?
+        .ok_or_else(|| {
+            JsonProviderError::Provider("embedding request must be an object".to_string())
+        })?
         .insert("model".to_string(), Value::String(model.to_string()));
 
+    let client = provider_http_client(None).map_err(JsonProviderError::Provider)?;
     let response = authorized(
-        reqwest::Client::new().post(provider_url(base_url, "embeddings")?),
+        client.post(provider_url(base_url, "embeddings").map_err(JsonProviderError::Provider)?),
         token,
     )
     .json(&request)
     .send()
     .await
-    .map_err(|error| format!("embedding provider request failed: {error}"))?;
+    .map_err(|error| {
+        JsonProviderError::Provider(format!("embedding provider request failed: {error}"))
+    })?;
     decode_json_response(response, "embedding").await
 }
 
@@ -374,7 +450,8 @@ pub async fn elevenlabs_speech(
         base_url.trim_end_matches('/'),
         encode_path_segment(voice_id)?
     );
-    let response = authorized(reqwest::Client::new().post(url), token)
+    let client = provider_http_client(None)?;
+    let response = authorized(client.post(url), token)
         .header("xi-api-key", token.unwrap_or_default())
         .json(request)
         .send()
@@ -391,29 +468,46 @@ pub async fn openai_audio_transcription(
     file_name: &str,
     content_type: &str,
 ) -> Result<Value, String> {
+    openai_audio_transcription_result(base_url, token, model, audio, file_name, content_type)
+        .await
+        .map_err(JsonProviderError::into_message)
+}
+
+async fn openai_audio_transcription_result(
+    base_url: &str,
+    token: Option<&str>,
+    model: &str,
+    audio: Vec<u8>,
+    file_name: &str,
+    content_type: &str,
+) -> Result<Value, JsonProviderError> {
     let part = reqwest::multipart::Part::bytes(audio)
         .file_name(file_name.to_string())
         .mime_str(content_type)
-        .map_err(|error| format!("audio content type is invalid: {error}"))?;
+        .map_err(|error| {
+            JsonProviderError::Provider(format!("audio content type is invalid: {error}"))
+        })?;
     let form = reqwest::multipart::Form::new()
         .text("model", model.to_string())
         .part("file", part);
+    let client = provider_http_client(None).map_err(JsonProviderError::Provider)?;
     let response = authorized(
-        reqwest::Client::new().post(provider_url(base_url, "audio/transcriptions")?),
+        client.post(
+            provider_url(base_url, "audio/transcriptions").map_err(JsonProviderError::Provider)?,
+        ),
         token,
     )
     .multipart(form)
     .send()
     .await
-    .map_err(|error| format!("transcription provider request failed: {error}"))?;
+    .map_err(|error| {
+        JsonProviderError::Provider(format!("transcription provider request failed: {error}"))
+    })?;
     decode_json_response(response, "audio transcription").await
 }
 
 pub async fn probe_openai_compatible(base_url: &str, token: Option<&str>) -> Result<(), String> {
-    let client = reqwest::Client::builder()
-        .timeout(PROVIDER_PROBE_TIMEOUT)
-        .build()
-        .map_err(|error| format!("provider client could not be created: {error}"))?;
+    let client = provider_http_client(Some(PROVIDER_PROBE_TIMEOUT))?;
     let response = authorized(client.get(provider_url(base_url, "models")?), token)
         .send()
         .await
@@ -422,10 +516,7 @@ pub async fn probe_openai_compatible(base_url: &str, token: Option<&str>) -> Res
 }
 
 pub async fn probe_elevenlabs(base_url: &str, token: Option<&str>) -> Result<(), String> {
-    let client = reqwest::Client::builder()
-        .timeout(PROVIDER_PROBE_TIMEOUT)
-        .build()
-        .map_err(|error| format!("provider client could not be created: {error}"))?;
+    let client = provider_http_client(Some(PROVIDER_PROBE_TIMEOUT))?;
     let response = authorized(client.get(provider_url(base_url, "models")?), token)
         .header("xi-api-key", token.unwrap_or_default())
         .send()
@@ -569,12 +660,272 @@ fn persona_prompt(persona: &Value) -> String {
     sections.join("\n\n")
 }
 
+enum JsonProviderError {
+    Provider(String),
+    MalformedResponse(String),
+}
+
+impl JsonProviderError {
+    fn into_message(self) -> String {
+        match self {
+            Self::Provider(message) | Self::MalformedResponse(message) => message,
+        }
+    }
+}
+
+fn provider_json_result(
+    provider_name: &str,
+    events: &ProviderEventSink,
+    kind: &str,
+    result: Result<Value, JsonProviderError>,
+) -> Result<Value, RuntimeError> {
+    match result {
+        Ok(response) => Ok(response),
+        Err(JsonProviderError::Provider(message)) => {
+            Err(RuntimeError::provider(provider_name, message))
+        }
+        Err(JsonProviderError::MalformedResponse(message)) => {
+            let started = Instant::now();
+            events.stage_started(ProviderStage::Validate, json!({ "kind": kind }));
+            Err(validation_error(
+                provider_name,
+                events,
+                kind,
+                started,
+                message,
+            ))
+        }
+    }
+}
+
+fn validate_with_events(
+    provider_name: &str,
+    events: &ProviderEventSink,
+    kind: &str,
+    validate: impl FnOnce() -> Result<Value, String>,
+) -> Result<(), RuntimeError> {
+    let started = Instant::now();
+    events.stage_started(ProviderStage::Validate, json!({ "kind": kind }));
+    match validate() {
+        Ok(metadata) => {
+            events.stage_completed(ProviderStage::Validate, elapsed_ms(started), metadata);
+            Ok(())
+        }
+        Err(message) => Err(validation_error(
+            provider_name,
+            events,
+            kind,
+            started,
+            message,
+        )),
+    }
+}
+
+fn validation_error(
+    provider_name: &str,
+    events: &ProviderEventSink,
+    kind: &str,
+    started: Instant,
+    message: String,
+) -> RuntimeError {
+    let error = RuntimeError::provider(provider_name, message);
+    events.stage_failed(
+        ProviderStage::Validate,
+        elapsed_ms(started),
+        error.to_string(),
+        json!({ "kind": kind }),
+    );
+    error
+}
+
+fn validate_openai_chat_response(response: &Value) -> Result<Value, String> {
+    let choices = response
+        .get("choices")
+        .and_then(Value::as_array)
+        .filter(|choices| !choices.is_empty())
+        .ok_or_else(|| "chat response has no choices".to_string())?;
+    let message = choices[0]
+        .get("message")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "chat response first choice has no assistant message".to_string())?;
+    if let Some(role) = message.get("role") {
+        if role.as_str() != Some("assistant") {
+            return Err("chat response first message is not from the assistant".to_string());
+        }
+    }
+    let content = message.get("content");
+    if let Some(content) = content {
+        if !matches!(content, Value::Null | Value::String(_) | Value::Array(_)) {
+            return Err("chat response assistant content has an invalid type".to_string());
+        }
+    }
+    let tool_calls = message.get("tool_calls");
+    if tool_calls.is_some_and(|calls| !calls.is_array()) {
+        return Err("chat response assistant tool_calls is not an array".to_string());
+    }
+    let function_call = message.get("function_call");
+    if function_call.is_some_and(|call| !call.is_object() && !call.is_null()) {
+        return Err("chat response assistant function_call is not an object".to_string());
+    }
+    if content.is_none() && tool_calls.is_none() && function_call.is_none() {
+        return Err("chat response assistant message has no content or tool calls".to_string());
+    }
+    Ok(json!({
+        "kind": "chat",
+        "choices": choices.len(),
+        "toolCalls": tool_calls.and_then(Value::as_array).map_or(0, Vec::len),
+    }))
+}
+
+fn validate_openai_embedding_response(response: &Value) -> Result<Value, String> {
+    let rows = response
+        .get("data")
+        .and_then(Value::as_array)
+        .filter(|rows| !rows.is_empty())
+        .ok_or_else(|| "embedding response has no data rows".to_string())?;
+    let mut dimensions = None;
+    let mut encoding = None;
+    for (index, row) in rows.iter().enumerate() {
+        let embedding = row
+            .get("embedding")
+            .ok_or_else(|| format!("embedding row {index} has no vector"))?;
+        let (row_dimensions, row_encoding) = if let Some(values) = embedding.as_array() {
+            if values.is_empty()
+                || values
+                    .iter()
+                    .any(|value| !value.as_f64().is_some_and(f64::is_finite))
+            {
+                return Err(format!(
+                    "embedding row {index} has an invalid numeric vector"
+                ));
+            }
+            (values.len(), "float")
+        } else if let Some(encoded) = embedding.as_str() {
+            let row_dimensions = decode_base64_float32_dimensions(encoded)
+                .map_err(|message| format!("embedding row {index} {message}"))?;
+            (row_dimensions, "base64")
+        } else {
+            return Err(format!("embedding row {index} has an invalid vector type"));
+        };
+        if let Some(expected_dimensions) = dimensions {
+            if expected_dimensions != row_dimensions {
+                return Err(format!(
+                    "embedding row {index} changed dimension from {expected_dimensions} to {row_dimensions}"
+                ));
+            }
+        } else {
+            dimensions = Some(row_dimensions);
+        }
+        if let Some(expected_encoding) = encoding {
+            if expected_encoding != row_encoding {
+                return Err(format!(
+                    "embedding row {index} changed encoding from {expected_encoding} to {row_encoding}"
+                ));
+            }
+        } else {
+            encoding = Some(row_encoding);
+        }
+    }
+    Ok(json!({
+        "kind": "embedding",
+        "rows": rows.len(),
+        "dimensions": dimensions,
+        "encoding": encoding,
+    }))
+}
+
+fn validate_transcription_response(response: &Value) -> Result<Value, String> {
+    let text = response
+        .get("text")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "transcription response text is missing or is not a string".to_string())?;
+    Ok(json!({ "kind": "transcription", "characters": text.chars().count() }))
+}
+
+fn decode_base64_float32_dimensions(encoded: &str) -> Result<usize, String> {
+    let mut bytes = encoded.as_bytes().to_vec();
+    if bytes.is_empty() || bytes.len() % 4 == 1 {
+        return Err("has invalid base64 float32 data".to_string());
+    }
+    match bytes.len() % 4 {
+        2 => bytes.extend_from_slice(b"=="),
+        3 => bytes.push(b'='),
+        _ => {}
+    }
+    let mut decoded = Vec::with_capacity(bytes.len() / 4 * 3);
+    let chunks = bytes.len() / 4;
+    for (chunk_index, chunk) in bytes.chunks_exact(4).enumerate() {
+        let last = chunk_index + 1 == chunks;
+        let padding = chunk.iter().rev().take_while(|byte| **byte == b'=').count();
+        if padding > 2 || (!last && padding > 0) || chunk[..4 - padding].contains(&b'=') {
+            return Err("has invalid base64 padding".to_string());
+        }
+        let a = base64_value(chunk[0])?;
+        let b = base64_value(chunk[1])?;
+        let c = if padding >= 2 {
+            0
+        } else {
+            base64_value(chunk[2])?
+        };
+        let d = if padding >= 1 {
+            0
+        } else {
+            base64_value(chunk[3])?
+        };
+        if (padding == 2 && b & 0x0f != 0) || (padding == 1 && c & 0x03 != 0) {
+            return Err("has non-canonical base64 padding".to_string());
+        }
+        decoded.push((a << 2) | (b >> 4));
+        if padding < 2 {
+            decoded.push((b << 4) | (c >> 2));
+        }
+        if padding == 0 {
+            decoded.push((c << 6) | d);
+        }
+    }
+    if decoded.is_empty() || decoded.len() % std::mem::size_of::<f32>() != 0 {
+        return Err("does not contain whole float32 values".to_string());
+    }
+    for bytes in decoded.chunks_exact(4) {
+        let value = f32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+        if !value.is_finite() {
+            return Err("contains a non-finite float32 value".to_string());
+        }
+    }
+    Ok(decoded.len() / std::mem::size_of::<f32>())
+}
+
+fn base64_value(byte: u8) -> Result<u8, String> {
+    match byte {
+        b'A'..=b'Z' => Ok(byte - b'A'),
+        b'a'..=b'z' => Ok(byte - b'a' + 26),
+        b'0'..=b'9' => Ok(byte - b'0' + 52),
+        b'+' | b'-' => Ok(62),
+        b'/' | b'_' => Ok(63),
+        _ => Err("has invalid base64 characters".to_string()),
+    }
+}
+
+fn elapsed_ms(started: Instant) -> u64 {
+    u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
+}
+
 fn provider_url(base_url: &str, path: &str) -> Result<String, String> {
     let base_url = base_url.trim();
     if !(base_url.starts_with("http://") || base_url.starts_with("https://")) {
         return Err("provider URL must use http or https".to_string());
     }
     Ok(format!("{}/{}", base_url.trim_end_matches('/'), path))
+}
+
+fn provider_http_client(timeout: Option<std::time::Duration>) -> Result<reqwest::Client, String> {
+    let mut builder = reqwest::Client::builder().redirect(reqwest::redirect::Policy::none());
+    if let Some(timeout) = timeout {
+        builder = builder.timeout(timeout);
+    }
+    builder
+        .build()
+        .map_err(|error| format!("provider client could not be created: {error}"))
 }
 
 fn authorized(builder: reqwest::RequestBuilder, token: Option<&str>) -> reqwest::RequestBuilder {
@@ -587,17 +938,23 @@ fn authorized(builder: reqwest::RequestBuilder, token: Option<&str>) -> reqwest:
 async fn decode_json_response(
     response: reqwest::Response,
     operation: &str,
-) -> Result<Value, String> {
+) -> Result<Value, JsonProviderError> {
     let status = response.status();
-    let body = response
-        .bytes()
-        .await
-        .map_err(|error| format!("{operation} response could not be read: {error}"))?;
+    let body = response.bytes().await.map_err(|error| {
+        JsonProviderError::Provider(format!("{operation} response could not be read: {error}"))
+    })?;
     if !status.is_success() {
-        return Err(provider_error(operation, status.as_u16(), &body));
+        return Err(JsonProviderError::Provider(provider_error(
+            operation,
+            status.as_u16(),
+            &body,
+        )));
     }
-    serde_json::from_slice(&body)
-        .map_err(|error| format!("{operation} response is not valid JSON: {error}"))
+    serde_json::from_slice(&body).map_err(|error| {
+        JsonProviderError::MalformedResponse(format!(
+            "{operation} response is not valid JSON: {error}"
+        ))
+    })
 }
 
 async fn decode_binary_response(
@@ -690,9 +1047,20 @@ fn resample_linear(input: &[f32], from_hz: u32, to_hz: u32) -> Vec<f32> {
 
 #[cfg(test)]
 mod tests {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::sync::{Arc, Mutex};
+    use std::thread;
+
     use serde_json::json;
 
-    use super::{persona_prompt, provider_url, resolve_local_model_path};
+    use super::{
+        openai_chat_completion, persona_prompt, probe_openai_compatible, provider_json_result,
+        provider_url, resolve_local_model_path, validate_openai_chat_response,
+        validate_openai_embedding_response, validate_transcription_response, validate_with_events,
+        JsonProviderError,
+    };
+    use crate::{ProviderEvent, ProviderEventSink, ProviderStage, RuntimeError};
 
     #[test]
     fn builds_a_portable_persona_prompt() {
@@ -721,11 +1089,288 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn provider_requests_do_not_follow_redirects() {
+        let (base_url, server) = redirecting_provider();
+
+        let error = openai_chat_completion(
+            &base_url,
+            Some("test-token"),
+            "local-model",
+            &json!({"messages": [{"role": "user", "content": "hello"}]}),
+            &json!({}),
+        )
+        .await
+        .unwrap_err();
+
+        server.join().unwrap();
+        assert!(error.contains("307"), "unexpected provider error: {error}");
+    }
+
+    #[tokio::test]
+    async fn provider_probes_do_not_follow_redirects() {
+        let (base_url, server) = redirecting_provider();
+
+        let error = probe_openai_compatible(&base_url, Some("test-token"))
+            .await
+            .unwrap_err();
+
+        server.join().unwrap();
+        assert!(error.contains("307"), "unexpected probe error: {error}");
+    }
+
+    fn redirecting_provider() -> (String, thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0_u8; 4096];
+            let _ = stream.read(&mut request);
+            stream
+                .write_all(
+                    b"HTTP/1.1 307 Temporary Redirect\r\nLocation: http://127.0.0.1:9/exfil\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                )
+                .unwrap();
+        });
+        (format!("http://{address}/v1"), server)
+    }
+
     #[test]
     fn keeps_local_models_inside_the_vifu_model_directory() {
         let path =
             resolve_local_model_path(std::path::Path::new("/tmp/.vifu"), "tiny.bin").unwrap();
         assert_eq!(path, std::path::Path::new("/tmp/.vifu/models/tiny.bin"));
         assert!(resolve_local_model_path(std::path::Path::new("/tmp/.vifu"), "../key").is_err());
+    }
+
+    #[test]
+    fn validates_openai_chat_assistant_text() {
+        let metadata = validate_openai_chat_response(&json!({
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": [{ "type": "text", "text": "Ready." }]
+                }
+            }]
+        }))
+        .unwrap();
+
+        assert_eq!(
+            metadata,
+            json!({ "kind": "chat", "choices": 1, "toolCalls": 0 })
+        );
+    }
+
+    #[test]
+    fn accepts_empty_and_tool_call_only_chat_outputs() {
+        let empty = validate_openai_chat_response(&json!({
+            "choices": [{ "message": { "role": "assistant", "content": "" } }]
+        }))
+        .unwrap();
+        let tool_call = validate_openai_chat_response(&json!({
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": null,
+                    "tool_calls": [{
+                        "id": "call-1",
+                        "type": "function",
+                        "function": { "name": "move", "arguments": "{}" }
+                    }]
+                }
+            }]
+        }))
+        .unwrap();
+
+        assert_eq!(empty["toolCalls"], 0);
+        assert_eq!(tool_call["toolCalls"], 1);
+    }
+
+    #[test]
+    fn validates_consistent_numeric_embedding_rows() {
+        let metadata = validate_openai_embedding_response(&json!({
+            "data": [
+                { "embedding": [1, 2.5] },
+                { "embedding": [-3, 4] }
+            ]
+        }))
+        .unwrap();
+
+        assert_eq!(
+            metadata,
+            json!({
+                "kind": "embedding",
+                "rows": 2,
+                "dimensions": 2,
+                "encoding": "float"
+            })
+        );
+    }
+
+    #[test]
+    fn validates_consistent_base64_float32_embedding_rows() {
+        let metadata = validate_openai_embedding_response(&json!({
+            "data": [
+                { "embedding": "AACAPwAAAMA=" },
+                { "embedding": "AACAPwAAAMA=" }
+            ]
+        }))
+        .unwrap();
+
+        assert_eq!(metadata["dimensions"], 2);
+        assert_eq!(metadata["encoding"], "base64");
+    }
+
+    #[test]
+    fn rejects_embedding_rows_with_different_dimensions() {
+        let error = validate_openai_embedding_response(&json!({
+            "data": [
+                { "embedding": [1, 2] },
+                { "embedding": [3] }
+            ]
+        }))
+        .unwrap_err();
+
+        assert_eq!(error, "embedding row 1 changed dimension from 2 to 1");
+    }
+
+    #[test]
+    fn rejects_malformed_base64_embedding_vectors() {
+        let error = validate_openai_embedding_response(&json!({
+            "data": [{ "embedding": "not base64" }]
+        }))
+        .unwrap_err();
+
+        assert!(error.contains("invalid base64"));
+    }
+
+    #[test]
+    fn accepts_silence_and_rejects_transcription_without_a_text_field() {
+        assert_eq!(
+            validate_transcription_response(&json!({ "text": "" })).unwrap(),
+            json!({ "kind": "transcription", "characters": 0 })
+        );
+        let error = validate_transcription_response(&json!({})).unwrap_err();
+
+        assert_eq!(
+            error,
+            "transcription response text is missing or is not a string"
+        );
+    }
+
+    #[test]
+    fn malformed_chat_emits_validate_failed_and_returns_provider_error() {
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let event_capture = Arc::clone(&captured);
+        let events = ProviderEventSink::from_fn(move |event| {
+            event_capture.lock().unwrap().push(event);
+        });
+
+        let error = validate_with_events("remote", &events, "chat", || {
+            validate_openai_chat_response(&json!({
+                "choices": [{ "message": { "role": "assistant", "content": 42 } }]
+            }))
+        })
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            RuntimeError::Provider { ref provider, ref message }
+                if provider == "remote"
+                    && message == "chat response assistant content has an invalid type"
+        ));
+        let captured = captured.lock().unwrap();
+        assert_eq!(captured.len(), 2);
+        assert!(matches!(
+            captured[0],
+            ProviderEvent::StageStarted {
+                stage: ProviderStage::Validate,
+                ..
+            }
+        ));
+        assert!(matches!(
+            captured[1],
+            ProviderEvent::StageFailed {
+                stage: ProviderStage::Validate,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn malformed_embedding_emits_validate_failed_and_returns_provider_error() {
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let event_capture = Arc::clone(&captured);
+        let events = ProviderEventSink::from_fn(move |event| {
+            event_capture.lock().unwrap().push(event);
+        });
+
+        let error = validate_with_events("remote", &events, "embedding", || {
+            validate_openai_embedding_response(&json!({
+                "data": [
+                    { "embedding": [1, 2] },
+                    { "embedding": [3] }
+                ]
+            }))
+        })
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            RuntimeError::Provider { ref provider, ref message }
+                if provider == "remote"
+                    && message == "embedding row 1 changed dimension from 2 to 1"
+        ));
+        let captured = captured.lock().unwrap();
+        assert_eq!(captured.len(), 2);
+        assert!(matches!(
+            captured[0],
+            ProviderEvent::StageStarted {
+                stage: ProviderStage::Validate,
+                ..
+            }
+        ));
+        assert!(matches!(
+            captured[1],
+            ProviderEvent::StageFailed {
+                stage: ProviderStage::Validate,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn invalid_json_output_emits_validate_failed() {
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let event_capture = Arc::clone(&captured);
+        let events = ProviderEventSink::from_fn(move |event| {
+            event_capture.lock().unwrap().push(event);
+        });
+
+        let error = provider_json_result(
+            "remote",
+            &events,
+            "chat",
+            Err(JsonProviderError::MalformedResponse(
+                "chat completion response is not valid JSON".to_string(),
+            )),
+        )
+        .unwrap_err();
+
+        assert!(matches!(error, RuntimeError::Provider { .. }));
+        let captured = captured.lock().unwrap();
+        assert!(matches!(
+            captured.as_slice(),
+            [
+                ProviderEvent::StageStarted {
+                    stage: ProviderStage::Validate,
+                    ..
+                },
+                ProviderEvent::StageFailed {
+                    stage: ProviderStage::Validate,
+                    ..
+                }
+            ]
+        ));
     }
 }

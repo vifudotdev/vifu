@@ -317,7 +317,7 @@ function ApiReferenceDialog({ baseUrl }: { baseUrl: string }) {
             </section>
             <section>
               <h3>Tracing</h3>
-              <p>Every accepted call creates a trace. Use the project Logs page to inspect its request, response, latency, and error details.</p>
+              <p>Every accepted call creates a trace. Use the project Traces page to inspect its observations, input, output, latency, scores, and errors.</p>
             </section>
           </div>
         </div>

@@ -16,8 +16,8 @@ pub use application::{
     AgentDefinition, AgentProvider, CancellationToken, EffectExecution, EndpointDefinition,
     InvocationData, InvocationEvent, InvocationEventKind, InvocationHandle, InvocationInput,
     InvocationOutput, InvocationPoll, InvocationStatus, InvocationTraceEvent, MemoryRuntimeStore,
-    ProviderEventSink, ProviderFuture, ProviderRequest, ProviderResponse, RuntimeError,
-    RuntimeSession, RuntimeStore, VifuRuntime,
+    ProviderEvent, ProviderEventSink, ProviderFuture, ProviderRequest, ProviderResponse,
+    ProviderStage, RuntimeError, RuntimeSession, RuntimeStore, VifuRuntime,
 };
 pub use bridge::{
     RuntimeBridge, RuntimeBridgeCancelParams, RuntimeBridgeError, RuntimeBridgeHelloParams,
@@ -65,11 +65,11 @@ pub mod prelude {
         EffectRequestQueue, EffectResult, EffectResultQueue, EndpointDefinition, HeadlessRuntime,
         HttpCapabilityProvider, HttpCapabilityRoute, InvocationData, InvocationEvent,
         InvocationEventKind, InvocationHandle, InvocationInput, InvocationOutput, InvocationPoll,
-        InvocationStatus, InvocationTraceEvent, MemoryRuntimeStore, ProjectSettings,
+        InvocationStatus, InvocationTraceEvent, MemoryRuntimeStore, ProjectSettings, ProviderEvent,
         ProviderEventSink, ProviderFuture, ProviderRequest, ProviderRequirement, ProviderResponse,
-        RuntimeAdvance, RuntimeBridge, RuntimeBridgeError, RuntimeCommand, RuntimeCommandQueue,
-        RuntimeError, RuntimeEvent, RuntimeEventQueue, RuntimeManifest, RuntimeRelease,
-        RuntimeSchedule, RuntimeSession, RuntimeSnapshot, RuntimeState, RuntimeStore,
-        RuntimeTraceRecord, VifuRuntime, VifuRuntimePlugin,
+        ProviderStage, RuntimeAdvance, RuntimeBridge, RuntimeBridgeError, RuntimeCommand,
+        RuntimeCommandQueue, RuntimeError, RuntimeEvent, RuntimeEventQueue, RuntimeManifest,
+        RuntimeRelease, RuntimeSchedule, RuntimeSession, RuntimeSnapshot, RuntimeState,
+        RuntimeStore, RuntimeTraceRecord, VifuRuntime, VifuRuntimePlugin,
     };
 }

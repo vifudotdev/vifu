@@ -35,7 +35,7 @@
   "scripts": {
     "build": "node scripts/build.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "vitest run"
+    "test": "vitest run --root ../.. packages/runtime-console"
   },
   "peerDependencies": {
     "react": ">=18.0.0",

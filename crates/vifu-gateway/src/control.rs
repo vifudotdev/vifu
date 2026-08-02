@@ -1,10 +1,38 @@
+use std::fmt;
+use std::time::Duration;
+
+use crate::protocol::TraceTelemetryBatch;
+use reqwest::StatusCode;
 use url::Url;
 use uuid::Uuid;
 use vifu_runtime::{RuntimeManifest, RuntimeRelease, RuntimeTraceRecord};
 
 use serde::{Deserialize, Serialize};
 
+use crate::optimization::RuntimeComparisonUpload;
 use crate::relay::agent_gateway_websocket_url;
+
+const TRACE_OBSERVATION_UPLOAD_TIMEOUT: Duration = Duration::from_secs(2);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum TraceObservationUploadError {
+    Retryable(String),
+    Permanent(String),
+}
+
+impl TraceObservationUploadError {
+    pub(crate) fn is_retryable(&self) -> bool {
+        matches!(self, Self::Retryable(_))
+    }
+}
+
+impl fmt::Display for TraceObservationUploadError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Retryable(message) | Self::Permanent(message) => formatter.write_str(message),
+        }
+    }
+}
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -47,6 +75,8 @@ pub struct RuntimeDeploymentConfiguration {
     pub project_slug: String,
     pub project_name: String,
     pub is_primary: bool,
+    #[serde(default)]
+    pub binding_ids: Vec<Uuid>,
     pub policies: RuntimeDeploymentPolicies,
     pub release: Option<RuntimeRelease>,
 }
@@ -63,6 +93,18 @@ pub struct RuntimeDeploymentPolicies {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct UploadedRuntimeTraces {
     accepted_trace_ids: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct UploadedRuntimeComparison {
+    comparison_id: Uuid,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct UploadedRuntimeTraceObservations {
+    accepted_request_id: Uuid,
 }
 
 #[derive(Serialize)]
@@ -98,6 +140,8 @@ pub struct RuntimeControlClient {
     client: reqwest::Client,
     config_url: Url,
     traces_url: Url,
+    trace_observations_url: Url,
+    comparisons_url: Url,
     release_url: Url,
     credential: String,
 }
@@ -107,11 +151,15 @@ impl RuntimeControlClient {
         agent_gateway_websocket_url(server_url)?;
         let config_url = endpoint_url(server_url, "runtime-config")?;
         let traces_url = endpoint_url(server_url, "runtime-traces")?;
+        let trace_observations_url = endpoint_url(server_url, "runtime-trace-observations")?;
+        let comparisons_url = endpoint_url(server_url, "runtime-comparisons")?;
         let release_url = endpoint_url(server_url, "runtime-releases/bootstrap")?;
         Ok(Self {
             client: reqwest::Client::new(),
             config_url,
             traces_url,
+            trace_observations_url,
+            comparisons_url,
             release_url,
             credential: credential.into(),
         })
@@ -169,6 +217,84 @@ impl RuntimeControlClient {
         Ok(response.accepted_trace_ids)
     }
 
+    pub async fn upload_trace_observations(
+        &self,
+        request_id: Uuid,
+        batch: &TraceTelemetryBatch,
+    ) -> Result<(), String> {
+        self.upload_trace_observations_classified(request_id, batch)
+            .await
+            .map_err(|error| error.to_string())
+    }
+
+    pub(crate) async fn upload_trace_observations_classified(
+        &self,
+        request_id: Uuid,
+        batch: &TraceTelemetryBatch,
+    ) -> Result<(), TraceObservationUploadError> {
+        crate::protocol::validate_trace_telemetry_batch(batch)
+            .map_err(TraceObservationUploadError::Permanent)?;
+        let response = self
+            .client
+            .post(self.trace_observations_url.clone())
+            .bearer_auth(&self.credential)
+            .timeout(TRACE_OBSERVATION_UPLOAD_TIMEOUT)
+            .json(&serde_json::json!({
+                "requestId": request_id,
+                "events": batch.events,
+                "droppedEvents": batch.dropped_events,
+                "rootInputSummary": batch.root_input_summary,
+                "rootOutputSummary": batch.root_output_summary,
+            }))
+            .send()
+            .await
+            .map_err(|error| {
+                TraceObservationUploadError::Retryable(format!(
+                    "runtime trace observation upload failed: {error}"
+                ))
+            })?;
+        let status = response.status();
+        if !status.is_success() {
+            let message = format!(
+                "server rejected runtime trace observation upload (HTTP {})",
+                status.as_u16()
+            );
+            return Err(classify_trace_observation_status(status, message));
+        }
+        let response = response
+            .json::<UploadedRuntimeTraceObservations>()
+            .await
+            .map_err(|error| {
+                TraceObservationUploadError::Permanent(format!(
+                    "server returned invalid runtime trace observation upload: {error}"
+                ))
+            })?;
+        validate_trace_observation_ack(request_id, response)
+            .map_err(TraceObservationUploadError::Permanent)
+    }
+
+    pub async fn upload_comparison(
+        &self,
+        comparison: &RuntimeComparisonUpload,
+    ) -> Result<Uuid, String> {
+        comparison.validate()?;
+        let response = self
+            .client
+            .post(self.comparisons_url.clone())
+            .bearer_auth(&self.credential)
+            .json(comparison)
+            .send()
+            .await
+            .map_err(|error| format!("runtime comparison upload failed: {error}"))?;
+        let response =
+            decode_response::<UploadedRuntimeComparison>(response, "runtime comparison upload")
+                .await?;
+        if response.comparison_id != comparison.id {
+            return Err("server returned a different runtime comparison id".to_string());
+        }
+        Ok(response.comparison_id)
+    }
+
     pub async fn bootstrap_runtime_release(
         &self,
         deployment_id: Uuid,
@@ -198,6 +324,31 @@ impl RuntimeControlClient {
         };
         release.validate().map_err(|error| error.to_string())?;
         Ok(release)
+    }
+}
+
+fn classify_trace_observation_status(
+    status: StatusCode,
+    message: String,
+) -> TraceObservationUploadError {
+    if status == StatusCode::REQUEST_TIMEOUT
+        || status == StatusCode::TOO_MANY_REQUESTS
+        || status.is_server_error()
+    {
+        TraceObservationUploadError::Retryable(message)
+    } else {
+        TraceObservationUploadError::Permanent(message)
+    }
+}
+
+fn validate_trace_observation_ack(
+    request_id: Uuid,
+    response: UploadedRuntimeTraceObservations,
+) -> Result<(), String> {
+    if response.accepted_request_id == request_id {
+        Ok(())
+    } else {
+        Err("server acknowledged a different runtime trace observation request".to_string())
     }
 }
 
@@ -244,11 +395,59 @@ mod tests {
             "https://runtime.example.com/api/v1/agent-gateway/runtime-config"
         );
         assert_eq!(
+            endpoint_url("https://runtime.example.com/api/", "runtime-comparisons")
+                .unwrap()
+                .as_str(),
+            "https://runtime.example.com/api/v1/agent-gateway/runtime-comparisons"
+        );
+        assert_eq!(
             server_endpoint_url("https://runtime.example.com/api/", "v1/guest/bootstrap")
                 .unwrap()
                 .as_str(),
             "https://runtime.example.com/api/v1/guest/bootstrap"
         );
+    }
+
+    #[test]
+    fn trace_observation_ack_must_match_the_uploaded_request() {
+        let request_id = Uuid::new_v4();
+        assert!(validate_trace_observation_ack(
+            request_id,
+            UploadedRuntimeTraceObservations {
+                accepted_request_id: request_id,
+            },
+        )
+        .is_ok());
+        assert!(validate_trace_observation_ack(
+            request_id,
+            UploadedRuntimeTraceObservations {
+                accepted_request_id: Uuid::new_v4(),
+            },
+        )
+        .unwrap_err()
+        .contains("different"));
+    }
+
+    #[test]
+    fn trace_observation_failures_only_retry_transient_statuses() {
+        for status in [
+            StatusCode::REQUEST_TIMEOUT,
+            StatusCode::TOO_MANY_REQUESTS,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            StatusCode::SERVICE_UNAVAILABLE,
+        ] {
+            assert!(classify_trace_observation_status(status, "failed".to_string()).is_retryable());
+        }
+        for status in [
+            StatusCode::BAD_REQUEST,
+            StatusCode::UNAUTHORIZED,
+            StatusCode::FORBIDDEN,
+            StatusCode::PAYLOAD_TOO_LARGE,
+        ] {
+            assert!(
+                !classify_trace_observation_status(status, "failed".to_string()).is_retryable()
+            );
+        }
     }
 
     #[test]
@@ -263,6 +462,7 @@ mod tests {
                     "projectSlug": "moon-train",
                     "projectName": "Moon Train",
                     "isPrimary": true,
+                    "bindingIds": [],
                     "policies": {
                         "configSync": true,
                         "traceMode": "summary",

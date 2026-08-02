@@ -5,6 +5,7 @@ use std::num::NonZeroU32;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
+use std::time::Instant;
 
 use llama_cpp_2::context::params::{LlamaContextParams, LlamaPoolingType};
 use llama_cpp_2::context::LlamaContext;
@@ -24,7 +25,7 @@ use serde_json::{json, Map, Value};
 use tokio::sync::Semaphore;
 use vifu_runtime::{
     AgentProvider, CancellationToken, InvocationData, ProviderEventSink, ProviderFuture,
-    ProviderRequest, ProviderResponse, RuntimeError,
+    ProviderRequest, ProviderResponse, ProviderStage, RuntimeError,
 };
 
 const DEFAULT_CONTEXT_SIZE: u32 = 4_096;
@@ -422,9 +423,28 @@ impl AgentProvider for LlamaProvider {
         let default_max_tokens = self.default_max_tokens;
         let multimodal = self.multimodal.clone();
         Box::pin(async move {
-            let permit = concurrency
-                .try_acquire_owned()
-                .map_err(|_error| provider_error("local model concurrency limit reached"))?;
+            let queue_started = Instant::now();
+            events.stage_started(ProviderStage::Queue, Value::Null);
+            let permit = match concurrency.try_acquire_owned() {
+                Ok(permit) => {
+                    events.stage_completed(
+                        ProviderStage::Queue,
+                        elapsed_ms(queue_started),
+                        Value::Null,
+                    );
+                    permit
+                }
+                Err(_error) => {
+                    let error = provider_error("local model concurrency limit reached");
+                    events.stage_failed(
+                        ProviderStage::Queue,
+                        elapsed_ms(queue_started),
+                        error.to_string(),
+                        Value::Null,
+                    );
+                    return Err(error);
+                }
+            };
             let task = tokio::task::spawn_blocking(move || {
                 let _permit = permit;
                 match request.capability.as_str() {
@@ -440,9 +460,14 @@ impl AgentProvider for LlamaProvider {
                         &cancellation,
                         &events,
                     ),
-                    "embedding" => {
-                        generate_embeddings(&backend, &model, context_size, request, &cancellation)
-                    }
+                    "embedding" => generate_embeddings(
+                        &backend,
+                        &model,
+                        context_size,
+                        request,
+                        &cancellation,
+                        &events,
+                    ),
                     capability => Err(provider_error(&format!(
                         "capability {capability} is not supported"
                     ))),
@@ -650,7 +675,14 @@ fn generate_chat(
         )
         .map_err(|_error| provider_error("model context could not be created"))?;
     let (input_tokens, mut position) = if image_buffers.is_empty() {
-        evaluate_text_prompt(model, &mut context, context_size, max_tokens, &prompt)?
+        evaluate_text_prompt(
+            model,
+            &mut context,
+            context_size,
+            max_tokens,
+            &prompt,
+            events,
+        )?
     } else {
         let multimodal = multimodal.ok_or_else(|| {
             provider_error("local text model does not accept image message content")
@@ -660,9 +692,12 @@ fn generate_chat(
             context_size,
             max_tokens,
             multimodal,
-            &prompt,
-            &image_buffers,
+            MultimodalPromptInput {
+                text: &prompt,
+                images: &image_buffers,
+            },
             cancellation,
+            events,
         )?
     };
     let mut batch = LlamaBatch::new(1, 1);
@@ -692,42 +727,90 @@ fn generate_chat(
     let mut generated_tokens = 0_u32;
     let mut stopped_on_eog = false;
     let mut stopped_on_valid_json = false;
-    while generated_tokens < max_tokens {
-        if cancellation.is_cancelled() {
-            return Err(RuntimeError::Cancelled);
+    let decode_started = Instant::now();
+    let mut first_token_observed = false;
+    let mut first_token_ms = None;
+    events.stage_started(ProviderStage::FirstToken, Value::Null);
+    events.stage_started(ProviderStage::Decode, Value::Null);
+    let decode_result = (|| {
+        while generated_tokens < max_tokens {
+            if cancellation.is_cancelled() {
+                return Err(RuntimeError::Cancelled);
+            }
+            let token = sampler.sample(&context, -1);
+            if model.is_eog_token(token) {
+                stopped_on_eog = true;
+                break;
+            }
+            let piece = model
+                .token_to_piece(token, &mut decoder, true, None)
+                .map_err(|_error| provider_error("model output could not be decoded"))?;
+            if !first_token_observed {
+                first_token_observed = true;
+                let completion_start_ms = elapsed_ms(decode_started);
+                first_token_ms = Some(completion_start_ms);
+                events.stage_completed(ProviderStage::FirstToken, completion_start_ms, Value::Null);
+            }
+            if let Some(piece) = visible_output.push(&piece) {
+                output.push_str(&piece);
+                events.output_delta(InvocationData::Json(Value::String(piece)));
+            }
+            if structured_output.is_some() && structured_json_is_complete(&output) {
+                generated_tokens += 1;
+                stopped_on_valid_json = true;
+                break;
+            }
+            batch.clear();
+            batch
+                .add(token, position, &[0], true)
+                .map_err(|_error| provider_error("model output could not be prepared"))?;
+            context
+                .decode(&mut batch)
+                .map_err(|_error| provider_error("model output inference failed"))?;
+            position += 1;
+            generated_tokens += 1;
         }
-        let token = sampler.sample(&context, -1);
-        if model.is_eog_token(token) {
-            stopped_on_eog = true;
-            break;
-        }
-        let piece = model
-            .token_to_piece(token, &mut decoder, true, None)
-            .map_err(|_error| provider_error("model output could not be decoded"))?;
-        if let Some(piece) = visible_output.push(&piece) {
+        if let Some(piece) = visible_output.finish() {
             output.push_str(&piece);
             events.output_delta(InvocationData::Json(Value::String(piece)));
         }
-        if structured_output.is_some() && structured_json_is_complete(&output) {
-            generated_tokens += 1;
-            stopped_on_valid_json = true;
-            break;
+        Ok::<_, RuntimeError>(())
+    })();
+    if let Err(error) = decode_result {
+        if !first_token_observed {
+            events.stage_failed(
+                ProviderStage::FirstToken,
+                elapsed_ms(decode_started),
+                error.to_string(),
+                Value::Null,
+            );
         }
-        batch.clear();
-        batch
-            .add(token, position, &[0], true)
-            .map_err(|_error| provider_error("model output could not be prepared"))?;
-        context
-            .decode(&mut batch)
-            .map_err(|_error| provider_error("model output inference failed"))?;
-        position += 1;
-        generated_tokens += 1;
+        events.stage_failed(
+            ProviderStage::Decode,
+            elapsed_ms(decode_started),
+            error.to_string(),
+            json!({ "outputTokens": generated_tokens }),
+        );
+        return Err(error);
     }
-    if let Some(piece) = visible_output.finish() {
-        output.push_str(&piece);
-        events.output_delta(InvocationData::Json(Value::String(piece)));
+    if !first_token_observed {
+        events.stage_completed(
+            ProviderStage::FirstToken,
+            elapsed_ms(decode_started),
+            json!({ "empty": true }),
+        );
     }
+    events.stage_completed(
+        ProviderStage::Decode,
+        elapsed_ms(decode_started),
+        json!({ "outputTokens": generated_tokens }),
+    );
 
+    let validate_started = Instant::now();
+    events.stage_started(
+        ProviderStage::Validate,
+        json!({ "structured": structured_output.is_some() }),
+    );
     let structured = structured_output
         .as_ref()
         .map(|_format| {
@@ -735,7 +818,26 @@ fn generate_chat(
                 provider_error("structured response ended before producing valid JSON")
             })
         })
-        .transpose()?;
+        .transpose();
+    let structured = match structured {
+        Ok(structured) => {
+            events.stage_completed(
+                ProviderStage::Validate,
+                elapsed_ms(validate_started),
+                json!({ "structured": structured_output.is_some() }),
+            );
+            structured
+        }
+        Err(error) => {
+            events.stage_failed(
+                ProviderStage::Validate,
+                elapsed_ms(validate_started),
+                error.to_string(),
+                json!({ "structured": true }),
+            );
+            return Err(error);
+        }
+    };
     let finish_reason = if stopped_on_eog || stopped_on_valid_json {
         "stop"
     } else {
@@ -788,6 +890,7 @@ fn generate_chat(
             "outputTokens": generated_tokens,
             "imageCount": image_count,
             "finishReason": finish_reason,
+            "completionStartMs": first_token_ms,
         }),
         state: None,
     })
@@ -799,34 +902,92 @@ fn evaluate_text_prompt(
     context_size: NonZeroU32,
     max_tokens: u32,
     prompt: &str,
+    events: &ProviderEventSink,
 ) -> Result<(i32, i32), RuntimeError> {
-    let tokens = model
+    let tokenize_started = Instant::now();
+    events.stage_started(ProviderStage::Tokenize, Value::Null);
+    let tokens = match model
         .str_to_token(prompt, AddBos::Always)
-        .map_err(|_error| provider_error("chat prompt could not be tokenized"))?;
-    if tokens.is_empty() {
-        return Err(provider_error("chat prompt produced no tokens"));
-    }
-    ensure_prompt_fits_context(tokens.len(), context_size, max_tokens)?;
-    let prompt_ranges = prompt_chunk_ranges(tokens.len(), context.n_batch())?;
-    let prompt_batch_size = prompt_ranges.first().map_or(1, |range| range.len()).max(1);
-    let mut batch = LlamaBatch::new(prompt_batch_size, 1);
-    for range in prompt_ranges {
-        batch.clear();
-        for (offset, token) in tokens[range.clone()].iter().copied().enumerate() {
-            let absolute_position = range.start + offset;
-            let position = i32::try_from(absolute_position)
-                .map_err(|_error| provider_error("chat prompt is too long"))?;
-            batch
-                .add(token, position, &[0], absolute_position + 1 == tokens.len())
-                .map_err(|_error| provider_error("chat prompt could not be prepared"))?;
+        .map_err(|_error| provider_error("chat prompt could not be tokenized"))
+    {
+        Ok(tokens) => tokens,
+        Err(error) => {
+            events.stage_failed(
+                ProviderStage::Tokenize,
+                elapsed_ms(tokenize_started),
+                error.to_string(),
+                Value::Null,
+            );
+            return Err(error);
         }
-        context
-            .decode(&mut batch)
-            .map_err(|_error| provider_error("chat prompt inference failed"))?;
+    };
+    if tokens.is_empty() {
+        let error = provider_error("chat prompt produced no tokens");
+        events.stage_failed(
+            ProviderStage::Tokenize,
+            elapsed_ms(tokenize_started),
+            error.to_string(),
+            Value::Null,
+        );
+        return Err(error);
     }
-    let input_tokens =
-        i32::try_from(tokens.len()).map_err(|_error| provider_error("chat prompt is too long"))?;
-    Ok((input_tokens, input_tokens))
+    events.stage_completed(
+        ProviderStage::Tokenize,
+        elapsed_ms(tokenize_started),
+        json!({ "inputTokens": tokens.len() }),
+    );
+    let prefill_started = Instant::now();
+    events.stage_started(
+        ProviderStage::Prefill,
+        json!({ "inputTokens": tokens.len() }),
+    );
+    let result = (|| {
+        ensure_prompt_fits_context(tokens.len(), context_size, max_tokens)?;
+        let prompt_ranges = prompt_chunk_ranges(tokens.len(), context.n_batch())?;
+        let prompt_batch_size = prompt_ranges.first().map_or(1, |range| range.len()).max(1);
+        let mut batch = LlamaBatch::new(prompt_batch_size, 1);
+        for range in prompt_ranges {
+            batch.clear();
+            for (offset, token) in tokens[range.clone()].iter().copied().enumerate() {
+                let absolute_position = range.start + offset;
+                let position = i32::try_from(absolute_position)
+                    .map_err(|_error| provider_error("chat prompt is too long"))?;
+                batch
+                    .add(token, position, &[0], absolute_position + 1 == tokens.len())
+                    .map_err(|_error| provider_error("chat prompt could not be prepared"))?;
+            }
+            context
+                .decode(&mut batch)
+                .map_err(|_error| provider_error("chat prompt inference failed"))?;
+        }
+        let input_tokens = i32::try_from(tokens.len())
+            .map_err(|_error| provider_error("chat prompt is too long"))?;
+        Ok::<_, RuntimeError>((input_tokens, input_tokens))
+    })();
+    match result {
+        Ok(result) => {
+            events.stage_completed(
+                ProviderStage::Prefill,
+                elapsed_ms(prefill_started),
+                json!({ "inputTokens": tokens.len() }),
+            );
+            Ok(result)
+        }
+        Err(error) => {
+            events.stage_failed(
+                ProviderStage::Prefill,
+                elapsed_ms(prefill_started),
+                error.to_string(),
+                json!({ "inputTokens": tokens.len() }),
+            );
+            Err(error)
+        }
+    }
+}
+
+struct MultimodalPromptInput<'a> {
+    text: &'a str,
+    images: &'a [Vec<u8>],
 }
 
 fn evaluate_multimodal_prompt(
@@ -834,47 +995,104 @@ fn evaluate_multimodal_prompt(
     context_size: NonZeroU32,
     max_tokens: u32,
     multimodal: &MultimodalRuntime,
-    prompt: &str,
-    image_buffers: &[Vec<u8>],
+    input: MultimodalPromptInput<'_>,
     cancellation: &CancellationToken,
+    events: &ProviderEventSink,
 ) -> Result<(i32, i32), RuntimeError> {
     if cancellation.is_cancelled() {
         return Err(RuntimeError::Cancelled);
     }
-    let mtmd = multimodal
-        .context
-        .lock()
-        .map_err(|_error| provider_error("multimodal context stopped"))?;
-    let bitmaps = image_buffers
-        .iter()
-        .map(|image| {
-            MtmdBitmap::from_buffer(&mtmd, image, false)
-                .map_err(|_error| provider_error("image content could not be decoded"))
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    let bitmap_refs = bitmaps.iter().collect::<Vec<_>>();
-    let chunks = mtmd
-        .tokenize(
-            MtmdInputText {
-                text: prompt.to_string(),
-                add_special: true,
-                parse_special: true,
-            },
-            &bitmap_refs,
-        )
-        .map_err(|_error| provider_error("multimodal prompt could not be tokenized"))?;
-    ensure_prompt_fits_context(chunks.total_tokens(), context_size, max_tokens)?;
-    let input_tokens = i32::try_from(chunks.total_tokens())
-        .map_err(|_error| provider_error("multimodal prompt is too long"))?;
-    let n_batch = i32::try_from(context.n_batch())
-        .map_err(|_error| provider_error("model batch size is unsupported"))?;
-    let next_position = chunks
-        .eval_chunks(&mtmd, context, 0, 0, n_batch, true)
-        .map_err(|_error| provider_error("multimodal prompt inference failed"))?;
-    if cancellation.is_cancelled() {
-        return Err(RuntimeError::Cancelled);
+    let tokenize_started = Instant::now();
+    events.stage_started(
+        ProviderStage::Tokenize,
+        json!({ "imageCount": input.images.len() }),
+    );
+    let tokenization = (|| {
+        let mtmd = multimodal
+            .context
+            .lock()
+            .map_err(|_error| provider_error("multimodal context stopped"))?;
+        let bitmaps = input
+            .images
+            .iter()
+            .map(|image| {
+                MtmdBitmap::from_buffer(&mtmd, image, false)
+                    .map_err(|_error| provider_error("image content could not be decoded"))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let bitmap_refs = bitmaps.iter().collect::<Vec<_>>();
+        let chunks = mtmd
+            .tokenize(
+                MtmdInputText {
+                    text: input.text.to_string(),
+                    add_special: true,
+                    parse_special: true,
+                },
+                &bitmap_refs,
+            )
+            .map_err(|_error| provider_error("multimodal prompt could not be tokenized"))?;
+        Ok::<_, RuntimeError>((mtmd, chunks))
+    })();
+    let (mtmd, chunks) = match tokenization {
+        Ok(tokenization) => {
+            events.stage_completed(
+                ProviderStage::Tokenize,
+                elapsed_ms(tokenize_started),
+                json!({
+                    "imageCount": input.images.len(),
+                    "inputTokens": tokenization.1.total_tokens(),
+                }),
+            );
+            tokenization
+        }
+        Err(error) => {
+            events.stage_failed(
+                ProviderStage::Tokenize,
+                elapsed_ms(tokenize_started),
+                error.to_string(),
+                json!({ "imageCount": input.images.len() }),
+            );
+            return Err(error);
+        }
+    };
+    let prefill_started = Instant::now();
+    events.stage_started(
+        ProviderStage::Prefill,
+        json!({ "inputTokens": chunks.total_tokens() }),
+    );
+    let prefill = (|| {
+        ensure_prompt_fits_context(chunks.total_tokens(), context_size, max_tokens)?;
+        let input_tokens = i32::try_from(chunks.total_tokens())
+            .map_err(|_error| provider_error("multimodal prompt is too long"))?;
+        let n_batch = i32::try_from(context.n_batch())
+            .map_err(|_error| provider_error("model batch size is unsupported"))?;
+        let next_position = chunks
+            .eval_chunks(&mtmd, context, 0, 0, n_batch, true)
+            .map_err(|_error| provider_error("multimodal prompt inference failed"))?;
+        if cancellation.is_cancelled() {
+            return Err(RuntimeError::Cancelled);
+        }
+        Ok::<_, RuntimeError>((input_tokens, next_position))
+    })();
+    match prefill {
+        Ok(result) => {
+            events.stage_completed(
+                ProviderStage::Prefill,
+                elapsed_ms(prefill_started),
+                json!({ "inputTokens": chunks.total_tokens() }),
+            );
+            Ok(result)
+        }
+        Err(error) => {
+            events.stage_failed(
+                ProviderStage::Prefill,
+                elapsed_ms(prefill_started),
+                error.to_string(),
+                json!({ "inputTokens": chunks.total_tokens() }),
+            );
+            Err(error)
+        }
     }
-    Ok((input_tokens, next_position))
 }
 
 fn ensure_prompt_fits_context(
@@ -898,6 +1116,7 @@ fn generate_embeddings(
     context_size: NonZeroU32,
     request: ProviderRequest,
     cancellation: &CancellationToken,
+    events: &ProviderEventSink,
 ) -> Result<ProviderResponse, RuntimeError> {
     let input = match request.data {
         InvocationData::Json(value) => serde_json::from_value::<EmbeddingRequest>(value)
@@ -916,79 +1135,143 @@ fn generate_embeddings(
         }
     };
     let requested_dimensions = input.dimensions;
-    let sequences = embedding_sequences(model, input.input)?;
+    let tokenize_started = Instant::now();
+    events.stage_started(ProviderStage::Tokenize, Value::Null);
+    let sequences = match embedding_sequences(model, input.input) {
+        Ok(sequences) => sequences,
+        Err(error) => {
+            events.stage_failed(
+                ProviderStage::Tokenize,
+                elapsed_ms(tokenize_started),
+                error.to_string(),
+                Value::Null,
+            );
+            return Err(error);
+        }
+    };
     if sequences.is_empty() {
-        return Err(provider_error("at least one embedding input is required"));
+        let error = provider_error("at least one embedding input is required");
+        events.stage_failed(
+            ProviderStage::Tokenize,
+            elapsed_ms(tokenize_started),
+            error.to_string(),
+            Value::Null,
+        );
+        return Err(error);
     }
     if sequences.len() > MAX_EMBEDDING_INPUTS {
-        return Err(provider_error("too many embedding inputs"));
+        let error = provider_error("too many embedding inputs");
+        events.stage_failed(
+            ProviderStage::Tokenize,
+            elapsed_ms(tokenize_started),
+            error.to_string(),
+            json!({ "inputCount": sequences.len() }),
+        );
+        return Err(error);
     }
-    let context_tokens = usize::try_from(context_size.get())
-        .map_err(|_error| provider_error("context size is unsupported"))?;
-    if sequences.iter().any(|tokens| tokens.len() > context_tokens) {
-        return Err(provider_error(
-            "embedding input exceeds the configured context size",
-        ));
-    }
-
-    let mut prompt_tokens = 0_usize;
-    let mut data = Vec::with_capacity(sequences.len());
-    let mut dimensions = 0_usize;
-    for (index, tokens) in sequences.iter().enumerate() {
-        if cancellation.is_cancelled() {
-            return Err(RuntimeError::Cancelled);
+    let token_count = sequences
+        .iter()
+        .map(Vec::len)
+        .fold(0_usize, usize::saturating_add);
+    events.stage_completed(
+        ProviderStage::Tokenize,
+        elapsed_ms(tokenize_started),
+        json!({ "inputCount": sequences.len(), "inputTokens": token_count }),
+    );
+    let prefill_started = Instant::now();
+    events.stage_started(
+        ProviderStage::Prefill,
+        json!({ "inputCount": sequences.len(), "inputTokens": token_count }),
+    );
+    let inference = (|| {
+        let context_tokens = usize::try_from(context_size.get())
+            .map_err(|_error| provider_error("context size is unsupported"))?;
+        if sequences.iter().any(|tokens| tokens.len() > context_tokens) {
+            return Err(provider_error(
+                "embedding input exceeds the configured context size",
+            ));
         }
-        prompt_tokens = prompt_tokens.saturating_add(tokens.len());
-        let mut batch = LlamaBatch::new(tokens.len().max(1), 1);
-        batch
-            .add_sequence(tokens, 0, false)
-            .map_err(|_error| provider_error("embedding input could not be prepared"))?;
-        let params = || {
-            LlamaContextParams::default()
-                .with_n_ctx(Some(context_size))
-                .with_n_batch(context_size.get())
-                .with_embeddings(true)
-                .with_pooling_type(LlamaPoolingType::Mean)
-        };
-        let mut context = model
-            .new_context(backend, params())
-            .map_err(|_error| provider_error("embedding context could not be created"))?;
-        if model_uses_encoder(model) {
-            context
-                .encode(&mut batch)
-                .map_err(|_error| provider_error("embedding inference failed"))?;
-        } else {
-            context
-                .decode(&mut batch)
-                .map_err(|_error| provider_error("embedding inference failed"))?;
-        }
-        let embedding = normalize_embedding(
-            context
-                .embeddings_seq_ith(0)
-                .map_err(|_error| provider_error("model did not produce an embedding"))?,
-        )?;
-        if let Some(requested_dimensions) = requested_dimensions {
-            if requested_dimensions != embedding.len() {
-                return Err(provider_error(
-                    "requested embedding dimensions do not match the local model",
-                ));
+        let mut prompt_tokens = 0_usize;
+        let mut data = Vec::with_capacity(sequences.len());
+        let mut dimensions = 0_usize;
+        for (index, tokens) in sequences.iter().enumerate() {
+            if cancellation.is_cancelled() {
+                return Err(RuntimeError::Cancelled);
             }
+            prompt_tokens = prompt_tokens.saturating_add(tokens.len());
+            let mut batch = LlamaBatch::new(tokens.len().max(1), 1);
+            batch
+                .add_sequence(tokens, 0, false)
+                .map_err(|_error| provider_error("embedding input could not be prepared"))?;
+            let params = || {
+                LlamaContextParams::default()
+                    .with_n_ctx(Some(context_size))
+                    .with_n_batch(context_size.get())
+                    .with_embeddings(true)
+                    .with_pooling_type(LlamaPoolingType::Mean)
+            };
+            let mut context = model
+                .new_context(backend, params())
+                .map_err(|_error| provider_error("embedding context could not be created"))?;
+            if model_uses_encoder(model) {
+                context
+                    .encode(&mut batch)
+                    .map_err(|_error| provider_error("embedding inference failed"))?;
+            } else {
+                context
+                    .decode(&mut batch)
+                    .map_err(|_error| provider_error("embedding inference failed"))?;
+            }
+            let embedding = normalize_embedding(
+                context
+                    .embeddings_seq_ith(0)
+                    .map_err(|_error| provider_error("model did not produce an embedding"))?,
+            )?;
+            if let Some(requested_dimensions) = requested_dimensions {
+                if requested_dimensions != embedding.len() {
+                    return Err(provider_error(
+                        "requested embedding dimensions do not match the local model",
+                    ));
+                }
+            }
+            dimensions = dimensions.max(embedding.len());
+            let embedding = if encode_base64 {
+                Value::String(encode_embedding_base64(&embedding))
+            } else {
+                json!(embedding)
+            };
+            data.push(json!({
+                "object": "embedding",
+                "index": index,
+                "embedding": embedding,
+            }));
         }
-        dimensions = dimensions.max(embedding.len());
-        let embedding = if encode_base64 {
-            Value::String(encode_embedding_base64(&embedding))
-        } else {
-            json!(embedding)
-        };
-        data.push(json!({
-            "object": "embedding",
-            "index": index,
-            "embedding": embedding,
-        }));
-    }
 
+        Ok::<_, RuntimeError>((prompt_tokens, data, dimensions))
+    })();
+    let (prompt_tokens, data, dimensions) = match inference {
+        Ok(result) => {
+            events.stage_completed(
+                ProviderStage::Prefill,
+                elapsed_ms(prefill_started),
+                json!({ "inputCount": sequences.len(), "inputTokens": result.0 }),
+            );
+            result
+        }
+        Err(error) => {
+            events.stage_failed(
+                ProviderStage::Prefill,
+                elapsed_ms(prefill_started),
+                error.to_string(),
+                json!({ "inputCount": sequences.len() }),
+            );
+            return Err(error);
+        }
+    };
+    let validate_started = Instant::now();
+    events.stage_started(ProviderStage::Validate, Value::Null);
     let model_name = input.model.unwrap_or_else(|| request.agent.id.clone());
-    Ok(ProviderResponse {
+    let response = ProviderResponse {
         data: InvocationData::Json(json!({
             "object": "list",
             "data": data,
@@ -1004,7 +1287,17 @@ fn generate_embeddings(
             "embeddingDimensions": dimensions,
         }),
         state: None,
-    })
+    };
+    events.stage_completed(
+        ProviderStage::Validate,
+        elapsed_ms(validate_started),
+        json!({ "dimensions": dimensions }),
+    );
+    Ok(response)
+}
+
+fn elapsed_ms(started: Instant) -> u64 {
+    u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
 
 fn model_uses_encoder(model: &LlamaModel) -> bool {

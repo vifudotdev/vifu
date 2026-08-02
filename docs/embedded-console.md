@@ -7,8 +7,8 @@ binary starts the local Server, Agent Gateway, and Console from one process:
 vifu
 ```
 
-The binary prints the Console URL at startup. With the default local address it
-is:
+In an interactive terminal, the binary opens the live Runtime TUI. Press `B`
+to open the Console served by the same process. Its default local address is:
 
 ```text
 http://127.0.0.1:6790
@@ -96,6 +96,10 @@ cargo run -p vifu
 does not invoke Bun automatically, so build the Console before compiling Vifu.
 If the asset directory is absent, the Rust server embeds a fallback page that
 asks the developer to run `bun run build:console`.
+
+After startup, use the TUI for live supervision and press `B` for persistent
+Trace and Comparison history. The loopback Console uses Vifu's same-origin
+server proxy, so its browser bundle never needs the local Admin Key.
 
 The release workflow runs `bun run build:console`, verifies `index.html`, and
 requires the bundle when compiling every release binary. A release fails rather

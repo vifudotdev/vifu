@@ -5,6 +5,7 @@ pub mod gateway_frame;
 pub mod identity;
 pub mod openclaw;
 pub mod openclaw_rpc;
+pub mod optimization;
 pub mod protocol;
 pub mod providers;
 pub mod relay;

@@ -4,6 +4,7 @@ use axum::http::header::{ACCEPT, CACHE_CONTROL, CONTENT_TYPE, HOST, ORIGIN};
 use axum::http::{HeaderMap, Method, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
 use serde_json::json;
+use std::time::Duration;
 
 use crate::config::DeploymentMode;
 use crate::AppState;
@@ -33,7 +34,7 @@ pub async fn proxy_runtime_request(
     if !local_console_enabled(&state) {
         return StatusCode::NOT_FOUND.into_response();
     }
-    if !same_origin_request(&headers) {
+    if !same_origin_request(&headers, state.config.addr) {
         return json_error(
             StatusCode::FORBIDDEN,
             "embedded console requests must be same-origin",
@@ -57,6 +58,7 @@ pub async fn proxy_runtime_request(
         reqwest::Method::from_bytes(method.as_str().as_bytes()).unwrap_or(reqwest::Method::GET);
     let mut request = client
         .request(request_method, target)
+        .timeout(Duration::from_secs(8))
         .header(ACCEPT.as_str(), "application/json")
         .header(
             AUTHORIZATION_HEADER,
@@ -75,7 +77,11 @@ pub async fn proxy_runtime_request(
     match request.send().await {
         Ok(response) => runtime_response(response).await,
         Err(error) => json_error(
-            StatusCode::BAD_GATEWAY,
+            if error.is_timeout() {
+                StatusCode::GATEWAY_TIMEOUT
+            } else {
+                StatusCode::BAD_GATEWAY
+            },
             &format!("embedded console proxy failed: {error}"),
         ),
     }
@@ -125,7 +131,7 @@ fn valid_runtime_path(path: &str) -> bool {
     valid_asset_path(path)
 }
 
-fn same_origin_request(headers: &HeaderMap) -> bool {
+fn same_origin_request(headers: &HeaderMap, expected_addr: std::net::SocketAddr) -> bool {
     let fetch_site = headers
         .get("sec-fetch-site")
         .and_then(|value| value.to_str().ok())
@@ -134,20 +140,17 @@ fn same_origin_request(headers: &HeaderMap) -> bool {
         return false;
     }
 
-    let Some(origin) = headers.get(ORIGIN).and_then(|value| value.to_str().ok()) else {
-        return true;
-    };
     let Some(host) = headers.get(HOST).and_then(|value| value.to_str().ok()) else {
         return false;
     };
-    origin_host(origin)
-        .map(|origin_host| origin_host.eq_ignore_ascii_case(host))
-        .unwrap_or(false)
-}
-
-fn origin_host(origin: &str) -> Option<&str> {
-    let (_, rest) = origin.split_once("://")?;
-    rest.split('/').next().filter(|value| !value.is_empty())
+    let expected_authority = expected_addr.to_string();
+    if !host.eq_ignore_ascii_case(&expected_authority) {
+        return false;
+    }
+    headers
+        .get(ORIGIN)
+        .and_then(|value| value.to_str().ok())
+        .is_none_or(|origin| origin.eq_ignore_ascii_case(&format!("http://{expected_authority}")))
 }
 
 fn asset_response(asset: &'static ConsoleAsset) -> Response {
@@ -220,6 +223,8 @@ const AUTHORIZATION_HEADER: &str = "authorization";
 
 #[cfg(test)]
 mod tests {
+    use std::net::SocketAddr;
+
     use axum::http::{HeaderMap, HeaderValue, Uri};
 
     use super::{asset_path_for_uri, same_origin_request, valid_runtime_path};
@@ -251,12 +256,37 @@ mod tests {
 
     #[test]
     fn console_proxy_requires_same_origin_when_origin_is_present() {
+        let expected: SocketAddr = "127.0.0.1:6790".parse().unwrap();
         let mut headers = HeaderMap::new();
         headers.insert("host", HeaderValue::from_static("127.0.0.1:6790"));
         headers.insert("origin", HeaderValue::from_static("http://evil.test"));
-        assert!(!same_origin_request(&headers));
+        assert!(!same_origin_request(&headers, expected));
 
         headers.insert("origin", HeaderValue::from_static("http://127.0.0.1:6790"));
-        assert!(same_origin_request(&headers));
+        assert!(same_origin_request(&headers, expected));
+    }
+
+    #[test]
+    fn console_proxy_rejects_dns_rebinding_hosts_even_without_an_origin() {
+        let expected: SocketAddr = "127.0.0.1:6790".parse().unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert("host", HeaderValue::from_static("attacker.test:6790"));
+        headers.insert(
+            "origin",
+            HeaderValue::from_static("http://attacker.test:6790"),
+        );
+        headers.insert("sec-fetch-site", HeaderValue::from_static("same-origin"));
+        assert!(!same_origin_request(&headers, expected));
+
+        headers.remove("origin");
+        assert!(!same_origin_request(&headers, expected));
+    }
+
+    #[test]
+    fn console_proxy_allows_the_configured_loopback_host_without_an_origin() {
+        let expected: SocketAddr = "127.0.0.1:6790".parse().unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert("host", HeaderValue::from_static("127.0.0.1:6790"));
+        assert!(same_origin_request(&headers, expected));
     }
 }

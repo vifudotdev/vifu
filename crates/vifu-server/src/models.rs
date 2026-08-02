@@ -851,6 +851,11 @@ pub struct EndpointTrace {
     pub selection_key: Option<String>,
     pub status: String,
     pub latency_ms: Option<i64>,
+    pub model: Option<String>,
+    pub completion_start_ms: Option<i64>,
+    pub usage: Option<Value>,
+    pub decode_ms: Option<i64>,
+    pub app_outcome: Option<String>,
     pub request: Value,
     pub response: Option<Value>,
     pub error: Option<String>,
@@ -866,9 +871,14 @@ pub struct TraceSpan {
     pub parent_span_id: Option<Uuid>,
     pub name: String,
     pub kind: String,
+    pub observation_type: String,
     pub status: String,
     pub provider_key: Option<String>,
     pub capability_kind: Option<String>,
+    pub model: Option<String>,
+    pub model_parameters: Option<Value>,
+    pub completion_start_ms: Option<i64>,
+    pub usage: Option<Value>,
     pub duration_ms: Option<i64>,
     pub input_summary: Option<Value>,
     pub output_summary: Option<Value>,
@@ -876,6 +886,19 @@ pub struct TraceSpan {
     pub error: Option<String>,
     pub created_at: DateTime<Utc>,
     pub completed_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Serialize, FromRow)]
+#[serde(rename_all = "camelCase")]
+pub struct TraceScore {
+    pub id: Uuid,
+    pub trace_id: Uuid,
+    pub span_id: Option<Uuid>,
+    pub name: String,
+    pub data_type: String,
+    pub value: Value,
+    pub source: String,
+    pub created_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, FromRow)]

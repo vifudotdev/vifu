@@ -8,14 +8,14 @@ Download the archive for your platform from the
 - macOS and Linux archives use `.tar.gz`.
 - Windows archives use `.zip`.
 
-Extract the archive, then start the local Server and Agent Gateway:
+Extract the archive, then start Vifu:
 
 ```bash
 ./vifu
 ```
 
-The same process serves the local Console. Open the URL printed at startup,
-normally:
+In an interactive terminal, Vifu opens the live Runtime TUI. Press `B` when you
+want to open the Dashboard served by the same process, normally at:
 
 ```text
 http://127.0.0.1:6790
@@ -116,10 +116,13 @@ The first run creates `~/.vifu/config.json` and
 `~/.vifu/providers.json`. With the default configuration, one process runs the
 Server and Agent Gateway roles. Runtime and Gateway state is stored in
 `~/.vifu/runtime.sqlite`; local Server data is stored separately in
-`~/.vifu/vifu.sqlite`. It opens the local Dashboard automatically and keeps
-running until you press `Ctrl-C`. Provider credentials and model files are not
-required for this first launch. Add providers when you are ready to run a model;
-see [Agent Providers](../providers/README.md).
+`~/.vifu/vifu.sqlite`. In an interactive terminal it opens the Vifu TUI and
+keeps the runtime running while you inspect agents, traces, and device load.
+Press `B` to open the local Dashboard, or `q` to stop Vifu. An active
+comparison, active requests, or a session route override trigger confirmation.
+Provider credentials and model
+files are not required for this first launch. Add providers when you are ready
+to run a model; see [Agent Providers](../providers/README.md).
 
 On Unix systems, Vifu restricts the `~/.vifu` directory to mode `0700` and its
 configuration and local database files to mode `0600`.
@@ -177,8 +180,9 @@ canonical [self-hosting guide](self-hosting.md) for those paths.
 
 ## Stop
 
-Stop a release or source process with `Ctrl-C`. Stop the Console stack while
-preserving its PostgreSQL volume with:
+In the interactive TUI, press `q` or `Ctrl-C`; Vifu asks for confirmation when
+requests or a session route override are active. Stop the self-host Console
+stack while preserving its PostgreSQL volume with:
 
 ```bash
 docker compose down

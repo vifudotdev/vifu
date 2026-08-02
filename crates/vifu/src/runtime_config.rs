@@ -695,7 +695,20 @@ mod tests {
 
         let config = RuntimeConfig::load_or_create(&path).unwrap();
 
-        assert!(config.server.is_some());
+        let server = config.server.as_ref().expect("first run enables Server");
+        assert_eq!(server.listen.as_deref(), Some("127.0.0.1:6790"));
+        assert_eq!(
+            server.database_url(&path).unwrap(),
+            format!(
+                "sqlite://{}",
+                directory.join(DEFAULT_LOCAL_DATABASE_FILE).display()
+            )
+        );
+        let gateway = config.gateway.as_ref().expect("first run enables Gateway");
+        assert_eq!(
+            gateway.server_url.as_deref(),
+            Some(vifu_gateway::config::DEFAULT_SERVER_URL)
+        );
         assert!(path.exists());
         std::fs::remove_dir_all(directory).unwrap();
     }

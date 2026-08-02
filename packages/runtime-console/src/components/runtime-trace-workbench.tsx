@@ -1,15 +1,50 @@
 "use client";
 
 import { Search, X } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  memo,
+  useCallback,
+  useDeferredValue,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import type { CSSProperties } from "react";
 import { Group as PanelGroup, Panel, Separator as PanelResizeHandle } from "react-resizable-panels";
 import { List } from "react-window";
 import { useRuntimeConsoleHost } from "../host";
-import type { EndpointTrace, TraceSpan } from "../types";
+import {
+  buildTraceObservationForest,
+  exactTraceLookupPath,
+  flattenTraceObservationForest,
+  formatMetric,
+  observationMetadata,
+  observationModel,
+  observationTimelineOffsets,
+  observationTtftMs,
+  observationType,
+  observationUsage,
+  retainPinnedTrace,
+  sameTraceSpanRevision,
+  traceListPresentation,
+  traceIdForInvocation,
+  traceEventSpansForSelection,
+  traceSearchText,
+  traceScoresForSelection,
+  traceSelectionFromUrl,
+  traceSelectionUrl,
+  traceIoValues,
+  type TraceListPresentation,
+  type TraceStatusGroup,
+} from "../trace-model";
+import type { EndpointTrace, TraceScore, TraceSpan, TraceUsage } from "../types";
+import { RuntimeComparisonHistory } from "./runtime-comparison-history";
 
-const MAX_LOGS = 100;
-const ROW_HEIGHT = 32;
+const MAX_TRACES = 100;
+const ROW_HEIGHT = 42;
+const TRACE_POLL_MS = 2_000;
+const TRACE_REQUEST_TIMEOUT_MS = 8_000;
 
 type RuntimeTraceWorkbenchProps = {
   projectId: string;
@@ -24,153 +59,487 @@ type RuntimeTraceResponse = {
 
 type RuntimeTraceSpansResponse = {
   spans?: TraceSpan[];
+  scores?: TraceScore[];
   error?: { message?: string };
 };
 
+type RuntimeTraceScoresResponse = {
+  scores?: TraceScore[];
+  error?: { message?: string };
+};
+
+type TraceListRow = {
+  presentation: TraceListPresentation;
+  searchText: string;
+  trace: EndpointTrace;
+};
+
+type ObservationView = "tree" | "timeline";
+type DetailTab = "summary" | "io" | "metadata" | "scores" | "events";
+
 export function RuntimeTraceWorkbench({ projectId, projectSlug, traces: initialTraces }: RuntimeTraceWorkbenchProps) {
   const { request } = useRuntimeConsoleHost();
-  const [traces, setTraces] = useState(() => sortTraces(initialTraces).slice(0, MAX_LOGS));
+  const [traces, setTraces] = useState(() => sortTraces(initialTraces).slice(0, MAX_TRACES));
   const [pausedTraces, setPausedTraces] = useState<EndpointTrace[]>([]);
   const [paused, setPaused] = useState(false);
   const [query, setQuery] = useState("");
+  const deferredQuery = useDeferredValue(query);
   const [agentFilter, setAgentFilter] = useState("all");
-  const [statusFilter, setStatusFilter] = useState("all");
-  const [hiddenTraceIds, setHiddenTraceIds] = useState<Set<string>>(() => new Set());
+  const [modelFilter, setModelFilter] = useState("all");
+  const [statusFilter, setStatusFilter] = useState<"all" | TraceStatusGroup>("all");
   const [selectedTraceId, setSelectedTraceId] = useState<string | null>(null);
+  const [selectedObservationId, setSelectedObservationId] = useState<string | null>(null);
+  const [requestedTraceId, setRequestedTraceId] = useState<string | null>(null);
+  const [requestedInvocationId, setRequestedInvocationId] = useState<string | null>(null);
   const [selectedSpans, setSelectedSpans] = useState<TraceSpan[]>([]);
+  const [selectedScores, setSelectedScores] = useState<TraceScore[]>([]);
   const [spansLoading, setSpansLoading] = useState(false);
   const [spansError, setSpansError] = useState<string | null>(null);
-  const [streamError, setStreamError] = useState<string | null>(null);
+  const [pollError, setPollError] = useState<string | null>(null);
+  const [selectionError, setSelectionError] = useState<string | null>(null);
+  const [traceListLoading, setTraceListLoading] = useState(initialTraces.length === 0);
+  const [urlSelectionReady, setUrlSelectionReady] = useState(false);
   const tracesRef = useRef(traces);
   const pausedTracesRef = useRef(pausedTraces);
+  const pausedRef = useRef(paused);
+  const selectedTraceIdRef = useRef(selectedTraceId);
 
   useEffect(() => {
-    setTraces((current) => mergeTraces(sortTraces(initialTraces), current).slice(0, MAX_LOGS));
-  }, [initialTraces]);
+    tracesRef.current = [];
+    pausedTracesRef.current = [];
+    pausedRef.current = false;
+    selectedTraceIdRef.current = null;
+    setTraces([]);
+    setPausedTraces([]);
+    setPaused(false);
+    setSelectedTraceId(null);
+    setSelectedObservationId(null);
+    setRequestedTraceId(null);
+    setRequestedInvocationId(null);
+    setSelectedSpans([]);
+    setSelectedScores([]);
+    setSpansError(null);
+    setPollError(null);
+    setSelectionError(null);
+    setTraceListLoading(true);
+    setUrlSelectionReady(false);
+  }, [projectId, projectSlug]);
+
+  useEffect(() => {
+    const scoped = sortTraces(initialTraces.filter((trace) => trace.projectId === projectId));
+    setTraces((current) => reconcileTraces(
+      scoped,
+      current.filter((trace) => trace.projectId === projectId),
+      MAX_TRACES,
+      selectedTraceIdRef.current,
+    ));
+  }, [initialTraces, projectId]);
 
   useEffect(() => {
     tracesRef.current = traces;
   }, [traces]);
 
   useEffect(() => {
+    selectedTraceIdRef.current = selectedTraceId;
+  }, [selectedTraceId]);
+
+  useEffect(() => {
     pausedTracesRef.current = pausedTraces;
   }, [pausedTraces]);
 
   useEffect(() => {
-    const controller = new AbortController();
+    pausedRef.current = paused;
+  }, [paused]);
 
-    async function poll() {
+  useEffect(() => {
+    const applyLocationSelection = () => {
+      const selection = readTraceSelection();
+      selectedTraceIdRef.current = selection.traceId;
+      setSelectedTraceId(selection.traceId);
+      setSelectedObservationId(selection.observationId);
+      setRequestedTraceId(selection.traceId);
+      setRequestedInvocationId(selection.traceId ? null : selection.invocationId);
+      setSelectionError(null);
+      setUrlSelectionReady(true);
+    };
+    applyLocationSelection();
+    window.addEventListener("popstate", applyLocationSelection);
+    return () => window.removeEventListener("popstate", applyLocationSelection);
+  }, [projectSlug]);
+
+  useEffect(() => {
+    if (!urlSelectionReady || requestedTraceId || requestedInvocationId) return;
+    writeTraceSelection(selectedTraceId, selectedObservationId);
+  }, [requestedInvocationId, requestedTraceId, selectedObservationId, selectedTraceId, urlSelectionReady]);
+
+  useEffect(() => {
+    if (!requestedTraceId) return;
+    const traceId = requestedTraceId;
+    const localTrace = tracesRef.current.find((trace) => trace.id === traceId && trace.projectId === projectId);
+    if (localTrace) {
+      selectedTraceIdRef.current = localTrace.id;
+      setSelectedTraceId(localTrace.id);
+      setRequestedTraceId(null);
+      setSelectionError(null);
+      return;
+    }
+
+    const controller = new AbortController();
+    let timedOut = false;
+    const timeout = window.setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, TRACE_REQUEST_TIMEOUT_MS);
+    async function loadExactTrace() {
       try {
         const payload = await request<RuntimeTraceResponse>(
-          `project/${encodeURIComponent(projectSlug)}/traces?limit=100`,
+          exactTraceLookupPath(projectSlug, "traceId", traceId),
           "GET",
           undefined,
           controller.signal,
         );
+        if (controller.signal.aborted) return;
+        const trace = (payload.traces ?? []).find((candidate) =>
+          candidate.projectId === projectId && candidate.id === traceId
+        );
+        if (!trace) {
+          setSelectionError("The requested trace is not available in this project.");
+          return;
+        }
+        selectedTraceIdRef.current = trace.id;
+        setTraces((current) => reconcileTraces(
+          [trace],
+          current.filter((candidate) => candidate.projectId === projectId),
+          MAX_TRACES,
+          trace.id,
+        ));
+        setSelectedTraceId(trace.id);
+        setRequestedTraceId(null);
+        setSelectionError(null);
+      } catch (error) {
+        if (timedOut) {
+          setSelectionError("The requested trace lookup timed out.");
+        } else if (!controller.signal.aborted) {
+          setSelectionError(error instanceof Error ? error.message : "Failed to load the requested trace.");
+        }
+      } finally {
+        window.clearTimeout(timeout);
+      }
+    }
+    void loadExactTrace();
+    return () => {
+      window.clearTimeout(timeout);
+      controller.abort();
+    };
+  }, [projectId, projectSlug, request, requestedTraceId]);
+
+  useEffect(() => {
+    if (!requestedInvocationId) return;
+    const invocationId: string = requestedInvocationId;
+    const localTraceId = traceIdForInvocation(tracesRef.current, invocationId);
+    if (localTraceId) {
+      selectedTraceIdRef.current = localTraceId;
+      setSelectedTraceId(localTraceId);
+      setRequestedInvocationId(null);
+      setSelectionError(null);
+      return;
+    }
+
+    const controller = new AbortController();
+    let timedOut = false;
+    const timeout = window.setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, TRACE_REQUEST_TIMEOUT_MS);
+    async function loadExactInvocation() {
+      try {
+        const payload = await request<RuntimeTraceResponse>(
+          exactTraceLookupPath(projectSlug, "requestId", invocationId),
+          "GET",
+          undefined,
+          controller.signal,
+        );
+        if (controller.signal.aborted) return;
+        const trace = (payload.traces ?? []).find((candidate) =>
+          candidate.projectId === projectId && candidate.requestId === invocationId
+        );
+        if (!trace) {
+          setSelectionError("The requested invocation is not available in this project.");
+          return;
+        }
+        selectedTraceIdRef.current = trace.id;
+        setTraces((current) => reconcileTraces(
+          [trace],
+          current.filter((candidate) => candidate.projectId === projectId),
+          MAX_TRACES,
+          trace.id,
+        ));
+        setSelectedTraceId(trace.id);
+        setRequestedInvocationId(null);
+        setSelectionError(null);
+      } catch (error) {
+        if (timedOut) {
+          setSelectionError("The requested invocation lookup timed out.");
+        } else if (!controller.signal.aborted) {
+          setSelectionError(error instanceof Error ? error.message : "Failed to load the requested invocation.");
+        }
+      } finally {
+        window.clearTimeout(timeout);
+      }
+    }
+    void loadExactInvocation();
+    return () => {
+      window.clearTimeout(timeout);
+      controller.abort();
+    };
+  }, [projectId, projectSlug, request, requestedInvocationId]);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    let timer: number | undefined;
+
+    async function poll() {
+      const requestController = new AbortController();
+      const abortRequest = () => requestController.abort();
+      let timedOut = false;
+      const timeout = window.setTimeout(() => {
+        timedOut = true;
+        requestController.abort();
+      }, TRACE_REQUEST_TIMEOUT_MS);
+      controller.signal.addEventListener("abort", abortRequest, { once: true });
+      try {
+        const payload = await request<RuntimeTraceResponse>(
+          `project/${encodeURIComponent(projectSlug)}/traces?limit=${MAX_TRACES}`,
+          "GET",
+          undefined,
+          requestController.signal,
+        );
+        if (controller.signal.aborted) return;
         const fetched = sortTraces((payload.traces ?? []).filter((trace) => trace.projectId === projectId));
-        setStreamError(null);
-        if (paused) {
+        setPollError((current) => current === null ? current : null);
+        if (pausedRef.current) {
           const knownTraceIds = new Set([...tracesRef.current, ...pausedTracesRef.current].map((trace) => trace.id));
           const newPausedTraces = fetched.filter((trace) => !knownTraceIds.has(trace.id));
           if (newPausedTraces.length > 0) {
-            setPausedTraces((current) => mergeTraces(newPausedTraces, current).slice(0, MAX_LOGS));
+            setPausedTraces((current) => reconcileTraces(newPausedTraces, current, MAX_TRACES, null));
           }
         } else {
-          setTraces((current) => mergeTraces(fetched, current).slice(0, MAX_LOGS));
-          setPausedTraces([]);
+          setTraces((current) => reconcileTraces(
+            fetched,
+            current.filter((trace) => trace.projectId === projectId),
+            MAX_TRACES,
+            selectedTraceIdRef.current,
+          ));
+          setPausedTraces((current) => current.length === 0 ? current : []);
         }
       } catch (error) {
         if (!controller.signal.aborted) {
-          setStreamError(error instanceof Error ? error.message : "Failed to load logs.");
+          const message = timedOut
+            ? "Trace polling request timed out."
+            : error instanceof Error ? error.message : "Failed to load traces.";
+          setPollError((current) => current === message ? current : message);
+        }
+      } finally {
+        window.clearTimeout(timeout);
+        controller.signal.removeEventListener("abort", abortRequest);
+        if (!controller.signal.aborted) {
+          setTraceListLoading(false);
+          timer = window.setTimeout(poll, TRACE_POLL_MS);
         }
       }
     }
 
     void poll();
-    const timer = window.setInterval(poll, paused ? 3500 : 2000);
     return () => {
       controller.abort();
-      window.clearInterval(timer);
+      if (timer !== undefined) window.clearTimeout(timer);
     };
-  }, [paused, projectId, projectSlug, request]);
+  }, [projectId, projectSlug, request]);
 
-  const agentOptions = useMemo(() => {
-    return Array.from(new Set([...traces, ...pausedTraces].map(traceAgentLabel))).sort((a, b) => a.localeCompare(b));
-  }, [pausedTraces, traces]);
+  const rows = useMemo<TraceListRow[]>(() => traces.map((trace) => ({
+    presentation: traceListPresentation(trace),
+    searchText: traceSearchText(trace),
+    trace,
+  })), [traces]);
 
-  const visibleTraces = useMemo(() => {
-    const normalizedQuery = query.trim().toLowerCase();
-    return traces.filter((trace) => {
-      if (hiddenTraceIds.has(trace.id)) return false;
-      if (agentFilter !== "all" && traceAgentLabel(trace) !== agentFilter) return false;
-      if (statusFilter !== "all" && !traceMatchesLogType(trace, statusFilter)) return false;
-      if (!normalizedQuery) return true;
-      return traceSearchText(trace).includes(normalizedQuery);
-    });
-  }, [agentFilter, hiddenTraceIds, query, statusFilter, traces]);
+  const pausedRows = useMemo<TraceListRow[]>(() => pausedTraces.map((trace) => ({
+    presentation: traceListPresentation(trace),
+    searchText: traceSearchText(trace),
+    trace,
+  })), [pausedTraces]);
 
-  const selectedTrace = selectedTraceId
-    ? visibleTraces.find((trace) => trace.id === selectedTraceId) ?? traces.find((trace) => trace.id === selectedTraceId) ?? null
-    : null;
+  const agentOptions = useMemo(
+    () => uniqueSorted([...rows, ...pausedRows].map((row) => row.presentation.agent)),
+    [pausedRows, rows],
+  );
+  const modelOptions = useMemo(
+    () => uniqueSorted([...rows, ...pausedRows].flatMap((row) => row.presentation.model ? [row.presentation.model] : [])),
+    [pausedRows, rows],
+  );
+
+  const normalizedQuery = deferredQuery.trim().toLowerCase();
+  const visibleRows = useMemo(() => rows.filter((row) => {
+    if (agentFilter !== "all" && row.presentation.agent !== agentFilter) return false;
+    if (modelFilter !== "all" && row.presentation.model !== modelFilter) return false;
+    if (statusFilter !== "all" && row.presentation.status !== statusFilter) return false;
+    return !normalizedQuery || row.searchText.includes(normalizedQuery);
+  }), [agentFilter, modelFilter, normalizedQuery, rows, statusFilter]);
+
+  const traceById = useMemo(() => new Map(traces.map((trace) => [trace.id, trace])), [traces]);
+  const selectedTrace = selectedTraceId ? traceById.get(selectedTraceId) ?? null : null;
 
   useEffect(() => {
     const controller = new AbortController();
+    let timer: number | undefined;
     if (!selectedTraceId) {
       setSelectedSpans([]);
+      setSelectedScores([]);
       setSpansError(null);
       setSpansLoading(false);
       return () => controller.abort();
     }
     setSelectedSpans([]);
+    setSelectedScores([]);
     setSpansError(null);
     setSpansLoading(true);
-    void (async () => {
+    let loaded = false;
+    const loadObservations = async () => {
+      const requestController = new AbortController();
+      const abortRequest = () => requestController.abort();
+      let timedOut = false;
+      const timeout = window.setTimeout(() => {
+        timedOut = true;
+        requestController.abort();
+      }, TRACE_REQUEST_TIMEOUT_MS);
+      controller.signal.addEventListener("abort", abortRequest, { once: true });
       try {
-        const payload = await request<RuntimeTraceSpansResponse>(
-          `project/${encodeURIComponent(projectSlug)}/traces/${encodeURIComponent(selectedTraceId)}/spans`,
-          "GET",
-          undefined,
-          controller.signal,
-        );
-        setSelectedSpans(payload.spans ?? []);
+        const tracePath = `project/${encodeURIComponent(projectSlug)}/traces/${encodeURIComponent(selectedTraceId)}`;
+        const [spanPayload, scorePayload] = await Promise.all([
+          request<RuntimeTraceSpansResponse>(`${tracePath}/spans`, "GET", undefined, requestController.signal),
+          request<RuntimeTraceScoresResponse>(`${tracePath}/scores`, "GET", undefined, requestController.signal)
+            .catch(() => null),
+        ]);
+        setSelectedSpans((current) => reconcileSpans(spanPayload.spans ?? [], current));
+        const scores = scorePayload?.scores ?? spanPayload.scores;
+        if (scores) setSelectedScores((current) => reconcileScores(scores, current));
+        setSpansError((current) => current === null ? current : null);
       } catch (error: unknown) {
-        if (!controller.signal.aborted) setSpansError(error instanceof Error ? error.message : "Failed to load trace spans.");
+        if (!controller.signal.aborted) {
+          const message = timedOut
+            ? "Trace observation polling request timed out."
+            : error instanceof Error ? error.message : "Failed to load trace observations.";
+          setSpansError((current) => current === message ? current : message);
+        }
       } finally {
-        if (!controller.signal.aborted) setSpansLoading(false);
+        window.clearTimeout(timeout);
+        controller.signal.removeEventListener("abort", abortRequest);
+        if (!controller.signal.aborted && !loaded) {
+          loaded = true;
+          setSpansLoading(false);
+        }
+        if (!controller.signal.aborted) {
+          timer = window.setTimeout(loadObservations, TRACE_POLL_MS);
+        }
       }
-    })();
-    return () => controller.abort();
+    };
+    void loadObservations();
+    return () => {
+      controller.abort();
+      if (timer !== undefined) window.clearTimeout(timer);
+    };
   }, [projectSlug, request, selectedTraceId]);
 
+  useEffect(() => {
+    if (spansLoading || !selectedObservationId || selectedSpans.length === 0) return;
+    if (!selectedSpans.some((span) => span.id === selectedObservationId)) setSelectedObservationId(null);
+  }, [selectedObservationId, selectedSpans, spansLoading]);
+
   const selectTrace = useCallback((trace: EndpointTrace) => {
+    selectedTraceIdRef.current = trace.id;
+    setRequestedTraceId(null);
+    setRequestedInvocationId(null);
+    setSelectionError(null);
     setSelectedTraceId(trace.id);
+    setSelectedObservationId(null);
   }, []);
 
   const rowProps = useMemo<TraceRowProps>(() => ({
     onSelectTrace: selectTrace,
+    rows: visibleRows,
     selectedTraceId,
-    traces: visibleTraces,
-  }), [selectTrace, selectedTraceId, visibleTraces]);
+  }), [selectTrace, selectedTraceId, visibleRows]);
 
-  const goLive = () => {
-    setTraces((current) => mergeTraces(pausedTracesRef.current, current).slice(0, MAX_LOGS));
+  const statusCounts = useMemo(() => {
+    const counts = { passed: 0, problems: 0, running: 0, unknown: 0 };
+    for (const row of rows) counts[row.presentation.status] += 1;
+    return counts;
+  }, [rows]);
+
+  const goLive = useCallback(() => {
+    setTraces((current) => reconcileTraces(
+      pausedTracesRef.current,
+      current,
+      MAX_TRACES,
+      selectedTraceIdRef.current,
+    ));
     setPausedTraces([]);
     setPaused(false);
-  };
+  }, []);
 
-  const clearVisibleLogs = () => {
-    setHiddenTraceIds((current) => {
-      const next = new Set(current);
-      for (const trace of visibleTraces) next.add(trace.id);
-      return next;
-    });
+  const resetFilters = useCallback(() => {
+    setQuery("");
+    setAgentFilter("all");
+    setModelFilter("all");
+    setStatusFilter("all");
+  }, []);
+
+  const closeTrace = useCallback(() => {
+    selectedTraceIdRef.current = null;
+    setRequestedTraceId(null);
+    setRequestedInvocationId(null);
+    setSelectionError(null);
     setSelectedTraceId(null);
-  };
+    setSelectedObservationId(null);
+  }, []);
 
   return (
-    <div className="convex-log-workbench">
-      <div className="convex-log-toolbar">
-        <div className="convex-log-toolbar-spacer" />
+    <div className="trace-explorer">
+      <header className="trace-explorer-overview">
+        <div>
+          <strong>Trace Explorer</strong>
+          <span className={paused ? "trace-live-state paused" : "trace-live-state"}>{paused ? "Paused" : "Live"}</span>
+        </div>
+        <dl>
+          <div><dt>Running</dt><dd>{statusCounts.running}</dd></div>
+          <div><dt>Passed</dt><dd>{statusCounts.passed}</dd></div>
+          <div><dt>Problems</dt><dd>{statusCounts.problems}</dd></div>
+          <div><dt>Unknown</dt><dd>{statusCounts.unknown}</dd></div>
+        </dl>
+      </header>
+
+      <RuntimeComparisonHistory projectId={projectId} projectSlug={projectSlug} />
+
+      <div className="trace-explorer-toolbar">
+        <label className="trace-explorer-search">
+          <Search aria-hidden="true" />
+          <span className="sr-only">Search traces</span>
+          <input
+            placeholder="Search trace, agent, model, or error..."
+            type="search"
+            value={query}
+            onChange={(event) => setQuery(event.target.value)}
+          />
+        </label>
+        <label>
+          <span className="sr-only">Filter trace status</span>
+          <select value={statusFilter} onChange={(event) => setStatusFilter(event.target.value as typeof statusFilter)}>
+            <option value="all">All statuses</option>
+            <option value="running">Running</option>
+            <option value="passed">Passed</option>
+            <option value="problems">Problems</option>
+            <option value="unknown">Unknown</option>
+          </select>
+        </label>
         <label>
           <span className="sr-only">Filter agents</span>
           <select value={agentFilter} onChange={(event) => setAgentFilter(event.target.value)}>
@@ -179,56 +548,52 @@ export function RuntimeTraceWorkbench({ projectId, projectSlug, traces: initialT
           </select>
         </label>
         <label>
-          <span className="sr-only">Filter status</span>
-          <select value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)}>
-            <option value="all">All log types</option>
-            <option value="success">success</option>
-            <option value="failure">failure</option>
-            <option value="debug">debug</option>
-            <option value="info">info</option>
-            <option value="warn">warn</option>
-            <option value="error">error</option>
+          <span className="sr-only">Filter models</span>
+          <select value={modelFilter} onChange={(event) => setModelFilter(event.target.value)}>
+            <option value="all">All models</option>
+            {modelOptions.map((model) => <option key={model} value={model}>{model}</option>)}
           </select>
         </label>
+        <button className="secondary-button small" type="button" onClick={paused ? goLive : () => setPaused(true)}>
+          {paused ? `Go live${pausedTraces.length > 0 ? ` (${pausedTraces.length})` : ""}` : "Pause"}
+        </button>
+        <button className="secondary-button small" type="button" onClick={resetFilters}>Reset</button>
       </div>
-      <div className="convex-log-search-row">
-        <label className="convex-log-search">
-          <Search aria-hidden="true" />
-          <span className="sr-only">Filter logs</span>
-          <input
-            placeholder="Filter logs..."
-            type="search"
-            value={query}
-            onChange={(event) => setQuery(event.target.value)}
-          />
-        </label>
-        <button className="secondary-button" type="button" disabled={visibleTraces.length === 0} onClick={clearVisibleLogs}>Clear Logs</button>
+
+      <div className="trace-explorer-result-bar">
+        <span>{visibleRows.length} of {rows.length} traces</span>
+        {query !== deferredQuery ? <span>Updating results...</span> : null}
       </div>
-      {streamError ? <div className="inline-notice error">Log stream error: {streamError}</div> : null}
-      <div className="convex-log-sheet">
-        <PanelGroup orientation="horizontal" id="vifu-logs-content" className="convex-log-panels">
-          <Panel id="log-list-panel" minSize={selectedTrace ? 38 : 100} defaultSize={selectedTrace ? 62 : 100}>
-            <div className="convex-log-list">
-              <div className="convex-log-list-header">
-                <div>Timestamp</div>
-                <div>ID</div>
+      {selectionError ? <div className="inline-notice error">Trace selection error: {selectionError}</div> : null}
+      {pollError ? <div className="inline-notice error">Trace polling error: {pollError}</div> : null}
+
+      <div className="trace-explorer-sheet">
+        <PanelGroup orientation="horizontal" id="vifu-traces-content" className="trace-explorer-panels">
+          <Panel id="trace-list-panel" minSize={selectedTrace ? "38" : "100"} defaultSize={selectedTrace ? "55" : "100"}>
+            <div className="trace-explorer-list" aria-busy={traceListLoading}>
+              <div className="trace-explorer-list-header" aria-hidden="true">
+                <div>Time</div>
                 <div>Status</div>
                 <div>Agent</div>
-                <button className="secondary-button small" type="button" onClick={() => paused ? goLive() : setPaused(true)}>
-                  {paused ? `Go Live${pausedTraces.length > 0 ? ` (${pausedTraces.length})` : ""}` : "Pause"}
-                </button>
+                <div>Model</div>
+                <div>Latency</div>
+                <div>TTFT</div>
+                <div>Tok/s</div>
+                <div>App score</div>
               </div>
-              {visibleTraces.length === 0 ? (
-                <div className="convex-log-empty">
-                  {query || agentFilter !== "all" || statusFilter !== "all" ? "No logs match your filters." : "Waiting for new logs..."}
+              {visibleRows.length === 0 ? (
+                <div className="trace-explorer-empty">
+                  {rows.length === 0
+                    ? traceListLoading ? "Loading traces..." : "Waiting for the first trace..."
+                    : "No traces match these filters."}
                 </div>
               ) : (
                 <List
-                  className="convex-log-virtual-list"
+                  className="trace-explorer-virtual-list"
                   defaultHeight={560}
-                  overscanCount={20}
+                  overscanCount={16}
                   rowComponent={TraceRow}
-                  rowCount={visibleTraces.length}
+                  rowCount={visibleRows.length}
                   rowHeight={ROW_HEIGHT}
                   rowProps={rowProps}
                   style={{ height: "100%", width: "100%" }}
@@ -238,15 +603,17 @@ export function RuntimeTraceWorkbench({ projectId, projectSlug, traces: initialT
           </Panel>
           {selectedTrace ? (
             <>
-              <PanelResizeHandle className="convex-log-resize-handle" />
-              <Panel id="log-drilldown-panel" minSize={28} defaultSize={38}>
-                <TraceDrilldown
+              <PanelResizeHandle className="trace-explorer-resize-handle" />
+              <Panel id="trace-detail-panel" minSize="34" defaultSize="45">
+                <TraceDetail
                   trace={selectedTrace}
                   spans={selectedSpans}
-                  spansLoading={spansLoading}
-                  spansError={spansError}
-                  onClose={() => setSelectedTraceId(null)}
-                  onFilterByRequestId={(requestId) => setQuery(requestId)}
+                  scores={selectedScores}
+                  loading={spansLoading}
+                  error={spansError}
+                  selectedObservationId={selectedObservationId}
+                  onSelectObservation={setSelectedObservationId}
+                  onClose={closeTrace}
                 />
               </Panel>
             </>
@@ -259,117 +626,314 @@ export function RuntimeTraceWorkbench({ projectId, projectSlug, traces: initialT
 
 type TraceRowProps = {
   onSelectTrace: (trace: EndpointTrace) => void;
+  rows: TraceListRow[];
   selectedTraceId: string | null;
-  traces: EndpointTrace[];
 };
 
 function TraceRow({
   ariaAttributes,
   index,
   onSelectTrace,
+  rows,
   selectedTraceId,
   style,
-  traces,
 }: TraceRowProps & {
   ariaAttributes?: React.AriaAttributes & { role: "listitem" };
   index?: number;
   style?: CSSProperties;
 }) {
-  const trace = traces[index ?? 0];
-  if (!trace) return null;
+  const row = rows[index ?? 0];
+  if (!row) return null;
+  const { presentation, trace } = row;
   const selected = trace.id === selectedTraceId;
   return (
-    <div {...ariaAttributes} className="convex-log-row-wrap" style={style}>
+    <div {...ariaAttributes} className="trace-explorer-row-wrap" style={style}>
       <button
-        className={selected ? "convex-log-row selected" : "convex-log-row"}
-        data-log-key={trace.id}
+        className={selected ? "trace-explorer-row selected" : "trace-explorer-row"}
         onClick={() => onSelectTrace(trace)}
         type="button"
+        aria-label={`Open ${presentation.agent} trace ${trace.requestId}`}
       >
-        <time>{formatDate(trace.createdAt)}</time>
-        <code>{shortId(trace.requestId, 4)}</code>
-        <span className={statusClass(trace)}>{traceStatusLabel(trace)}</span>
-        <strong>{traceAgentLabel(trace)}</strong>
-        <p>{tracePreview(trace)}</p>
+        <time title={formatDate(trace.createdAt)}>{formatShortTime(trace.createdAt)}</time>
+        <span className={`trace-status ${presentation.status}`}>{presentation.statusLabel}</span>
+        <strong title={presentation.agent}>{presentation.agent}</strong>
+        <code title={presentation.model ?? undefined}>{presentation.model ?? "-"}</code>
+        <span>{formatMetric(presentation.latencyMs, "ms")}</span>
+        <span>{formatMetric(presentation.ttftMs, "ms")}</span>
+        <span>{formatMetric(presentation.tokensPerSecond, "", 1)}</span>
+        <span className={appScoreClass(presentation.appScore)}>{presentation.appScore ?? "-"}</span>
       </button>
     </div>
   );
 }
 
-function TraceDrilldown({
+const TraceDetail = memo(function TraceDetail({
+  error,
+  loading,
   onClose,
-  onFilterByRequestId,
-  trace,
+  onSelectObservation,
+  scores,
+  selectedObservationId,
   spans,
-  spansLoading,
-  spansError,
+  trace,
 }: {
+  error: string | null;
+  loading: boolean;
   onClose: () => void;
-  onFilterByRequestId: (requestId: string) => void;
-  trace: EndpointTrace;
+  onSelectObservation: (spanId: string | null) => void;
+  scores: TraceScore[];
+  selectedObservationId: string | null;
   spans: TraceSpan[];
-  spansLoading: boolean;
-  spansError: string | null;
+  trace: EndpointTrace;
 }) {
+  const [view, setView] = useState<ObservationView>("tree");
+  const [tab, setTab] = useState<DetailTab>("summary");
+  const presentation = useMemo(() => traceListPresentation(trace), [trace]);
+  const selectedSpan = selectedObservationId
+    ? spans.find((span) => span.id === selectedObservationId) ?? null
+    : null;
+
   return (
-    <aside className="convex-log-drilldown">
-      <header>
+    <aside className="trace-detail">
+      <header className="trace-detail-header">
         <div>
-          <time>{formatDate(trace.createdAt)}</time>
-        <span className={statusClass(trace)}>{traceStatusLabel(trace)}</span>
+          <span className={`trace-status ${presentation.status}`}>{presentation.statusLabel}</span>
+          <strong>{presentation.agent}</strong>
+          <code title={trace.requestId}>{shortId(trace.requestId, 12)}</code>
         </div>
-        <div>
-          <button className="secondary-button small" type="button" onClick={() => onFilterByRequestId(trace.requestId)}>Filter request</button>
-          <button className="icon-button" type="button" aria-label="Close log details" onClick={onClose}><X aria-hidden="true" /></button>
-        </div>
+        <button className="icon-button" type="button" aria-label="Close trace details" onClick={onClose}>
+          <X aria-hidden="true" />
+        </button>
       </header>
-      <dl className="convex-log-metadata">
-        <div><dt>Request ID</dt><dd><code>{trace.requestId}</code></dd></div>
-        <div><dt>Agent</dt><dd>{traceAgentLabel(trace)}</dd></div>
-        <div><dt>Operation</dt><dd><code>{trace.operation}</code></dd></div>
-        <div><dt>Profile</dt><dd><code title={trace.profileId ?? undefined}>{trace.profileSlug ?? (trace.profileId ? shortId(trace.profileId, 12) : "-")}</code></dd></div>
-        <div><dt>Version</dt><dd><code title={trace.profileVersionId ?? undefined}>{trace.profileVersionNumber === null ? (trace.profileVersionId ? shortId(trace.profileVersionId, 12) : "-") : `v${trace.profileVersionNumber}`}</code></dd></div>
-        <div><dt>Capability</dt><dd>{trace.capabilityKind ?? "-"}</dd></div>
-        <div><dt>Provider</dt><dd><code>{trace.providerKey ?? "-"}</code></dd></div>
-        <div><dt>Latency</dt><dd>{trace.latencyMs === null ? "-" : `${trace.latencyMs} ms`}</dd></div>
-        <div><dt>Gateway</dt><dd>{trace.gatewaySessionId ? shortId(trace.gatewaySessionId, 12) : "-"}</dd></div>
-      </dl>
-      <TraceSpanTimeline spans={spans} loading={spansLoading} error={spansError} />
-      <div className="convex-log-detail-tabs">
-        <TracePayload title="Request" value={trace.request} />
-        <TracePayload title="Response" value={trace.response} />
-        {trace.error ? <TracePayload title="Error" value={trace.error} tone="error" /> : null}
+
+      <div className="trace-detail-kpis">
+        <div><span>Model</span><strong>{presentation.model ?? "-"}</strong></div>
+        <div><span>Latency</span><strong>{formatMetric(presentation.latencyMs, "ms")}</strong></div>
+        <div><span>TTFT</span><strong>{formatMetric(presentation.ttftMs, "ms")}</strong></div>
+        <div><span>Tokens/s</span><strong>{formatMetric(presentation.tokensPerSecond, "", 1)}</strong></div>
+      </div>
+
+      <section className="observation-browser">
+        <header>
+          <div><strong>Observations</strong><span>{spans.length}</span></div>
+          <div className="trace-segmented-control" role="group" aria-label="Observation view">
+            <button className={view === "tree" ? "active" : ""} type="button" onClick={() => setView("tree")}>Tree</button>
+            <button className={view === "timeline" ? "active" : ""} type="button" onClick={() => setView("timeline")}>Timeline</button>
+          </div>
+        </header>
+        {loading ? <p className="trace-detail-message">Loading observations...</p> : null}
+        {error ? <p className="trace-detail-message error" role="alert">{error}</p> : null}
+        {!loading && !error ? (
+          <ObservationList
+            trace={trace}
+            spans={spans}
+            view={view}
+            selectedObservationId={selectedObservationId}
+            onSelectObservation={onSelectObservation}
+          />
+        ) : null}
+      </section>
+
+      <div className="trace-detail-tabs" role="tablist" aria-label="Trace details">
+        {(["summary", "io", "metadata", "scores", "events"] as const).map((item) => (
+          <button
+            aria-selected={tab === item}
+            className={tab === item ? "active" : ""}
+            key={item}
+            onClick={() => setTab(item)}
+            role="tab"
+            type="button"
+          >
+            {detailTabLabel(item)}
+          </button>
+        ))}
+      </div>
+      <div className="trace-detail-tab-panel" role="tabpanel">
+        <TraceDetailTab tab={tab} trace={trace} spans={spans} selectedSpan={selectedSpan} scores={scores} />
       </div>
     </aside>
   );
+});
+
+function ObservationList({
+  onSelectObservation,
+  selectedObservationId,
+  spans,
+  trace,
+  view,
+}: {
+  onSelectObservation: (spanId: string | null) => void;
+  selectedObservationId: string | null;
+  spans: TraceSpan[];
+  trace: EndpointTrace;
+  view: ObservationView;
+}) {
+  const observations = useMemo(
+    () => flattenTraceObservationForest(buildTraceObservationForest(spans)),
+    [spans],
+  );
+  const traceWindow = useMemo(() => timelineWindow(trace, spans), [spans, trace]);
+
+  if (spans.length === 0) {
+    return <p className="trace-detail-message">No observations recorded for this trace.</p>;
+  }
+  return (
+    <div className={`observation-list ${view}`}>
+      <button
+        className={selectedObservationId === null ? "observation-row trace-root selected" : "observation-row trace-root"}
+        type="button"
+        onClick={() => onSelectObservation(null)}
+      >
+        <span className={`observation-status ${traceListPresentation(trace).status}`} />
+        <strong>Trace</strong>
+        <small>{trace.operation}</small>
+        <time>{formatMetric(trace.latencyMs, "ms")}</time>
+      </button>
+      {observations.map(({ depth, span }) => {
+        const selected = span.id === selectedObservationId;
+        const rowStyle = { "--observation-depth": depth } as CSSProperties;
+        return (
+          <button
+            className={selected ? "observation-row selected" : "observation-row"}
+            key={span.id}
+            style={rowStyle}
+            type="button"
+            onClick={() => onSelectObservation(span.id)}
+          >
+            <span className={`observation-status ${statusGroupFromSpan(span)}`} />
+            <strong title={span.name}>{span.name}</strong>
+            {view === "timeline" ? (
+              <span className="observation-waterfall" aria-hidden="true">
+                <i style={waterfallStyle(trace, span, traceWindow)} />
+              </span>
+            ) : <small>{observationType(span)}</small>}
+            <time>{formatMetric(span.durationMs, "ms")}</time>
+          </button>
+        );
+      })}
+    </div>
+  );
 }
 
-function TraceSpanTimeline({ spans, loading, error }: { spans: TraceSpan[]; loading: boolean; error: string | null }) {
+function TraceDetailTab({
+  scores,
+  selectedSpan,
+  spans,
+  tab,
+  trace,
+}: {
+  scores: TraceScore[];
+  selectedSpan: TraceSpan | null;
+  spans: TraceSpan[];
+  tab: DetailTab;
+  trace: EndpointTrace;
+}) {
+  if (tab === "summary") return <TraceSummary trace={trace} spans={spans} selectedSpan={selectedSpan} />;
+  if (tab === "io") {
+    const io = traceIoValues(trace, spans, selectedSpan);
+    return (
+      <div className="trace-payload-grid">
+        <TracePayload title="Input" value={io.input} />
+        <TracePayload title="Output" value={io.output} />
+      </div>
+    );
+  }
+  if (tab === "metadata") {
+    const metadata = selectedSpan ? observationMetadata(selectedSpan) : traceMetadata(trace);
+    return (
+      <div className="trace-payload-grid">
+        <TracePayload title="Metadata" value={metadata} />
+      </div>
+    );
+  }
+  if (tab === "scores") return <TraceScores scores={scores} selectedSpan={selectedSpan} />;
+  return <TraceEvents spans={spans} selectedSpan={selectedSpan} />;
+}
+
+function TraceSummary({ trace, spans, selectedSpan }: {
+  trace: EndpointTrace;
+  spans: TraceSpan[];
+  selectedSpan: TraceSpan | null;
+}) {
+  const firstProblem = [...spans].sort(compareSpanTime).find((span) => statusGroupFromSpan(span) === "problems") ?? null;
+  const childSpans = spans.filter((span) => span.parentSpanId !== null);
+  const durationCandidates = childSpans.length > 0 ? childSpans : spans;
+  const longest = durationCandidates.reduce<TraceSpan | null>((current, span) => {
+    if (span.durationMs === null) return current;
+    return current === null || (current.durationMs ?? -1) < span.durationMs ? span : current;
+  }, null);
+  const usage = selectedSpan
+    ? observationUsage(selectedSpan)
+    : trace.usage ?? traceUsageFromResponse(trace.response);
+
   return (
-    <section className="trace-span-timeline">
-      <header><strong>Execution</strong><span>{spans.length} spans</span></header>
-      {loading ? <p>Loading execution spans...</p> : null}
-      {error ? <p className="inline-error" role="alert">{error}</p> : null}
-      {!loading && !error && spans.length === 0 ? <p>No execution spans recorded.</p> : null}
-      {spans.map((span) => (
-        <details key={span.id}>
-          <summary>
-            <span className={`trace-span-status ${span.status}`} />
-            <strong>{span.name}</strong>
-            <small>{span.providerKey ?? span.kind}</small>
-            <time>{span.durationMs === null ? "-" : `${span.durationMs} ms`}</time>
-          </summary>
-          <dl>
-            <div><dt>Kind</dt><dd>{span.kind}</dd></div>
-            <div><dt>Capability</dt><dd>{span.capabilityKind ?? "-"}</dd></div>
-            <div><dt>Status</dt><dd>{span.status}</dd></div>
-          </dl>
-          {span.inputSummary !== null ? <TracePayload title="Input" value={span.inputSummary} /> : null}
-          {span.outputSummary !== null ? <TracePayload title="Output" value={span.outputSummary} /> : null}
-          {span.error ? <TracePayload title="Error" value={span.error} tone="error" /> : null}
-        </details>
+    <div className="trace-summary-panel">
+      <dl className="trace-summary-grid">
+        <div><dt>Selected</dt><dd>{selectedSpan?.name ?? "Trace"}</dd></div>
+        <div><dt>Type</dt><dd>{selectedSpan ? observationType(selectedSpan) : "trace"}</dd></div>
+        <div><dt>Status</dt><dd>{selectedSpan?.status ?? trace.status}</dd></div>
+        <div><dt>Duration</dt><dd>{formatMetric(selectedSpan?.durationMs ?? trace.latencyMs, "ms")}</dd></div>
+        <div><dt>Provider</dt><dd>{selectedSpan?.providerKey ?? trace.providerKey ?? "-"}</dd></div>
+        <div><dt>Model</dt><dd>{selectedSpan ? observationModel(selectedSpan) ?? "-" : traceListPresentation(trace).model ?? "-"}</dd></div>
+        <div><dt>TTFT</dt><dd>{formatMetric(selectedSpan ? observationTtftMs(selectedSpan) : traceListPresentation(trace).ttftMs, "ms")}</dd></div>
+        <div><dt>Tokens</dt><dd>{formatUsage(usage)}</dd></div>
+      </dl>
+      <div className="trace-summary-findings">
+        <article>
+          <span>First problem</span>
+          <strong>{firstProblem?.name ?? (trace.error ? "Trace" : "None")}</strong>
+          <p>{firstProblem?.error ?? trace.error ?? "No failed or timed-out observation was recorded."}</p>
+        </article>
+        <article>
+          <span>Longest observation</span>
+          <strong>{longest?.name ?? "-"}</strong>
+          <p>{longest?.durationMs === null || longest === null ? "No duration data." : `${longest.durationMs} ms for the longest recorded observation.`}</p>
+        </article>
+      </div>
+      {selectedSpan?.error ? <TracePayload title="Error" value={selectedSpan.error} tone="error" /> : null}
+      {!selectedSpan && trace.error ? <TracePayload title="Error" value={trace.error} tone="error" /> : null}
+    </div>
+  );
+}
+
+function TraceScores({ scores, selectedSpan }: { scores: TraceScore[]; selectedSpan: TraceSpan | null }) {
+  const visible = traceScoresForSelection(scores, selectedSpan?.id ?? null);
+  if (visible.length === 0) return <p className="trace-detail-message">No scores recorded for this selection.</p>;
+  return (
+    <div className="trace-score-list">
+      {visible.map((score) => (
+        <article key={score.id}>
+          <div><strong>{score.name}</strong><span>{score.dataType}</span></div>
+          <code>{formatScoreValue(score.value)}</code>
+          <small>{score.source}{selectedSpan && score.spanId === selectedSpan.id ? " · selected observation" : ""}</small>
+        </article>
       ))}
-    </section>
+    </div>
+  );
+}
+
+function TraceEvents({ spans, selectedSpan }: { spans: TraceSpan[]; selectedSpan: TraceSpan | null }) {
+  const eventSpans = traceEventSpansForSelection(spans, selectedSpan?.id ?? null);
+  const rawEvents = selectedSpan && observationType(selectedSpan) !== "event"
+    ? eventPayloads(selectedSpan.attributes)
+    : [];
+  if (eventSpans.length === 0 && rawEvents.length === 0) {
+    return <p className="trace-detail-message">No events or linked logs recorded.</p>;
+  }
+  return (
+    <div className="trace-event-list">
+      {eventSpans.map((span) => (
+        <article key={span.id}>
+          <header><strong>{span.name}</strong><time>{formatShortTime(span.createdAt)}</time></header>
+          <span className={`trace-status ${statusGroupFromSpan(span)}`}>{span.status}</span>
+          {span.outputSummary !== null ? <TracePayload title="Event" value={span.outputSummary} /> : null}
+          {eventPayloads(span.attributes).map((event, index) => (
+            <TracePayload key={`${span.id}-${index}`} title="Linked log" value={event} />
+          ))}
+        </article>
+      ))}
+      {rawEvents.map((event, index) => <TracePayload key={index} title="Linked log" value={event} />)}
+    </div>
   );
 }
 
@@ -382,109 +946,221 @@ function TracePayload({ title, value, tone }: { title: string; value: unknown; t
   );
 }
 
-function mergeTraces(primary: EndpointTrace[], secondary: EndpointTrace[]): EndpointTrace[] {
+function reconcileTraces(
+  primary: EndpointTrace[],
+  secondary: EndpointTrace[],
+  limit: number,
+  pinnedTraceId: string | null,
+): EndpointTrace[] {
+  const previousById = new Map(secondary.map((trace) => [trace.id, trace]));
   const seen = new Set<string>();
-  return sortTraces([...primary, ...secondary]).filter((trace) => {
-    if (seen.has(trace.id)) return false;
+  const merged: EndpointTrace[] = [];
+  for (const trace of [...primary, ...secondary]) {
+    if (seen.has(trace.id)) continue;
     seen.add(trace.id);
-    return true;
+    const previous = previousById.get(trace.id);
+    merged.push(previous && sameTraceRevision(previous, trace) ? previous : trace);
+  }
+  const next = retainPinnedTrace(sortTraces(merged), limit, pinnedTraceId);
+  if (next.length === secondary.length && next.every((trace, index) => trace === secondary[index])) return secondary;
+  return next;
+}
+
+function sameTraceRevision(a: EndpointTrace, b: EndpointTrace): boolean {
+  const aPresentation = traceListPresentation(a);
+  const bPresentation = traceListPresentation(b);
+  return a.id === b.id
+    && a.status === b.status
+    && a.latencyMs === b.latencyMs
+    && a.completedAt === b.completedAt
+    && a.error === b.error
+    && a.profileName === b.profileName
+    && a.providerKey === b.providerKey
+    && formatJson(a.request) === formatJson(b.request)
+    && formatJson(a.response) === formatJson(b.response)
+    && aPresentation.model === bPresentation.model
+    && aPresentation.ttftMs === bPresentation.ttftMs
+    && aPresentation.tokensPerSecond === bPresentation.tokensPerSecond
+    && aPresentation.appScore === bPresentation.appScore;
+}
+
+function reconcileSpans(next: TraceSpan[], current: TraceSpan[]): TraceSpan[] {
+  const currentById = new Map(current.map((span) => [span.id, span]));
+  const reconciled = [...next].sort(compareSpanTime).map((span) => {
+    const previous = currentById.get(span.id);
+    return previous && sameTraceSpanRevision(previous, span) ? previous : span;
   });
+  if (reconciled.length === current.length && reconciled.every((span, index) => span === current[index])) return current;
+  return reconciled;
+}
+
+function reconcileScores(next: TraceScore[], current: TraceScore[]): TraceScore[] {
+  if (next.length === current.length && next.every((score, index) => sameScore(score, current[index]))) return current;
+  return next;
+}
+
+function sameScore(a: TraceScore, b: TraceScore | undefined): boolean {
+  return Boolean(b)
+    && a.id === b?.id
+    && a.spanId === b.spanId
+    && a.name === b.name
+    && a.dataType === b.dataType
+    && formatJson(a.value) === formatJson(b.value);
 }
 
 function sortTraces(traces: EndpointTrace[]): EndpointTrace[] {
   return [...traces].sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt));
 }
 
-function statusClass(trace: EndpointTrace): string {
-  const level = traceLogLevel(trace);
-  if (level === "info") return "status-label ready";
-  if (level === "debug") return "status-label pending";
-  if (level === "warn") return "status-label warning";
-  return "status-label off";
+function statusGroupFromSpan(span: TraceSpan): TraceStatusGroup {
+  const normalized = span.status.toLowerCase();
+  if (["created", "pending", "queued", "running", "started", "streaming"].includes(normalized)) return "running";
+  if (["completed", "ok", "passed", "success", "succeeded"].includes(normalized)) return "passed";
+  if (["cancelled", "error", "failed", "rejected", "timed_out", "timeout"].includes(normalized)) return "problems";
+  return "unknown";
 }
 
-function traceMatchesLogType(trace: EndpointTrace, type: string): boolean {
-  if (type === "success") return trace.status === "completed";
-  if (type === "failure") return trace.status !== "completed" && trace.status !== "pending";
-  return traceLogLevel(trace) === type;
+function appScoreClass(value: string | null): string {
+  const normalized = value?.toLowerCase();
+  if (["pass", "passed", "true", "accepted"].includes(normalized ?? "")) return "app-score passed";
+  if (["fail", "failed", "false", "rejected"].includes(normalized ?? "")) return "app-score problems";
+  return "app-score";
 }
 
-function traceStatusLabel(trace: EndpointTrace): string {
-  return traceLogLevel(trace);
+function traceMetadata(trace: EndpointTrace): Record<string, unknown> {
+  return {
+    traceId: trace.id,
+    requestId: trace.requestId,
+    endpointId: trace.endpointId,
+    projectId: trace.projectId,
+    gatewaySessionId: trace.gatewaySessionId,
+    profileId: trace.profileId,
+    profileVersionId: trace.profileVersionId,
+    profileVersionNumber: trace.profileVersionNumber,
+    operation: trace.operation,
+    providerKey: trace.providerKey,
+    capabilityKind: trace.capabilityKind,
+    selectionKey: trace.selectionKey,
+    createdAt: trace.createdAt,
+    completedAt: trace.completedAt,
+  };
 }
 
-function traceLogLevel(trace: EndpointTrace): "debug" | "info" | "warn" | "error" {
-  const requestLevel = readLogLevel(trace.request);
-  if (requestLevel) return requestLevel;
-  const responseLevel = readLogLevel(trace.response);
-  if (responseLevel) return responseLevel;
-  if (trace.status === "pending") return "debug";
-  if (trace.status === "completed") return "info";
-  return "error";
+function eventPayloads(attributes: Record<string, unknown>): unknown[] {
+  return [attributes.events, attributes.logs, attributes.log].flatMap((value) => {
+    if (value === undefined || value === null) return [];
+    return Array.isArray(value) ? value : [value];
+  });
 }
 
-function readLogLevel(value: unknown): "debug" | "info" | "warn" | "error" | null {
+function traceUsageFromResponse(value: unknown): TraceUsage | null {
   if (!isRecord(value)) return null;
-  const rawLevel = value.level ?? value.logLevel;
-  if (typeof rawLevel === "string") {
-    const level = rawLevel.toLowerCase();
-    if (level === "debug" || level === "info" || level === "warn" || level === "error") return level;
-  }
-  if (isRecord(value.metadata)) return readLogLevel(value.metadata);
+  if (isRecord(value.usage)) return value.usage;
+  if (isRecord(value.metadata) && isRecord(value.metadata.usage)) return value.metadata.usage;
   return null;
 }
 
-function traceAgentLabel(trace: EndpointTrace): string {
-  if (trace.profileName?.trim()) return trace.profileName;
-  if (trace.profileSlug?.trim()) return trace.profileSlug;
-  if (isRecord(trace.request) && typeof trace.request.model === "string") return trace.request.model;
-  if (isRecord(trace.response) && typeof trace.response.agentId === "string") return trace.response.agentId;
-  if (isRecord(trace.request) && isRecord(trace.request.metadata) && typeof trace.request.metadata.agent === "string") {
-    return trace.request.metadata.agent;
-  }
-  if (trace.profileId) return `Profile ${shortId(trace.profileId, 8)}`;
-  return trace.gatewaySessionId ? `Gateway ${shortId(trace.gatewaySessionId, 8)}` : "Agent";
+function formatUsage(usage: TraceUsage | null): string {
+  if (!usage) return "-";
+  const input = firstNumber(usage.inputTokens, usage.promptTokens, usage.input_tokens, usage.prompt_tokens);
+  const output = firstNumber(usage.outputTokens, usage.completionTokens, usage.output_tokens, usage.completion_tokens);
+  if (input === null && output === null) return "-";
+  return `${input ?? "-"} in / ${output ?? "-"} out`;
 }
 
-function tracePreview(trace: EndpointTrace): string {
-  if (trace.error) return trace.error;
-  if (isRecord(trace.request) && Array.isArray(trace.request.messages)) {
-    const last = [...trace.request.messages].reverse().find(isRecord);
-    if (last && typeof last.content === "string" && last.content.trim()) return last.content;
-  }
-  if (isRecord(trace.request) && typeof trace.request.message === "string" && trace.request.message.trim()) {
-    return trace.request.message;
-  }
-  if (isRecord(trace.response) && typeof trace.response.reply === "string" && trace.response.reply.trim()) {
-    return trace.response.reply;
-  }
-  return "Agent invocation";
+function formatScoreValue(value: unknown): string {
+  if (typeof value === "string") return value;
+  if (typeof value === "boolean" || typeof value === "number") return String(value);
+  return formatJson(value);
 }
 
-function traceSearchText(trace: EndpointTrace): string {
-  return [
-    trace.requestId,
-    trace.status,
-    trace.operation,
-    trace.providerKey ?? "",
-    trace.capabilityKind ?? "",
-    trace.profileId ?? "",
-    trace.profileVersionId ?? "",
-    trace.profileSlug ?? "",
-    trace.profileName ?? "",
-    trace.profileVersionNumber?.toString() ?? "",
-    traceAgentLabel(trace),
-    tracePreview(trace),
-    trace.error ?? "",
-    formatJson(trace.request),
-    formatJson(trace.response),
-  ].join(" ").toLowerCase();
+function timelineWindow(trace: EndpointTrace, spans: TraceSpan[]): { start: number; duration: number } {
+  const ends = spans.map((span) => spanTimelineBounds(trace, span).endMs);
+  return {
+    start: 0,
+    duration: Math.max(1, trace.latencyMs ?? 0, ...ends),
+  };
+}
+
+function waterfallStyle(
+  trace: EndpointTrace,
+  span: TraceSpan,
+  window: { start: number; duration: number },
+): CSSProperties {
+  const bounds = spanTimelineBounds(trace, span);
+  const left = ((bounds.startMs - window.start) / window.duration) * 100;
+  const width = ((bounds.endMs - bounds.startMs || 1) / window.duration) * 100;
+  return {
+    left: `${Math.max(0, Math.min(99, left))}%`,
+    width: `${Math.max(1, Math.min(100 - left, width))}%`,
+  };
+}
+
+function spanTimelineBounds(
+  trace: EndpointTrace,
+  span: TraceSpan,
+): { startMs: number; endMs: number } {
+  const offsets = observationTimelineOffsets(span);
+  if (offsets) return offsets;
+
+  const traceStart = Date.parse(trace.createdAt);
+  const spanStart = Date.parse(span.createdAt);
+  const startMs = Number.isFinite(traceStart) && Number.isFinite(spanStart)
+    ? Math.max(0, spanStart - traceStart)
+    : 0;
+  const explicitEnd = span.completedAt ? Date.parse(span.completedAt) : Number.NaN;
+  const endMs = Number.isFinite(traceStart) && Number.isFinite(explicitEnd)
+    ? Math.max(startMs, explicitEnd - traceStart)
+    : startMs + Math.max(0, span.durationMs ?? 0);
+  return { startMs, endMs };
+}
+
+function compareSpanTime(a: TraceSpan, b: TraceSpan): number {
+  const aOffsets = observationTimelineOffsets(a);
+  const bOffsets = observationTimelineOffsets(b);
+  if (aOffsets && bOffsets && aOffsets.startMs !== bOffsets.startMs) {
+    return aOffsets.startMs - bOffsets.startMs;
+  }
+  if (aOffsets && !bOffsets) return -1;
+  if (!aOffsets && bOffsets) return 1;
+  return Date.parse(a.createdAt) - Date.parse(b.createdAt);
+}
+
+function detailTabLabel(tab: DetailTab): string {
+  if (tab === "io") return "I/O";
+  return tab.charAt(0).toUpperCase() + tab.slice(1);
+}
+
+function readTraceSelection(): {
+  traceId: string | null;
+  invocationId: string | null;
+  observationId: string | null;
+} {
+  if (typeof window === "undefined") {
+    return { traceId: null, invocationId: null, observationId: null };
+  }
+  return traceSelectionFromUrl(window.location.href);
+}
+
+function writeTraceSelection(traceId: string | null, observationId: string | null) {
+  if (typeof window === "undefined") return;
+  const next = traceSelectionUrl(window.location.href, traceId, observationId);
+  const current = `${window.location.pathname}${window.location.search}${window.location.hash}`;
+  if (next !== current) window.history.replaceState(window.history.state, "", next);
+}
+
+function uniqueSorted(values: string[]): string[] {
+  return Array.from(new Set(values)).sort((a, b) => a.localeCompare(b));
 }
 
 function formatJson(value: unknown): string {
   if (value === null || value === undefined) return "-";
   if (typeof value === "string") return value;
-  return JSON.stringify(value, null, 2);
+  try {
+    return JSON.stringify(value, null, 2);
+  } catch {
+    return String(value);
+  }
 }
 
 function formatDate(value: string | null): string {
@@ -496,14 +1172,28 @@ function formatDate(value: string | null): string {
     hour: "numeric",
     minute: "2-digit",
     month: "short",
-    timeZone: "UTC",
+    second: "2-digit",
     timeZoneName: "short",
     year: "numeric",
   }).format(date);
 }
 
+function formatShortTime(value: string | null): string {
+  if (!value) return "-";
+  const date = new Date(value);
+  if (Number.isNaN(date.valueOf())) return "-";
+  return new Intl.DateTimeFormat("en", { hour: "2-digit", minute: "2-digit", second: "2-digit" }).format(date);
+}
+
 function shortId(value: string, length = 8): string {
   return value.length <= length ? value : `${value.slice(0, length)}...`;
+}
+
+function firstNumber(...values: unknown[]): number | null {
+  for (const value of values) {
+    if (typeof value === "number" && Number.isFinite(value)) return value;
+  }
+  return null;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

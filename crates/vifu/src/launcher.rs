@@ -8,10 +8,13 @@ use vifu_server::config::{Config as ServerConfig, DeploymentMode};
 
 use crate::cli::{help_text, Command, Options};
 use crate::gateway;
+use crate::monitor::{runtime_event_channel, RuntimeEvent, RuntimeHealth};
 use crate::runtime_config::LoadedRuntimeConfig;
+use crate::tui;
 
 pub async fn execute(options: Options) -> Result<(), String> {
-    init_tracing();
+    let interactive_start = matches!(&options.command, Command::Start) && tui::should_run();
+    init_tracing(interactive_start);
     let Options {
         command,
         config_profile,
@@ -94,6 +97,9 @@ fn role_status(enabled: bool) -> &'static str {
 }
 
 async fn run_combined(config: LoadedRuntimeConfig, open_browser: bool) -> Result<(), String> {
+    if tui::should_run() {
+        return run_combined_tui(config).await;
+    }
     let server_config = config.server_config()?;
     let console_url = local_console_url(&server_config);
     let gateway_options = config.gateway_options()?;
@@ -103,7 +109,13 @@ async fn run_combined(config: LoadedRuntimeConfig, open_browser: bool) -> Result
         wait_for_shutdown(shutdown_rx.clone()),
     ));
     announce_console(console_url, open_browser);
-    let mut gateway = tokio::spawn(gateway::run(gateway_options, shutdown_rx));
+    let gateway_control = gateway::GatewayControl::new();
+    let mut gateway = tokio::spawn(gateway::run(
+        gateway_options,
+        shutdown_rx,
+        None,
+        gateway_control,
+    ));
     let outcome = tokio::select! {
         () = shutdown_signal() => CombinedRuntimeOutcome::Shutdown,
         result = &mut server => CombinedRuntimeOutcome::Server(result),
@@ -124,10 +136,14 @@ async fn run_combined(config: LoadedRuntimeConfig, open_browser: bool) -> Result
             let _ = server.await;
             join_result("Vifu Agent Gateway", result)
         }
+        CombinedRuntimeOutcome::Tui(result) => result,
     }
 }
 
 async fn run_server_only(config: LoadedRuntimeConfig, open_browser: bool) -> Result<(), String> {
+    if tui::should_run() {
+        return run_server_only_tui(config).await;
+    }
     let server_config = config.server_config()?;
     let console_url = local_console_url(&server_config);
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
@@ -147,13 +163,23 @@ async fn run_server_only(config: LoadedRuntimeConfig, open_browser: bool) -> Res
             Ok(())
         }
         SingleRuntimeOutcome::Role(result) => join_result("Vifu Server", result),
+        SingleRuntimeOutcome::Tui(result) => result,
     }
 }
 
 async fn run_gateway_only(config: LoadedRuntimeConfig) -> Result<(), String> {
+    if tui::should_run() {
+        return run_gateway_only_tui(config).await;
+    }
     let gateway_options = config.gateway_options()?;
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
-    let mut gateway = tokio::spawn(gateway::run(gateway_options, shutdown_rx));
+    let gateway_control = gateway::GatewayControl::new();
+    let mut gateway = tokio::spawn(gateway::run(
+        gateway_options,
+        shutdown_rx,
+        None,
+        gateway_control,
+    ));
     let outcome = tokio::select! {
         () = shutdown_signal() => SingleRuntimeOutcome::Shutdown,
         result = &mut gateway => SingleRuntimeOutcome::Role(result),
@@ -165,17 +191,150 @@ async fn run_gateway_only(config: LoadedRuntimeConfig) -> Result<(), String> {
             Ok(())
         }
         SingleRuntimeOutcome::Role(result) => join_result("Vifu Agent Gateway", result),
+        SingleRuntimeOutcome::Tui(result) => result,
+    }
+}
+
+async fn run_combined_tui(config: LoadedRuntimeConfig) -> Result<(), String> {
+    let server_config = config.server_config()?;
+    let console_url = local_console_url(&server_config);
+    let gateway_options = config.gateway_options()?;
+    let dashboard_url = console_url
+        .clone()
+        .or_else(|| gateway_options.dashboard_url.clone());
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    let (monitor_tx, monitor_rx) = runtime_event_channel();
+    let gateway_control = gateway::GatewayControl::new();
+    let optimization = gateway_control.optimization();
+    let mut server = tokio::spawn(vifu_server::serve(
+        server_config,
+        wait_for_shutdown(shutdown_rx.clone()),
+    ));
+    let mut gateway = tokio::spawn(gateway::run(
+        gateway_options,
+        shutdown_rx,
+        Some(monitor_tx),
+        gateway_control,
+    ));
+    let mut terminal = Box::pin(tui::run(monitor_rx, dashboard_url, Some(optimization)));
+    let outcome = tokio::select! {
+        () = shutdown_signal() => CombinedRuntimeOutcome::Shutdown,
+        result = &mut terminal => CombinedRuntimeOutcome::Tui(result),
+        result = &mut server => CombinedRuntimeOutcome::Server(result),
+        result = &mut gateway => CombinedRuntimeOutcome::Gateway(result),
+    };
+    let _ = shutdown_tx.send(true);
+    match outcome {
+        CombinedRuntimeOutcome::Shutdown | CombinedRuntimeOutcome::Tui(Ok(())) => {
+            let _ = server.await;
+            let _ = gateway.await;
+            Ok(())
+        }
+        CombinedRuntimeOutcome::Tui(Err(error)) => {
+            let _ = server.await;
+            let _ = gateway.await;
+            Err(format!("Vifu TUI failed: {error}"))
+        }
+        CombinedRuntimeOutcome::Server(result) => {
+            let _ = gateway.await;
+            join_result("Vifu Server", result)
+        }
+        CombinedRuntimeOutcome::Gateway(result) => {
+            let _ = server.await;
+            join_result("Vifu Agent Gateway", result)
+        }
+    }
+}
+
+async fn run_server_only_tui(config: LoadedRuntimeConfig) -> Result<(), String> {
+    let server_config = config.server_config()?;
+    let console_url = local_console_url(&server_config);
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    let (monitor_tx, monitor_rx) = runtime_event_channel();
+    let _ = monitor_tx.send(RuntimeEvent::HealthChanged {
+        health: RuntimeHealth::Starting,
+        message: None,
+    });
+    let _ = monitor_tx.send(RuntimeEvent::LoadedModelsChanged(0));
+    if let Some(readiness_url) = console_url.clone() {
+        let readiness_monitor = monitor_tx.clone();
+        std::mem::drop(tokio::spawn(async move {
+            if wait_for_console(&readiness_url).await.is_ok() {
+                let _ = readiness_monitor.send(RuntimeEvent::HealthChanged {
+                    health: RuntimeHealth::Live,
+                    message: None,
+                });
+            }
+        }));
+    }
+    drop(monitor_tx);
+    let mut server = tokio::spawn(vifu_server::serve(
+        server_config,
+        wait_for_shutdown(shutdown_rx),
+    ));
+    let mut terminal = Box::pin(tui::run(monitor_rx, console_url, None));
+    let outcome = tokio::select! {
+        () = shutdown_signal() => SingleRuntimeOutcome::Shutdown,
+        result = &mut terminal => SingleRuntimeOutcome::Tui(result),
+        result = &mut server => SingleRuntimeOutcome::Role(result),
+    };
+    let _ = shutdown_tx.send(true);
+    match outcome {
+        SingleRuntimeOutcome::Shutdown | SingleRuntimeOutcome::Tui(Ok(())) => {
+            let _ = server.await;
+            Ok(())
+        }
+        SingleRuntimeOutcome::Tui(Err(error)) => {
+            let _ = server.await;
+            Err(format!("Vifu TUI failed: {error}"))
+        }
+        SingleRuntimeOutcome::Role(result) => join_result("Vifu Server", result),
+    }
+}
+
+async fn run_gateway_only_tui(config: LoadedRuntimeConfig) -> Result<(), String> {
+    let gateway_options = config.gateway_options()?;
+    let dashboard_url = gateway_options.dashboard_url.clone();
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    let (monitor_tx, monitor_rx) = runtime_event_channel();
+    let gateway_control = gateway::GatewayControl::new();
+    let optimization = gateway_control.optimization();
+    let mut gateway = tokio::spawn(gateway::run(
+        gateway_options,
+        shutdown_rx,
+        Some(monitor_tx),
+        gateway_control,
+    ));
+    let mut terminal = Box::pin(tui::run(monitor_rx, dashboard_url, Some(optimization)));
+    let outcome = tokio::select! {
+        () = shutdown_signal() => SingleRuntimeOutcome::Shutdown,
+        result = &mut terminal => SingleRuntimeOutcome::Tui(result),
+        result = &mut gateway => SingleRuntimeOutcome::Role(result),
+    };
+    let _ = shutdown_tx.send(true);
+    match outcome {
+        SingleRuntimeOutcome::Shutdown | SingleRuntimeOutcome::Tui(Ok(())) => {
+            let _ = gateway.await;
+            Ok(())
+        }
+        SingleRuntimeOutcome::Tui(Err(error)) => {
+            let _ = gateway.await;
+            Err(format!("Vifu TUI failed: {error}"))
+        }
+        SingleRuntimeOutcome::Role(result) => join_result("Vifu Agent Gateway", result),
     }
 }
 
 enum CombinedRuntimeOutcome {
     Shutdown,
+    Tui(Result<(), String>),
     Server(Result<Result<(), String>, tokio::task::JoinError>),
     Gateway(Result<Result<(), String>, tokio::task::JoinError>),
 }
 
 enum SingleRuntimeOutcome {
     Shutdown,
+    Tui(Result<(), String>),
     Role(Result<Result<(), String>, tokio::task::JoinError>),
 }
 
@@ -206,26 +365,34 @@ fn announce_console(console_url: Option<String>, open_browser: bool) {
 }
 
 fn should_open_browser() -> bool {
-    std::io::stdout().is_terminal() && std::env::var_os("CI").is_none()
+    auto_browser_policy(
+        std::io::stdin().is_terminal(),
+        std::io::stdout().is_terminal(),
+        std::env::var_os("CI").is_some(),
+        std::env::var_os("TERM").is_some_and(|term| term == "dumb"),
+    )
+}
+
+fn auto_browser_policy(
+    stdin_is_terminal: bool,
+    stdout_is_terminal: bool,
+    is_ci: bool,
+    term_is_dumb: bool,
+) -> bool {
+    stdin_is_terminal && stdout_is_terminal && !is_ci && !term_is_dumb
 }
 
 async fn open_console_when_ready(url: String) {
-    if let Err(error) = wait_for_console(&url).await {
-        eprintln!("Could not load Vifu Console automatically: {error}");
-        return;
-    }
-    if let Err(error) = open_browser(&url) {
+    if let Err(error) = open_browser_when_ready(url).await {
         eprintln!("Could not open Vifu Console automatically: {error}");
     }
 }
 
 async fn wait_for_console(url: &str) -> Result<(), String> {
-    let authority = url
-        .strip_prefix("http://")
-        .ok_or_else(|| format!("unsupported local Console URL: {url}"))?;
-    let address = authority
-        .parse::<std::net::SocketAddr>()
-        .map_err(|error| format!("invalid local Console URL {url}: {error}"))?;
+    let address = console_socket_address(url)?;
+    if !address.ip().is_loopback() {
+        return Err(format!("unsupported non-loopback Console URL: {url}"));
+    }
 
     for attempt in 0..50 {
         if tokio::net::TcpStream::connect(address).await.is_ok() {
@@ -238,7 +405,29 @@ async fn wait_for_console(url: &str) -> Result<(), String> {
     Err(format!("the local Server did not become ready at {url}"))
 }
 
-fn open_browser(url: &str) -> Result<(), String> {
+fn console_socket_address(url: &str) -> Result<std::net::SocketAddr, String> {
+    let remainder = url
+        .strip_prefix("http://")
+        .ok_or_else(|| format!("unsupported local Console URL: {url}"))?;
+    let authority = remainder
+        .split(['/', '?', '#'])
+        .next()
+        .filter(|authority| !authority.is_empty())
+        .ok_or_else(|| format!("invalid local Console URL: {url}"))?;
+    let address = authority
+        .parse::<std::net::SocketAddr>()
+        .map_err(|error| format!("invalid local Console URL {url}: {error}"))?;
+    Ok(address)
+}
+
+pub(crate) async fn open_browser_when_ready(url: String) -> Result<(), String> {
+    if console_socket_address(&url).is_ok_and(|address| address.ip().is_loopback()) {
+        wait_for_console(&url).await?;
+    }
+    open_browser(&url)
+}
+
+pub(crate) fn open_browser(url: &str) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     let command = ProcessCommand::new("open").arg(url).spawn();
 
@@ -288,9 +477,18 @@ async fn shutdown_signal() {
     }
 }
 
-fn init_tracing() {
+fn init_tracing(suppress_terminal_output: bool) {
     let filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new("vifu=info,vifu_server=info,tower_http=info"));
+    if suppress_terminal_output {
+        let _ = tracing_subscriber::fmt()
+            .with_env_filter(filter)
+            .json()
+            .with_current_span(false)
+            .with_writer(std::io::sink)
+            .try_init();
+        return;
+    }
     let _ = tracing_subscriber::fmt()
         .with_env_filter(filter)
         .json()
@@ -302,7 +500,16 @@ fn init_tracing() {
 mod tests {
     use tokio::net::TcpListener;
 
-    use super::{join_result, wait_for_console};
+    use super::{auto_browser_policy, join_result, wait_for_console};
+
+    #[test]
+    fn automatic_browser_launch_requires_a_fully_interactive_terminal() {
+        assert!(auto_browser_policy(true, true, false, false));
+        assert!(!auto_browser_policy(false, true, false, false));
+        assert!(!auto_browser_policy(true, false, false, false));
+        assert!(!auto_browser_policy(true, true, true, false));
+        assert!(!auto_browser_policy(true, true, false, true));
+    }
 
     #[tokio::test]
     async fn runtime_errors_keep_their_original_cause() {
@@ -322,11 +529,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn console_readiness_accepts_a_dashboard_deep_link() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!(
+            "http://{}/project/demo/logs?invocationId=test#detail",
+            listener.local_addr().unwrap()
+        );
+
+        assert!(wait_for_console(&url).await.is_ok());
+    }
+
+    #[tokio::test]
     async fn console_readiness_rejects_non_http_urls() {
         let error = wait_for_console("https://dashboard.example.com")
             .await
             .unwrap_err();
 
         assert!(error.contains("unsupported local Console URL"));
+    }
+
+    #[tokio::test]
+    async fn console_readiness_rejects_non_loopback_urls() {
+        let error = wait_for_console("http://192.0.2.1:6790").await.unwrap_err();
+
+        assert!(error.contains("non-loopback"));
     }
 }

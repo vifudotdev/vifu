@@ -32,6 +32,9 @@ export type RuntimeBrowserUpload = <T = unknown>(
   signal?: AbortSignal,
 ) => Promise<T>;
 
+const RUNTIME_BROWSER_REQUEST_TIMEOUT_MS = 8_000;
+const RUNTIME_BROWSER_UPLOAD_TIMEOUT_MS = 60_000;
+
 declare global {
   interface Window {
     __VIFU_RUNTIME_CONSOLE_API_BASE__?: string;
@@ -58,12 +61,12 @@ export const runtimeBrowserRequest: RuntimeBrowserRequest = async <T = unknown>(
   body?: unknown,
   signal?: AbortSignal,
 ): Promise<T> => {
-  const response = await fetch(runtimeConsoleApiUrl(path), {
+  const response = await fetchWithTimeout(runtimeConsoleApiUrl(path), {
     method,
     headers: body === undefined ? undefined : { "content-type": "application/json" },
     body: body === undefined ? undefined : JSON.stringify(body),
     signal,
-  });
+  }, RUNTIME_BROWSER_REQUEST_TIMEOUT_MS);
   if (response.status === 204) return undefined as T;
   const payload = await response.json().catch(() => null) as T | { error?: unknown } | null;
   if (!response.ok) {
@@ -82,11 +85,11 @@ export const runtimeBrowserUpload: RuntimeBrowserUpload = async <T = unknown>(
   formData: FormData,
   signal?: AbortSignal,
 ): Promise<T> => {
-  const response = await fetch(runtimeConsoleApiUrl(path), {
+  const response = await fetchWithTimeout(runtimeConsoleApiUrl(path), {
     method: "POST",
     body: formData,
     signal,
-  });
+  }, RUNTIME_BROWSER_UPLOAD_TIMEOUT_MS);
   const payload = await response.json().catch(() => null) as T | { error?: unknown } | null;
   if (!response.ok) {
     throw new RuntimeBrowserError(
@@ -98,6 +101,34 @@ export const runtimeBrowserUpload: RuntimeBrowserUpload = async <T = unknown>(
   }
   return (payload ?? {}) as T;
 };
+
+async function fetchWithTimeout(
+  input: RequestInfo | URL,
+  init: RequestInit,
+  timeoutMs: number,
+): Promise<Response> {
+  const controller = new AbortController();
+  const parentSignal = init.signal;
+  let timedOut = false;
+  const abortFromParent = () => controller.abort();
+  if (parentSignal?.aborted) controller.abort();
+  else parentSignal?.addEventListener("abort", abortFromParent, { once: true });
+  const timeout = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, timeoutMs);
+  try {
+    return await fetch(input, { ...init, signal: controller.signal });
+  } catch (error) {
+    if (timedOut) {
+      throw new RuntimeBrowserError(408, "Runtime request timed out.", null);
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+    parentSignal?.removeEventListener("abort", abortFromParent);
+  }
+}
 
 function runtimeBrowserErrorMessage(payload: unknown): string {
   if (!payload || typeof payload !== "object") return "Runtime request failed.";

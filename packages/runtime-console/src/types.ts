@@ -294,11 +294,40 @@ export type EndpointTrace = {
   selectionKey: string | null;
   status: string;
   latencyMs: number | null;
+  model?: string | null;
+  completionStartMs?: number | null;
+  usage?: TraceUsage | null;
+  decodeMs?: number | null;
+  appOutcome?: string | null;
   request: Record<string, unknown>;
   response: unknown;
   error: string | null;
   createdAt: string;
   completedAt: string | null;
+};
+
+export type TraceUsage = Record<string, unknown> & {
+  inputTokens?: number;
+  outputTokens?: number;
+  totalTokens?: number;
+  promptTokens?: number;
+  completionTokens?: number;
+  input_tokens?: number;
+  output_tokens?: number;
+  total_tokens?: number;
+  prompt_tokens?: number;
+  completion_tokens?: number;
+};
+
+export type TraceScore = {
+  id: string;
+  traceId: string;
+  spanId: string | null;
+  name: string;
+  dataType: "boolean" | "categorical" | "numeric" | string;
+  value: unknown;
+  source: string;
+  createdAt: string;
 };
 
 export type TraceSpan = {
@@ -307,9 +336,14 @@ export type TraceSpan = {
   parentSpanId: string | null;
   name: string;
   kind: string;
+  observationType?: "span" | "generation" | "event" | string;
   status: string;
   providerKey: string | null;
   capabilityKind: string | null;
+  model?: string | null;
+  modelParameters?: Record<string, unknown> | null;
+  completionStartMs?: number | null;
+  usage?: TraceUsage | null;
   durationMs: number | null;
   inputSummary: unknown;
   outputSummary: unknown;
@@ -317,6 +351,58 @@ export type TraceSpan = {
   error: string | null;
   createdAt: string;
   completedAt: string | null;
+};
+
+export type RuntimeComparisonMetricRange = {
+  median: number;
+  min: number;
+  max: number;
+  samples: number;
+};
+
+export type RuntimeComparisonRun = {
+  id: string;
+  comparisonId: string;
+  combinationId: string;
+  label: string;
+  rule: string;
+  routes: Record<string, string>;
+  routeLabels: Record<string, string>;
+  outcome: string;
+  firstTotalMs: number | null;
+  firstRunCold: boolean | null;
+  repeatRunsResident: boolean | null;
+  repeatTotal: RuntimeComparisonMetricRange | null;
+  repeatTtft: RuntimeComparisonMetricRange | null;
+  tokensPerSecond: number | null;
+  firstProcessCpuPercent: number | null;
+  processCpuPercent: number | null;
+  peakRssBytes: number | null;
+  error: string | null;
+};
+
+export type RuntimeComparison = {
+  id: string;
+  projectId: string;
+  deploymentId: string;
+  gatewayId: string;
+  status: string;
+  recommendation: string | null;
+  notExhaustive: boolean;
+  sequentialReplay: boolean;
+  corpusAgents: number;
+  configuredModels: number;
+  testedModels: number;
+  passedModels: number;
+  device: {
+    architecture: string;
+    backend?: string;
+    os?: string;
+  };
+  monotonicDurationMs: number;
+  startedAt: string;
+  completedAt: string | null;
+  runs: RuntimeComparisonRun[];
 };
 
 export type RuntimeSnapshot = {

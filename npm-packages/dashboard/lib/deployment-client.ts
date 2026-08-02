@@ -26,6 +26,8 @@ export type DeploymentClientOptions = {
   fetcher?: VifuFetch;
 };
 
+const DEPLOYMENT_REQUEST_TIMEOUT_MS = 8_000;
+
 export class VifuHttpError extends Error {
   readonly status: number;
   readonly payload: unknown;
@@ -141,11 +143,30 @@ export class DeploymentClient {
     headers.set("accept", headers.get("accept") ?? "application/json");
     if (init.body && !headers.has("content-type")) headers.set("content-type", "application/json");
     if (!publicRequest && this.credential) headers.set("authorization", `Vifu ${this.credential}`);
-    return this.fetcher(appendApiPath(this.apiBaseUrl, path), {
-      ...init,
-      headers,
-      cache: init.cache ?? "no-store",
-    });
+    const controller = new AbortController();
+    const parentSignal = init.signal;
+    let timedOut = false;
+    const abortFromParent = () => controller.abort();
+    if (parentSignal?.aborted) controller.abort();
+    else parentSignal?.addEventListener("abort", abortFromParent, { once: true });
+    const timeout = setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, DEPLOYMENT_REQUEST_TIMEOUT_MS);
+    try {
+      return await this.fetcher(appendApiPath(this.apiBaseUrl, path), {
+        ...init,
+        headers,
+        cache: init.cache ?? "no-store",
+        signal: controller.signal,
+      });
+    } catch (error) {
+      if (timedOut) throw new VifuHttpError(504, "Vifu API request timed out.", null);
+      throw error;
+    } finally {
+      clearTimeout(timeout);
+      parentSignal?.removeEventListener("abort", abortFromParent);
+    }
   }
 }
 

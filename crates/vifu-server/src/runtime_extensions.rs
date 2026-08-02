@@ -246,15 +246,19 @@ pub async fn invoke_project_profile_for_extension(
         },
     )
     .await?;
-    let span_id = db::create_trace_span(
+    let span_id = db::create_trace_span_with_id(
         &state.pool,
+        request_id,
         db::NewTraceSpan {
             trace_id,
             parent_span_id: None,
             name: "runtime.extension.effect",
             kind: "runtime_extension",
+            observation_type: "span",
             provider_key: None,
             capability_kind: Some(&input.capability),
+            model: None,
+            model_parameters: None,
             input_summary: Some(&request_summary),
             attributes: &json!({ "extensionId": definition.manifest.id }),
         },
@@ -348,15 +352,19 @@ pub async fn invoke_project_runtime(
         },
     )
     .await?;
-    let span_id = db::create_trace_span(
+    let span_id = db::create_trace_span_with_id(
         &state.pool,
+        request_id,
         db::NewTraceSpan {
             trace_id,
             parent_span_id: None,
             name: "runtime.extension",
             kind: "runtime_extension",
+            observation_type: "span",
             provider_key: None,
             capability_kind: Some("runtime.rpc"),
+            model: None,
+            model_parameters: None,
             input_summary: Some(&json!({ "method": method })),
             attributes: &json!({
                 "extensionId": definition.manifest.id,

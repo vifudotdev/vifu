@@ -142,8 +142,9 @@ function isAllowedPath(path: string[]): boolean {
     }
     if (path[2] === "traces") {
       return path.length === 3
-        || (path.length === 5 && path[4] === "spans");
+        || (path.length === 5 && (path[4] === "spans" || path[4] === "scores"));
     }
+    if (path[2] === "comparisons") return path.length === 3;
     if (path[2] === "agents") {
       return path.length === 3
         || (path.length === 4 && path[3] === "import")

@@ -25,8 +25,9 @@ it, then run Vifu:
 ./vifu
 ```
 
-Vifu starts locally, stores its state in SQLite under `~/.vifu`, opens the
-Dashboard automatically, and keeps running until you press `Ctrl-C`. The local
+Vifu creates its local Runtime profile, stores state in SQLite under `~/.vifu`,
+and opens the live Runtime TUI. Press `B` to open the Dashboard for persistent
+Traces and Comparisons. Vifu keeps serving until you quit the TUI. The local
 Dashboard is normally available at `http://127.0.0.1:6790`.
 
 ## Description
@@ -38,6 +39,8 @@ transport, keys, and traces.
 
 - Operate many projects from one Console.
 - Connect external Providers or in-process local Providers.
+- Monitor hundreds of Agent lanes and inspect typed Trace boundaries in one TUI.
+- Compare configured local models, activate a measured session route, and Undo.
 - Call project endpoints through an OpenAI-compatible HTTP API.
 - Embed the Rust Runtime directly inside an application.
 - Sync embedded agents through Agent Gateway when a deployment needs operations.
@@ -62,6 +65,7 @@ transport, keys, and traces.
 
 - [Install Vifu](docs/install.md)
 - [Embedded Console](docs/embedded-console.md)
+- [ARM optimization TUI](docs/arm-optimization-tui.md)
 - [Self-host with Docker](docs/self-hosting.md)
 - [Project Settings](docs/project-settings.md)
 - [Provider integrations](providers/README.md)

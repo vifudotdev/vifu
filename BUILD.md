@@ -29,9 +29,11 @@ cargo run -p vifu
 
 The default build includes the llama.cpp and Local Whisper Providers. Vifu
 creates `~/.vifu/config.json` and `~/.vifu/providers.json`, starts both roles
-on loopback, opens the local Dashboard, and keeps running until the user presses
-`Ctrl-C`. Runtime and Gateway state is stored in `~/.vifu/runtime.sqlite`;
-local Server data is stored in `~/.vifu/vifu.sqlite`.
+on loopback, and opens the live Runtime TUI in an interactive terminal. Press
+`B` to open the local Dashboard. Press `Q` to stop Vifu; an active comparison,
+active requests, or a session route override trigger confirmation. Runtime and
+Gateway state is stored in `~/.vifu/runtime.sqlite`; local Server data is stored
+in `~/.vifu/vifu.sqlite`.
 
 `bun run build:console` compiles the shared React Console into
 `target/vifu-console-assets/`. Cargo embeds the files already present in that
@@ -119,7 +121,7 @@ The Rust workspace produces one runtime executable. Its configuration selects
 the Server role, Agent Gateway role, or both:
 
 ```bash
-cargo build --release --locked -p vifu --all-features
+cargo build --release --locked -p vifu
 ```
 
 It is written to `target/release/vifu`. The binary uses embedded SQLite unless

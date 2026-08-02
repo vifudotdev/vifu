@@ -14,6 +14,7 @@ stable endpoints, Gateway transport, and traces.
 
 ## Operate
 
+- [ARM optimization TUI](arm-optimization-tui.md)
 - [Provider integrations](../providers/README.md)
 - [Local llama Provider](../providers/llama/README.md)
 - [Local Whisper Provider](../providers/local-whisper/README.md)

@@ -1,7 +1,12 @@
+mod benchmark;
 mod cli;
 mod gateway;
 mod launcher;
+#[cfg(feature = "local-llama")]
+mod local_models;
+mod monitor;
 mod runtime_config;
+mod tui;
 
 #[tokio::main]
 async fn main() {

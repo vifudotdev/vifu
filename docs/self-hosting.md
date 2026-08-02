@@ -3,8 +3,9 @@
 Self-hosted mode runs Vifu as managed services. The Vifu Server does not expose
 the embedded local Dashboard in this mode, and it does not open a browser. The
 operations Dashboard is a separate, optional Compose service. `--no-browser`
-is only needed when suppressing browser launch for a local loopback `vifu`
-process.
+remains accepted as a compatibility option. Interactive `vifu` opens the local
+Dashboard only when you press `B`, and headless `vifu` never opens a browser
+automatically.
 
 The Compose backend and Dashboard use separate images. The backend image does
 not build or copy the Dashboard bundle; the Full Operations Stack builds the

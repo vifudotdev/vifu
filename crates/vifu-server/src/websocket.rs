@@ -131,6 +131,8 @@ async fn run_socket(
         }
     };
     let gateway_id = authorization.gateway_id.as_str();
+    let application_feedback_supported =
+        gateway_supports_feature(&metadata, protocol::APPLICATION_FEEDBACK_FEATURE);
 
     let agents_json = serde_json::to_value(&agents).map_err(|error| error.to_string())?;
     let (session_id, resumed) = db::open_agent_gateway_session(
@@ -149,7 +151,13 @@ async fn run_socket(
     let (sender, mut receiver) = state.relay.channel();
     state
         .relay
-        .register(gateway_id.to_string(), connection_id, session_id, sender)
+        .register(
+            gateway_id.to_string(),
+            connection_id,
+            session_id,
+            sender,
+            application_feedback_supported,
+        )
         .await;
 
     let welcome = AgentGatewayCommand::Welcome {
@@ -178,7 +186,6 @@ async fn run_socket(
     );
     heartbeat.set_missed_tick_behavior(MissedTickBehavior::Delay);
     let mut last_seen = Instant::now();
-
     let result = loop {
         tokio::select! {
             outbound = receiver.recv() => {
@@ -251,6 +258,13 @@ async fn run_socket(
     }
     info!(%gateway_id, %connection_id, %session_id, "agent gateway disconnected");
     result
+}
+
+fn gateway_supports_feature(metadata: &serde_json::Value, feature: &str) -> bool {
+    metadata
+        .get("features")
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|features| features.iter().any(|value| value.as_str() == Some(feature)))
 }
 
 enum GatewayAuthorizationOutcome {
@@ -615,7 +629,7 @@ mod tests {
     };
     use crate::auth::hash_api_key;
     use crate::config::Config;
-    use crate::db::{self, NewProject};
+    use crate::db::{self, NewEndpoint, NewProject};
     use crate::error::ApiError;
     use crate::models::{
         ApiKeyAgentScope, ApiKeyPermissions, EndpointPermission, ProfileCapabilityDraft,
@@ -997,14 +1011,79 @@ mod tests {
             payload["choices"][0]["message"]["content"],
             "Hi from frame transport"
         );
-        let traces = db::list_traces(&state.pool, None, Some(seeded.project_id), 10)
-            .await
-            .unwrap();
+        let traces = db::list_traces(
+            &state.pool,
+            None,
+            Some(seeded.project_id),
+            None,
+            None,
+            None,
+            10,
+        )
+        .await
+        .unwrap();
         let trace = traces
             .iter()
             .find(|trace| trace.profile_id == Some(seeded.profile_id))
             .expect("project invocation trace");
         assert_eq!(trace.project_id, Some(seeded.project_id));
+
+        let generic_state = state.clone();
+        let generic_model = seeded.endpoint_slug.clone();
+        let generic_admin_key = admin_key.clone();
+        let generic_task = tokio::spawn(async move {
+            app(generic_state)
+                .oneshot(
+                    Request::post("/v1/chat/completions")
+                        .header(CONTENT_TYPE, "application/json")
+                        .header(AUTHORIZATION, format!("Bearer {generic_admin_key}"))
+                        .body(Body::from(
+                            json!({
+                                "model": generic_model,
+                                "messages": [{"role": "user", "content": "Root trace"}],
+                                "stream": false,
+                            })
+                            .to_string(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .expect("generic chat response")
+        });
+        let generic_invoke = receive_json_frame(&mut socket).await;
+        complete_invocation(&mut socket, &generic_invoke, "Root observation recorded").await;
+        let generic_response = generic_task.await.unwrap();
+        assert_eq!(generic_response.status(), StatusCode::OK);
+        let generic_request_id = generic_response
+            .headers()
+            .get("x-vifu-invocation-id")
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| Uuid::parse_str(value).ok())
+            .expect("canonical invocation id header");
+        let generic_traces = db::list_traces(
+            &state.pool,
+            None,
+            None,
+            Some(generic_request_id),
+            None,
+            None,
+            1,
+        )
+        .await
+        .unwrap();
+        assert_eq!(generic_traces.len(), 1);
+        let generic_spans = db::list_trace_spans(&state.pool, generic_traces[0].id)
+            .await
+            .unwrap();
+        let root = generic_spans
+            .iter()
+            .find(|span| span.id == generic_request_id)
+            .expect("generic endpoint trace root");
+        assert_eq!(root.parent_span_id, None);
+        assert_eq!(root.observation_type, "generation");
+        assert_eq!(root.status, "completed");
+        assert_eq!(root.input_summary.as_ref().unwrap()["messageCount"], 1);
+        assert_eq!(root.output_summary.as_ref().unwrap()["choiceCount"], 1);
 
         let missing_model = app(state.clone())
             .oneshot(chat_completion_request(
@@ -1247,6 +1326,20 @@ mod tests {
             gateway_id,
             "guide-agent",
             &json!({}),
+        )
+        .await
+        .unwrap();
+        db::create_endpoint(
+            pool,
+            NewEndpoint {
+                id: Uuid::new_v4(),
+                slug: &profile_slug,
+                name: "Wire Test Legacy Endpoint",
+                profile_id,
+                binding_id,
+                enabled: true,
+                request_timeout_ms: 30_000,
+            },
         )
         .await
         .unwrap();

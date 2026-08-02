@@ -16,7 +16,8 @@ Download the archive for your platform, extract it, then run:
 
 The default binary runs Vifu Server and Agent Gateway and includes the
 in-process llama.cpp and Local Whisper Providers. The first launch creates the
-local files and opens the Dashboard. Runtime and Gateway state use
+local files and opens the live Runtime TUI in an interactive terminal. Press
+`B` to open the Dashboard. Runtime and Gateway state use
 `~/.vifu/runtime.sqlite`; the local Server uses `~/.vifu/vifu.sqlite`.
 Configure models in `~/.vifu/providers.json` when you are ready to run them.
 

@@ -2,6 +2,8 @@
 
 export * from "./data";
 export * from "./types";
+export * from "./trace-model";
+export * from "./comparison-model";
 export * from "./components/console-shell";
 export * from "./components/dismissible-details";
 export * from "./components/project-home";
@@ -15,4 +17,5 @@ export * from "./components/runtime-deployments";
 export * from "./components/runtime-profile-workbench";
 export * from "./components/runtime-providers";
 export * from "./components/runtime-trace-workbench";
+export * from "./components/runtime-comparison-history";
 export * from "./host";

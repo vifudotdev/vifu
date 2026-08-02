@@ -64,7 +64,7 @@ const PROJECT_NAVIGATION: NavigationItem[] = [
   { id: "providers", label: "Providers", icon: Plug, capability: "providerConnections" },
   { id: "deployments", label: "Deployments", icon: Network },
   { id: "api", label: "API", icon: KeyRound, capability: "apiKeys" },
-  { id: "logs", label: "Logs", icon: ScrollText, capability: "traces" },
+  { id: "logs", label: "Traces", icon: ScrollText, capability: "traces" },
   { id: "settings", label: "Settings", icon: Settings },
 ];
 
@@ -74,7 +74,7 @@ const SECTION_TITLES: Record<DashboardSection, string> = {
   providers: "Providers",
   deployments: "Deployments",
   api: "API Integrations",
-  logs: "Logs",
+  logs: "Traces",
   settings: "Settings",
 };
 
@@ -229,7 +229,7 @@ function ProjectSectionView({
       />
     );
   }
-  if (section === "logs") return <LogsView project={project} traces={projectTraces(data.runtime.traces, project)} />;
+  if (section === "logs") return <TracesView project={project} traces={projectTraces(data.runtime.traces, project)} />;
   if (section === "settings") {
     return (
       <SettingsView
@@ -448,7 +448,7 @@ function ErrorTraceList({ traces }: { traces: EndpointTrace[] }) {
   );
 }
 
-function LogsView({ project, traces }: { project: RuntimeProject; traces: EndpointTrace[] }) {
+function TracesView({ project, traces }: { project: RuntimeProject; traces: EndpointTrace[] }) {
   return (
     <section className="content-section trace-section convex-trace-section">
       <RuntimeTraceWorkbench projectId={project.id} projectSlug={project.slug} traces={traces} />
@@ -536,7 +536,7 @@ function SetupRail({ project, providerCount, agentCount, callableCount, connecte
 }
 
 function TraceTable({ traces, project: _project, detailed = false }: { traces: EndpointTrace[]; project: RuntimeProject; detailed?: boolean }) {
-  if (traces.length === 0) return <EmptyState>No logs yet.</EmptyState>;
+  if (traces.length === 0) return <EmptyState>No traces yet.</EmptyState>;
   if (detailed) {
     return <RuntimeTraceWorkbench projectId={_project.id} projectSlug={_project.slug} traces={traces} />;
   }
