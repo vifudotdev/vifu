@@ -67,7 +67,7 @@ export function RuntimeProvidersView({ project, catalog, providers, availableAge
               key={provider.id}
               project={project}
               provider={provider}
-              adapter={catalog.registry.find((adapter) => adapter.id === provider.providerType)}
+              adapter={catalog.registry.find((adapter) => adapter.id === provider.providerType) ?? fallbackAdapter(provider.providerType)}
               online={providerOnline(provider, availableAgents)}
               onConfigure={() => setDialog({ provider })}
             />
@@ -200,22 +200,28 @@ function ProviderDialog({
     event.preventDefault();
     if (!choice) return;
     const form = new FormData(event.currentTarget);
+    const attachConfiguredProvider = !provider && choice.source.kind === "custom";
     const config: Record<string, unknown> = {};
     const secrets: Record<string, string> = {};
-    for (const field of choice.fields) {
-      if (field.key === "baseUrl") continue;
-      const value = String(form.get(field.key) ?? "").trim();
-      if (!value) continue;
-      if (field.secret) secrets[field.key] = value;
-      else config[field.key] = value;
+    if (!attachConfiguredProvider) {
+      for (const field of choice.fields) {
+        if (field.key === "baseUrl") continue;
+        const value = String(form.get(field.key) ?? "").trim();
+        if (!value) continue;
+        if (field.secret) secrets[field.key] = value;
+        else config[field.key] = value;
+      }
     }
-    const body = {
-      ...(provider ? {} : { source: choice.source }),
-      name: String(form.get("name") ?? choice.name).trim(),
-      baseUrl: String(form.get("baseUrl") ?? choice.baseUrl).trim(),
-      config,
-      secrets,
-    };
+    const name = String(form.get("name") ?? choice.name).trim();
+    const body = attachConfiguredProvider
+      ? { source: choice.source, name }
+      : {
+          ...(provider ? {} : { source: choice.source }),
+          name,
+          baseUrl: String(form.get("baseUrl") ?? choice.baseUrl).trim(),
+          config,
+          secrets,
+        };
     setPending(true);
     setError(null);
     setNotice(null);
@@ -274,7 +280,9 @@ function ProviderDialog({
           </header>
           <div className="resource-dialog-fields">
             <label><span>Name</span><input name="name" required maxLength={128} defaultValue={provider?.name ?? choice.name} autoFocus /></label>
-            {choice.fields.map((field) => (
+            {!provider && choice.source.kind === "custom" ? (
+              <p>This provider is already available from the connected runtime. Adding it only makes it available to this project.</p>
+            ) : choice.fields.map((field) => (
               <label key={field.key}><span>{field.label}</span><input
                 name={field.key}
                 type={field.secret ? "password" : field.kind === "url" ? "url" : "text"}
@@ -297,8 +305,8 @@ function ProviderDialog({
           <header><div><span>Add provider</span><h2>Choose a provider</h2></div><button className="icon-button" type="button" onClick={() => dialogRef.current?.close()} aria-label="Close"><X aria-hidden="true" /></button></header>
           <label className="resource-picker-search"><Search aria-hidden="true" /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search providers" autoFocus /></label>
           <div className="provider-picker-list">
-            <ProviderChoiceGroup title="Vifu Registry" items={filtered.filter((item) => item.source.kind === "registry")} onSelect={setChoice} />
-            <ProviderChoiceGroup title="Custom Providers" items={filtered.filter((item) => item.source.kind === "custom")} onSelect={setChoice} />
+            <ProviderChoiceGroup title="Provider templates" items={filtered.filter((item) => item.source.kind === "registry")} onSelect={setChoice} />
+            <ProviderChoiceGroup title="Available providers" items={filtered.filter((item) => item.source.kind === "custom")} onSelect={setChoice} />
             {filtered.length === 0 ? <div className="resource-picker-empty">No providers match your search.</div> : null}
           </div>
           <footer><span /><button className="secondary-button" type="button" onClick={() => dialogRef.current?.close()}>Cancel</button></footer>
@@ -346,7 +354,7 @@ function customChoice(provider: CustomProvider, adapters: ProviderAdapter[]): Pr
     source: { kind: "custom", key: provider.providerKey },
     name: provider.name,
     providerType: provider.providerType,
-    description: `Custom ${adapter.name} configuration`,
+    description: `Available ${adapter.name} provider`,
     capabilities: adapter.capabilities,
     fields: adapter.fields,
     baseUrl: provider.baseUrl,
@@ -375,6 +383,18 @@ function choiceForProvider(provider: ProjectProvider, catalog: ProviderCatalog):
 }
 
 function fallbackAdapter(type: string): ProviderAdapter {
+  if (type === "vifu-runtime") {
+    return {
+      id: type,
+      category: "local",
+      name: "Vifu Runtime",
+      description: "Provider reported by a connected Vifu Agent Gateway.",
+      capabilities: ["chat", "embedding", "transcription"],
+      executionModes: ["gateway"],
+      supportsDiscovery: false,
+      fields: [],
+    };
+  }
   return {
     id: type,
     category: "custom",

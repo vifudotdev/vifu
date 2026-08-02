@@ -14,11 +14,10 @@ use crate::models::{
     slugify, validate_slug, AgentBinding, AgentEndpoint, AgentGatewayAuthorization,
     AgentGatewayCredential, AgentGatewayPairingRequest, AgentGatewaySession, AgentProfile,
     AgentProfileCapability, AgentProfileRollout, AgentProfileVersion, ApiKeyAgentScope,
-    ApiKeyPermissions, ApiKeyRecord, AvailableAgent, CustomProvider, CustomProviderSecret,
-    EndpointRoute, EndpointTrace, ProfileCapabilityDraft, ProfileRoute, Project,
-    ProjectRuntimeChannel, ProjectRuntimeExtension, ProjectRuntimeRelease, ProjectWithBindings,
-    ProviderConnection, ProviderConnectionSecret, PublicAgent, RealtimeSession, RuntimeDeployment,
-    TraceSpan,
+    ApiKeyPermissions, ApiKeyRecord, AvailableAgent, EndpointRoute, EndpointTrace,
+    ProfileCapabilityDraft, ProfileRoute, Project, ProjectRuntimeChannel, ProjectRuntimeExtension,
+    ProjectRuntimeRelease, ProjectWithBindings, ProviderConnection, ProviderConnectionSecret,
+    PublicAgent, RealtimeSession, RuntimeDeployment, TraceSpan,
 };
 
 #[derive(Debug, FromRow)]
@@ -164,60 +163,6 @@ impl From<ProviderConnectionSecretRow> for ProviderConnectionSecret {
             created_at: row.created_at,
             updated_at: row.updated_at,
         }
-    }
-}
-
-#[derive(Debug, FromRow)]
-struct CustomProviderRow {
-    id: Uuid,
-    provider_key: String,
-    name: String,
-    provider_type: String,
-    base_url: String,
-    config: Value,
-    encrypted_secret_json: Option<String>,
-    secret_keys: Json<Vec<String>>,
-    display_secret: Option<String>,
-    status: String,
-    last_checked_at: Option<DateTime<Utc>>,
-    created_at: DateTime<Utc>,
-    updated_at: DateTime<Utc>,
-}
-
-impl CustomProviderRow {
-    fn into_provider(self) -> CustomProvider {
-        CustomProvider {
-            id: self.id,
-            provider_key: self.provider_key,
-            name: self.name,
-            provider_type: self.provider_type,
-            base_url: self.base_url,
-            config: self.config,
-            secret_keys: self.secret_keys.0,
-            display_secret: self.display_secret,
-            status: self.status,
-            last_checked_at: self.last_checked_at,
-            created_at: self.created_at,
-            updated_at: self.updated_at,
-        }
-    }
-
-    fn into_secret(self) -> Result<CustomProviderSecret, ApiError> {
-        Ok(CustomProviderSecret {
-            id: self.id,
-            provider_key: self.provider_key,
-            name: self.name,
-            provider_type: self.provider_type,
-            base_url: self.base_url,
-            config: self.config,
-            encrypted_secret_json: self.encrypted_secret_json.ok_or(ApiError::Internal)?,
-            secret_keys: self.secret_keys.0,
-            display_secret: self.display_secret,
-            status: self.status,
-            last_checked_at: self.last_checked_at,
-            created_at: self.created_at,
-            updated_at: self.updated_at,
-        })
     }
 }
 
@@ -1287,80 +1232,6 @@ pub async fn update_provider_connection_status(
     .await?
     .ok_or(ApiError::NotFound)?;
     Ok(row.into())
-}
-
-pub async fn list_custom_providers(pool: &SqlitePool) -> Result<Vec<CustomProvider>, ApiError> {
-    let rows = sqlx::query_as::<_, CustomProviderRow>(
-        "SELECT id, provider_key, name, provider_type, base_url, config,
-                NULL AS encrypted_secret_json,
-                secret_keys, display_secret, status, last_checked_at, created_at, updated_at
-         FROM custom_providers
-         ORDER BY name ASC, provider_key ASC",
-    )
-    .fetch_all(pool)
-    .await
-    .map_err(ApiError::from)?;
-    Ok(rows
-        .into_iter()
-        .map(CustomProviderRow::into_provider)
-        .collect())
-}
-
-pub async fn upsert_custom_provider(
-    pool: &SqlitePool,
-    connection: NewProviderConnection<'_>,
-) -> Result<CustomProvider, ApiError> {
-    let row = sqlx::query_as::<_, CustomProviderRow>(
-        "INSERT INTO custom_providers
-            (id, provider_key, name, provider_type, base_url, config,
-             encrypted_secret_json, secret_keys, display_secret, status)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-         ON CONFLICT (provider_key) DO UPDATE SET
-            name = EXCLUDED.name,
-            provider_type = EXCLUDED.provider_type,
-            base_url = EXCLUDED.base_url,
-            config = EXCLUDED.config,
-            encrypted_secret_json = EXCLUDED.encrypted_secret_json,
-            secret_keys = EXCLUDED.secret_keys,
-            display_secret = EXCLUDED.display_secret,
-            status = EXCLUDED.status,
-            updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-         RETURNING id, provider_key, name, provider_type, base_url, config,
-                   encrypted_secret_json,
-                   secret_keys, display_secret, status, last_checked_at, created_at, updated_at",
-    )
-    .bind(Uuid::new_v4())
-    .bind(connection.provider_key)
-    .bind(connection.name)
-    .bind(connection.provider_type)
-    .bind(connection.base_url)
-    .bind(connection.config)
-    .bind(connection.encrypted_secret_json)
-    .bind(Json(connection.secret_keys))
-    .bind(connection.display_secret)
-    .bind(connection.status)
-    .fetch_one(pool)
-    .await
-    .map_err(map_database_error)?;
-    Ok(row.into_provider())
-}
-
-pub async fn get_custom_provider_secret_by_key(
-    pool: &SqlitePool,
-    provider_key: &str,
-) -> Result<CustomProviderSecret, ApiError> {
-    let row = sqlx::query_as::<_, CustomProviderRow>(
-        "SELECT id, provider_key, name, provider_type, base_url, config,
-                encrypted_secret_json, secret_keys, display_secret, status,
-                last_checked_at, created_at, updated_at
-         FROM custom_providers
-         WHERE provider_key = $1",
-    )
-    .bind(provider_key)
-    .fetch_optional(pool)
-    .await?
-    .ok_or(ApiError::NotFound)?;
-    row.into_secret()
 }
 
 pub async fn project_provider_is_assigned(

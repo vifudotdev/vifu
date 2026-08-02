@@ -969,7 +969,7 @@ function resourcePlaceholder(kind: ProfileCapabilityKind, providerType: string):
 function providerSupportsCapability(providerType: string, kind: ProfileCapabilityKind): boolean {
   if (providerType === "openclaw") return kind === "chat" || kind === "tool";
   if (providerType === "openai-compatible") return kind === "chat" || kind === "embedding" || kind === "transcription" || kind === "realtime";
-  if (providerType === "llama" || providerType === "vifu-runtime") return kind === "chat" || kind === "embedding";
+  if (providerType === "llama" || providerType === "vifu-runtime") return kind === "chat" || kind === "embedding" || kind === "transcription";
   if (providerType === "elevenlabs") return kind === "speech";
   if (providerType === "local-whisper") return kind === "transcription";
   return false;

@@ -14,11 +14,10 @@ use crate::models::{
     slugify, validate_slug, AgentBinding, AgentEndpoint, AgentGatewayAuthorization,
     AgentGatewayCredential, AgentGatewayPairingRequest, AgentGatewaySession, AgentProfile,
     AgentProfileCapability, AgentProfileRollout, AgentProfileVersion, ApiKeyAgentScope,
-    ApiKeyPermissions, ApiKeyRecord, AvailableAgent, CustomProvider, CustomProviderSecret,
-    EndpointRoute, EndpointTrace, ProfileCapabilityDraft, ProfileRoute, Project,
-    ProjectRuntimeChannel, ProjectRuntimeExtension, ProjectRuntimeRelease, ProjectWithBindings,
-    ProviderConnection, ProviderConnectionSecret, PublicAgent, RealtimeSession, RuntimeDeployment,
-    TraceSpan,
+    ApiKeyPermissions, ApiKeyRecord, AvailableAgent, EndpointRoute, EndpointTrace,
+    ProfileCapabilityDraft, ProfileRoute, Project, ProjectRuntimeChannel, ProjectRuntimeExtension,
+    ProjectRuntimeRelease, ProjectWithBindings, ProviderConnection, ProviderConnectionSecret,
+    PublicAgent, RealtimeSession, RuntimeDeployment, TraceSpan,
 };
 
 #[derive(Debug, FromRow)]
@@ -1091,72 +1090,6 @@ pub async fn update_provider_connection_status(
     )
     .bind(id)
     .bind(status)
-    .fetch_optional(pool)
-    .await?
-    .ok_or(ApiError::NotFound)
-}
-
-pub async fn list_custom_providers(pool: &PgPool) -> Result<Vec<CustomProvider>, ApiError> {
-    sqlx::query_as::<_, CustomProvider>(
-        "SELECT id, provider_key, name, provider_type, base_url, config,
-                secret_keys, display_secret, status, last_checked_at, created_at, updated_at
-         FROM custom_providers
-         ORDER BY name ASC, provider_key ASC",
-    )
-    .fetch_all(pool)
-    .await
-    .map_err(ApiError::from)
-}
-
-pub async fn upsert_custom_provider(
-    pool: &PgPool,
-    connection: NewProviderConnection<'_>,
-) -> Result<CustomProvider, ApiError> {
-    sqlx::query_as::<_, CustomProvider>(
-        "INSERT INTO custom_providers
-            (id, provider_key, name, provider_type, base_url, config,
-             encrypted_secret_json, secret_keys, display_secret, status)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-         ON CONFLICT (provider_key) DO UPDATE SET
-            name = EXCLUDED.name,
-            provider_type = EXCLUDED.provider_type,
-            base_url = EXCLUDED.base_url,
-            config = EXCLUDED.config,
-            encrypted_secret_json = EXCLUDED.encrypted_secret_json,
-            secret_keys = EXCLUDED.secret_keys,
-            display_secret = EXCLUDED.display_secret,
-            status = EXCLUDED.status,
-            updated_at = NOW()
-         RETURNING id, provider_key, name, provider_type, base_url, config,
-                   secret_keys, display_secret, status, last_checked_at, created_at, updated_at",
-    )
-    .bind(Uuid::new_v4())
-    .bind(connection.provider_key)
-    .bind(connection.name)
-    .bind(connection.provider_type)
-    .bind(connection.base_url)
-    .bind(connection.config)
-    .bind(connection.encrypted_secret_json)
-    .bind(connection.secret_keys)
-    .bind(connection.display_secret)
-    .bind(connection.status)
-    .fetch_one(pool)
-    .await
-    .map_err(map_database_error)
-}
-
-pub async fn get_custom_provider_secret_by_key(
-    pool: &PgPool,
-    provider_key: &str,
-) -> Result<CustomProviderSecret, ApiError> {
-    sqlx::query_as::<_, CustomProviderSecret>(
-        "SELECT id, provider_key, name, provider_type, base_url, config,
-                encrypted_secret_json, secret_keys, display_secret, status,
-                last_checked_at, created_at, updated_at
-         FROM custom_providers
-         WHERE provider_key = $1",
-    )
-    .bind(provider_key)
     .fetch_optional(pool)
     .await?
     .ok_or(ApiError::NotFound)

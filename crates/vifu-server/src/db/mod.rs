@@ -141,9 +141,6 @@ dispatch! {
     pub async fn get_provider_connection_secret(storage: &Storage, id: Uuid) -> Result<ProviderConnectionSecret, ApiError>;
     pub async fn get_provider_connection_secret_by_key(storage: &Storage, project_slug: &str, provider_key: &str) -> Result<ProviderConnectionSecret, ApiError>;
     pub async fn update_provider_connection_status(storage: &Storage, id: Uuid, status: &str) -> Result<ProviderConnection, ApiError>;
-    pub async fn list_custom_providers(storage: &Storage) -> Result<Vec<CustomProvider>, ApiError>;
-    pub async fn upsert_custom_provider(storage: &Storage, connection: NewProviderConnection<'_>) -> Result<CustomProvider, ApiError>;
-    pub async fn get_custom_provider_secret_by_key(storage: &Storage, provider_key: &str) -> Result<CustomProviderSecret, ApiError>;
     pub async fn project_provider_is_assigned(storage: &Storage, project_id: Uuid, provider_key: &str) -> Result<bool, ApiError>;
     pub async fn list_projects_for_gateway(storage: &Storage, gateway_id: &str) -> Result<Vec<(Uuid, String)>, ApiError>;
     pub async fn list_projects_for_provider_key(storage: &Storage, provider_key: &str) -> Result<Vec<(Uuid, String)>, ApiError>;
@@ -365,32 +362,6 @@ mod tests {
         update_provider_connection_status(&storage, provider.id, "ready")
             .await
             .expect("provider status should update");
-        upsert_custom_provider(
-            &storage,
-            NewProviderConnection {
-                provider_key: "shared-openai",
-                source_kind: "custom",
-                source_key: "shared-openai",
-                name: "Shared provider",
-                provider_type: "openai-compatible",
-                base_url: "http://127.0.0.1:8081/v1",
-                config: &json!({}),
-                encrypted_secret_json: "{}",
-                secret_keys: &secret_keys,
-                display_secret: Some("configured"),
-                status: "configured",
-            },
-        )
-        .await
-        .expect("custom provider should be stored");
-        assert_eq!(
-            list_custom_providers(&storage)
-                .await
-                .expect("custom providers should list")
-                .len(),
-            1
-        );
-
         let profile_id = Uuid::new_v4();
         create_profile(
             &storage,

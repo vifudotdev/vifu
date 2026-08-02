@@ -291,42 +291,6 @@ pub struct CustomProvider {
     pub updated_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, FromRow)]
-pub struct CustomProviderSecret {
-    pub id: Uuid,
-    pub provider_key: String,
-    pub name: String,
-    pub provider_type: String,
-    pub base_url: String,
-    pub config: Value,
-    pub encrypted_secret_json: String,
-    pub secret_keys: Vec<String>,
-    pub display_secret: Option<String>,
-    pub status: String,
-    pub last_checked_at: Option<DateTime<Utc>>,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
-}
-
-impl From<CustomProviderSecret> for CustomProvider {
-    fn from(value: CustomProviderSecret) -> Self {
-        Self {
-            id: value.id,
-            provider_key: value.provider_key,
-            name: value.name,
-            provider_type: value.provider_type,
-            base_url: value.base_url,
-            config: value.config,
-            secret_keys: value.secret_keys,
-            display_secret: value.display_secret,
-            status: value.status,
-            last_checked_at: value.last_checked_at,
-            created_at: value.created_at,
-            updated_at: value.updated_at,
-        }
-    }
-}
-
 impl From<ProviderConnectionSecret> for ProviderConnection {
     fn from(value: ProviderConnectionSecret) -> Self {
         Self {
@@ -347,18 +311,6 @@ impl From<ProviderConnectionSecret> for ProviderConnection {
             updated_at: value.updated_at,
         }
     }
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct UpsertProviderConnection {
-    pub name: Option<String>,
-    pub provider_type: String,
-    pub base_url: String,
-    #[serde(default = "empty_object")]
-    pub config: Value,
-    #[serde(default = "empty_object")]
-    pub secrets: Value,
 }
 
 #[derive(Debug, Deserialize)]
@@ -389,6 +341,8 @@ pub struct ImportProjectProvider {
     pub base_url: String,
     #[serde(default = "empty_object")]
     pub config: Value,
+    #[serde(default = "empty_object")]
+    pub secrets: Value,
 }
 
 #[derive(Debug, Deserialize)]

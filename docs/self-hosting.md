@@ -107,9 +107,11 @@ Copy `.env.example` once and set deployment-local values there. Runtime role and
 network settings are defined by `docker-compose.yml`; generated deployment
 secrets remain in the named `vifu_secrets` volume across normal restarts.
 
-Provider integrations are configured independently. Start with
-[providers/README.md](../providers/README.md), then add a provider from the
-Console or `~/.vifu/providers.json`.
+Provider integrations are configured independently. Runtime-owned providers live
+in the `providers.json` loaded by the Agent Gateway, while project-local
+providers and project assignments live in the Server database. Start with
+[providers/README.md](../providers/README.md), then attach the available
+provider keys to each project from the Dashboard or API.
 
 ## Network Boundary
 
