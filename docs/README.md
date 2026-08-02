@@ -8,6 +8,7 @@ stable endpoints, Gateway transport, and traces.
 ## Start
 
 - [Install Vifu](install.md)
+- [Embedded Console](embedded-console.md)
 - [Self-host with Docker](self-hosting.md)
 - [Project Settings](project-settings.md)
 

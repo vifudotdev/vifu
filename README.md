@@ -11,7 +11,7 @@
 [![CI](https://github.com/vifudotdev/vifu/actions/workflows/ci.yml/badge.svg)](https://github.com/vifudotdev/vifu/actions/workflows/ci.yml)
 [![Discord](https://img.shields.io/badge/Discord-Join-5865F2?logo=discord&logoColor=white)](https://discord.com/invite/VdqqFwJbNE)
 
-[quick start](#quick-start) / [docs](docs/README.md) / [install](docs/install.md) / [providers](providers/README.md) / [embed](docs/runtime-embedding.md) / [self-host](docs/self-hosting.md) / [build](BUILD.md)
+[quick start](#quick-start) / [docs](docs/README.md) / [install](docs/install.md) / [console](docs/embedded-console.md) / [providers](providers/README.md) / [embed](docs/runtime-embedding.md) / [self-host](docs/self-hosting.md) / [build](BUILD.md)
 
 </div>
 
@@ -25,7 +25,10 @@ it, then start the local Server and Agent Gateway:
 ./vifu
 ```
 
-For the Console and PostgreSQL stack:
+Open the Console URL printed by the process, normally
+`http://127.0.0.1:6790/console`.
+
+For the PostgreSQL self-host Console stack:
 
 ```bash
 cp .env.example .env
@@ -60,7 +63,8 @@ transport, keys, and traces.
 
 | Surface | Status | Start here |
 | --- | --- | --- |
-| Server and Console | Supported | [Install](docs/install.md) or [Self-host](docs/self-hosting.md) |
+| Local Server and embedded Console | Supported | [Install](docs/install.md) or [Embedded Console](docs/embedded-console.md) |
+| Self-host Server and Console | Supported | [Self-host](docs/self-hosting.md) |
 | Agent Providers | Supported | [Provider integrations](providers/README.md) |
 | Rust embedding | Supported | [Embed the Runtime](docs/runtime-embedding.md) |
 | Swift on iOS/macOS | Supported | [Apple application guide](docs/runtime-embedding.md#add-vifu-to-an-apple-application) |
@@ -72,6 +76,7 @@ transport, keys, and traces.
 #### Use Vifu
 
 - [Install Vifu](docs/install.md)
+- [Embedded Console](docs/embedded-console.md)
 - [Self-host with Docker](docs/self-hosting.md)
 - [Project Settings](docs/project-settings.md)
 - [Provider integrations](providers/README.md)

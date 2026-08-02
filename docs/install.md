@@ -14,6 +14,13 @@ Extract the archive, then start the local Server and Agent Gateway:
 ./vifu
 ```
 
+The same process serves the local Console. Open the URL printed at startup,
+normally:
+
+```text
+http://127.0.0.1:6790/console
+```
+
 On Windows:
 
 ```powershell
@@ -27,12 +34,13 @@ Use Cargo only when you want to build from source.
 ### Requirements
 
 - Rust from `rust-toolchain.toml`
+- Bun, when rebuilding the embedded Console assets
 
 ### Run Vifu
 
 ```bash
-cd crates/vifu
-cargo run
+bun run build:console
+cargo run -p vifu
 ```
 
 The first run creates `~/.vifu/config.json` and
@@ -45,10 +53,13 @@ local models in the same process. The Console edits the same registry in local
 mode, and project provider records only bind provider keys to projects; see
 [Agent Providers](../providers/README.md).
 
+`cargo run` embeds the assets already generated in
+`target/vifu-console-assets/`. Re-run `bun run build:console` after changing
+the embedded Console UI. See [Embedded Console](embedded-console.md).
+
 ## Run The Console
 
-The complete Console stack uses Docker Compose and PostgreSQL. From the
-repository root:
+The PostgreSQL Console stack uses Docker Compose. From the repository root:
 
 ```bash
 cp .env.example .env

@@ -24,15 +24,21 @@ Source development uses loopback defaults. Docker self-hosting uses the root
 ## Source Development
 
 ```bash
-cd crates/vifu
-cargo run
+bun run build:console
+cargo run -p vifu
 ```
 
 The first `cargo run` creates `~/.vifu/config.json` and
 `~/.vifu/providers.json`, starts both roles on loopback, and creates
 `~/.vifu/runtime.sqlite` for Runtime and Gateway state plus
 `~/.vifu/vifu.sqlite` for local Server data. The server listens on
-`http://127.0.0.1:6790`.
+`http://127.0.0.1:6790` and serves the embedded Console at
+`http://127.0.0.1:6790/console`.
+
+`bun run build:console` compiles the shared React Console into
+`target/vifu-console-assets/`. Cargo embeds the files already present in that
+directory; it does not run Bun automatically. Re-run the Console build after UI
+changes and before compiling release binaries.
 
 To run a Gateway-only process on a machine that already has a Server, replace
 the generated runtime configuration with a gateway-only configuration:
