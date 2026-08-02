@@ -6,9 +6,11 @@ agent definitions. In-process providers keep their model and resource settings
 in the local Provider registry. Vifu makes the resulting capabilities
 manageable through Projects, endpoints, keys, status, and logs.
 
-Provider registrations use the same Vifu Server, Dashboard, database, and Agent
-Gateway deployment. You can add, disable, replace, or delete a registration
-without changing those services.
+Provider registrations live in the runtime Provider registry. The Dashboard can
+edit that registry when it is available to the local runtime process, while the
+Server database stores only project bindings, status, and traces. You can add,
+disable, replace, or delete a registration without changing the Server database
+schema.
 
 Vifu reads provider registrations from the user configuration file at
 `~/.vifu/providers.json`. The registry is intentionally provider-neutral:
@@ -31,7 +33,8 @@ Vifu reads provider registrations from the user configuration file at
 `key` is the stable Vifu-side provider identifier and `type` selects the
 adapter. Network providers use `url` and may use `auth.token`. In-process
 providers use `config` for device-local settings such as a model path. Create
-`providers.json` before connecting a provider to a Vifu project.
+`providers.json` before connecting a provider to a Vifu project; project
+bindings reference the provider key instead of copying provider settings.
 
 | Provider | Status | Guide |
 | --- | --- | --- |

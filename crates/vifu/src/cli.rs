@@ -96,7 +96,7 @@ Usage:
   vifu --doctor          Diagnose local setup
 Configuration:
   ~/.vifu/config.json    Created with local Server and Agent Gateway defaults
-  ~/.vifu/providers.json Created empty; add providers in the Dashboard
+  ~/.vifu/providers.json Runtime provider registry; edit directly or from Console
   -p, --profile <name>   Use ~/.vifu/<name>.config.json instead of the base config
   -c, --config <key=value>
                          Override a configuration value for this run. Use a
