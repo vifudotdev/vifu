@@ -4,8 +4,14 @@ node_modules
 **/node_modules
 .next
 **/.next
+.build
+**/.build
 .next-e2e
 **/.next-e2e
+examples
+integrations
+npm-packages
+Frameworks
 test-results
 **/test-results
 .turbo
