@@ -53,7 +53,7 @@ test("session remains valid across sidebar navigation on the bind address", asyn
     ["Agents", "agents", "Agents"],
     ["Providers", "providers", "Providers"],
     ["API", "api", "API Integrations"],
-    ["Logs", "logs", "Logs"],
+    ["Traces", "logs", "Traces"],
     ["Settings", "settings", "Settings"],
   ] as const) {
     await page.getByRole("link", { name: label, exact: true }).click();
