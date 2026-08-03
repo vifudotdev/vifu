@@ -11,8 +11,8 @@ use uuid::Uuid;
 use crate::monitor::{FeedbackEvent, FeedbackOutcome, RuntimeStage, RuntimeTerminal, StageStatus};
 
 use super::model::{
-    App, ComparisonRow, LaneFilter, LaneOutcome, MetricSummary, ObservationType, SystemMetrics,
-    TraceObservation, TraceRecord, TraceTab, View,
+    AgentLane, App, ComparisonRow, LaneFilter, LaneOutcome, MetricSummary, ObservationType,
+    SystemMetrics, TraceObservation, TraceRecord, TraceTab, View,
 };
 
 const RAIL_QUANTUM: Duration = Duration::from_millis(250);
@@ -26,9 +26,7 @@ pub(crate) fn render(frame: &mut Frame<'_>, app: &mut App, now: Instant, no_colo
 
     match app.view.clone() {
         View::Main => render_main(frame, app, area, now, no_color),
-        View::Traces { agent_key } => {
-            render_recent_traces(frame, app, area, &agent_key, now, no_color)
-        }
+        View::Agent { agent_key } => render_agent_live(frame, app, area, &agent_key, now, no_color),
         View::Trace { .. } => render_trace(frame, app, area, now, no_color),
         View::Optimize => render_optimize(frame, app, area, no_color),
     }
@@ -63,7 +61,7 @@ fn render_main(frame: &mut Frame<'_>, app: &mut App, area: Rect, now: Instant, n
         if app.search_active {
             "Search: type · Enter Keep · Esc Cancel"
         } else {
-            "↑↓ Select  → Traces  O Optimize  F Filter  / Search  S Sort  B Dashboard  Q Quit"
+            "↑↓ Select  → Focus  O Optimize  F Filter  / Search  S Sort  B Dashboard  Q Quit"
         },
         app.notice.as_deref(),
     );
@@ -282,7 +280,7 @@ fn render_selected_stage_strip(frame: &mut Frame<'_>, app: &App, area: Rect, no_
     );
 }
 
-fn render_recent_traces(
+fn render_agent_live(
     frame: &mut Frame<'_>,
     app: &App,
     area: Rect,
@@ -290,32 +288,165 @@ fn render_recent_traces(
     now: Instant,
     no_color: bool,
 ) {
-    let sections = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(2),
-            Constraint::Min(4),
-            Constraint::Length(1),
-        ])
-        .split(area);
     let Some(lane) = app.lane(agent_key) else {
         frame.render_widget(Paragraph::new("Agent is no longer available"), area);
         return;
     };
+    let capability_height = u16::try_from(lane.capabilities().len())
+        .unwrap_or(u16::MAX)
+        .saturating_add(1)
+        .min(area.height.saturating_sub(9).max(2));
+    let capability_noun = if lane.capabilities().len() == 1 {
+        "capability"
+    } else {
+        "capabilities"
+    };
+    let sections = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(2),
+            Constraint::Length(capability_height),
+            Constraint::Min(4),
+            Constraint::Length(3),
+            Constraint::Length(1),
+        ])
+        .split(area);
     frame.render_widget(
         Paragraph::new(vec![
             Line::styled(
-                format!(" {} · {}", lane.name, lane.capability),
-                Style::default().add_modifier(Modifier::BOLD),
+                format!(" {}", lane.name),
+                if no_color {
+                    Style::default().add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD)
+                },
             ),
             Line::raw(format!(
-                " Provider {} · Model {}",
-                lane.provider, lane.model
+                " Agent {} · {} {} · {} active requests",
+                lane.agent_id,
+                lane.capabilities().len(),
+                capability_noun,
+                lane.concurrency()
             )),
         ]),
         sections[0],
     );
-    let traces = lane.recent_traces();
+
+    render_agent_capabilities(frame, lane, sections[1], now, no_color);
+    render_agent_requests(frame, app, lane, sections[2], now, no_color);
+    render_agent_selected_request(frame, app, lane, sections[3], now, no_color);
+    render_footer(
+        frame,
+        sections[4],
+        "↑↓ Select  →/Enter Inspect  ←/Esc Agents  O Optimize  B Dashboard",
+        app.notice.as_deref(),
+    );
+}
+
+fn render_agent_capabilities(
+    frame: &mut Frame<'_>,
+    lane: &AgentLane,
+    area: Rect,
+    now: Instant,
+    no_color: bool,
+) {
+    let wide = area.width >= 96;
+    let rows = lane.capabilities().iter().map(|capability| {
+        let trace = lane.live_trace_for_capability(capability);
+        let active = lane.active_for_capability(capability);
+        let outcome = if active > 0 {
+            LaneOutcome::Running
+        } else {
+            trace.map_or(LaneOutcome::Unknown, |trace| trace.outcome)
+        };
+        let request = trace.map_or_else(
+            || "— waiting".to_string(),
+            |trace| {
+                elapsed_rail(
+                    outcome,
+                    trace.elapsed(now),
+                    trace.current_stage(),
+                    if wide { 22 } else { 16 },
+                )
+            },
+        );
+        let mut cells = vec![
+            Cell::from(shorten_capability(capability)),
+            Cell::from(active.to_string()),
+            Cell::from(request),
+        ];
+        if wide {
+            cells.push(Cell::from(format_optional_duration(
+                trace.and_then(|trace| trace.ttft),
+            )));
+            cells.push(Cell::from(format_rate(
+                trace.and_then(|trace| trace.tokens_per_second),
+            )));
+        }
+        cells.push(Cell::from(if trace.is_none() {
+            "— WAITING".to_string()
+        } else {
+            format!("{} {}", outcome.symbol(), outcome.label())
+        }));
+        Row::new(cells).style(outcome_style(outcome, no_color))
+    });
+    let (headers, widths) = if wide {
+        (
+            vec![
+                "CAPABILITY",
+                "ACTIVE",
+                "REQUEST / TIME",
+                "TTFT",
+                "RATE",
+                "RESULT",
+            ],
+            vec![
+                Constraint::Length(13),
+                Constraint::Length(7),
+                Constraint::Min(22),
+                Constraint::Length(9),
+                Constraint::Length(9),
+                Constraint::Length(11),
+            ],
+        )
+    } else {
+        (
+            vec!["CAPABILITY", "ACTIVE", "REQUEST / TIME", "RESULT"],
+            vec![
+                Constraint::Length(13),
+                Constraint::Length(7),
+                Constraint::Min(16),
+                Constraint::Length(11),
+            ],
+        )
+    };
+    frame.render_widget(
+        Table::new(rows, widths)
+            .header(Row::new(headers).style(Style::default().add_modifier(Modifier::BOLD)))
+            .column_spacing(1),
+        area,
+    );
+}
+
+fn render_agent_requests(
+    frame: &mut Frame<'_>,
+    app: &App,
+    lane: &AgentLane,
+    area: Rect,
+    now: Instant,
+    no_color: bool,
+) {
+    let sections = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(1), Constraint::Min(1)])
+        .split(area);
+    frame.render_widget(
+        Paragraph::new(" LIVE REQUESTS").style(Style::default().add_modifier(Modifier::BOLD)),
+        sections[0],
+    );
+    let traces = lane.live_traces();
     let visible_rows = sections[1].height.saturating_sub(1) as usize;
     let selected_index = app
         .selected_trace
@@ -329,56 +460,126 @@ fn render_recent_traces(
         .take(visible_rows)
         .map(|(index, trace)| {
             let selected = app.selected_trace == Some(trace.id);
-            Row::new(vec![
+            let mut cells = vec![
                 Cell::from(format!(
                     "{}{:02}",
                     if selected { "›" } else { " " },
                     index + 1
                 )),
+                Cell::from(shorten_capability(&trace.capability)),
                 Cell::from(short_uuid(trace.id)),
-                Cell::from(format!(
-                    "{} {}",
-                    trace.outcome.symbol(),
-                    trace.outcome.label()
-                )),
-                Cell::from(format_duration(trace.elapsed(now))),
-                Cell::from(trace.current_stage().label()),
                 Cell::from(trace.model.clone()),
-            ])
-            .style(if selected {
+                Cell::from(elapsed_rail(
+                    trace.outcome,
+                    trace.elapsed(now),
+                    trace.current_stage(),
+                    20,
+                )),
+            ];
+            if area.width >= 112 {
+                cells.push(Cell::from(format_optional_duration(trace.ttft)));
+                cells.push(Cell::from(format_rate(trace.tokens_per_second)));
+            }
+            cells.push(Cell::from(format!(
+                "{} {}",
+                trace.outcome.symbol(),
+                trace.outcome.label()
+            )));
+            Row::new(cells).style(if selected {
                 selected_style(outcome_style(trace.outcome, no_color), no_color)
             } else {
                 outcome_style(trace.outcome, no_color)
             })
         });
-    let table = Table::new(
-        rows,
-        [
-            Constraint::Length(5),
-            Constraint::Length(14),
-            Constraint::Length(11),
-            Constraint::Length(10),
-            Constraint::Length(14),
-            Constraint::Min(16),
-        ],
-    )
-    .header(
-        Row::new(["#", "TRACE", "RESULT", "TOTAL", "LAST STAGE", "MODEL"])
-            .style(Style::default().add_modifier(Modifier::BOLD)),
+    let (headers, widths) = if area.width >= 112 {
+        (
+            vec![
+                "#",
+                "TYPE",
+                "REQUEST",
+                "MODEL",
+                "REQUEST / TIME",
+                "TTFT",
+                "RATE",
+                "RESULT",
+            ],
+            vec![
+                Constraint::Length(5),
+                Constraint::Length(11),
+                Constraint::Length(14),
+                Constraint::Length(18),
+                Constraint::Min(20),
+                Constraint::Length(9),
+                Constraint::Length(9),
+                Constraint::Length(11),
+            ],
+        )
+    } else {
+        (
+            vec!["#", "TYPE", "REQUEST", "MODEL", "REQUEST / TIME", "RESULT"],
+            vec![
+                Constraint::Length(5),
+                Constraint::Length(11),
+                Constraint::Length(14),
+                Constraint::Length(16),
+                Constraint::Min(16),
+                Constraint::Length(11),
+            ],
+        )
+    };
+    frame.render_widget(
+        Table::new(rows, widths)
+            .header(Row::new(headers).style(Style::default().add_modifier(Modifier::BOLD)))
+            .column_spacing(1),
+        sections[1],
     );
-    frame.render_widget(table, sections[1]);
     if traces.is_empty() {
         frame.render_widget(
-            Paragraph::new("No real invocation has reached this Agent yet.")
+            Paragraph::new("Waiting for this Agent's first live request…")
                 .alignment(Alignment::Center),
             sections[1],
         );
     }
-    render_footer(
-        frame,
-        sections[2],
-        "↑↓ Select  →/Enter Inspect  ←/Esc Back  O Optimize  B Dashboard",
-        app.notice.as_deref(),
+}
+
+fn render_agent_selected_request(
+    frame: &mut Frame<'_>,
+    app: &App,
+    lane: &AgentLane,
+    area: Rect,
+    now: Instant,
+    no_color: bool,
+) {
+    let trace = app.selected_trace.and_then(|trace_id| lane.trace(trace_id));
+    let identity = trace.map_or_else(
+        || "SELECTED — waiting for a live request".to_string(),
+        |trace| {
+            format!(
+                "SELECTED {} · {} · {} · {}",
+                shorten_capability(&trace.capability),
+                short_uuid(trace.id),
+                trace.current_stage().label(),
+                format_duration(trace.elapsed(now))
+            )
+        },
+    );
+    let stages = RuntimeStage::ORDERED.into_iter().map(|stage| {
+        let status = trace.map_or(StageStatus::Unknown, |trace| {
+            trace.observation_status(stage)
+        });
+        Span::styled(
+            format!("{} {}  ", stage.label(), stage_status_symbol(status)),
+            stage_style(status, no_color),
+        )
+    });
+    frame.render_widget(
+        Paragraph::new(vec![
+            Line::raw(identity),
+            Line::from(stages.collect::<Vec<_>>()),
+        ])
+        .block(Block::default().borders(Borders::TOP))
+        .wrap(Wrap { trim: true }),
+        area,
     );
 }
 
@@ -1968,6 +2169,120 @@ mod tests {
     }
 
     #[test]
+    fn agent_live_view_should_render_capabilities_requests_and_the_selected_stage() {
+        let mut app = App::default();
+        let now = Instant::now();
+        app.apply(
+            RuntimeEvent::ProjectProfilesRegistered(vec![ProjectProfileRegistration {
+                id: "profile-1".to_string(),
+                name: "Farmhand".to_string(),
+                provider: "stardew-valley/development".to_string(),
+                capabilities: vec!["chat".to_string(), "embedding".to_string()],
+                model: "stardew-valley-farmhand".to_string(),
+            }]),
+            now,
+        );
+        let invocation_id = Uuid::new_v4();
+        app.apply(
+            RuntimeEvent::InvocationStarted {
+                invocation_id,
+                agent_id: "profile-1".to_string(),
+                agent_name: "Farmhand".to_string(),
+                source_agent_id: "local-qwen".to_string(),
+                capability: "chat".to_string(),
+                provider: "local-qwen".to_string(),
+                model: "qwen".to_string(),
+                started_unix_ms: 100,
+            },
+            now,
+        );
+        app.apply(
+            RuntimeEvent::StageChanged {
+                invocation_id,
+                observation_id: Uuid::new_v4(),
+                stage: RuntimeStage::Prefill,
+                status: StageStatus::Active,
+                start_offset: Duration::from_millis(10),
+                end_offset: None,
+                elapsed: Duration::from_millis(20),
+                request_elapsed: Some(Duration::from_millis(30)),
+                input_tokens: Some(20),
+                output_tokens: None,
+                resident: Some(true),
+                error: None,
+            },
+            now,
+        );
+        app.open_selected_agent();
+
+        let content = rendered_content(&mut app, now, 140, 22);
+
+        assert!(content.contains("2 capabilities"));
+        assert!(content.contains("CAPABILITY"));
+        assert!(content.contains("embed"));
+        assert!(content.contains("LIVE REQUESTS"));
+        assert!(content.contains(&short_uuid(invocation_id)));
+        assert!(content.contains("PREFILL"));
+        assert!(content.contains("←/Esc Agents"));
+    }
+
+    #[test]
+    fn agent_live_view_should_show_declared_capabilities_before_the_first_request() {
+        let mut app = App::default();
+        app.filter = LaneFilter::All;
+        let now = Instant::now();
+        app.apply(
+            RuntimeEvent::ProjectProfilesRegistered(vec![ProjectProfileRegistration {
+                id: "profile-1".to_string(),
+                name: "Farmhand".to_string(),
+                provider: "stardew-valley/development".to_string(),
+                capabilities: vec!["chat".to_string(), "embedding".to_string()],
+                model: "stardew-valley-farmhand".to_string(),
+            }]),
+            now,
+        );
+        app.open_selected_agent();
+
+        let content = rendered_content(&mut app, now, 120, 18);
+
+        assert!(content.contains("chat"));
+        assert!(content.contains("embed"));
+        assert!(content.contains("WAITING"));
+        assert!(content.contains("Waiting for this Agent's first live request"));
+    }
+
+    #[test]
+    fn agent_live_view_should_render_the_newest_request_as_the_first_selected_row() {
+        let mut app = App::default();
+        let now = Instant::now();
+        let older = Uuid::new_v4();
+        let newest = Uuid::new_v4();
+        for (invocation_id, started_unix_ms) in [(older, 100), (newest, 200)] {
+            app.apply(
+                RuntimeEvent::InvocationStarted {
+                    invocation_id,
+                    agent_id: "profile-1".to_string(),
+                    agent_name: "Farmhand".to_string(),
+                    source_agent_id: "local-qwen".to_string(),
+                    capability: "chat".to_string(),
+                    provider: "local-qwen".to_string(),
+                    model: "qwen".to_string(),
+                    started_unix_ms,
+                },
+                now,
+            );
+        }
+        app.open_selected_agent();
+
+        let content = rendered_content(&mut app, now, 120, 18);
+        let cursor = content.find("›01").unwrap();
+        let newest = content.find(&short_uuid(newest)).unwrap();
+        let older = content.find(&short_uuid(older)).unwrap();
+
+        assert!(cursor < newest && newest < older);
+    }
+
+    #[test]
     fn selected_agent_should_use_an_accent_foreground_without_reverse_video() {
         let mut app = App::default();
         let now = Instant::now();
@@ -2344,7 +2659,7 @@ mod tests {
     }
 
     #[test]
-    fn short_recent_trace_list_keeps_the_keyboard_selection_visible() {
+    fn narrow_agent_live_view_keeps_the_selected_historical_request_visible() {
         let mut app = App::default();
         let now = Instant::now();
         app.apply(
@@ -2387,14 +2702,14 @@ mod tests {
         }
         let oldest = oldest.unwrap();
         app.selected_trace = Some(oldest);
-        app.view = View::Traces {
+        app.view = View::Agent {
             agent_key: "planner\0".to_string(),
         };
 
         let content = rendered_content(&mut app, now, 120, 11);
 
         assert!(content.contains(&short_uuid(oldest)));
-        assert!(content.contains("←/Esc Back"));
+        assert!(content.contains("←/Esc Agents"));
     }
 
     #[test]

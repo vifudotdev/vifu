@@ -200,7 +200,7 @@ pub(crate) struct OptimizationSummary {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum View {
     Main,
-    Traces {
+    Agent {
         agent_key: String,
     },
     Trace {
@@ -447,6 +447,7 @@ pub(crate) struct AgentLane {
     pub(crate) name: String,
     pub(crate) provider: String,
     pub(crate) capability: String,
+    capabilities: Vec<String>,
     pub(crate) model: String,
     configured: bool,
     active: HashMap<Uuid, TraceRecord>,
@@ -458,6 +459,7 @@ impl AgentLane {
     fn from_registration(registration: RegisteredAgent) -> Self {
         let key = lane_key(&registration.id, &registration.capability);
         let source_agent_id = registration.id.clone();
+        let capabilities = vec![registration.capability.clone()];
         Self {
             key,
             agent_id: registration.id,
@@ -465,6 +467,7 @@ impl AgentLane {
             name: registration.name,
             provider: registration.provider,
             capability: registration.capability,
+            capabilities,
             model: registration.model,
             configured: true,
             active: HashMap::new(),
@@ -475,7 +478,8 @@ impl AgentLane {
 
     fn from_project_profile(registration: ProjectProfileRegistration) -> Self {
         let key = profile_lane_key(&registration.id);
-        let capability = capability_label(&registration.capabilities);
+        let capabilities = normalized_capabilities(registration.capabilities);
+        let capability = capability_label(&capabilities);
         Self {
             key,
             agent_id: registration.id,
@@ -483,6 +487,7 @@ impl AgentLane {
             name: registration.name,
             provider: registration.provider,
             capability,
+            capabilities,
             model: registration.model,
             configured: true,
             active: HashMap::new(),
@@ -493,6 +498,53 @@ impl AgentLane {
 
     pub(crate) fn concurrency(&self) -> usize {
         self.active.len()
+    }
+
+    pub(crate) fn capabilities(&self) -> &[String] {
+        &self.capabilities
+    }
+
+    pub(crate) fn active_for_capability(&self, capability: &str) -> usize {
+        self.active
+            .values()
+            .filter(|trace| trace.capability == capability)
+            .count()
+    }
+
+    pub(crate) fn live_trace_for_capability(&self, capability: &str) -> Option<&TraceRecord> {
+        self.active
+            .values()
+            .filter(|trace| trace.capability == capability)
+            .max_by_key(|trace| trace.started_unix_ms)
+            .or_else(|| {
+                self.history
+                    .iter()
+                    .find(|trace| trace.capability == capability)
+            })
+    }
+
+    pub(crate) fn live_traces(&self) -> Vec<&TraceRecord> {
+        let mut traces = self
+            .active
+            .values()
+            .chain(self.history.iter())
+            .collect::<Vec<_>>();
+        traces.sort_by(|left, right| {
+            right
+                .started_unix_ms
+                .cmp(&left.started_unix_ms)
+                .then_with(|| left.id.cmp(&right.id))
+        });
+        traces
+    }
+
+    fn register_capability(&mut self, capability: &str) {
+        if let Err(index) = self
+            .capabilities
+            .binary_search_by(|candidate| candidate.as_str().cmp(capability))
+        {
+            self.capabilities.insert(index, capability.to_string());
+        }
     }
 
     fn represents_agent(&self) -> bool {
@@ -512,14 +564,7 @@ impl AgentLane {
             .unwrap_or(LaneOutcome::Unknown)
     }
 
-    pub(crate) fn recent_traces(&self) -> Vec<&TraceRecord> {
-        let mut traces = self.active.values().collect::<Vec<_>>();
-        traces.sort_by_key(|trace| std::cmp::Reverse(trace.started_unix_ms));
-        traces.extend(self.history.iter());
-        traces
-    }
-
-    fn trace(&self, trace_id: Uuid) -> Option<&TraceRecord> {
+    pub(crate) fn trace(&self, trace_id: Uuid) -> Option<&TraceRecord> {
         self.active
             .get(&trace_id)
             .or_else(|| self.history.iter().find(|trace| trace.id == trace_id))
@@ -565,8 +610,8 @@ pub(crate) struct App {
     pub(crate) search_active: bool,
     pub(crate) selected_lane: Option<String>,
     pub(crate) selected_trace: Option<Uuid>,
+    live_agent_keys: HashSet<String>,
     pub(crate) scroll_offset: usize,
-    pub(crate) trace_scroll_offset: usize,
     pub(crate) lanes: HashMap<String, AgentLane>,
     configured_sources: HashSet<String>,
     project_configured_sources: HashSet<String>,
@@ -604,8 +649,8 @@ impl Default for App {
             search_active: false,
             selected_lane: None,
             selected_trace: None,
+            live_agent_keys: HashSet::new(),
             scroll_offset: 0,
-            trace_scroll_offset: 0,
             lanes: HashMap::new(),
             configured_sources: HashSet::new(),
             project_configured_sources: HashSet::new(),
@@ -727,13 +772,13 @@ impl App {
                 }
                 for registration in registrations {
                     let key = profile_lane_key(&registration.id);
-                    let capability = capability_label(&registration.capabilities);
                     match self.lanes.get_mut(&key) {
                         Some(lane) => {
                             lane.agent_id = registration.id;
                             lane.name = registration.name;
+                            lane.capabilities = normalized_capabilities(registration.capabilities);
                             if lane.representative().is_none() {
-                                lane.capability = capability;
+                                lane.capability = capability_label(&lane.capabilities);
                                 lane.provider = registration.provider;
                                 lane.model = registration.model;
                             }
@@ -794,6 +839,11 @@ impl App {
             } => {
                 let inventory_key = lane_key(&source_agent_id, &capability);
                 let key = profile_lane_key(&agent_id);
+                let focus_invocation = matches!(
+                    &self.view,
+                    View::Agent { agent_key } | View::Trace { agent_key, .. }
+                        if agent_key == &key
+                );
                 let inventory_configured = self.configured_sources.contains(&inventory_key);
                 if inventory_key != key
                     && self
@@ -822,6 +872,7 @@ impl App {
                 lane.name = agent_name;
                 lane.provider = provider.clone();
                 lane.capability = capability.clone();
+                lane.register_capability(&capability);
                 lane.model = model.clone();
                 lane.last_updated_unix_ms = started_unix_ms;
                 lane.active.insert(
@@ -851,6 +902,9 @@ impl App {
                     },
                 );
                 self.invocation_lanes.insert(invocation_id, key);
+                if focus_invocation {
+                    self.selected_trace = Some(invocation_id);
+                }
                 self.normalize_lane_selection(now);
             }
             RuntimeEvent::InvocationMetadata {
@@ -1070,6 +1124,7 @@ impl App {
                 let Some(lane_key) = self.invocation_lanes.get(&invocation_id).cloned() else {
                     return;
                 };
+                let retain_live_history = self.live_agent_keys.contains(&lane_key);
                 let Some(lane) = self.lanes.get_mut(&lane_key) else {
                     return;
                 };
@@ -1134,7 +1189,7 @@ impl App {
                     .started_unix_ms
                     .saturating_add(elapsed.as_millis().try_into().unwrap_or(u64::MAX));
                 lane.history.push_front(trace);
-                let dropped = (lane.history.len() > TRACE_HISTORY_LIMIT)
+                let dropped = (!retain_live_history && lane.history.len() > TRACE_HISTORY_LIMIT)
                     .then(|| lane.history.pop_back())
                     .flatten()
                     .map(|trace| trace.id);
@@ -1147,6 +1202,7 @@ impl App {
                 let Some(lane_key) = self.invocation_lanes.remove(&invocation_id) else {
                     return;
                 };
+                let retain_live_history = self.live_agent_keys.contains(&lane_key);
                 let Some(lane) = self.lanes.get_mut(&lane_key) else {
                     return;
                 };
@@ -1158,7 +1214,13 @@ impl App {
                 trace.outcome = LaneOutcome::Skipped;
                 trace.error = Some("Invocation cancelled".to_string());
                 lane.history.push_front(trace);
-                lane.history.truncate(TRACE_HISTORY_LIMIT);
+                let dropped = (!retain_live_history && lane.history.len() > TRACE_HISTORY_LIMIT)
+                    .then(|| lane.history.pop_back())
+                    .flatten()
+                    .map(|trace| trace.id);
+                if let Some(dropped) = dropped {
+                    self.invocation_lanes.remove(&dropped);
+                }
                 self.prune_trace_history();
             }
         }
@@ -1291,8 +1353,11 @@ impl App {
         if self.selected_lane.as_deref() == Some(old_key) {
             self.selected_lane = Some(new_key.to_string());
         }
+        if self.live_agent_keys.remove(old_key) {
+            self.live_agent_keys.insert(new_key.to_string());
+        }
         match &mut self.view {
-            View::Traces { agent_key } | View::Trace { agent_key, .. } if agent_key == old_key => {
+            View::Agent { agent_key } | View::Trace { agent_key, .. } if agent_key == old_key => {
                 *agent_key = new_key.to_string();
             }
             _ => {}
@@ -1390,19 +1455,19 @@ impl App {
         self.selected_trace = self
             .lanes
             .get(&agent_key)
-            .and_then(|lane| lane.recent_traces().first().map(|trace| trace.id));
-        self.trace_scroll_offset = 0;
-        self.view = View::Traces { agent_key };
+            .and_then(|lane| lane.live_traces().first().map(|trace| trace.id));
+        self.live_agent_keys.insert(agent_key.clone());
+        self.view = View::Agent { agent_key };
     }
 
-    pub(crate) fn move_trace_selection(&mut self, amount: isize) {
-        let View::Traces { agent_key } = &self.view else {
+    pub(crate) fn move_agent_request_selection(&mut self, amount: isize) {
+        let View::Agent { agent_key } = &self.view else {
             return;
         };
         let Some(lane) = self.lanes.get(agent_key) else {
             return;
         };
-        let traces = lane.recent_traces();
+        let traces = lane.live_traces();
         if traces.is_empty() {
             self.selected_trace = None;
             return;
@@ -1418,7 +1483,7 @@ impl App {
     }
 
     pub(crate) fn open_selected_trace(&mut self) {
-        let View::Traces { agent_key } = &self.view else {
+        let View::Agent { agent_key } = &self.view else {
             return;
         };
         let Some(trace_id) = self.selected_trace else {
@@ -1439,8 +1504,8 @@ impl App {
         self.notice = None;
         self.view = match &self.view {
             View::Main => View::Main,
-            View::Traces { .. } | View::Optimize => View::Main,
-            View::Trace { agent_key, .. } => View::Traces {
+            View::Agent { .. } | View::Optimize => View::Main,
+            View::Trace { agent_key, .. } => View::Agent {
                 agent_key: agent_key.clone(),
             },
         };
@@ -1590,6 +1655,12 @@ fn capability_label(capabilities: &[String]) -> String {
     }
 }
 
+fn normalized_capabilities(mut capabilities: Vec<String>) -> Vec<String> {
+    capabilities.sort();
+    capabilities.dedup();
+    capabilities
+}
+
 fn attention_cmp(left: &AgentLane, right: &AgentLane, now: Instant) -> Ordering {
     let left_outcome = left.outcome();
     let right_outcome = right.outcome();
@@ -1649,6 +1720,39 @@ mod tests {
             model: "qwen2.5:2b".to_string(),
             local_model_loaded: true,
         }
+    }
+
+    fn app_with_focused_completed_requests(requests: u64, now: Instant) -> App {
+        let mut app = App::default();
+        for started_unix_ms in 1..=requests {
+            let invocation_id = Uuid::new_v4();
+            app.apply(
+                RuntimeEvent::InvocationStarted {
+                    invocation_id,
+                    agent_id: "profile-1".to_string(),
+                    agent_name: "Farmhand".to_string(),
+                    source_agent_id: "local-qwen".to_string(),
+                    capability: "chat".to_string(),
+                    provider: "local-qwen".to_string(),
+                    model: "qwen".to_string(),
+                    started_unix_ms,
+                },
+                now,
+            );
+            if started_unix_ms == 1 {
+                app.open_selected_agent();
+            }
+            app.apply(
+                RuntimeEvent::InvocationFinished {
+                    invocation_id,
+                    elapsed: Duration::from_millis(10),
+                    terminal: RuntimeTerminal::Delivered,
+                    error: None,
+                },
+                now,
+            );
+        }
+        app
     }
 
     #[test]
@@ -1860,6 +1964,230 @@ mod tests {
         assert_eq!(app.counts().total, 1);
         assert_eq!(app.visible_lane_keys(now), vec!["profile-1\0"]);
         assert_eq!(app.lanes["profile-1\0"].concurrency(), 2);
+    }
+
+    #[test]
+    fn agent_live_requests_should_keep_every_observed_request_in_newest_first_order() {
+        let now = Instant::now();
+        let mut app = App::default();
+        let old_embedding = Uuid::new_v4();
+        let latest_embedding = Uuid::new_v4();
+        for (invocation_id, started_unix_ms) in [(old_embedding, 100), (latest_embedding, 200)] {
+            app.apply(
+                RuntimeEvent::InvocationStarted {
+                    invocation_id,
+                    agent_id: "profile-1".to_string(),
+                    agent_name: "Farmhand".to_string(),
+                    source_agent_id: "local-qwen".to_string(),
+                    capability: "embedding".to_string(),
+                    provider: "local-qwen".to_string(),
+                    model: "qwen".to_string(),
+                    started_unix_ms,
+                },
+                now,
+            );
+            app.apply(
+                RuntimeEvent::InvocationFinished {
+                    invocation_id,
+                    elapsed: Duration::from_millis(10),
+                    terminal: RuntimeTerminal::Delivered,
+                    error: None,
+                },
+                now,
+            );
+        }
+        let active_chat = Uuid::new_v4();
+        app.apply(
+            RuntimeEvent::InvocationStarted {
+                invocation_id: active_chat,
+                agent_id: "profile-1".to_string(),
+                agent_name: "Farmhand".to_string(),
+                source_agent_id: "local-qwen".to_string(),
+                capability: "chat".to_string(),
+                provider: "local-qwen".to_string(),
+                model: "qwen".to_string(),
+                started_unix_ms: 50,
+            },
+            now,
+        );
+
+        let requests = app.lanes["profile-1\0"]
+            .live_traces()
+            .into_iter()
+            .map(|trace| trace.id)
+            .collect::<Vec<_>>();
+
+        assert_eq!(requests, vec![latest_embedding, old_embedding, active_chat]);
+    }
+
+    #[test]
+    fn agent_live_session_should_retain_every_request_observed_while_it_is_open() {
+        let now = Instant::now();
+        let app = app_with_focused_completed_requests(10, now);
+
+        assert_eq!(app.lanes["profile-1\0"].live_traces().len(), 10);
+    }
+
+    #[test]
+    fn returning_to_an_observed_agent_should_keep_its_live_session_requests() {
+        let now = Instant::now();
+        let mut app = app_with_focused_completed_requests(10, now);
+
+        app.go_back();
+        let invocation_id = Uuid::new_v4();
+        app.apply(
+            RuntimeEvent::InvocationStarted {
+                invocation_id,
+                agent_id: "profile-1".to_string(),
+                agent_name: "Farmhand".to_string(),
+                source_agent_id: "local-qwen".to_string(),
+                capability: "chat".to_string(),
+                provider: "local-qwen".to_string(),
+                model: "qwen".to_string(),
+                started_unix_ms: 11,
+            },
+            now,
+        );
+        app.apply(
+            RuntimeEvent::InvocationFinished {
+                invocation_id,
+                elapsed: Duration::from_millis(10),
+                terminal: RuntimeTerminal::Delivered,
+                error: None,
+            },
+            now,
+        );
+        app.open_selected_agent();
+
+        assert_eq!(app.lanes["profile-1\0"].live_traces().len(), 11);
+    }
+
+    #[test]
+    fn agent_live_view_should_follow_new_requests_from_the_focused_agent() {
+        let now = Instant::now();
+        let mut app = App::default();
+        let first = Uuid::new_v4();
+        app.apply(
+            RuntimeEvent::InvocationStarted {
+                invocation_id: first,
+                agent_id: "profile-1".to_string(),
+                agent_name: "Farmhand".to_string(),
+                source_agent_id: "local-qwen".to_string(),
+                capability: "chat".to_string(),
+                provider: "local-qwen".to_string(),
+                model: "qwen".to_string(),
+                started_unix_ms: 100,
+            },
+            now,
+        );
+        app.open_selected_agent();
+        let second = Uuid::new_v4();
+        app.apply(
+            RuntimeEvent::InvocationStarted {
+                invocation_id: second,
+                agent_id: "profile-1".to_string(),
+                agent_name: "Farmhand".to_string(),
+                source_agent_id: "local-qwen".to_string(),
+                capability: "embedding".to_string(),
+                provider: "local-qwen".to_string(),
+                model: "qwen".to_string(),
+                started_unix_ms: 200,
+            },
+            now,
+        );
+        app.apply(
+            RuntimeEvent::InvocationStarted {
+                invocation_id: Uuid::new_v4(),
+                agent_id: "profile-2".to_string(),
+                agent_name: "Miner".to_string(),
+                source_agent_id: "local-qwen".to_string(),
+                capability: "chat".to_string(),
+                provider: "local-qwen".to_string(),
+                model: "qwen".to_string(),
+                started_unix_ms: 300,
+            },
+            now,
+        );
+
+        assert_eq!(app.selected_trace, Some(second));
+    }
+
+    #[test]
+    fn completed_latest_request_should_remain_selected_at_the_top_of_agent_live_view() {
+        let now = Instant::now();
+        let mut app = App::default();
+        let older = Uuid::new_v4();
+        let latest = Uuid::new_v4();
+        for (invocation_id, started_unix_ms) in [(older, 100), (latest, 200)] {
+            app.apply(
+                RuntimeEvent::InvocationStarted {
+                    invocation_id,
+                    agent_id: "profile-1".to_string(),
+                    agent_name: "Farmhand".to_string(),
+                    source_agent_id: "local-qwen".to_string(),
+                    capability: "chat".to_string(),
+                    provider: "local-qwen".to_string(),
+                    model: "qwen".to_string(),
+                    started_unix_ms,
+                },
+                now,
+            );
+        }
+        app.open_selected_agent();
+        app.apply(
+            RuntimeEvent::InvocationFinished {
+                invocation_id: latest,
+                elapsed: Duration::from_millis(10),
+                terminal: RuntimeTerminal::Delivered,
+                error: None,
+            },
+            now,
+        );
+
+        let first_request = app.lanes["profile-1\0"].live_traces()[0].id;
+
+        assert_eq!((app.selected_trace, first_request), (Some(latest), latest));
+    }
+
+    #[test]
+    fn agent_live_view_should_return_to_the_newest_request_when_one_starts() {
+        let now = Instant::now();
+        let mut app = App::default();
+        let first = Uuid::new_v4();
+        let second = Uuid::new_v4();
+        for (invocation_id, started_unix_ms) in [(first, 100), (second, 200)] {
+            app.apply(
+                RuntimeEvent::InvocationStarted {
+                    invocation_id,
+                    agent_id: "profile-1".to_string(),
+                    agent_name: "Farmhand".to_string(),
+                    source_agent_id: "local-qwen".to_string(),
+                    capability: "chat".to_string(),
+                    provider: "local-qwen".to_string(),
+                    model: "qwen".to_string(),
+                    started_unix_ms,
+                },
+                now,
+            );
+        }
+        app.open_selected_agent();
+        app.move_agent_request_selection(1);
+        let third = Uuid::new_v4();
+        app.apply(
+            RuntimeEvent::InvocationStarted {
+                invocation_id: third,
+                agent_id: "profile-1".to_string(),
+                agent_name: "Farmhand".to_string(),
+                source_agent_id: "local-qwen".to_string(),
+                capability: "chat".to_string(),
+                provider: "local-qwen".to_string(),
+                model: "qwen".to_string(),
+                started_unix_ms: 300,
+            },
+            now,
+        );
+
+        assert_eq!(app.selected_trace, Some(third));
     }
 
     #[test]

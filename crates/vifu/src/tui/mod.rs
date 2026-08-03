@@ -273,11 +273,11 @@ fn handle_key(app: &mut App, key: KeyEvent, now: Instant) -> UiAction {
             KeyCode::Char('q' | 'Q') => return request_quit(app),
             _ => {}
         },
-        View::Traces { .. } => match key.code {
-            KeyCode::Up => app.move_trace_selection(-1),
-            KeyCode::Down => app.move_trace_selection(1),
-            KeyCode::PageUp => app.move_trace_selection(-10),
-            KeyCode::PageDown => app.move_trace_selection(10),
+        View::Agent { .. } => match key.code {
+            KeyCode::Up => app.move_agent_request_selection(-1),
+            KeyCode::Down => app.move_agent_request_selection(1),
+            KeyCode::PageUp => app.move_agent_request_selection(-10),
+            KeyCode::PageDown => app.move_agent_request_selection(10),
             KeyCode::Right | KeyCode::Enter => app.open_selected_trace(),
             KeyCode::Left | KeyCode::Esc => app.go_back(),
             KeyCode::Char('o' | 'O') => return UiAction::Optimize,
@@ -580,7 +580,7 @@ fn dashboard_target_url(base_url: &str, app: &App) -> String {
         .unwrap_or_else(|| base_url.to_string());
     let (trace_id, observation_id) = match &app.view {
         View::Trace { trace_id, .. } => (*trace_id, app.selected_observation_id()),
-        View::Traces { .. } => {
+        View::Agent { .. } => {
             let Some(trace_id) = app.selected_trace else {
                 return project_base;
             };
@@ -1093,7 +1093,7 @@ mod tests {
             "http://127.0.0.1:8787"
         );
         let trace_id = Uuid::from_u128(0x42);
-        app.view = View::Traces {
+        app.view = View::Agent {
             agent_key: "planner\0".to_string(),
         };
         app.selected_trace = Some(trace_id);
