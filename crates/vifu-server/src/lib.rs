@@ -451,6 +451,10 @@ pub fn app(state: AppState) -> Router {
             get(api::get_agent_gateway_runtime_config),
         )
         .route(
+            "/v1/agent-gateway/runtime-agents",
+            get(api::list_agent_gateway_runtime_agents),
+        )
+        .route(
             "/v1/agent-gateway/runtime-traces",
             post(api::upload_agent_gateway_runtime_traces),
         )
@@ -2166,6 +2170,108 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn agent_gateway_runtime_agents_include_assigned_project_profiles() {
+        let path = std::env::temp_dir().join(format!(
+            "vifu-runtime-agents-{}.sqlite",
+            uuid::Uuid::new_v4()
+        ));
+        let storage = crate::db::connect(&format!("sqlite://{}", path.display()), 5)
+            .await
+            .unwrap();
+        crate::db::migrate(&storage).await.unwrap();
+        let project_id = uuid::Uuid::new_v4();
+        let profile_id = uuid::Uuid::new_v4();
+        crate::db::create_project(
+            &storage,
+            crate::db::NewProject {
+                id: project_id,
+                owner_user_id: None,
+                slug: "stardew-valley",
+                name: "Stardew Valley",
+                description: None,
+                gateway_id: "gateway-stardew",
+                binding_ids: &[],
+            },
+        )
+        .await
+        .unwrap();
+        crate::db::upsert_agent_gateway_machine(&storage, "machine-stardew", "test-public-key")
+            .await
+            .unwrap();
+        let config = Config::from_env().unwrap();
+        let device_token = format!("vifu_gw_{}", "b".repeat(64));
+        let token_hash =
+            crate::auth::hash_agent_gateway_credential(&device_token, &config.api_key_pepper);
+        crate::db::create_agent_gateway_authorization(
+            &storage,
+            crate::db::NewAgentGatewayAuthorization {
+                gateway_id: "gateway-stardew",
+                machine_id: "machine-stardew",
+                owner_user_id: None,
+                token_prefix: &device_token.chars().take(20).collect::<String>(),
+                token_hash: &token_hash,
+                token_expires_at: chrono::Utc::now() + chrono::Duration::days(30),
+            },
+        )
+        .await
+        .unwrap();
+        crate::db::create_profile(
+            &storage,
+            profile_id,
+            project_id,
+            "stardew-valley-farming-0",
+            "Farming 0",
+            None,
+        )
+        .await
+        .unwrap();
+        let capabilities = vec![crate::models::ProfileCapabilityDraft {
+            kind: "chat".to_string(),
+            provider_type: "openai-compatible".to_string(),
+            provider_key: "local-qwen".to_string(),
+            resource_id: Some("qwen".to_string()),
+            config: json!({}),
+            input_schema: json!({}),
+            output_schema: json!({}),
+        }];
+        let empty = json!({});
+        crate::db::create_profile_version(
+            &storage,
+            profile_id,
+            crate::db::NewProfileVersion {
+                persona: &empty,
+                runtime: &empty,
+                presentation: &empty,
+                source: &empty,
+                capabilities: &capabilities,
+                change_summary: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        let response = app(state_with_storage(config, storage.clone()))
+            .oneshot(
+                Request::get("/v1/agent-gateway/runtime-agents")
+                    .header("authorization", format!("Bearer {device_token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+        let payload: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            payload["deployments"][0]["agents"][0]["slug"],
+            "stardew-valley-farming-0"
+        );
+
+        close_temp_storage(storage, path).await;
     }
 
     async fn state_with_access_token_auth(

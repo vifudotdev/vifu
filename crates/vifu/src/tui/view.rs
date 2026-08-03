@@ -8,12 +8,10 @@ use ratatui::widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table, Wrap}
 use ratatui::Frame;
 use uuid::Uuid;
 
-use crate::monitor::{
-    FeedbackEvent, FeedbackOutcome, RuntimeHealth, RuntimeStage, RuntimeTerminal, StageStatus,
-};
+use crate::monitor::{FeedbackEvent, FeedbackOutcome, RuntimeStage, RuntimeTerminal, StageStatus};
 
 use super::model::{
-    App, ComparisonRow, LaneOutcome, MetricSummary, ObservationType, SystemMetrics,
+    App, ComparisonRow, LaneFilter, LaneOutcome, MetricSummary, ObservationType, SystemMetrics,
     TraceObservation, TraceRecord, TraceTab, View,
 };
 
@@ -72,34 +70,22 @@ fn render_main(frame: &mut Frame<'_>, app: &mut App, area: Rect, now: Instant, n
 }
 
 fn render_runtime_header(frame: &mut Frame<'_>, app: &App, area: Rect, no_color: bool) {
-    let health = match app.health {
-        RuntimeHealth::Starting => "● STARTING",
-        RuntimeHealth::Live => "● LIVE",
-        RuntimeHealth::Reconnecting => "✕ RECONNECTING",
-    };
-    let identity = match (&app.project, &app.deployment) {
-        (Some(project), Some(deployment)) => format!("{project} / {deployment}"),
-        (Some(project), None) => project.clone(),
-        _ => "local runtime".to_string(),
-    };
-    let health_style = if no_color {
-        Style::default().add_modifier(Modifier::BOLD)
-    } else {
-        match app.health {
-            RuntimeHealth::Starting => Style::default().fg(Color::Yellow),
-            RuntimeHealth::Live => Style::default().fg(Color::Green),
-            RuntimeHealth::Reconnecting => Style::default().fg(Color::Red),
-        }
-        .add_modifier(Modifier::BOLD)
-    };
-    let first = Line::from(vec![
-        Span::styled(
-            " VIFU ARM RUNTIME  ",
-            Style::default().add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(health, health_style),
-        Span::raw(format!("   {identity}")),
-    ]);
+    let project = app.project.as_deref().unwrap_or("project pending");
+    let dashboard = app
+        .project_dashboard_url
+        .as_deref()
+        .unwrap_or("dashboard unavailable");
+    let deployment = app.deployment.as_deref().unwrap_or("deployment pending");
+    let first = Line::styled(
+        format!(" {project} / {dashboard} / {deployment}"),
+        if no_color {
+            Style::default().add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD)
+        },
+    );
     let second = Line::raw(format_system_metrics(
         app.metrics,
         app.loaded_models,
@@ -145,6 +131,7 @@ fn render_lanes(frame: &mut Frame<'_>, app: &App, area: Rect, now: Instant, no_c
 
     let rows = visible.map(|(index, lane)| {
         let trace = lane.representative();
+        let never_run = trace.is_none();
         let outcome = lane.outcome();
         let stage = trace
             .map(TraceRecord::current_stage)
@@ -152,14 +139,14 @@ fn render_lanes(frame: &mut Frame<'_>, app: &App, area: Rect, now: Instant, no_c
         let elapsed = trace.map(|trace| trace.elapsed(now));
         let concurrency = (lane.concurrency() > 1).then(|| format!(" ×{}", lane.concurrency()));
         let request = elapsed.map_or_else(
-            || "? no request yet".to_string(),
+            || "— NOT RUN YET".to_string(),
             |elapsed| elapsed_rail(outcome, elapsed, stage, if wide { 24 } else { 17 }),
         );
         let mut cells = vec![
             Cell::from(format!(
                 "{}{:02}",
                 if selected == Some(lane.key.as_str()) {
-                    ">"
+                    "›"
                 } else {
                     " "
                 },
@@ -168,8 +155,12 @@ fn render_lanes(frame: &mut Frame<'_>, app: &App, area: Rect, now: Instant, no_c
             Cell::from(format!("{}{}", lane.name, concurrency.unwrap_or_default())),
         ];
         if medium {
-            cells.push(Cell::from(shorten_capability(&lane.capability)));
-            cells.push(Cell::from(lane.model.clone()));
+            cells.push(Cell::from(shorten_capability(
+                trace.map_or(lane.capability.as_str(), |trace| trace.capability.as_str()),
+            )));
+            cells.push(Cell::from(
+                trace.map_or(lane.model.as_str(), |trace| trace.model.as_str()),
+            ));
         }
         cells.push(Cell::from(request));
         if wide {
@@ -180,13 +171,13 @@ fn render_lanes(frame: &mut Frame<'_>, app: &App, area: Rect, now: Instant, no_c
                 trace.and_then(|trace| trace.tokens_per_second),
             )));
         }
-        cells.push(Cell::from(format!(
-            "{} {}",
-            outcome.symbol(),
-            outcome.label()
-        )));
+        cells.push(Cell::from(if never_run {
+            "—".to_string()
+        } else {
+            format!("{} {}", outcome.symbol(), outcome.label())
+        }));
         let style = if selected == Some(lane.key.as_str()) {
-            Style::default().add_modifier(Modifier::REVERSED)
+            selected_style(outcome_style(outcome, no_color), no_color)
         } else {
             outcome_style(outcome, no_color)
         };
@@ -246,7 +237,9 @@ fn render_lanes(frame: &mut Frame<'_>, app: &App, area: Rect, now: Instant, no_c
     frame.render_widget(table, area);
 
     if keys.is_empty() {
-        let message = if app.lanes.is_empty() {
+        let message = if app.filter == LaneFilter::Live && app.search.is_empty() {
+            "Waiting for live Agent activity…"
+        } else if app.counts().total == 0 {
             "Waiting for configured Agents and real invocations…"
         } else {
             "No Agents match the current filter/search."
@@ -339,7 +332,7 @@ fn render_recent_traces(
             Row::new(vec![
                 Cell::from(format!(
                     "{}{:02}",
-                    if selected { ">" } else { " " },
+                    if selected { "›" } else { " " },
                     index + 1
                 )),
                 Cell::from(short_uuid(trace.id)),
@@ -353,7 +346,7 @@ fn render_recent_traces(
                 Cell::from(trace.model.clone()),
             ])
             .style(if selected {
-                Style::default().add_modifier(Modifier::REVERSED)
+                selected_style(outcome_style(trace.outcome, no_color), no_color)
             } else {
                 outcome_style(trace.outcome, no_color)
             })
@@ -445,7 +438,7 @@ fn render_trace(frame: &mut Frame<'_>, app: &App, area: Rect, now: Instant, no_c
         if item == *tab {
             Span::styled(
                 format!("[{}] ", item.label()),
-                Style::default().add_modifier(Modifier::BOLD | Modifier::REVERSED),
+                selected_style(Style::default(), no_color),
             )
         } else {
             Span::raw(format!(" {}  ", item.label()))
@@ -539,12 +532,13 @@ fn render_observations(frame: &mut Frame<'_>, pane: TraceObservationPane<'_>) {
         outcome_style(trace.outcome, no_color),
         root_cursor,
         root_selected,
+        no_color,
     );
     let root = root_matches.then(|| {
         Row::new([
             Cell::from(format!(
                 "{}{}{} Generation",
-                if root_cursor { ">" } else { " " },
+                if root_cursor { "›" } else { " " },
                 if root_selected { "●" } else { " " },
                 if searching { " *" } else { "" },
             )),
@@ -569,7 +563,7 @@ fn render_observations(frame: &mut Frame<'_>, pane: TraceObservationPane<'_>) {
         Row::new([
             Cell::from(format!(
                 "{}{}{} {indent}{} {} ({})",
-                if is_cursor { ">" } else { " " },
+                if is_cursor { "›" } else { " " },
                 if is_selected { "●" } else { " " },
                 if searching { " *" } else { "" },
                 stage_status_symbol(status),
@@ -582,6 +576,7 @@ fn render_observations(frame: &mut Frame<'_>, pane: TraceObservationPane<'_>) {
             stage_style(status, no_color),
             is_cursor,
             is_selected,
+            no_color,
         ))
     });
     let visible_rows = area.height.saturating_sub(2) as usize;
@@ -1255,7 +1250,7 @@ fn render_optimize(frame: &mut Frame<'_>, app: &App, area: Rect, no_color: bool)
                     Cell::from(format!(
                         "{}{}",
                         if index == app.selected_comparison {
-                            ">"
+                            "›"
                         } else {
                             " "
                         },
@@ -1281,7 +1276,7 @@ fn render_optimize(frame: &mut Frame<'_>, app: &App, area: Rect, no_color: bool)
                     row.result.label()
                 )));
                 Row::new(cells).style(if index == app.selected_comparison {
-                    Style::default().add_modifier(Modifier::REVERSED)
+                    selected_style(outcome_style(row.result, no_color), no_color)
                 } else {
                     outcome_style(row.result, no_color)
                 })
@@ -1677,16 +1672,25 @@ fn stage_style(status: StageStatus, no_color: bool) -> Style {
     }
 }
 
-fn selection_style(style: Style, cursor: bool, selected: bool) -> Style {
+fn selection_style(style: Style, cursor: bool, selected: bool, no_color: bool) -> Style {
     let style = if selected {
         style.add_modifier(Modifier::BOLD)
     } else {
         style
     };
     if cursor {
-        style.add_modifier(Modifier::REVERSED)
+        selected_style(style, no_color)
     } else {
         style
+    }
+}
+
+fn selected_style(style: Style, no_color: bool) -> Style {
+    let style = style.add_modifier(Modifier::BOLD);
+    if no_color {
+        style
+    } else {
+        style.fg(Color::Cyan)
     }
 }
 
@@ -1747,17 +1751,20 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use ratatui::backend::TestBackend;
+    use ratatui::style::{Color, Modifier};
     use ratatui::Terminal;
     use uuid::Uuid;
     use vifu_gateway::optimization::{CombinationKind, RouteCombination};
 
     use crate::monitor::{
-        FeedbackEvent, FeedbackOutcome, RegisteredAgent, RuntimeEvent, RuntimeStage,
-        RuntimeTerminal, StageStatus,
+        FeedbackEvent, FeedbackOutcome, ProjectProfileRegistration, RegisteredAgent, RuntimeEvent,
+        RuntimeStage, RuntimeTerminal, StageStatus,
     };
 
     use super::{elapsed_rail, render, short_uuid};
-    use crate::tui::model::{App, ComparisonRow, LaneOutcome, OptimizationSummary, TraceTab, View};
+    use crate::tui::model::{
+        App, ComparisonRow, LaneFilter, LaneOutcome, OptimizationSummary, TraceTab, View,
+    };
 
     fn rendered_content(app: &mut App, now: Instant, width: u16, height: u16) -> String {
         let backend = TestBackend::new(width, height);
@@ -1827,20 +1834,31 @@ mod tests {
         let mut app = App::default();
         let now = Instant::now();
         app.apply(
-            RuntimeEvent::AgentsRegistered(
-                (0..100)
-                    .map(|index| RegisteredAgent {
-                        id: format!("agent-{index:03}"),
-                        name: format!("Agent {index:03}"),
-                        provider: "local".to_string(),
-                        capability: "chat".to_string(),
-                        model: "qwen".to_string(),
-                        local_model_loaded: index == 0,
-                    })
-                    .collect(),
-            ),
+            RuntimeEvent::AgentsRegistered(vec![RegisteredAgent {
+                id: "local".to_string(),
+                name: "Local Provider".to_string(),
+                provider: "local".to_string(),
+                capability: "chat".to_string(),
+                model: "qwen".to_string(),
+                local_model_loaded: true,
+            }]),
             now,
         );
+        for index in 0..100 {
+            app.apply(
+                RuntimeEvent::InvocationStarted {
+                    invocation_id: Uuid::new_v4(),
+                    agent_id: format!("agent-{index:03}"),
+                    agent_name: format!("Agent {index:03}"),
+                    source_agent_id: "local".to_string(),
+                    capability: "chat".to_string(),
+                    provider: "local".to_string(),
+                    model: "qwen".to_string(),
+                    started_unix_ms: 1,
+                },
+                now,
+            );
+        }
         app.apply(
             RuntimeEvent::BackendsChanged(vec!["llama.cpp".to_string()]),
             now,
@@ -1871,13 +1889,26 @@ mod tests {
         let now = Instant::now();
         app.apply(
             RuntimeEvent::AgentsRegistered(vec![RegisteredAgent {
-                id: "planner".to_string(),
-                name: "Planner".to_string(),
+                id: "local".to_string(),
+                name: "Local Provider".to_string(),
                 provider: "local".to_string(),
                 capability: "chat".to_string(),
                 model: "qwen".to_string(),
                 local_model_loaded: false,
             }]),
+            now,
+        );
+        app.apply(
+            RuntimeEvent::InvocationStarted {
+                invocation_id: Uuid::new_v4(),
+                agent_id: "planner".to_string(),
+                agent_name: "Planner".to_string(),
+                source_agent_id: "local".to_string(),
+                capability: "chat".to_string(),
+                provider: "local".to_string(),
+                model: "qwen".to_string(),
+                started_unix_ms: 1,
+            },
             now,
         );
         let backend = TestBackend::new(100, 18);
@@ -1894,7 +1925,81 @@ mod tests {
             .map(|cell| cell.symbol())
             .collect::<String>();
 
-        assert!(content.contains("? UNKNOWN"));
+        assert!(content.contains("● RUNNING"));
+    }
+
+    #[test]
+    fn main_header_should_show_project_url_and_deployment_without_runtime_branding() {
+        let mut app = App::default();
+        app.project = Some("stardew-valley".to_string());
+        app.deployment = Some("development".to_string());
+        app.project_dashboard_url =
+            Some("http://127.0.0.1:6790/project/stardew-valley".to_string());
+
+        let content = rendered_content(&mut app, Instant::now(), 120, 18);
+
+        assert!(content.contains(
+            "stardew-valley / http://127.0.0.1:6790/project/stardew-valley / development"
+        ));
+        assert!(!content.contains("VIFU ARM RUNTIME"));
+        assert!(!content.contains("● LIVE"));
+    }
+
+    #[test]
+    fn never_run_project_agent_should_render_as_inactive() {
+        let mut app = App::default();
+        app.filter = LaneFilter::All;
+        let now = Instant::now();
+        app.apply(
+            RuntimeEvent::ProjectProfilesRegistered(vec![ProjectProfileRegistration {
+                id: "profile-1".to_string(),
+                name: "Farming 0".to_string(),
+                provider: "stardew-valley/development".to_string(),
+                capabilities: vec!["chat".to_string()],
+                model: "stardew-valley-farming-0".to_string(),
+            }]),
+            now,
+        );
+
+        let content = rendered_content(&mut app, now, 120, 18);
+
+        assert!(content.contains("Farming 0"));
+        assert!(content.contains("NOT RUN YET"));
+    }
+
+    #[test]
+    fn selected_agent_should_use_an_accent_foreground_without_reverse_video() {
+        let mut app = App::default();
+        let now = Instant::now();
+        app.apply(
+            RuntimeEvent::InvocationStarted {
+                invocation_id: Uuid::new_v4(),
+                agent_id: "planner".to_string(),
+                agent_name: "Planner".to_string(),
+                source_agent_id: "local".to_string(),
+                capability: "chat".to_string(),
+                provider: "local".to_string(),
+                model: "qwen".to_string(),
+                started_unix_ms: 1,
+            },
+            now,
+        );
+        let backend = TestBackend::new(100, 18);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        terminal
+            .draw(|frame| render(frame, &mut app, now, false))
+            .unwrap();
+        let selected = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .find(|cell| cell.symbol() == "›")
+            .expect("selected Agent marker");
+
+        assert_eq!(selected.fg, Color::Cyan);
+        assert!(!selected.modifier.contains(Modifier::REVERSED));
     }
 
     #[test]
@@ -1998,7 +2103,7 @@ mod tests {
             now,
         );
         app.view = View::Trace {
-            agent_key: "planner\0chat".to_string(),
+            agent_key: "planner\0".to_string(),
             trace_id,
             tab: TraceTab::Summary,
             timeline: false,
@@ -2064,7 +2169,7 @@ mod tests {
             now,
         );
         app.view = View::Trace {
-            agent_key: "planner\0chat".to_string(),
+            agent_key: "planner\0".to_string(),
             trace_id,
             tab: TraceTab::Summary,
             timeline: false,
@@ -2134,7 +2239,7 @@ mod tests {
             now,
         );
         app.view = View::Trace {
-            agent_key: "planner\0chat".to_string(),
+            agent_key: "planner\0".to_string(),
             trace_id,
             tab: TraceTab::Scores,
             timeline: false,
@@ -2211,7 +2316,7 @@ mod tests {
             now,
         );
         app.view = View::Trace {
-            agent_key: "planner\0chat".to_string(),
+            agent_key: "planner\0".to_string(),
             trace_id,
             tab: TraceTab::Summary,
             timeline: false,
@@ -2235,7 +2340,7 @@ mod tests {
         assert!(content.contains("Summary · Decode"));
         assert!(content.contains("Generation"));
         assert!(content.contains("Observation: Decode"));
-        assert!(content.contains(">●   ● Decode"));
+        assert!(content.contains("›●   ● Decode"));
     }
 
     #[test]
@@ -2283,7 +2388,7 @@ mod tests {
         let oldest = oldest.unwrap();
         app.selected_trace = Some(oldest);
         app.view = View::Traces {
-            agent_key: "planner\0chat".to_string(),
+            agent_key: "planner\0".to_string(),
         };
 
         let content = rendered_content(&mut app, now, 120, 11);
@@ -2345,7 +2450,7 @@ mod tests {
         }
         let last_observation = last_observation.unwrap();
         app.view = View::Trace {
-            agent_key: "planner\0chat".to_string(),
+            agent_key: "planner\0".to_string(),
             trace_id,
             tab: TraceTab::Summary,
             timeline: false,
@@ -2355,7 +2460,7 @@ mod tests {
 
         let content = rendered_content(&mut app, now, 52, 18);
 
-        assert!(content.contains(">●   ✓ Frame"));
+        assert!(content.contains("›●   ✓ Frame"));
         assert!(content.contains("← Back"));
     }
 
@@ -2421,7 +2526,7 @@ mod tests {
             );
         }
         app.view = View::Trace {
-            agent_key: "planner\0chat".to_string(),
+            agent_key: "planner\0".to_string(),
             trace_id,
             tab: TraceTab::Summary,
             timeline: false,
@@ -2503,7 +2608,7 @@ mod tests {
             now,
         );
         app.view = View::Trace {
-            agent_key: "planner\0chat".to_string(),
+            agent_key: "planner\0".to_string(),
             trace_id,
             tab: TraceTab::Summary,
             timeline: false,

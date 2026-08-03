@@ -22,7 +22,7 @@ use llama_cpp_2::token::LlamaToken;
 use llama_cpp_2::{send_logs_to_tracing, LogOptions};
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
-use tokio::sync::Semaphore;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use vifu_runtime::{
     AgentProvider, CancellationToken, InvocationData, ProviderEventSink, ProviderFuture,
     ProviderRequest, ProviderResponse, ProviderStage, RuntimeError,
@@ -425,7 +425,7 @@ impl AgentProvider for LlamaProvider {
         Box::pin(async move {
             let queue_started = Instant::now();
             events.stage_started(ProviderStage::Queue, Value::Null);
-            let permit = match concurrency.try_acquire_owned() {
+            let permit = match wait_for_inference_slot(concurrency, &cancellation).await {
                 Ok(permit) => {
                     events.stage_completed(
                         ProviderStage::Queue,
@@ -434,8 +434,7 @@ impl AgentProvider for LlamaProvider {
                     );
                     permit
                 }
-                Err(_error) => {
-                    let error = provider_error("local model concurrency limit reached");
+                Err(error) => {
                     events.stage_failed(
                         ProviderStage::Queue,
                         elapsed_ms(queue_started),
@@ -476,6 +475,21 @@ impl AgentProvider for LlamaProvider {
             task.await
                 .map_err(|_error| RuntimeError::provider("llama", "local model task stopped"))?
         })
+    }
+}
+
+async fn wait_for_inference_slot(
+    concurrency: Arc<Semaphore>,
+    cancellation: &CancellationToken,
+) -> Result<OwnedSemaphorePermit, RuntimeError> {
+    if cancellation.is_cancelled() {
+        return Err(RuntimeError::Cancelled);
+    }
+    tokio::select! {
+        biased;
+        _ = cancellation.cancelled() => Err(RuntimeError::Cancelled),
+        permit = concurrency.acquire_owned() => permit
+            .map_err(|_error| provider_error("local model concurrency queue closed")),
     }
 }
 
@@ -1638,6 +1652,44 @@ fn non_empty(value: String) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn inference_slot_waits_until_the_current_request_finishes() {
+        let concurrency = Arc::new(Semaphore::new(1));
+        let current = Arc::clone(&concurrency).acquire_owned().await.unwrap();
+        let cancellation = CancellationToken::default();
+        let mut waiting = Box::pin(wait_for_inference_slot(
+            Arc::clone(&concurrency),
+            &cancellation,
+        ));
+
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(20), &mut waiting)
+                .await
+                .is_err()
+        );
+        drop(current);
+
+        let _permit = tokio::time::timeout(std::time::Duration::from_secs(1), waiting)
+            .await
+            .expect("queued request should receive the released inference slot")
+            .expect("inference semaphore should remain open");
+    }
+
+    #[tokio::test]
+    async fn inference_slot_stops_waiting_when_the_request_is_cancelled() {
+        let concurrency = Arc::new(Semaphore::new(1));
+        let _current = Arc::clone(&concurrency).acquire_owned().await.unwrap();
+        let cancellation = CancellationToken::default();
+        let waiting = wait_for_inference_slot(concurrency, &cancellation);
+        cancellation.cancel();
+
+        let result = tokio::time::timeout(std::time::Duration::from_secs(1), waiting)
+            .await
+            .expect("cancelled queue wait should finish promptly");
+
+        assert!(matches!(result, Err(RuntimeError::Cancelled)));
+    }
 
     #[test]
     fn accepts_openai_embedding_input_shapes() {

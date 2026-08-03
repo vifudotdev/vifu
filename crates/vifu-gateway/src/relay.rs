@@ -293,7 +293,7 @@ pub enum GatewayRuntimeEvent {
         profile_id: Uuid,
         binding_id: Uuid,
         agent_id: String,
-        agent_name: String,
+        profile_name: String,
         provider_key: String,
         capability: String,
         model: Option<String>,
@@ -686,6 +686,14 @@ fn binding_text<'a>(binding: &'a serde_json::Value, name: &str) -> Option<&'a st
         .and_then(serde_json::Value::as_str)
         .map(str::trim)
         .filter(|value| !value.is_empty())
+}
+
+fn runtime_profile_name(binding: &serde_json::Value, agent_id: &str) -> String {
+    binding_text(binding, "profileName")
+        .or_else(|| binding_text(binding, "profileSlug"))
+        .or_else(|| binding_text(binding, "agentName"))
+        .unwrap_or(agent_id)
+        .to_string()
 }
 
 fn trace_model_parameters(config: &serde_json::Value) -> serde_json::Value {
@@ -1867,11 +1875,7 @@ async fn run_connection(
                             capability.clone(),
                             model.clone(),
                         )));
-                        let agent_name = binding_text(&binding, "agentName")
-                            .or_else(|| binding_text(&binding, "profileName"))
-                            .or_else(|| binding_text(&binding, "profileSlug"))
-                            .unwrap_or(&agent_id)
-                            .to_string();
+                        let profile_name = runtime_profile_name(&binding, &agent_id);
                         let binding = Arc::new(binding);
                         let input = Arc::new(input);
                         telemetry
@@ -1885,7 +1889,7 @@ async fn run_connection(
                                 profile_id,
                                 binding_id,
                                 agent_id: agent_id.clone(),
-                                agent_name,
+                                profile_name,
                                 provider_key: provider_key.clone(),
                                 capability: capability.clone(),
                                 model: model.clone(),
@@ -2637,9 +2641,9 @@ mod tests {
         agent_gateway_error, agent_gateway_websocket_url, decode_command,
         dispatch_preflight_failure, encode_command, enqueue_telemetry_batch, guest_claim_url,
         handle_telemetry_flush_result, observe_capture_dropped, queue_error, resolve_provider,
-        safe_observer_error, safe_trace_telemetry, sanitize_error, trigger_telemetry_flush,
-        try_capture, write_terminal_line, AgentGatewayProvider, GatewayCaptureEvent,
-        GatewayInvocationTerminal, GatewayOutputPolicy, GatewayRuntimeEvent,
+        runtime_profile_name, safe_observer_error, safe_trace_telemetry, sanitize_error,
+        trigger_telemetry_flush, try_capture, write_terminal_line, AgentGatewayProvider,
+        GatewayCaptureEvent, GatewayInvocationTerminal, GatewayOutputPolicy, GatewayRuntimeEvent,
         InProcessGatewayProvider, InvocationDelivery, InvocationTelemetry, OpenClawGatewayProvider,
         PendingTelemetryBatch, RuntimeControlClient, SessionRouteOverrides, TelemetryBacklogState,
         MAX_PENDING_TELEMETRY_BATCHES,
@@ -2658,6 +2662,20 @@ mod tests {
     };
 
     struct PersonaProvider;
+
+    #[test]
+    fn runtime_profile_name_should_prefer_the_server_profile_over_the_physical_agent() {
+        let binding = json!({
+            "profileName": "Stardew Valley combat/0",
+            "profileSlug": "stardew-valley-combat-0",
+            "agentName": "Local Qwen",
+        });
+
+        assert_eq!(
+            runtime_profile_name(&binding, "stardew-valley-llama"),
+            "Stardew Valley combat/0"
+        );
+    }
 
     fn pending_telemetry(request_id: Uuid) -> PendingTelemetryBatch {
         PendingTelemetryBatch {

@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::io::{self, IsTerminal};
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use tokio::sync::watch;
@@ -26,12 +26,16 @@ use session::SessionSummary;
 
 use crate::benchmark::OptimizationController;
 use crate::monitor::{
-    redacted_io_summary, safe_error_message, FeedbackEvent, FeedbackOutcome, RegisteredAgent,
-    RuntimeEvent, RuntimeEventSender, RuntimeHealth, RuntimeStage, RuntimeTerminal, StageStatus,
+    redacted_io_summary, safe_error_message, FeedbackEvent, FeedbackOutcome,
+    ProjectProfileRegistration, RegisteredAgent, RuntimeEvent, RuntimeEventSender, RuntimeHealth,
+    RuntimeStage, RuntimeTerminal, StageStatus,
 };
 
 const PROVIDER_RETRY_DELAY: Duration = Duration::from_secs(10);
+const RUNTIME_ROSTER_REFRESH_DELAY: Duration = Duration::from_secs(5);
 const CAPTURE_QUEUE_CAPACITY: usize = 4;
+
+type RuntimeRosterTask = Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>;
 
 #[derive(Clone)]
 pub(crate) struct GatewayControl {
@@ -147,6 +151,32 @@ fn runtime_backends(agents: &[vifu_gateway::protocol::AgentDescriptor]) -> Vec<S
     backends
 }
 
+fn project_profile_registrations(
+    deployment: &vifu_gateway::control::RuntimeDeploymentAgents,
+) -> Vec<ProjectProfileRegistration> {
+    let provider = format!("{}/{}", deployment.project_slug, deployment.deployment);
+    deployment
+        .agents
+        .iter()
+        .map(|agent| {
+            let mut capabilities = agent.capabilities.clone();
+            capabilities.sort();
+            capabilities.dedup();
+            ProjectProfileRegistration {
+                id: agent.id.to_string(),
+                name: if agent.name.trim().is_empty() {
+                    agent.slug.clone()
+                } else {
+                    agent.name.clone()
+                },
+                provider: provider.clone(),
+                capabilities,
+                model: agent.slug.clone(),
+            }
+        })
+        .collect()
+}
+
 fn gateway_runtime_observer(
     monitor: Option<RuntimeEventSender>,
     loaded_model_notifier: Option<LoadedModelNotifier>,
@@ -172,7 +202,7 @@ fn gateway_runtime_observer(
         relay::GatewayRuntimeEvent::InvocationStarted {
             request_id,
             agent_id,
-            agent_name,
+            profile_name,
             profile_id,
             binding_id,
             provider_key,
@@ -191,7 +221,7 @@ fn gateway_runtime_observer(
                 RuntimeEvent::InvocationStarted {
                     invocation_id: request_id,
                     agent_id: profile_id.to_string(),
-                    agent_name,
+                    agent_name: profile_name,
                     source_agent_id: agent_id,
                     capability,
                     provider: provider_key,
@@ -724,12 +754,15 @@ pub async fn run(
                 }) as relay::GuestProjectObserver)
             }
         };
+        let runtime_roster_task = RuntimeRosterTask::default();
         let authorization_observer = {
             let server_url = config.server_url.clone();
             let optimization = control.optimization.clone();
             let monitor = monitor.clone();
+            let runtime_roster_task = Arc::clone(&runtime_roster_task);
             Some(
                 Arc::new(move |summary: &relay::GatewayAuthorizationSummary| {
+                    stop_runtime_roster_task(&runtime_roster_task);
                     mark_gateway_authorized(monitor.as_ref());
                     if optimization
                         .configure_runtime_control(
@@ -751,31 +784,19 @@ pub async fn run(
                         return;
                     };
                     let gateway_id = summary.gateway_id.clone();
-                    tokio::spawn(async move {
-                        let Ok(Ok(configuration)) =
-                            tokio::time::timeout(Duration::from_secs(10), client.configuration())
-                                .await
-                        else {
-                            return;
-                        };
-                        if configuration.gateway_id != gateway_id {
+                    let task = tokio::spawn(async move {
+                        if !publish_runtime_project_roster(&client, &gateway_id, &monitor).await {
                             return;
                         }
-                        let mut primary = configuration
-                            .deployments
-                            .iter()
-                            .filter(|deployment| deployment.is_primary);
-                        let Some(deployment) = primary.next() else {
-                            return;
-                        };
-                        if primary.next().is_some() {
-                            return;
+                        loop {
+                            tokio::time::sleep(RUNTIME_ROSTER_REFRESH_DELAY).await;
+                            if !publish_runtime_project_roster(&client, &gateway_id, &monitor).await
+                            {
+                                return;
+                            }
                         }
-                        let _ = monitor.send(RuntimeEvent::IdentityChanged {
-                            project: Some(deployment.project_slug.clone()),
-                            deployment: Some(deployment.deployment.clone()),
-                        });
                     });
+                    replace_runtime_roster_task(&runtime_roster_task, task);
                 }) as relay::GatewayAuthorizationObserver,
             )
         };
@@ -789,8 +810,12 @@ pub async fn run(
                 None,
             ) => Some(result),
             () = wait_for_provider_config_change(&provider_file, &provider_snapshot) => None,
-            () = wait_for_shutdown(&mut shutdown) => return Ok(()),
+            () = wait_for_shutdown(&mut shutdown) => {
+                stop_runtime_roster_task(&runtime_roster_task);
+                return Ok(());
+            },
         };
+        stop_runtime_roster_task(&runtime_roster_task);
         drop(capture_sender);
         if result.is_none() {
             capture_worker.abort();
@@ -824,6 +849,69 @@ pub async fn run(
             )
             .await;
         }
+    }
+}
+
+async fn publish_runtime_project_roster(
+    client: &RuntimeControlClient,
+    gateway_id: &str,
+    monitor: &RuntimeEventSender,
+) -> bool {
+    let Ok(Ok(configuration)) =
+        tokio::time::timeout(Duration::from_secs(10), client.configuration()).await
+    else {
+        return true;
+    };
+    if configuration.gateway_id != gateway_id {
+        return false;
+    }
+    let mut primary = configuration
+        .deployments
+        .iter()
+        .filter(|deployment| deployment.is_primary);
+    let Some(selected) = primary.next() else {
+        return true;
+    };
+    if primary.next().is_some() {
+        return true;
+    }
+    let _ = monitor.send(RuntimeEvent::IdentityChanged {
+        project: Some(selected.project_slug.clone()),
+        deployment: Some(selected.deployment.clone()),
+    });
+
+    let Ok(Ok(roster)) =
+        tokio::time::timeout(Duration::from_secs(10), client.runtime_agents()).await
+    else {
+        return true;
+    };
+    if roster.gateway_id != gateway_id {
+        return false;
+    }
+    let profiles = roster
+        .deployments
+        .iter()
+        .find(|deployment| deployment.deployment_id == selected.deployment_id)
+        .map(project_profile_registrations)
+        .unwrap_or_default();
+    let _ = monitor.send(RuntimeEvent::ProjectProfilesRegistered(profiles));
+    true
+}
+
+fn replace_runtime_roster_task(
+    slot: &Mutex<Option<tokio::task::JoinHandle<()>>>,
+    task: tokio::task::JoinHandle<()>,
+) {
+    let mut slot = slot.lock().unwrap_or_else(|error| error.into_inner());
+    if let Some(previous) = slot.replace(task) {
+        previous.abort();
+    }
+}
+
+fn stop_runtime_roster_task(slot: &Mutex<Option<tokio::task::JoinHandle<()>>>) {
+    let mut slot = slot.lock().unwrap_or_else(|error| error.into_inner());
+    if let Some(task) = slot.take() {
+        task.abort();
     }
 }
 
@@ -1481,8 +1569,8 @@ mod tests {
     use super::load_local_whisper_provider;
     use super::{
         format_terminal_link, gateway_runtime_observer, load_openai_compatible_provider,
-        mark_gateway_authorized, run_capture_worker, runtime_backends,
-        should_register_openai_compatible, AgentProviderConfig,
+        mark_gateway_authorized, project_profile_registrations, run_capture_worker,
+        runtime_backends, should_register_openai_compatible, AgentProviderConfig,
     };
     use crate::monitor::{RuntimeEvent, RuntimeHealth, RuntimeStage, StageStatus};
     use serde_json::json;
@@ -1523,6 +1611,32 @@ mod tests {
     }
 
     #[test]
+    fn project_roster_should_register_one_lane_per_agent() {
+        let deployment = vifu_gateway::control::RuntimeDeploymentAgents {
+            deployment_id: Uuid::nil(),
+            deployment: "development".to_string(),
+            project_id: Uuid::nil(),
+            project_slug: "stardew-valley".to_string(),
+            project_name: "Stardew Valley".to_string(),
+            is_primary: true,
+            agents: vec![vifu_gateway::control::RuntimeProjectAgent {
+                id: Uuid::new_v4(),
+                slug: "farmhand".to_string(),
+                name: "Farmhand".to_string(),
+                capabilities: vec!["embedding".to_string(), "chat".to_string()],
+            }],
+        };
+
+        let registrations = project_profile_registrations(&deployment);
+
+        assert_eq!(registrations.len(), 1);
+        assert_eq!(
+            registrations[0].capabilities,
+            vec!["chat".to_string(), "embedding".to_string()]
+        );
+    }
+
+    #[test]
     fn gateway_connection_status_reaches_the_tui_health_channel() {
         let (sender, mut receiver) = crate::monitor::runtime_event_channel();
         let observer = gateway_runtime_observer(Some(sender), None, optimization());
@@ -1554,7 +1668,7 @@ mod tests {
                 profile_id,
                 binding_id: Uuid::new_v4(),
                 agent_id: "local-qwen".to_string(),
-                agent_name: "Qwen".to_string(),
+                profile_name: "Stardew Valley combat/0".to_string(),
                 provider_key: "llama-local".to_string(),
                 capability: "chat".to_string(),
                 model: Some("qwen-new:2b".to_string()),
@@ -1567,6 +1681,7 @@ mod tests {
         let RuntimeEvent::InvocationStarted {
             invocation_id,
             agent_id,
+            agent_name,
             source_agent_id,
             model,
             ..
@@ -1577,6 +1692,7 @@ mod tests {
 
         assert_eq!(invocation_id, request_id);
         assert_eq!(agent_id, profile_id.to_string());
+        assert_eq!(agent_name, "Stardew Valley combat/0");
         assert_eq!(source_agent_id, "local-qwen");
         assert_eq!(model, "qwen-new:2b");
         assert!(matches!(

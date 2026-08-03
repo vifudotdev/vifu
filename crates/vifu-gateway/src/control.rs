@@ -68,6 +68,34 @@ pub struct GatewayRuntimeConfiguration {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GatewayRuntimeAgents {
+    pub gateway_id: String,
+    pub deployments: Vec<RuntimeDeploymentAgents>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RuntimeDeploymentAgents {
+    pub deployment_id: Uuid,
+    pub deployment: String,
+    pub project_id: Uuid,
+    pub project_slug: String,
+    pub project_name: String,
+    pub is_primary: bool,
+    pub agents: Vec<RuntimeProjectAgent>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RuntimeProjectAgent {
+    pub id: Uuid,
+    pub slug: String,
+    pub name: String,
+    pub capabilities: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RuntimeDeploymentConfiguration {
     pub deployment_id: Uuid,
     pub deployment: String,
@@ -139,6 +167,7 @@ struct PublishedRuntimeRelease {
 pub struct RuntimeControlClient {
     client: reqwest::Client,
     config_url: Url,
+    agents_url: Url,
     traces_url: Url,
     trace_observations_url: Url,
     comparisons_url: Url,
@@ -150,6 +179,7 @@ impl RuntimeControlClient {
     pub fn new(server_url: &str, credential: impl Into<String>) -> Result<Self, String> {
         agent_gateway_websocket_url(server_url)?;
         let config_url = endpoint_url(server_url, "runtime-config")?;
+        let agents_url = endpoint_url(server_url, "runtime-agents")?;
         let traces_url = endpoint_url(server_url, "runtime-traces")?;
         let trace_observations_url = endpoint_url(server_url, "runtime-trace-observations")?;
         let comparisons_url = endpoint_url(server_url, "runtime-comparisons")?;
@@ -157,6 +187,7 @@ impl RuntimeControlClient {
         Ok(Self {
             client: reqwest::Client::new(),
             config_url,
+            agents_url,
             traces_url,
             trace_observations_url,
             comparisons_url,
@@ -174,6 +205,17 @@ impl RuntimeControlClient {
             .await
             .map_err(|error| format!("runtime configuration request failed: {error}"))?;
         decode_response(response, "runtime configuration").await
+    }
+
+    pub async fn runtime_agents(&self) -> Result<GatewayRuntimeAgents, String> {
+        let response = self
+            .client
+            .get(self.agents_url.clone())
+            .bearer_auth(&self.credential)
+            .send()
+            .await
+            .map_err(|error| format!("runtime agent roster request failed: {error}"))?;
+        decode_response(response, "runtime agent roster").await
     }
 
     pub async fn bootstrap_guest_project(
@@ -473,6 +515,34 @@ mod tests {
             }))
             .unwrap();
         assert_eq!(configuration.deployments[0].project_slug, "moon-train");
+    }
+
+    #[test]
+    fn parses_a_runtime_agent_roster() {
+        let profile_id = Uuid::new_v4();
+        let roster = serde_json::from_value::<GatewayRuntimeAgents>(serde_json::json!({
+            "gatewayId": "gateway-1",
+            "deployments": [{
+                "deploymentId": Uuid::nil(),
+                "deployment": "development",
+                "projectId": Uuid::nil(),
+                "projectSlug": "stardew-valley",
+                "projectName": "Stardew Valley",
+                "isPrimary": true,
+                "agents": [{
+                    "id": profile_id,
+                    "slug": "stardew-valley-farming-0",
+                    "name": "Farming 0",
+                    "capabilities": ["chat"]
+                }]
+            }]
+        }))
+        .unwrap();
+
+        assert_eq!(
+            roster.deployments[0].agents[0].slug,
+            "stardew-valley-farming-0"
+        );
     }
 
     #[test]

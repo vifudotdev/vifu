@@ -1904,6 +1904,43 @@ pub async fn get_agent_gateway_runtime_config(
     })))
 }
 
+pub async fn list_agent_gateway_runtime_agents(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    let gateway_id = authenticated_agent_gateway(&state, &headers).await?;
+    let deployments = db::list_runtime_deployments_for_gateway(&state.pool, &gateway_id).await?;
+    let mut configurations = Vec::with_capacity(deployments.len());
+    for deployment in deployments {
+        let project = db::get_project(&state.pool, deployment.project_id).await?;
+        let agents = db::list_public_agents(&state.pool, project.project.id, None)
+            .await?
+            .into_iter()
+            .map(|agent| {
+                json!({
+                    "id": agent.id,
+                    "slug": agent.slug,
+                    "name": agent.name,
+                    "capabilities": agent.capabilities,
+                })
+            })
+            .collect::<Vec<_>>();
+        configurations.push(json!({
+            "deploymentId": deployment.id,
+            "deployment": deployment.name,
+            "projectId": project.project.id,
+            "projectSlug": project.project.slug,
+            "projectName": project.project.name,
+            "isPrimary": deployment.is_primary,
+            "agents": agents,
+        }));
+    }
+    Ok(Json(json!({
+        "gatewayId": gateway_id,
+        "deployments": configurations,
+    })))
+}
+
 pub async fn upload_agent_gateway_runtime_traces(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -4191,6 +4228,8 @@ async fn transcribe_profile_audio(
                 &route.provider_key,
                 "transcription",
                 &route.persona,
+                &route.profile_name,
+                &route.profile_slug,
             )?;
             if let Some(binding) = binding_config.as_object_mut() {
                 binding.insert("fileName".to_string(), Value::String(file_name.to_string()));
@@ -5368,6 +5407,8 @@ fn gateway_binding_config(
     provider_key: &str,
     capability: &str,
     persona: &Value,
+    profile_name: &str,
+    profile_slug: &str,
 ) -> Result<Value, ApiError> {
     let binding = capability_config.as_object_mut().ok_or_else(|| {
         ApiError::Invalid("Gateway capability config must be an object".to_string())
@@ -5381,6 +5422,14 @@ fn gateway_binding_config(
         Value::String(capability.to_string()),
     );
     binding.insert("persona".to_string(), persona.clone());
+    binding.insert(
+        "profileName".to_string(),
+        Value::String(profile_name.to_string()),
+    );
+    binding.insert(
+        "profileSlug".to_string(),
+        Value::String(profile_slug.to_string()),
+    );
     Ok(capability_config)
 }
 
@@ -5425,6 +5474,8 @@ async fn invoke_profile_chat(
                 &route.provider_key,
                 "chat",
                 &route.persona,
+                &route.profile_name,
+                &route.profile_slug,
             )?;
             let endpoint_route = EndpointRoute {
                 endpoint_id: route.capability_id,
@@ -5527,6 +5578,8 @@ async fn invoke_profile_embedding(
                 &route.provider_key,
                 "embedding",
                 &route.persona,
+                &route.profile_name,
+                &route.profile_slug,
             )?;
             let endpoint_route = EndpointRoute {
                 endpoint_id: route.capability_id,
@@ -7999,15 +8052,19 @@ mod tests {
     }
 
     #[test]
-    fn gateway_binding_carries_the_profile_persona() {
+    fn gateway_binding_carries_the_server_profile_identity_and_persona() {
         let binding = gateway_binding_config(
             json!({ "temperature": 0 }),
             "local-qwen",
             "chat",
             &json!({ "instructions": "Choose one safe action." }),
+            "Stardew Valley combat/0",
+            "stardew-valley-combat-0",
         )
         .unwrap();
 
+        assert_eq!(binding["profileName"], "Stardew Valley combat/0");
+        assert_eq!(binding["profileSlug"], "stardew-valley-combat-0");
         assert_eq!(
             binding["persona"]["instructions"],
             "Choose one safe action."

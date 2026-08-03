@@ -185,6 +185,14 @@ pub(crate) async fn run(
         // Read the controller's authoritative snapshot before every draw so
         // the quit guard and header always reflect the routes actually in use.
         sync_override_state(&mut app, optimization.as_ref());
+        app.project_dashboard_url = dashboard_url.as_deref().map(|base_url| {
+            app.project.as_deref().map_or_else(
+                || base_url.to_string(),
+                |project| {
+                    dashboard_project_url(base_url, project).unwrap_or_else(|| base_url.to_string())
+                },
+            )
+        });
         let now = Instant::now();
         terminal
             .terminal
@@ -565,15 +573,20 @@ fn sync_override_state(app: &mut App, optimization: Option<&OptimizationControll
 }
 
 fn dashboard_target_url(base_url: &str, app: &App) -> String {
+    let project_base = app
+        .project
+        .as_deref()
+        .and_then(|project| dashboard_project_url(base_url, project))
+        .unwrap_or_else(|| base_url.to_string());
     let (trace_id, observation_id) = match &app.view {
         View::Trace { trace_id, .. } => (*trace_id, app.selected_observation_id()),
         View::Traces { .. } => {
             let Some(trace_id) = app.selected_trace else {
-                return base_url.to_string();
+                return project_base;
             };
             (trace_id, None)
         }
-        View::Main | View::Optimize => return base_url.to_string(),
+        View::Main | View::Optimize => return project_base,
     };
     let trace_base = app
         .project
@@ -581,6 +594,11 @@ fn dashboard_target_url(base_url: &str, app: &App) -> String {
         .and_then(|project| dashboard_project_logs_url(base_url, project))
         .unwrap_or_else(|| base_url.to_string());
     append_invocation_query(&trace_base, trace_id, observation_id)
+}
+
+fn dashboard_project_url(base_url: &str, project: &str) -> Option<String> {
+    dashboard_project_logs_url(base_url, project)
+        .and_then(|logs_url| logs_url.strip_suffix("/logs").map(str::to_string))
 }
 
 fn dashboard_project_logs_url(base_url: &str, project: &str) -> Option<String> {
@@ -1076,7 +1094,7 @@ mod tests {
         );
         let trace_id = Uuid::from_u128(0x42);
         app.view = View::Traces {
-            agent_key: "planner\0chat".to_string(),
+            agent_key: "planner\0".to_string(),
         };
         app.selected_trace = Some(trace_id);
         app.project = Some("demo/東京".to_string());
@@ -1090,6 +1108,17 @@ mod tests {
         assert_eq!(
             dashboard_target_url("https://vifu.test/#/project/demo/logs", &app),
             format!("https://vifu.test/?invocationId={trace_id}#/project/demo/logs")
+        );
+    }
+
+    #[test]
+    fn dashboard_target_uses_the_current_project_on_the_main_view() {
+        let mut app = App::default();
+        app.project = Some("stardew-valley".to_string());
+
+        assert_eq!(
+            dashboard_target_url("http://127.0.0.1:6790", &app),
+            "http://127.0.0.1:6790/project/stardew-valley"
         );
     }
 
@@ -1130,7 +1159,7 @@ mod tests {
             now,
         );
         app.view = View::Trace {
-            agent_key: "planner\0chat".to_string(),
+            agent_key: "planner\0".to_string(),
             trace_id,
             tab: TraceTab::Summary,
             timeline: false,
@@ -1186,7 +1215,7 @@ mod tests {
                 now,
             );
         }
-        let trace = app.trace("planner\0chat", trace_id).unwrap();
+        let trace = app.trace("planner\0", trace_id).unwrap();
 
         let export = trace_export_value(trace, now);
         let observations = export["observations"].as_array().unwrap();
@@ -1265,7 +1294,7 @@ mod tests {
             },
             now,
         );
-        app.selected_lane = Some("planner\0chat".to_string());
+        app.selected_lane = Some("planner\0".to_string());
         app.open_selected_agent();
         app.open_selected_trace();
 

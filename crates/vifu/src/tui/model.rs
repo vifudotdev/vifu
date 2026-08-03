@@ -7,8 +7,8 @@ use uuid::Uuid;
 use vifu_gateway::optimization::RouteCombination;
 
 use crate::monitor::{
-    safe_error_message, FeedbackEvent, FeedbackOutcome, RegisteredAgent, RuntimeEvent,
-    RuntimeHealth, RuntimeStage, RuntimeTerminal, StageStatus,
+    safe_error_message, FeedbackEvent, FeedbackOutcome, ProjectProfileRegistration,
+    RegisteredAgent, RuntimeEvent, RuntimeHealth, RuntimeStage, RuntimeTerminal, StageStatus,
 };
 
 const TRACE_HISTORY_LIMIT: usize = 8;
@@ -17,28 +17,31 @@ const GLOBAL_TRACE_HISTORY_LIMIT: usize = 512;
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) enum LaneFilter {
     #[default]
-    All,
+    Live,
     Running,
     Problems,
     Passed,
+    All,
 }
 
 impl LaneFilter {
     pub(crate) fn next(self) -> Self {
         match self {
-            Self::All => Self::Running,
+            Self::Live => Self::Running,
             Self::Running => Self::Problems,
             Self::Problems => Self::Passed,
             Self::Passed => Self::All,
+            Self::All => Self::Live,
         }
     }
 
     pub(crate) fn label(self) -> &'static str {
         match self {
-            Self::All => "ALL",
+            Self::Live => "LIVE",
             Self::Running => "RUNNING",
             Self::Problems => "PROBLEMS",
             Self::Passed => "PASSED",
+            Self::All => "ALL",
         }
     }
 }
@@ -470,8 +473,30 @@ impl AgentLane {
         }
     }
 
+    fn from_project_profile(registration: ProjectProfileRegistration) -> Self {
+        let key = profile_lane_key(&registration.id);
+        let capability = capability_label(&registration.capabilities);
+        Self {
+            key,
+            agent_id: registration.id,
+            source_agent_id: String::new(),
+            name: registration.name,
+            provider: registration.provider,
+            capability,
+            model: registration.model,
+            configured: true,
+            active: HashMap::new(),
+            history: VecDeque::new(),
+            last_updated_unix_ms: 0,
+        }
+    }
+
     pub(crate) fn concurrency(&self) -> usize {
         self.active.len()
+    }
+
+    fn represents_agent(&self) -> bool {
+        self.representative().is_some() || self.agent_id != self.source_agent_id
     }
 
     pub(crate) fn representative(&self) -> Option<&TraceRecord> {
@@ -530,6 +555,7 @@ pub(crate) struct App {
     pub(crate) health_message: Option<String>,
     pub(crate) project: Option<String>,
     pub(crate) deployment: Option<String>,
+    pub(crate) project_dashboard_url: Option<String>,
     pub(crate) loaded_models: usize,
     pub(crate) runtime_backends: Vec<String>,
     pub(crate) metrics: SystemMetrics,
@@ -543,6 +569,7 @@ pub(crate) struct App {
     pub(crate) trace_scroll_offset: usize,
     pub(crate) lanes: HashMap<String, AgentLane>,
     configured_sources: HashSet<String>,
+    project_configured_sources: HashSet<String>,
     invocation_lanes: HashMap<Uuid, String>,
     pub(crate) comparison_rows: Vec<ComparisonRow>,
     pub(crate) selected_comparison: usize,
@@ -567,11 +594,12 @@ impl Default for App {
             health_message: None,
             project: None,
             deployment: None,
+            project_dashboard_url: None,
             loaded_models: 0,
             runtime_backends: Vec::new(),
             metrics: SystemMetrics::default(),
-            filter: LaneFilter::All,
-            sort: LaneSort::Attention,
+            filter: LaneFilter::Live,
+            sort: LaneSort::Recent,
             search: String::new(),
             search_active: false,
             selected_lane: None,
@@ -580,6 +608,7 @@ impl Default for App {
             trace_scroll_offset: 0,
             lanes: HashMap::new(),
             configured_sources: HashSet::new(),
+            project_configured_sources: HashSet::new(),
             invocation_lanes: HashMap::new(),
             comparison_rows: Vec::new(),
             selected_comparison: 0,
@@ -624,9 +653,10 @@ impl App {
                     .map(|registration| lane_key(&registration.id, &registration.capability))
                     .collect();
                 for lane in self.lanes.values_mut() {
-                    lane.configured = self
-                        .configured_sources
-                        .contains(&lane_key(&lane.source_agent_id, &lane.capability));
+                    lane.configured = self.project_configured_sources.contains(&lane.key)
+                        || self
+                            .configured_sources
+                            .contains(&lane_key(&lane.source_agent_id, &lane.capability));
                 }
                 for registration in registrations {
                     let key = lane_key(&registration.id, &registration.capability);
@@ -668,7 +698,61 @@ impl App {
                 let stale_keys = self
                     .lanes
                     .iter()
-                    .filter(|(_, lane)| !lane.configured && lane.active.is_empty())
+                    .filter(|(key, lane)| {
+                        !self.project_configured_sources.contains(*key)
+                            && !lane.configured
+                            && lane.active.is_empty()
+                    })
+                    .map(|(key, _)| key.clone())
+                    .collect::<Vec<_>>();
+                for key in stale_keys {
+                    if let Some(lane) = self.lanes.remove(&key) {
+                        for trace in lane.history {
+                            self.invocation_lanes.remove(&trace.id);
+                        }
+                    }
+                }
+                self.normalize_lane_selection(now);
+            }
+            RuntimeEvent::ProjectProfilesRegistered(registrations) => {
+                self.project_configured_sources = registrations
+                    .iter()
+                    .map(|registration| profile_lane_key(&registration.id))
+                    .collect();
+                for lane in self.lanes.values_mut() {
+                    lane.configured = self.project_configured_sources.contains(&lane.key)
+                        || self
+                            .configured_sources
+                            .contains(&lane_key(&lane.source_agent_id, &lane.capability));
+                }
+                for registration in registrations {
+                    let key = profile_lane_key(&registration.id);
+                    let capability = capability_label(&registration.capabilities);
+                    match self.lanes.get_mut(&key) {
+                        Some(lane) => {
+                            lane.agent_id = registration.id;
+                            lane.name = registration.name;
+                            if lane.representative().is_none() {
+                                lane.capability = capability;
+                                lane.provider = registration.provider;
+                                lane.model = registration.model;
+                            }
+                            lane.configured = true;
+                        }
+                        None => {
+                            self.lanes
+                                .insert(key, AgentLane::from_project_profile(registration));
+                        }
+                    }
+                }
+                let stale_keys = self
+                    .lanes
+                    .iter()
+                    .filter(|(key, lane)| {
+                        !self.project_configured_sources.contains(*key)
+                            && !self.configured_sources.contains(*key)
+                            && lane.active.is_empty()
+                    })
                     .map(|(key, _)| key.clone())
                     .collect::<Vec<_>>();
                 for key in stale_keys {
@@ -709,7 +793,7 @@ impl App {
                 started_unix_ms,
             } => {
                 let inventory_key = lane_key(&source_agent_id, &capability);
-                let key = lane_key(&agent_id, &capability);
+                let key = profile_lane_key(&agent_id);
                 let inventory_configured = self.configured_sources.contains(&inventory_key);
                 if inventory_key != key
                     && self
@@ -729,6 +813,7 @@ impl App {
                         model: model.clone(),
                         local_model_loaded: false,
                     });
+                    lane.key = key.clone();
                     lane.source_agent_id = source_agent_id.clone();
                     lane.configured = inventory_configured;
                     lane
@@ -736,6 +821,7 @@ impl App {
                 lane.source_agent_id = source_agent_id.clone();
                 lane.name = agent_name;
                 lane.provider = provider.clone();
+                lane.capability = capability.clone();
                 lane.model = model.clone();
                 lane.last_updated_unix_ms = started_unix_ms;
                 lane.active.insert(
@@ -1080,10 +1166,14 @@ impl App {
 
     pub(crate) fn counts(&self) -> LaneCounts {
         let mut counts = LaneCounts {
-            total: self.lanes.len(),
+            total: self
+                .lanes
+                .values()
+                .filter(|lane| lane.represents_agent())
+                .count(),
             ..LaneCounts::default()
         };
-        for lane in self.lanes.values() {
+        for lane in self.lanes.values().filter(|lane| lane.represents_agent()) {
             match lane.outcome() {
                 LaneOutcome::Running => counts.running += 1,
                 LaneOutcome::Passed => counts.passed += 1,
@@ -1100,6 +1190,7 @@ impl App {
         let mut lanes = self
             .lanes
             .values()
+            .filter(|lane| lane.represents_agent())
             .filter(|lane| self.matches_filter(lane))
             .filter(|lane| {
                 search.is_empty()
@@ -1186,7 +1277,8 @@ impl App {
             .filter(|(_, lane)| {
                 lane.active.is_empty()
                     && lane.history.is_empty()
-                    && lane.key != lane_key(&lane.source_agent_id, &lane.capability)
+                    && !self.project_configured_sources.contains(&lane.key)
+                    && !self.configured_sources.contains(&lane.key)
             })
             .map(|(key, _)| key.clone())
             .collect::<Vec<_>>();
@@ -1471,6 +1563,7 @@ impl App {
 
     fn matches_filter(&self, lane: &AgentLane) -> bool {
         match self.filter {
+            LaneFilter::Live => lane.representative().is_some(),
             LaneFilter::All => true,
             LaneFilter::Running => lane.outcome() == LaneOutcome::Running,
             LaneFilter::Problems => {
@@ -1483,6 +1576,18 @@ impl App {
 
 fn lane_key(agent_id: &str, capability: &str) -> String {
     format!("{agent_id}\0{capability}")
+}
+
+fn profile_lane_key(agent_id: &str) -> String {
+    format!("{agent_id}\0")
+}
+
+fn capability_label(capabilities: &[String]) -> String {
+    if capabilities.is_empty() {
+        "unknown".to_string()
+    } else {
+        capabilities.join("/")
+    }
 }
 
 fn attention_cmp(left: &AgentLane, right: &AgentLane, now: Instant) -> Ordering {
@@ -1526,8 +1631,8 @@ mod tests {
     use vifu_gateway::optimization::{CombinationKind, RouteCombination};
 
     use crate::monitor::{
-        FeedbackEvent, FeedbackOutcome, RegisteredAgent, RuntimeEvent, RuntimeStage,
-        RuntimeTerminal, StageStatus,
+        FeedbackEvent, FeedbackOutcome, ProjectProfileRegistration, RegisteredAgent, RuntimeEvent,
+        RuntimeStage, RuntimeTerminal, StageStatus,
     };
 
     use super::{
@@ -1551,11 +1656,33 @@ mod tests {
         let now = Instant::now();
         let mut app = App::default();
         app.apply(
-            RuntimeEvent::AgentsRegistered((0..100).map(registration).collect()),
+            RuntimeEvent::AgentsRegistered(vec![RegisteredAgent {
+                id: "local-qwen".to_string(),
+                name: "Local Qwen".to_string(),
+                provider: "local-qwen".to_string(),
+                capability: "chat".to_string(),
+                model: "qwen2.5:2b".to_string(),
+                local_model_loaded: true,
+            }]),
             now,
         );
+        for index in 0..100 {
+            app.apply(
+                RuntimeEvent::InvocationStarted {
+                    invocation_id: Uuid::new_v4(),
+                    agent_id: format!("agent-{index:03}"),
+                    agent_name: format!("Agent {index:03}"),
+                    source_agent_id: "local-qwen".to_string(),
+                    capability: "chat".to_string(),
+                    provider: "local-qwen".to_string(),
+                    model: "qwen2.5:2b".to_string(),
+                    started_unix_ms: 100,
+                },
+                now,
+            );
+        }
         app.sort = LaneSort::Agent;
-        app.selected_lane = Some("agent-050\0chat".to_string());
+        app.selected_lane = Some("agent-050\0".to_string());
         let invocation_id = Uuid::new_v4();
 
         app.apply(
@@ -1572,8 +1699,227 @@ mod tests {
             now,
         );
 
-        assert_eq!(app.selected_lane.as_deref(), Some("agent-050\0chat"));
+        assert_eq!(app.selected_lane.as_deref(), Some("agent-050\0"));
         assert_eq!(app.counts().total, 100);
+    }
+
+    #[test]
+    fn provider_inventory_should_not_be_counted_as_an_agent() {
+        let now = Instant::now();
+        let mut app = App::default();
+
+        app.apply(RuntimeEvent::AgentsRegistered(vec![registration(0)]), now);
+
+        assert_eq!(app.counts().total, 0);
+        assert!(app.visible_lane_keys(now).is_empty());
+    }
+
+    #[test]
+    fn live_should_be_the_default_recent_activity_view() {
+        let app = App::default();
+
+        assert_eq!(app.filter, LaneFilter::Live);
+        assert_eq!(app.sort, LaneSort::Recent);
+    }
+
+    #[test]
+    fn live_should_hide_project_agents_that_have_not_run() {
+        let now = Instant::now();
+        let mut app = App::default();
+        app.apply(
+            RuntimeEvent::ProjectProfilesRegistered(vec![ProjectProfileRegistration {
+                id: "profile-1".to_string(),
+                name: "Farming 0".to_string(),
+                provider: "stardew-valley/development".to_string(),
+                capabilities: vec!["chat".to_string()],
+                model: "stardew-valley-farming-0".to_string(),
+            }]),
+            now,
+        );
+
+        assert!(app.visible_lane_keys(now).is_empty());
+    }
+
+    #[test]
+    fn live_should_keep_completed_agents_visible() {
+        let now = Instant::now();
+        let mut app = App::default();
+        let invocation_id = Uuid::new_v4();
+        app.apply(
+            RuntimeEvent::InvocationStarted {
+                invocation_id,
+                agent_id: "profile-1".to_string(),
+                agent_name: "Farming 0".to_string(),
+                source_agent_id: "local-qwen".to_string(),
+                capability: "chat".to_string(),
+                provider: "local-qwen".to_string(),
+                model: "qwen".to_string(),
+                started_unix_ms: 100,
+            },
+            now,
+        );
+        app.apply(
+            RuntimeEvent::InvocationFinished {
+                invocation_id,
+                elapsed: Duration::from_millis(50),
+                error: None,
+                terminal: RuntimeTerminal::Delivered,
+            },
+            now,
+        );
+
+        assert_eq!(app.visible_lane_keys(now), vec!["profile-1\0"]);
+    }
+
+    #[test]
+    fn live_should_put_the_most_recently_active_agent_first() {
+        let now = Instant::now();
+        let mut app = App::default();
+        for (agent_id, started_unix_ms) in [("profile-1", 100), ("profile-2", 200)] {
+            app.apply(
+                RuntimeEvent::InvocationStarted {
+                    invocation_id: Uuid::new_v4(),
+                    agent_id: agent_id.to_string(),
+                    agent_name: agent_id.to_string(),
+                    source_agent_id: "local-qwen".to_string(),
+                    capability: "chat".to_string(),
+                    provider: "local-qwen".to_string(),
+                    model: "qwen".to_string(),
+                    started_unix_ms,
+                },
+                now,
+            );
+        }
+
+        assert_eq!(
+            app.visible_lane_keys(now),
+            vec!["profile-2\0", "profile-1\0"]
+        );
+    }
+
+    #[test]
+    fn project_profiles_should_prepopulate_never_run_agent_lanes() {
+        let now = Instant::now();
+        let mut app = App {
+            filter: LaneFilter::All,
+            ..App::default()
+        };
+        app.apply(RuntimeEvent::AgentsRegistered(vec![registration(0)]), now);
+        app.apply(
+            RuntimeEvent::ProjectProfilesRegistered(vec![ProjectProfileRegistration {
+                id: "profile-1".to_string(),
+                name: "Farming 0".to_string(),
+                provider: "stardew-valley/development".to_string(),
+                capabilities: vec!["chat".to_string()],
+                model: "stardew-valley-farming-0".to_string(),
+            }]),
+            now,
+        );
+
+        assert_eq!(app.counts().total, 1);
+        assert_eq!(app.visible_lane_keys(now), vec!["profile-1\0"]);
+        assert!(!app
+            .visible_lane_keys(now)
+            .contains(&"agent-000\0chat".to_string()));
+    }
+
+    #[test]
+    fn one_profile_with_multiple_capabilities_should_use_one_agent_lane() {
+        let now = Instant::now();
+        let mut app = App {
+            filter: LaneFilter::All,
+            ..App::default()
+        };
+        app.apply(
+            RuntimeEvent::ProjectProfilesRegistered(vec![ProjectProfileRegistration {
+                id: "profile-1".to_string(),
+                name: "Farmhand".to_string(),
+                provider: "stardew-valley/development".to_string(),
+                capabilities: vec!["chat".to_string(), "embedding".to_string()],
+                model: "stardew-valley-farmhand".to_string(),
+            }]),
+            now,
+        );
+
+        for capability in ["chat", "embedding"] {
+            app.apply(
+                RuntimeEvent::InvocationStarted {
+                    invocation_id: Uuid::new_v4(),
+                    agent_id: "profile-1".to_string(),
+                    agent_name: "Farmhand".to_string(),
+                    source_agent_id: "local-qwen".to_string(),
+                    capability: capability.to_string(),
+                    provider: "local-qwen".to_string(),
+                    model: "qwen".to_string(),
+                    started_unix_ms: 100,
+                },
+                now,
+            );
+        }
+
+        assert_eq!(app.counts().total, 1);
+        assert_eq!(app.visible_lane_keys(now), vec!["profile-1\0"]);
+        assert_eq!(app.lanes["profile-1\0"].concurrency(), 2);
+    }
+
+    #[test]
+    fn never_run_project_profiles_should_only_match_the_all_filter() {
+        let now = Instant::now();
+        let mut app = App::default();
+        app.apply(
+            RuntimeEvent::ProjectProfilesRegistered(vec![ProjectProfileRegistration {
+                id: "profile-1".to_string(),
+                name: "Farming 0".to_string(),
+                provider: "stardew-valley/development".to_string(),
+                capabilities: vec!["chat".to_string()],
+                model: "stardew-valley-farming-0".to_string(),
+            }]),
+            now,
+        );
+
+        for filter in [
+            LaneFilter::Live,
+            LaneFilter::Running,
+            LaneFilter::Problems,
+            LaneFilter::Passed,
+        ] {
+            app.filter = filter;
+            assert!(app.visible_lane_keys(now).is_empty());
+        }
+    }
+
+    #[test]
+    fn project_roster_refresh_should_preserve_the_live_model() {
+        let now = Instant::now();
+        let mut app = App::default();
+        let profile = ProjectProfileRegistration {
+            id: "profile-1".to_string(),
+            name: "Farming 0".to_string(),
+            provider: "stardew-valley/development".to_string(),
+            capabilities: vec!["chat".to_string()],
+            model: "stardew-valley-farming-0".to_string(),
+        };
+        app.apply(
+            RuntimeEvent::ProjectProfilesRegistered(vec![profile.clone()]),
+            now,
+        );
+        app.apply(
+            RuntimeEvent::InvocationStarted {
+                invocation_id: Uuid::new_v4(),
+                agent_id: profile.id.clone(),
+                agent_name: profile.name.clone(),
+                source_agent_id: "local-qwen".to_string(),
+                capability: profile.capabilities[0].clone(),
+                provider: "local-qwen".to_string(),
+                model: "Qwen3VL-8B-Instruct".to_string(),
+                started_unix_ms: 100,
+            },
+            now,
+        );
+
+        app.apply(RuntimeEvent::ProjectProfilesRegistered(vec![profile]), now);
+
+        assert_eq!(app.lanes["profile-1\0"].model, "Qwen3VL-8B-Instruct");
     }
 
     #[test]
@@ -1613,8 +1959,8 @@ mod tests {
 
         let keys = app.visible_lane_keys(now);
 
-        assert_eq!(keys[0], "agent-000\0chat");
-        assert_eq!(keys[1], "agent-001\0chat");
+        assert_eq!(keys[0], "agent-000\0");
+        assert_eq!(keys[1], "agent-001\0");
     }
 
     #[test]
@@ -1651,7 +1997,7 @@ mod tests {
         app.filter = LaneFilter::Problems;
 
         assert!(app.visible_lane_keys(now).is_empty());
-        assert_eq!(app.lanes["agent-000\0chat"].outcome(), LaneOutcome::Passed);
+        assert_eq!(app.lanes["agent-000\0"].outcome(), LaneOutcome::Passed);
     }
 
     #[test]
@@ -1700,7 +2046,7 @@ mod tests {
             now,
         );
 
-        let trace = app.lanes["agent-000\0chat"].representative().unwrap();
+        let trace = app.lanes["agent-000\0"].representative().unwrap();
         assert_eq!(trace.current_stage(), RuntimeStage::Decode);
         assert_eq!(
             trace.observation_status(RuntimeStage::Deliver),
@@ -1771,7 +2117,7 @@ mod tests {
             now,
         );
 
-        let trace = app.lanes["agent-000\0chat"].representative().unwrap();
+        let trace = app.lanes["agent-000\0"].representative().unwrap();
         let decode = trace
             .observation_for_stage(RuntimeStage::Decode)
             .expect("decode observation");
@@ -1836,7 +2182,7 @@ mod tests {
         app.apply(feedback(finish_first), now);
 
         for agent_id in ["agent-000", "agent-001"] {
-            let trace = app.lanes[&format!("{agent_id}\0chat")]
+            let trace = app.lanes[&format!("{agent_id}\0")]
                 .representative()
                 .unwrap();
             assert_eq!(trace.outcome, LaneOutcome::Failed);
@@ -1974,7 +2320,7 @@ mod tests {
             },
             now,
         );
-        app.selected_lane = Some("agent-000\0chat".to_string());
+        app.selected_lane = Some("agent-000\0".to_string());
         app.open_selected_agent();
         app.open_selected_trace();
         app.move_observation_cursor(2);
@@ -2013,7 +2359,7 @@ mod tests {
                 ..
             } if selected == decode_observation_id
         ));
-        let trace = app.lanes["agent-000\0chat"].representative().unwrap();
+        let trace = app.lanes["agent-000\0"].representative().unwrap();
         assert_eq!(trace.observations.len(), 2);
         assert!(trace
             .observations
@@ -2081,7 +2427,7 @@ mod tests {
             now,
         );
         app.view = View::Trace {
-            agent_key: "agent-000\0chat".to_string(),
+            agent_key: "agent-000\0".to_string(),
             trace_id: invocation_id,
             tab: super::TraceTab::Summary,
             timeline: false,
@@ -2089,7 +2435,7 @@ mod tests {
             selected_observation: None,
         };
 
-        let trace = app.trace("agent-000\0chat", invocation_id).unwrap();
+        let trace = app.trace("agent-000\0", invocation_id).unwrap();
         assert_eq!(
             trace.matching_observation_choices("missing action"),
             vec![Some(validate_id)]
@@ -2113,7 +2459,7 @@ mod tests {
         app.search = "no such observation".to_string();
         app.normalize_search_selection(now);
         assert!(app
-            .trace("agent-000\0chat", invocation_id)
+            .trace("agent-000\0", invocation_id)
             .unwrap()
             .matching_observation_choices(&app.search)
             .is_empty());
@@ -2235,7 +2581,7 @@ mod tests {
 
         assert!(!app.lanes.contains_key("local-qwen\0chat"));
         for (invocation_id, agent_id, _) in invocations {
-            let lane = &app.lanes[&format!("{agent_id}\0chat")];
+            let lane = &app.lanes[&format!("{agent_id}\0")];
             assert!(lane.configured);
             let trace = lane.trace(invocation_id).expect("completed trace");
             assert_eq!(trace.outcome, LaneOutcome::Failed);

@@ -344,6 +344,15 @@ impl RegisteredAgent {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProjectProfileRegistration {
+    pub id: String,
+    pub name: String,
+    pub provider: String,
+    pub capabilities: Vec<String>,
+    pub model: String,
+}
+
 #[derive(Clone, Debug)]
 pub enum RuntimeEvent {
     HealthChanged {
@@ -351,6 +360,7 @@ pub enum RuntimeEvent {
         message: Option<String>,
     },
     AgentsRegistered(Vec<RegisteredAgent>),
+    ProjectProfilesRegistered(Vec<ProjectProfileRegistration>),
     BackendsChanged(Vec<String>),
     LoadedModelsChanged(usize),
     IdentityChanged {
@@ -433,6 +443,7 @@ fn event_coalescing_key(event: &RuntimeEvent) -> RuntimeEventKey {
         RuntimeEvent::LoadedModelsChanged(_) => RuntimeEventKey::Global(3),
         RuntimeEvent::IdentityChanged { .. } => RuntimeEventKey::Global(4),
         RuntimeEvent::MonitorEventsDropped { .. } => RuntimeEventKey::Global(5),
+        RuntimeEvent::ProjectProfilesRegistered(_) => RuntimeEventKey::Global(6),
         RuntimeEvent::InvocationStarted { invocation_id, .. } => {
             RuntimeEventKey::Invocation(*invocation_id, 0)
         }
