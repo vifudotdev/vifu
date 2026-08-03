@@ -2,6 +2,19 @@
 
 All notable changes to Vifu are documented here.
 
+## 0.1.7 - 2026-08-03
+
+- Added the live ARM optimization TUI with hundreds-of-agent monitoring,
+  provider-stage traces, operating-system CPU/RSS evidence, and editor export.
+- Added bounded local-model combination measurements with repeat statistics,
+  contract validation, session route activation, and one-key Undo.
+- Added shared lazy llama.cpp model residency, memory admission, and idle-model
+  eviction for resource-constrained local inference.
+- Added typed application feedback and the StarDojo adapter so model delivery,
+  response parsing, action execution, and frame presentation remain distinct.
+- Added the embedded Trace Explorer and Comparison History Dashboard to the
+  default zero-configuration Vifu startup path.
+
 ## 0.1.6 - 2026-08-01
 
 - Added anonymous Gateway bootstrap for servers that enable temporary projects.
