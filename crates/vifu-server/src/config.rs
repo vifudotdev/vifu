@@ -16,6 +16,7 @@ pub enum DeploymentMode {
 pub struct Config {
     pub addr: SocketAddr,
     pub deployment_mode: DeploymentMode,
+    pub service_version: String,
     pub database_url: String,
     pub database_max_connections: u32,
     pub admin_key: String,
@@ -43,6 +44,18 @@ pub struct AccessTokenAuthorityConfig {
 impl Config {
     pub fn from_env() -> Result<Self, String> {
         Self::from_lookup(|key| std::env::var(key).ok())
+    }
+
+    pub fn apply_service_version(
+        &mut self,
+        service_version: impl AsRef<str>,
+    ) -> Result<(), String> {
+        let service_version = service_version.as_ref().trim();
+        if service_version.is_empty() {
+            return Err("server service version must not be empty".to_string());
+        }
+        self.service_version = service_version.to_string();
+        Ok(())
     }
 
     pub fn apply_listen_override(&mut self, addr: SocketAddr) -> Result<(), String> {
@@ -151,6 +164,7 @@ impl Config {
         Ok(Self {
             addr,
             deployment_mode,
+            service_version: env!("CARGO_PKG_VERSION").to_string(),
             database_url,
             database_max_connections: parse_u64(
                 &mut lookup,

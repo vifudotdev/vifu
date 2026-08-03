@@ -139,6 +139,7 @@ impl LoadedRuntimeConfig {
                 format!("{} does not configure a Vifu Server", self.path.display())
             })?;
         let mut config = vifu_server::config::Config::from_env()?;
+        config.apply_service_version(env!("CARGO_PKG_VERSION"))?;
         if let Some(listen) = server.listen.as_deref() {
             let addr = listen
                 .parse()
@@ -597,6 +598,24 @@ mod tests {
 
         let options = loaded.gateway_options().unwrap();
         assert!(!options.allow_guest_bootstrap);
+    }
+
+    #[test]
+    fn server_config_reports_the_vifu_product_version() {
+        let config = RuntimeConfig::parse(
+            Path::new("/tmp/config.json"),
+            r#"{"version":1,"server":{"databaseUrl":"postgres://vifu@127.0.0.1:5432/vifu"}}"#,
+        )
+        .unwrap();
+        let loaded = super::LoadedRuntimeConfig {
+            path: Path::new("/tmp/config.json").to_path_buf(),
+            profile: None,
+            config,
+        };
+
+        let server = loaded.server_config().unwrap();
+
+        assert_eq!(server.service_version, env!("CARGO_PKG_VERSION"));
     }
 
     #[test]

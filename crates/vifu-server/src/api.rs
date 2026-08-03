@@ -58,7 +58,7 @@ const VIFU_INVOCATION_ID_HEADER: &str = "x-vifu-invocation-id";
 struct HealthResponse {
     service: &'static str,
     status: &'static str,
-    version: &'static str,
+    version: String,
 }
 
 #[derive(Serialize)]
@@ -66,7 +66,7 @@ struct HealthResponse {
 struct StatusResponse {
     service: &'static str,
     status: &'static str,
-    version: &'static str,
+    version: String,
     mode: DeploymentMode,
     capabilities: Capabilities,
     agent_gateways: usize,
@@ -79,11 +79,11 @@ pub struct UploadRuntimeTraces {
     traces: Vec<RuntimeTraceRecord>,
 }
 
-pub async fn health() -> Json<impl Serialize> {
+pub async fn health(State(state): State<AppState>) -> Json<impl Serialize> {
     Json(HealthResponse {
         service: "vifu-server",
         status: "ok",
-        version: env!("CARGO_PKG_VERSION"),
+        version: state.config.service_version.clone(),
     })
 }
 
@@ -93,7 +93,7 @@ pub async fn status(State(state): State<AppState>) -> Result<Json<impl Serialize
     Ok(Json(StatusResponse {
         service: "vifu-server",
         status: "ok",
-        version: env!("CARGO_PKG_VERSION"),
+        version: state.config.service_version.clone(),
         mode: state.config.deployment_mode,
         capabilities,
         agent_gateways: state.relay.connection_count().await,

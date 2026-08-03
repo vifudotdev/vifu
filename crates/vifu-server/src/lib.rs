@@ -531,6 +531,21 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn status_reports_the_configured_service_version() {
+        let mut config = Config::from_env().unwrap();
+        config.apply_service_version("0.1.7").unwrap();
+        let (storage, path) = temp_sqlite_storage("status-version").await;
+        let response = app(state_with_storage(config, storage.clone()))
+            .oneshot(Request::get("/v1/status").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let payload = response_json(response).await;
+        close_temp_storage(storage, path).await;
+
+        assert_eq!(payload["version"], "0.1.7");
+    }
+
+    #[tokio::test]
     async fn local_embedded_console_mounts_at_server_root() {
         let mut config = Config::from_env().unwrap();
         config.deployment_mode = DeploymentMode::Local;
