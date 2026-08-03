@@ -9,14 +9,15 @@ const tsc = path.resolve(
   "..",
   "..",
   "node_modules",
-  ".bin",
-  process.platform === "win32" ? "tsc.cmd" : "tsc",
+  "typescript",
+  "bin",
+  "tsc",
 );
 
 rmSync(path.join(packageRoot, "dist"), { recursive: true, force: true });
 rmSync(path.join(packageRoot, "tsconfig.tsbuildinfo"), { force: true });
 
-execFileSync(tsc, ["-p", "tsconfig.json"], {
+execFileSync(process.execPath, [tsc, "-p", "tsconfig.json"], {
   cwd: packageRoot,
   stdio: "inherit",
 });
