@@ -25,9 +25,9 @@ import {
   observationTtftMs,
   observationType,
   observationUsage,
-  retainPinnedTrace,
   sameTraceSpanRevision,
   traceListPresentation,
+  traceListPath,
   traceIdForInvocation,
   traceEventSpansForSelection,
   traceSearchText,
@@ -36,12 +36,14 @@ import {
   traceSelectionUrl,
   traceIoValues,
   type TraceListPresentation,
+  type TraceListCursor,
   type TraceStatusGroup,
 } from "../trace-model";
+import { decodeTracePayload } from "../trace-payload";
 import type { EndpointTrace, TraceScore, TraceSpan, TraceUsage } from "../types";
 import { RuntimeComparisonHistory } from "./runtime-comparison-history";
 
-const MAX_TRACES = 100;
+const TRACE_PAGE_SIZE = 100;
 const ROW_HEIGHT = 42;
 const TRACE_POLL_MS = 2_000;
 const TRACE_REQUEST_TIMEOUT_MS = 8_000;
@@ -54,6 +56,7 @@ type RuntimeTraceWorkbenchProps = {
 
 type RuntimeTraceResponse = {
   traces?: EndpointTrace[];
+  nextCursor?: TraceListCursor | null;
   error?: { message?: string };
 };
 
@@ -79,9 +82,14 @@ type DetailTab = "summary" | "io" | "metadata" | "scores" | "events";
 
 export function RuntimeTraceWorkbench({ projectId, projectSlug, traces: initialTraces }: RuntimeTraceWorkbenchProps) {
   const { request } = useRuntimeConsoleHost();
-  const [traces, setTraces] = useState(() => sortTraces(initialTraces).slice(0, MAX_TRACES));
+  const [traces, setTraces] = useState(() => sortTraces(initialTraces));
   const [pausedTraces, setPausedTraces] = useState<EndpointTrace[]>([]);
   const [paused, setPaused] = useState(false);
+  const [dateFrom, setDateFrom] = useState("");
+  const [dateTo, setDateTo] = useState("");
+  const [nextCursor, setNextCursor] = useState<TraceListCursor | null>(null);
+  const [olderLoading, setOlderLoading] = useState(false);
+  const [olderError, setOlderError] = useState<string | null>(null);
   const [query, setQuery] = useState("");
   const deferredQuery = useDeferredValue(query);
   const [agentFilter, setAgentFilter] = useState("all");
@@ -103,6 +111,8 @@ export function RuntimeTraceWorkbench({ projectId, projectSlug, traces: initialT
   const pausedTracesRef = useRef(pausedTraces);
   const pausedRef = useRef(paused);
   const selectedTraceIdRef = useRef(selectedTraceId);
+  const initialPageLoadedRef = useRef(false);
+  const dateWindow = useMemo(() => localDateWindow(dateFrom, dateTo), [dateFrom, dateTo]);
 
   useEffect(() => {
     tracesRef.current = [];
@@ -112,6 +122,9 @@ export function RuntimeTraceWorkbench({ projectId, projectSlug, traces: initialT
     setTraces([]);
     setPausedTraces([]);
     setPaused(false);
+    setNextCursor(null);
+    setOlderLoading(false);
+    setOlderError(null);
     setSelectedTraceId(null);
     setSelectedObservationId(null);
     setRequestedTraceId(null);
@@ -123,6 +136,7 @@ export function RuntimeTraceWorkbench({ projectId, projectSlug, traces: initialT
     setSelectionError(null);
     setTraceListLoading(true);
     setUrlSelectionReady(false);
+    initialPageLoadedRef.current = false;
   }, [projectId, projectSlug]);
 
   useEffect(() => {
@@ -130,10 +144,22 @@ export function RuntimeTraceWorkbench({ projectId, projectSlug, traces: initialT
     setTraces((current) => reconcileTraces(
       scoped,
       current.filter((trace) => trace.projectId === projectId),
-      MAX_TRACES,
-      selectedTraceIdRef.current,
     ));
   }, [initialTraces, projectId]);
+
+  useEffect(() => {
+    tracesRef.current = [];
+    pausedTracesRef.current = [];
+    initialPageLoadedRef.current = false;
+    setTraces([]);
+    setPausedTraces([]);
+    setNextCursor(null);
+    setOlderError(null);
+    setTraceListLoading(true);
+    selectedTraceIdRef.current = null;
+    setSelectedTraceId(null);
+    setSelectedObservationId(null);
+  }, [dateWindow.from, dateWindow.to]);
 
   useEffect(() => {
     tracesRef.current = traces;
@@ -210,8 +236,6 @@ export function RuntimeTraceWorkbench({ projectId, projectSlug, traces: initialT
         setTraces((current) => reconcileTraces(
           [trace],
           current.filter((candidate) => candidate.projectId === projectId),
-          MAX_TRACES,
-          trace.id,
         ));
         setSelectedTraceId(trace.id);
         setRequestedTraceId(null);
@@ -271,8 +295,6 @@ export function RuntimeTraceWorkbench({ projectId, projectSlug, traces: initialT
         setTraces((current) => reconcileTraces(
           [trace],
           current.filter((candidate) => candidate.projectId === projectId),
-          MAX_TRACES,
-          trace.id,
         ));
         setSelectedTraceId(trace.id);
         setRequestedInvocationId(null);
@@ -309,26 +331,32 @@ export function RuntimeTraceWorkbench({ projectId, projectSlug, traces: initialT
       controller.signal.addEventListener("abort", abortRequest, { once: true });
       try {
         const payload = await request<RuntimeTraceResponse>(
-          `project/${encodeURIComponent(projectSlug)}/traces?limit=${MAX_TRACES}`,
+          traceListPath(projectSlug, {
+            from: dateWindow.from,
+            to: dateWindow.to,
+            limit: TRACE_PAGE_SIZE,
+          }),
           "GET",
           undefined,
           requestController.signal,
         );
         if (controller.signal.aborted) return;
         const fetched = sortTraces((payload.traces ?? []).filter((trace) => trace.projectId === projectId));
+        if (!initialPageLoadedRef.current) {
+          initialPageLoadedRef.current = true;
+          setNextCursor(payload.nextCursor ?? null);
+        }
         setPollError((current) => current === null ? current : null);
         if (pausedRef.current) {
           const knownTraceIds = new Set([...tracesRef.current, ...pausedTracesRef.current].map((trace) => trace.id));
           const newPausedTraces = fetched.filter((trace) => !knownTraceIds.has(trace.id));
           if (newPausedTraces.length > 0) {
-            setPausedTraces((current) => reconcileTraces(newPausedTraces, current, MAX_TRACES, null));
+            setPausedTraces((current) => reconcileTraces(newPausedTraces, current));
           }
         } else {
           setTraces((current) => reconcileTraces(
             fetched,
             current.filter((trace) => trace.projectId === projectId),
-            MAX_TRACES,
-            selectedTraceIdRef.current,
           ));
           setPausedTraces((current) => current.length === 0 ? current : []);
         }
@@ -354,7 +382,7 @@ export function RuntimeTraceWorkbench({ projectId, projectSlug, traces: initialT
       controller.abort();
       if (timer !== undefined) window.clearTimeout(timer);
     };
-  }, [projectId, projectSlug, request]);
+  }, [dateWindow.from, dateWindow.to, projectId, projectSlug, request]);
 
   const rows = useMemo<TraceListRow[]>(() => traces.map((trace) => ({
     presentation: traceListPresentation(trace),
@@ -479,18 +507,42 @@ export function RuntimeTraceWorkbench({ projectId, projectSlug, traces: initialT
     setTraces((current) => reconcileTraces(
       pausedTracesRef.current,
       current,
-      MAX_TRACES,
-      selectedTraceIdRef.current,
     ));
     setPausedTraces([]);
     setPaused(false);
   }, []);
+
+  const loadOlder = useCallback(async () => {
+    if (!nextCursor || olderLoading) return;
+    setOlderLoading(true);
+    setOlderError(null);
+    try {
+      const payload = await request<RuntimeTraceResponse>(
+        traceListPath(projectSlug, {
+          before: nextCursor,
+          from: dateWindow.from,
+          to: dateWindow.to,
+          limit: TRACE_PAGE_SIZE,
+        }),
+        "GET",
+      );
+      const fetched = (payload.traces ?? []).filter((trace) => trace.projectId === projectId);
+      setTraces((current) => reconcileTraces(fetched, current));
+      setNextCursor(payload.nextCursor ?? null);
+    } catch (error) {
+      setOlderError(error instanceof Error ? error.message : "Failed to load older traces.");
+    } finally {
+      setOlderLoading(false);
+    }
+  }, [dateWindow.from, dateWindow.to, nextCursor, olderLoading, projectId, projectSlug, request]);
 
   const resetFilters = useCallback(() => {
     setQuery("");
     setAgentFilter("all");
     setModelFilter("all");
     setStatusFilter("all");
+    setDateFrom("");
+    setDateTo("");
   }, []);
 
   const closeTrace = useCallback(() => {
@@ -554,6 +606,26 @@ export function RuntimeTraceWorkbench({ projectId, projectSlug, traces: initialT
             {modelOptions.map((model) => <option key={model} value={model}>{model}</option>)}
           </select>
         </label>
+        <label className="trace-date-filter">
+          <span>From</span>
+          <input
+            aria-label="Show traces from date"
+            max={dateTo || undefined}
+            type="date"
+            value={dateFrom}
+            onChange={(event) => setDateFrom(event.target.value)}
+          />
+        </label>
+        <label className="trace-date-filter">
+          <span>To</span>
+          <input
+            aria-label="Show traces through date"
+            min={dateFrom || undefined}
+            type="date"
+            value={dateTo}
+            onChange={(event) => setDateTo(event.target.value)}
+          />
+        </label>
         <button className="secondary-button small" type="button" onClick={paused ? goLive : () => setPaused(true)}>
           {paused ? `Go live${pausedTraces.length > 0 ? ` (${pausedTraces.length})` : ""}` : "Pause"}
         </button>
@@ -561,18 +633,26 @@ export function RuntimeTraceWorkbench({ projectId, projectSlug, traces: initialT
       </div>
 
       <div className="trace-explorer-result-bar">
-        <span>{visibleRows.length} of {rows.length} traces</span>
-        {query !== deferredQuery ? <span>Updating results...</span> : null}
+        <span>{visibleRows.length} shown · {rows.length} loaded</span>
+        <div>
+          {query !== deferredQuery ? <span>Updating results...</span> : null}
+          {nextCursor ? (
+            <button type="button" onClick={() => void loadOlder()} disabled={olderLoading}>
+              {olderLoading ? "Loading older..." : "Load older"}
+            </button>
+          ) : rows.length > 0 ? <span>Beginning of available history</span> : null}
+        </div>
       </div>
       {selectionError ? <div className="inline-notice error">Trace selection error: {selectionError}</div> : null}
       {pollError ? <div className="inline-notice error">Trace polling error: {pollError}</div> : null}
+      {olderError ? <div className="inline-notice error">Older trace error: {olderError}</div> : null}
 
       <div className="trace-explorer-sheet">
         <PanelGroup orientation="horizontal" id="vifu-traces-content" className="trace-explorer-panels">
           <Panel id="trace-list-panel" minSize={selectedTrace ? "38" : "100"} defaultSize={selectedTrace ? "55" : "100"}>
             <div className="trace-explorer-list" aria-busy={traceListLoading}>
               <div className="trace-explorer-list-header" aria-hidden="true">
-                <div>Time</div>
+                <div>Date / time</div>
                 <div>Status</div>
                 <div>Agent</div>
                 <div>Model</div>
@@ -654,7 +734,7 @@ function TraceRow({
         type="button"
         aria-label={`Open ${presentation.agent} trace ${trace.requestId}`}
       >
-        <time title={formatDate(trace.createdAt)}>{formatShortTime(trace.createdAt)}</time>
+        <time title={formatDate(trace.createdAt)}>{formatShortDateTime(trace.createdAt)}</time>
         <span className={`trace-status ${presentation.status}`}>{presentation.statusLabel}</span>
         <strong title={presentation.agent}>{presentation.agent}</strong>
         <code title={presentation.model ?? undefined}>{presentation.model ?? "-"}</code>
@@ -865,9 +945,14 @@ function TraceSummary({ trace, spans, selectedSpan }: {
   const usage = selectedSpan
     ? observationUsage(selectedSpan)
     : trace.usage ?? traceUsageFromResponse(trace.response);
+  const io = traceIoValues(trace, spans, selectedSpan);
 
   return (
     <div className="trace-summary-panel">
+      <div className="trace-summary-io">
+        <TracePayload title="Input" value={io.input} />
+        <TracePayload title="Output" value={io.output} />
+      </div>
       <dl className="trace-summary-grid">
         <div><dt>Selected</dt><dd>{selectedSpan?.name ?? "Trace"}</dd></div>
         <div><dt>Type</dt><dd>{selectedSpan ? observationType(selectedSpan) : "trace"}</dd></div>
@@ -924,7 +1009,7 @@ function TraceEvents({ spans, selectedSpan }: { spans: TraceSpan[]; selectedSpan
     <div className="trace-event-list">
       {eventSpans.map((span) => (
         <article key={span.id}>
-          <header><strong>{span.name}</strong><time>{formatShortTime(span.createdAt)}</time></header>
+          <header><strong>{span.name}</strong><time>{formatShortDateTime(span.createdAt)}</time></header>
           <span className={`trace-status ${statusGroupFromSpan(span)}`}>{span.status}</span>
           {span.outputSummary !== null ? <TracePayload title="Event" value={span.outputSummary} /> : null}
           {eventPayloads(span.attributes).map((event, index) => (
@@ -938,19 +1023,78 @@ function TraceEvents({ spans, selectedSpan }: { spans: TraceSpan[]; selectedSpan
 }
 
 function TracePayload({ title, value, tone }: { title: string; value: unknown; tone?: "error" }) {
+  const decoded = decodeTracePayload(value);
   return (
     <section className={tone === "error" ? "trace-payload error" : "trace-payload"}>
       <span>{title}</span>
-      <pre>{formatJson(value)}</pre>
+      {decoded.kind === "conversation" ? (
+        <div className="trace-conversation">
+          {decoded.messages.map((message, index) => (
+            <article className={`trace-message ${message.role.toLowerCase()}`} key={`${message.role}-${index}`}>
+              <header>
+                <strong>{message.role}</strong>
+                {message.name ? <span>{message.name}</span> : null}
+                {message.toolCallId ? <code>{message.toolCallId}</code> : null}
+              </header>
+              {message.content ? <p>{message.content}</p> : null}
+              {message.toolCalls.map((toolCall, toolIndex) => (
+                <section className="trace-tool-call" key={`${toolCall.id ?? toolCall.name}-${toolIndex}`}>
+                  <header><strong>{toolCall.name}</strong>{toolCall.id ? <code>{toolCall.id}</code> : null}</header>
+                  <StructuredValue value={toolCall.arguments} />
+                </section>
+              ))}
+            </article>
+          ))}
+        </div>
+      ) : decoded.kind === "embedding" ? (
+        <dl className="trace-embedding-summary">
+          <div><dt>Vectors</dt><dd>{decoded.count}</dd></div>
+          <div><dt>Dimensions</dt><dd>{decoded.dimensions ?? "-"}</dd></div>
+          <div><dt>Model</dt><dd>{decoded.model ?? "-"}</dd></div>
+          <div><dt>Usage</dt><dd><StructuredValue value={decoded.usage} /></dd></div>
+        </dl>
+      ) : <StructuredValue value={decoded.value} />}
     </section>
   );
+}
+
+function StructuredValue({ value, depth = 0 }: { value: unknown; depth?: number }) {
+  if (value === null || value === undefined) return <span className="trace-scalar">-</span>;
+  if (typeof value === "string") return <p className="trace-text-value">{value}</p>;
+  if (typeof value === "number" || typeof value === "boolean") {
+    return <code className="trace-scalar">{String(value)}</code>;
+  }
+  if (depth >= 8) return <span className="trace-scalar">Nested value</span>;
+  if (Array.isArray(value)) {
+    if (value.length > 32 && value.every((item) => typeof item === "number")) {
+      return <span className="trace-scalar">{value.length} numeric values</span>;
+    }
+    return (
+      <ol className="trace-structured-list">
+        {value.map((item, index) => <li key={index}><StructuredValue value={item} depth={depth + 1} /></li>)}
+      </ol>
+    );
+  }
+  if (isRecord(value)) {
+    const entries = Object.entries(value);
+    if (entries.length === 0) return <span className="trace-scalar">Empty object</span>;
+    return (
+      <dl className="trace-structured-object">
+        {entries.map(([key, item]) => (
+          <div key={key}>
+            <dt>{readableKey(key)}</dt>
+            <dd><StructuredValue value={item} depth={depth + 1} /></dd>
+          </div>
+        ))}
+      </dl>
+    );
+  }
+  return <span className="trace-scalar">{String(value)}</span>;
 }
 
 function reconcileTraces(
   primary: EndpointTrace[],
   secondary: EndpointTrace[],
-  limit: number,
-  pinnedTraceId: string | null,
 ): EndpointTrace[] {
   const previousById = new Map(secondary.map((trace) => [trace.id, trace]));
   const seen = new Set<string>();
@@ -961,7 +1105,7 @@ function reconcileTraces(
     const previous = previousById.get(trace.id);
     merged.push(previous && sameTraceRevision(previous, trace) ? previous : trace);
   }
-  const next = retainPinnedTrace(sortTraces(merged), limit, pinnedTraceId);
+  const next = sortTraces(merged);
   if (next.length === secondary.length && next.every((trace, index) => trace === secondary[index])) return secondary;
   return next;
 }
@@ -1009,7 +1153,10 @@ function sameScore(a: TraceScore, b: TraceScore | undefined): boolean {
 }
 
 function sortTraces(traces: EndpointTrace[]): EndpointTrace[] {
-  return [...traces].sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt));
+  return [...traces].sort((a, b) => {
+    const byTime = Date.parse(b.createdAt) - Date.parse(a.createdAt);
+    return byTime || b.id.localeCompare(a.id);
+  });
 }
 
 function statusGroupFromSpan(span: TraceSpan): TraceStatusGroup {
@@ -1178,11 +1325,40 @@ function formatDate(value: string | null): string {
   }).format(date);
 }
 
-function formatShortTime(value: string | null): string {
+function formatShortDateTime(value: string | null): string {
   if (!value) return "-";
   const date = new Date(value);
   if (Number.isNaN(date.valueOf())) return "-";
-  return new Intl.DateTimeFormat("en", { hour: "2-digit", minute: "2-digit", second: "2-digit" }).format(date);
+  return new Intl.DateTimeFormat("en", {
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    month: "short",
+    second: "2-digit",
+  }).format(date);
+}
+
+function localDateWindow(from: string, to: string): { from: string | null; to: string | null } {
+  return {
+    from: localDateBoundary(from, false),
+    to: localDateBoundary(to, true),
+  };
+}
+
+function localDateBoundary(value: string, nextDay: boolean): string | null {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
+  if (!match) return null;
+  const date = new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]));
+  if (nextDay) date.setDate(date.getDate() + 1);
+  return Number.isNaN(date.valueOf()) ? null : date.toISOString();
+}
+
+function readableKey(value: string): string {
+  const spaced = value
+    .replaceAll("_", " ")
+    .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+    .trim();
+  return spaced ? spaced.charAt(0).toUpperCase() + spaced.slice(1) : value;
 }
 
 function shortId(value: string, length = 8): string {

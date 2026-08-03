@@ -586,7 +586,17 @@ fn dashboard_target_url(base_url: &str, app: &App) -> String {
             };
             (trace_id, None)
         }
-        View::Main | View::Optimize => return project_base,
+        View::Main => {
+            let Some(trace_id) = app
+                .selected_lane()
+                .and_then(|lane| lane.representative())
+                .map(|trace| trace.id)
+            else {
+                return project_base;
+            };
+            (trace_id, None)
+        }
+        View::Optimize => return project_base,
     };
     let trace_base = app
         .project
@@ -1112,13 +1122,39 @@ mod tests {
     }
 
     #[test]
-    fn dashboard_target_uses_the_current_project_on_the_main_view() {
+    fn dashboard_target_uses_the_current_project_when_main_view_has_no_trace() {
         let mut app = App::default();
         app.project = Some("stardew-valley".to_string());
 
         assert_eq!(
             dashboard_target_url("http://127.0.0.1:6790", &app),
             "http://127.0.0.1:6790/project/stardew-valley"
+        );
+    }
+
+    #[test]
+    fn dashboard_target_deep_links_the_selected_main_view_trace() {
+        let now = Instant::now();
+        let trace_id = Uuid::new_v4();
+        let mut app = App::default();
+        app.project = Some("stardew-valley".to_string());
+        app.apply(
+            RuntimeEvent::InvocationStarted {
+                invocation_id: trace_id,
+                agent_id: "planner".to_string(),
+                agent_name: "Planner".to_string(),
+                source_agent_id: "planner".to_string(),
+                capability: "chat".to_string(),
+                provider: "local".to_string(),
+                model: "qwen".to_string(),
+                started_unix_ms: 1,
+            },
+            now,
+        );
+
+        assert_eq!(
+            dashboard_target_url("http://127.0.0.1:6790", &app),
+            format!("http://127.0.0.1:6790/project/stardew-valley/logs?invocationId={trace_id}")
         );
     }
 
@@ -1248,7 +1284,7 @@ mod tests {
     }
 
     #[test]
-    fn trace_keyboard_moves_and_commits_observation_selection() {
+    fn trace_keyboard_movement_immediately_previews_the_observation() {
         let now = Instant::now();
         let mut app = App::default();
         app.apply(
@@ -1301,11 +1337,6 @@ mod tests {
         handle_key(
             &mut app,
             KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
-            now,
-        );
-        handle_key(
-            &mut app,
-            KeyEvent::new(KeyCode::Right, KeyModifiers::NONE),
             now,
         );
 

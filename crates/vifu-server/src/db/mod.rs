@@ -289,7 +289,7 @@ dispatch! {
     pub async fn complete_trace_span(storage: &Storage, span_id: Uuid, status: &str, duration_ms: i64, output_summary: Option<&Value>, error: Option<&str>) -> Result<(), ApiError>;
     pub async fn upsert_trace_score(storage: &Storage, score: NewTraceScore<'_>) -> Result<TraceScore, ApiError>;
     pub async fn complete_trace(storage: &Storage, request_id: Uuid, status: &str, latency_ms: i64, response: Option<&Value>, error: Option<&str>) -> Result<(), ApiError>;
-    pub async fn list_traces(storage: &Storage, endpoint_id: Option<Uuid>, project_id: Option<Uuid>, request_id: Option<Uuid>, trace_id: Option<Uuid>, allowed_profile_ids: Option<&[Uuid]>, limit: i64) -> Result<Vec<EndpointTrace>, ApiError>;
+    pub async fn list_traces(storage: &Storage, options: TraceListOptions<'_>) -> Result<Vec<EndpointTrace>, ApiError>;
     pub async fn get_trace_project_id(storage: &Storage, trace_id: Uuid) -> Result<Option<Uuid>, ApiError>;
     pub async fn get_trace_identity(storage: &Storage, trace_id: Uuid) -> Result<TraceIdentity, ApiError>;
     pub async fn list_trace_spans(storage: &Storage, trace_id: Uuid) -> Result<Vec<TraceSpan>, ApiError>;
@@ -489,23 +489,39 @@ mod tests {
 
         let scoped = list_traces(
             &storage,
-            None,
-            Some(project_id),
-            None,
-            None,
-            Some(&[allowed_profile_id]),
-            10,
+            TraceListOptions {
+                endpoint_id: None,
+                project_id: Some(project_id),
+                request_id: None,
+                trace_id: None,
+                allowed_profile_ids: Some(&[allowed_profile_id]),
+                created_from: None,
+                created_before: None,
+                cursor: None,
+                limit: 10,
+            },
         )
         .await
         .expect("scoped traces should list");
         assert_eq!(scoped.len(), 1);
         assert_eq!(scoped[0].id, allowed_trace_id);
-        assert!(
-            list_traces(&storage, None, Some(project_id), None, None, Some(&[]), 10)
-                .await
-                .expect("empty scope should list")
-                .is_empty()
-        );
+        assert!(list_traces(
+            &storage,
+            TraceListOptions {
+                endpoint_id: None,
+                project_id: Some(project_id),
+                request_id: None,
+                trace_id: None,
+                allowed_profile_ids: Some(&[]),
+                created_from: None,
+                created_before: None,
+                cursor: None,
+                limit: 10,
+            },
+        )
+        .await
+        .expect("empty scope should list")
+        .is_empty());
         assert_eq!(
             get_trace_identity(&storage, allowed_trace_id)
                 .await
@@ -514,6 +530,105 @@ mod tests {
                 project_id: Some(project_id),
                 profile_id: Some(allowed_profile_id),
             }
+        );
+
+        close_and_remove(storage, &path).await;
+    }
+
+    #[tokio::test]
+    async fn sqlite_trace_listing_uses_stable_cursor_and_date_window() {
+        let (storage, path) = sqlite_storage().await;
+        let project_id = Uuid::new_v4();
+        create_project(
+            &storage,
+            NewProject {
+                id: project_id,
+                owner_user_id: None,
+                slug: "trace-pages",
+                name: "Trace pages",
+                description: None,
+                gateway_id: "gateway-trace-pages",
+                binding_ids: &[],
+            },
+        )
+        .await
+        .expect("project should be created");
+
+        let window_start = Utc::now() - ChronoDuration::hours(2);
+        let shared_time = window_start + ChronoDuration::minutes(30);
+        let window_end = window_start + ChronoDuration::hours(1);
+        let older_id = Uuid::parse_str("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1").unwrap();
+        let shared_low_id = Uuid::parse_str("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa2").unwrap();
+        let shared_high_id = Uuid::parse_str("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa3").unwrap();
+        let newer_id = Uuid::parse_str("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa4").unwrap();
+        for (id, created_at) in [
+            (older_id, window_start - ChronoDuration::seconds(1)),
+            (shared_low_id, shared_time),
+            (shared_high_id, shared_time),
+            (newer_id, window_end - ChronoDuration::seconds(1)),
+        ] {
+            create_uploaded_runtime_trace(
+                &storage,
+                NewUploadedRuntimeTrace {
+                    id,
+                    request_id: Uuid::new_v4(),
+                    project_id,
+                    operation: "runtime.invoke",
+                    provider_key: Some("local-provider"),
+                    capability_kind: Some("chat"),
+                    status: "completed",
+                    latency_ms: 1,
+                    request: &json!({}),
+                    created_at,
+                },
+            )
+            .await
+            .expect("uploaded trace should be created");
+        }
+
+        let first_page = list_traces(
+            &storage,
+            TraceListOptions {
+                endpoint_id: None,
+                project_id: Some(project_id),
+                request_id: None,
+                trace_id: None,
+                allowed_profile_ids: None,
+                created_from: Some(window_start),
+                created_before: Some(window_end),
+                cursor: None,
+                limit: 2,
+            },
+        )
+        .await
+        .expect("first trace page should list");
+        assert_eq!(
+            first_page.iter().map(|trace| trace.id).collect::<Vec<_>>(),
+            vec![newer_id, shared_high_id]
+        );
+
+        let second_page = list_traces(
+            &storage,
+            TraceListOptions {
+                endpoint_id: None,
+                project_id: Some(project_id),
+                request_id: None,
+                trace_id: None,
+                allowed_profile_ids: None,
+                created_from: Some(window_start),
+                created_before: Some(window_end),
+                cursor: Some(TraceCursor {
+                    created_at: first_page[1].created_at,
+                    trace_id: first_page[1].id,
+                }),
+                limit: 2,
+            },
+        )
+        .await
+        .expect("second trace page should list");
+        assert_eq!(
+            second_page.iter().map(|trace| trace.id).collect::<Vec<_>>(),
+            vec![shared_low_id]
         );
 
         close_and_remove(storage, &path).await;
@@ -1103,9 +1218,22 @@ mod tests {
                 .profile_id,
             profile_id
         );
-        let traces = list_traces(&storage, None, Some(project_id), None, None, None, 10)
-            .await
-            .expect("traces should list");
+        let traces = list_traces(
+            &storage,
+            TraceListOptions {
+                endpoint_id: None,
+                project_id: Some(project_id),
+                request_id: None,
+                trace_id: None,
+                allowed_profile_ids: None,
+                created_from: None,
+                created_before: None,
+                cursor: None,
+                limit: 10,
+            },
+        )
+        .await
+        .expect("traces should list");
         assert_eq!(traces.len(), 1);
         assert_eq!(traces[0].app_outcome.as_deref(), Some("unknown"));
         assert_eq!(

@@ -651,12 +651,17 @@ mod tests {
 
         let traces = db::list_traces(
             &storage,
-            None,
-            Some(project_id),
-            Some(request_id),
-            None,
-            None,
-            10,
+            db::TraceListOptions {
+                endpoint_id: None,
+                project_id: Some(project_id),
+                request_id: Some(request_id),
+                trace_id: None,
+                allowed_profile_ids: None,
+                created_from: None,
+                created_before: None,
+                cursor: None,
+                limit: 10,
+            },
         )
         .await
         .unwrap();

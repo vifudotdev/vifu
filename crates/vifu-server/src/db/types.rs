@@ -236,6 +236,24 @@ pub struct NewTraceScore<'a> {
     pub source: &'a str,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TraceCursor {
+    pub created_at: DateTime<Utc>,
+    pub trace_id: Uuid,
+}
+
+pub struct TraceListOptions<'a> {
+    pub endpoint_id: Option<Uuid>,
+    pub project_id: Option<Uuid>,
+    pub request_id: Option<Uuid>,
+    pub trace_id: Option<Uuid>,
+    pub allowed_profile_ids: Option<&'a [Uuid]>,
+    pub created_from: Option<DateTime<Utc>>,
+    pub created_before: Option<DateTime<Utc>>,
+    pub cursor: Option<TraceCursor>,
+    pub limit: i64,
+}
+
 #[derive(Debug, Clone)]
 pub struct TraceFeedbackTarget {
     pub trace_id: Uuid,

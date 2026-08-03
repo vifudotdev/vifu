@@ -1013,12 +1013,17 @@ mod tests {
         );
         let traces = db::list_traces(
             &state.pool,
-            None,
-            Some(seeded.project_id),
-            None,
-            None,
-            None,
-            10,
+            db::TraceListOptions {
+                endpoint_id: None,
+                project_id: Some(seeded.project_id),
+                request_id: None,
+                trace_id: None,
+                allowed_profile_ids: None,
+                created_from: None,
+                created_before: None,
+                cursor: None,
+                limit: 10,
+            },
         )
         .await
         .unwrap();
@@ -1062,12 +1067,17 @@ mod tests {
             .expect("canonical invocation id header");
         let generic_traces = db::list_traces(
             &state.pool,
-            None,
-            None,
-            Some(generic_request_id),
-            None,
-            None,
-            1,
+            db::TraceListOptions {
+                endpoint_id: None,
+                project_id: None,
+                request_id: Some(generic_request_id),
+                trace_id: None,
+                allowed_profile_ids: None,
+                created_from: None,
+                created_before: None,
+                cursor: None,
+                limit: 1,
+            },
         )
         .await
         .unwrap();

@@ -1032,18 +1032,23 @@ mod tests {
         assert_eq!(
             crate::db::list_traces(
                 &storage,
-                None,
-                Some(
-                    crate::db::get_project_by_slug(&storage, slug)
-                        .await
-                        .unwrap()
-                        .project
-                        .id,
-                ),
-                None,
-                None,
-                None,
-                10,
+                crate::db::TraceListOptions {
+                    endpoint_id: None,
+                    project_id: Some(
+                        crate::db::get_project_by_slug(&storage, slug)
+                            .await
+                            .unwrap()
+                            .project
+                            .id,
+                    ),
+                    request_id: None,
+                    trace_id: None,
+                    allowed_profile_ids: None,
+                    created_from: None,
+                    created_before: None,
+                    cursor: None,
+                    limit: 10,
+                },
             )
             .await
             .unwrap()

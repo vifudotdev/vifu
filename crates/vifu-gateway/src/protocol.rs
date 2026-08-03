@@ -983,7 +983,10 @@ fn redact_trace_io_value(
     key_hint: Option<&str>,
     truncated: &mut bool,
 ) -> Value {
-    if depth >= MAX_TRACE_IO_DEPTH {
+    if depth >= MAX_TRACE_IO_DEPTH
+        && matches!(value, Value::Object(_) | Value::Array(_))
+        && !trace_tool_call_container(depth, key_hint)
+    {
         *truncated = true;
         return Value::String(format!("<{} omitted>", trace_value_shape(value)));
     }
@@ -1032,6 +1035,13 @@ fn redact_trace_io_value(
         }
         Value::String(text) => {
             let character_count = text.chars().count();
+            if key_hint.is_some_and(trace_tool_call_arguments_key) {
+                if let Ok(decoded) = serde_json::from_str::<Value>(text) {
+                    if matches!(decoded, Value::Object(_) | Value::Array(_)) {
+                        return redact_trace_io_value(&decoded, depth, key_hint, truncated);
+                    }
+                }
+            }
             if canonical_trace_placeholder(text) {
                 *truncated = true;
                 value.clone()
@@ -1062,6 +1072,22 @@ fn redact_trace_io_value(
         }
         _ => value.clone(),
     }
+}
+
+fn trace_tool_call_container(depth: usize, key_hint: Option<&str>) -> bool {
+    let Some(key) = key_hint else {
+        return false;
+    };
+    match key.to_ascii_lowercase().as_str() {
+        "tool_calls" | "toolcalls" => depth == 5,
+        "function" => depth <= 6,
+        "arguments" | "args" => depth <= 7,
+        _ => false,
+    }
+}
+
+fn trace_tool_call_arguments_key(key: &str) -> bool {
+    matches!(key.to_ascii_lowercase().as_str(), "arguments" | "args")
 }
 
 fn canonical_trace_placeholder(value: &str) -> bool {
@@ -1625,6 +1651,29 @@ mod tests {
             canonical_trace_io_summary(&summary.value).value,
             summary.value
         );
+    }
+
+    #[test]
+    fn canonical_trace_io_keeps_bounded_chat_output_content_and_tool_arguments() {
+        let summary = canonical_trace_io_summary(&json!({
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": "I will move east.",
+                    "tool_calls": [{
+                        "function": {
+                            "name": "move",
+                            "arguments": "{\"direction\":\"east\",\"api_key\":\"private-value\"}"
+                        }
+                    }]
+                }
+            }]
+        }));
+
+        assert!(summary.value.to_string().contains("I will move east."));
+        assert!(summary.value.to_string().contains("direction"));
+        assert!(!summary.value.to_string().contains("private-value"));
+        assert!(serde_json::to_vec(&summary.value).unwrap().len() <= MAX_TRACE_IO_SUMMARY_BYTES);
     }
 
     #[test]

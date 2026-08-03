@@ -14,6 +14,7 @@ import {
   traceEventSpansForSelection,
   traceIoValues,
   traceListPresentation,
+  traceListPath,
   traceScoresForSelection,
   traceSelectionFromUrl,
   traceSelectionUrl,
@@ -98,6 +99,30 @@ describe("traceListPresentation", () => {
       .toBe("not applicable");
     expect(traceListPresentation(endpointTrace({ appOutcome: "unknown" })).appScore)
       .toBe("unknown");
+  });
+});
+
+describe("trace list paths", () => {
+  it("encodes a stable cursor and UTC date window", () => {
+    const path = traceListPath("stardew valley", {
+      from: "2026-08-03T00:00:00.000Z",
+      to: "2026-08-04T00:00:00.000Z",
+      before: {
+        createdAt: "2026-08-03T12:34:56.789Z",
+        traceId: "trace/older",
+      },
+      limit: 100,
+    });
+    const url = new URL(path, "http://vifu.invalid/");
+
+    expect(url.pathname).toBe("/project/stardew%20valley/traces");
+    expect(Object.fromEntries(url.searchParams)).toEqual({
+      beforeCreatedAt: "2026-08-03T12:34:56.789Z",
+      beforeTraceId: "trace/older",
+      from: "2026-08-03T00:00:00.000Z",
+      limit: "100",
+      to: "2026-08-04T00:00:00.000Z",
+    });
   });
 });
 

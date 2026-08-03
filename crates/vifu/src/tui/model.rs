@@ -1553,10 +1553,13 @@ impl App {
             .saturating_add_signed(amount)
             .min(choices.len().saturating_sub(1));
         if let View::Trace {
-            observation_cursor, ..
+            observation_cursor,
+            selected_observation,
+            ..
         } = &mut self.view
         {
             *observation_cursor = choices[next];
+            *selected_observation = choices[next];
         }
     }
 

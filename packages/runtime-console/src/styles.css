@@ -7085,7 +7085,8 @@ button:disabled {
   flex: 0 1 auto;
 }
 
-.trace-explorer-toolbar select {
+.trace-explorer-toolbar select,
+.trace-date-filter input {
   min-height: 34px;
   max-width: 180px;
   border: 1px solid var(--line-strong);
@@ -7096,6 +7097,21 @@ button:disabled {
   font: inherit;
   font-size: 11px;
   font-weight: 650;
+}
+
+.trace-date-filter {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--text-muted);
+  font-size: 9px;
+  font-weight: 750;
+  text-transform: uppercase;
+}
+
+.trace-date-filter input {
+  max-width: 142px;
+  padding: 0 7px;
 }
 
 .trace-explorer-search {
@@ -7147,6 +7163,27 @@ button:disabled {
   font-size: 10px;
 }
 
+.trace-explorer-result-bar > div {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+
+.trace-explorer-result-bar button {
+  border: 0;
+  background: transparent;
+  color: #2563eb;
+  cursor: pointer;
+  padding: 1px 0;
+  font: inherit;
+  font-weight: 750;
+}
+
+.trace-explorer-result-bar button:disabled {
+  color: var(--text-muted);
+  cursor: default;
+}
+
 .trace-explorer-sheet,
 .trace-explorer-panels {
   min-height: 0;
@@ -7175,7 +7212,7 @@ button:disabled {
 .trace-explorer-list-header,
 .trace-explorer-row {
   display: grid;
-  grid-template-columns: 76px 96px minmax(120px, 1.2fr) minmax(100px, 1fr) 70px 62px 58px 74px;
+  grid-template-columns: 116px 96px minmax(120px, 1.2fr) minmax(100px, 1fr) 70px 62px 58px 74px;
   align-items: center;
   gap: 9px;
 }
@@ -7604,6 +7641,11 @@ button:disabled {
   gap: 10px;
 }
 
+.trace-summary-io {
+  display: grid;
+  gap: 8px;
+}
+
 .trace-summary-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -7659,6 +7701,112 @@ button:disabled {
 
 .trace-detail-tab-panel .trace-payload pre {
   max-height: 320px;
+  font-size: 10px;
+}
+
+.trace-conversation {
+  display: grid;
+  gap: 8px;
+}
+
+.trace-message {
+  display: grid;
+  gap: 6px;
+  border-left: 3px solid #64748b;
+  border-radius: 5px;
+  background: #f8fafc;
+  padding: 8px 9px;
+}
+
+.trace-message.user {
+  border-left-color: #2563eb;
+}
+
+.trace-message.assistant {
+  border-left-color: var(--success);
+}
+
+.trace-message.tool {
+  border-left-color: #a16207;
+}
+
+.trace-message > header,
+.trace-tool-call > header {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.trace-message > header strong,
+.trace-tool-call > header strong {
+  font-size: 9px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.trace-message > header span,
+.trace-message > header code,
+.trace-tool-call > header code {
+  color: var(--text-muted);
+  font-size: 9px;
+}
+
+.trace-message > p,
+.trace-text-value {
+  margin: 0;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.trace-tool-call {
+  display: grid;
+  gap: 5px;
+  border-top: 1px solid var(--line);
+  padding-top: 6px;
+}
+
+.trace-embedding-summary,
+.trace-structured-object {
+  display: grid;
+  gap: 5px;
+  margin: 0;
+}
+
+.trace-embedding-summary > div,
+.trace-structured-object > div {
+  display: grid;
+  grid-template-columns: minmax(90px, 0.35fr) minmax(0, 1fr);
+  gap: 8px;
+  border-bottom: 1px solid var(--line);
+  padding: 4px 0;
+}
+
+.trace-embedding-summary dt,
+.trace-structured-object dt {
+  color: var(--text-muted);
+  font-size: 9px;
+  font-weight: 750;
+}
+
+.trace-embedding-summary dd,
+.trace-structured-object dd {
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+  font-size: 10px;
+}
+
+.trace-structured-list {
+  display: grid;
+  gap: 4px;
+  margin: 0;
+  padding-left: 20px;
+}
+
+.trace-scalar {
+  overflow-wrap: anywhere;
   font-size: 10px;
 }
 

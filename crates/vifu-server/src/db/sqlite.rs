@@ -4390,13 +4390,19 @@ pub async fn complete_trace(
 
 pub async fn list_traces(
     pool: &SqlitePool,
-    endpoint_id: Option<Uuid>,
-    project_id: Option<Uuid>,
-    request_id: Option<Uuid>,
-    trace_id: Option<Uuid>,
-    allowed_profile_ids: Option<&[Uuid]>,
-    limit: i64,
+    options: TraceListOptions<'_>,
 ) -> Result<Vec<EndpointTrace>, ApiError> {
+    let TraceListOptions {
+        endpoint_id,
+        project_id,
+        request_id,
+        trace_id,
+        allowed_profile_ids,
+        created_from,
+        created_before,
+        cursor,
+        limit,
+    } = options;
     let mut query = QueryBuilder::<Sqlite>::new(
         "SELECT trace.id, trace.request_id, trace.endpoint_id,
                 trace.project_id, trace.gateway_session_id, trace.profile_id,
@@ -4499,8 +4505,29 @@ pub async fn list_traces(
             profiles.push_unseparated(")");
         }
     }
+    if let Some(created_from) = created_from {
+        query.push(if filtered { " AND " } else { " WHERE " });
+        query.push("trace.created_at >= ").push_bind(created_from);
+        filtered = true;
+    }
+    if let Some(created_before) = created_before {
+        query.push(if filtered { " AND " } else { " WHERE " });
+        query.push("trace.created_at < ").push_bind(created_before);
+        filtered = true;
+    }
+    if let Some(cursor) = cursor {
+        query.push(if filtered { " AND " } else { " WHERE " });
+        query
+            .push("(trace.created_at < ")
+            .push_bind(cursor.created_at)
+            .push(" OR (trace.created_at = ")
+            .push_bind(cursor.created_at)
+            .push(" AND trace.id < ")
+            .push_bind(cursor.trace_id)
+            .push("))");
+    }
     query
-        .push(" ORDER BY trace.created_at DESC LIMIT ")
+        .push(" ORDER BY trace.created_at DESC, trace.id DESC LIMIT ")
         .push_bind(limit);
     query
         .build_query_as::<EndpointTrace>()

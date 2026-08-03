@@ -39,27 +39,13 @@ import {
   runtimeBrowserRequest,
   runtimeBrowserUpload,
 } from "@vifu/runtime-console";
+import { consoleRouteHref, readConsoleRoute, type ConsoleRoute } from "./route";
 
 const CONSOLE_ROUTE_CHANGE_EVENT = "vifu-console-route-change";
 const RUNTIME_API_BASE = "/api/runtime";
-const SECTION_IDS = new Set<DashboardSection>([
-  "overview",
-  "agents",
-  "providers",
-  "deployments",
-  "api",
-  "logs",
-  "settings",
-]);
-
 if (typeof window !== "undefined") {
   window.__VIFU_RUNTIME_CONSOLE_API_BASE__ = RUNTIME_API_BASE;
 }
-
-type ConsoleRoute = {
-  projectSlug?: string;
-  section: DashboardSection;
-};
 
 function EmbeddedRuntimeConsole() {
   const [route, setRoute] = useRoute();
@@ -143,11 +129,11 @@ function EmbeddedState({
 }
 
 function useRoute(): [ConsoleRoute, (route: ConsoleRoute) => void] {
-  const [route, setRouteState] = useState(() => readRoute(window.location.pathname));
+  const [route, setRouteState] = useState(() => readBrowserRoute());
 
   useEffect(() => {
-    const onPopState = () => setRouteState(readRoute(window.location.pathname));
-    const onConsoleRouteChange = () => setRouteState(readRoute(window.location.pathname));
+    const onPopState = () => setRouteState(readBrowserRoute());
+    const onConsoleRouteChange = () => setRouteState(readBrowserRoute());
     window.addEventListener("popstate", onPopState);
     window.addEventListener(CONSOLE_ROUTE_CHANGE_EVENT, onConsoleRouteChange);
     return () => {
@@ -221,30 +207,20 @@ function navigateBrowserHref(href: string) {
 }
 
 function pushBrowserRoute(route: ConsoleRoute) {
-  const href = routeHref(route);
-  if (href !== window.location.pathname) {
+  const href = consoleRouteHref(route);
+  const current = `${window.location.pathname}${window.location.search}${window.location.hash}`;
+  if (href !== current) {
     window.history.pushState(null, "", href);
   }
 }
 
 function routeFromHref(href: string): ConsoleRoute {
-  return readRoute(new URL(href, window.location.origin).pathname);
+  const url = new URL(href, window.location.origin);
+  return readConsoleRoute(url.pathname, url.search, url.hash);
 }
 
-function readRoute(pathname: string): ConsoleRoute {
-  const parts = pathname.split("/").filter(Boolean);
-  if (parts[0] !== "project") return { section: "overview" };
-  const projectSlug = parts[1] ? decodeURIComponent(parts[1]) : undefined;
-  const section = SECTION_IDS.has(parts[2] as DashboardSection)
-    ? parts[2] as DashboardSection
-    : "overview";
-  return { projectSlug, section };
-}
-
-function routeHref(route: ConsoleRoute): string {
-  if (!route.projectSlug) return "/project";
-  if (route.section === "overview") return `/project/${encodeURIComponent(route.projectSlug)}`;
-  return `/project/${encodeURIComponent(route.projectSlug)}/${encodeURIComponent(route.section)}`;
+function readBrowserRoute(): ConsoleRoute {
+  return readConsoleRoute(window.location.pathname, window.location.search, window.location.hash);
 }
 
 async function loadEmbeddedDashboardData(

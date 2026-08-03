@@ -37,6 +37,18 @@ export type TraceUrlSelection = {
   observationId: string | null;
 };
 
+export type TraceListCursor = {
+  createdAt: string;
+  traceId: string;
+};
+
+export type TraceListQuery = {
+  before?: TraceListCursor | null;
+  from?: string | null;
+  limit?: number;
+  to?: string | null;
+};
+
 const RUNNING_STATUSES = new Set(["created", "pending", "queued", "running", "started", "streaming"]);
 const PASSED_STATUSES = new Set(["completed", "ok", "passed", "success", "succeeded"]);
 const PROBLEM_STATUSES = new Set(["cancelled", "error", "failed", "rejected", "timed_out", "timeout"]);
@@ -340,6 +352,22 @@ export function exactTraceLookupPath(
   value: string,
 ): string {
   return `project/${encodeURIComponent(projectSlug)}/traces?${field}=${encodeURIComponent(value)}&limit=1`;
+}
+
+export function traceListPath(
+  projectSlug: string,
+  query: TraceListQuery = {},
+): string {
+  const params = new URLSearchParams();
+  if (query.from) params.set("from", query.from);
+  if (query.to) params.set("to", query.to);
+  if (query.before) {
+    params.set("beforeCreatedAt", query.before.createdAt);
+    params.set("beforeTraceId", query.before.traceId);
+  }
+  if (query.limit !== undefined) params.set("limit", String(query.limit));
+  const suffix = params.toString();
+  return `project/${encodeURIComponent(projectSlug)}/traces${suffix ? `?${suffix}` : ""}`;
 }
 
 export function retainPinnedTrace<T extends { id: string }>(

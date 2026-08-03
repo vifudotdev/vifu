@@ -11,8 +11,8 @@ use uuid::Uuid;
 use crate::monitor::{FeedbackEvent, FeedbackOutcome, RuntimeStage, RuntimeTerminal, StageStatus};
 
 use super::model::{
-    AgentLane, App, ComparisonRow, LaneFilter, LaneOutcome, MetricSummary, ObservationType,
-    SystemMetrics, TraceObservation, TraceRecord, TraceTab, View,
+    AgentLane, App, ComparisonRow, FeedbackRecord, LaneFilter, LaneOutcome, MetricSummary,
+    ObservationType, SystemMetrics, TraceObservation, TraceRecord, TraceTab, View,
 };
 
 const RAIL_QUANTUM: Duration = Duration::from_millis(250);
@@ -140,16 +140,12 @@ fn render_lanes(frame: &mut Frame<'_>, app: &App, area: Rect, now: Instant, no_c
             || "— NOT RUN YET".to_string(),
             |elapsed| elapsed_rail(outcome, elapsed, stage, if wide { 24 } else { 17 }),
         );
+        let is_selected = selected == Some(lane.key.as_str());
         let mut cells = vec![
-            Cell::from(format!(
-                "{}{:02}",
-                if selected == Some(lane.key.as_str()) {
-                    "›"
-                } else {
-                    " "
-                },
-                index + 1
-            )),
+            Cell::from(Line::from(vec![
+                selection_marker(is_selected, no_color),
+                Span::raw(format!("{:02}", index + 1)),
+            ])),
             Cell::from(format!("{}{}", lane.name, concurrency.unwrap_or_default())),
         ];
         if medium {
@@ -174,8 +170,8 @@ fn render_lanes(frame: &mut Frame<'_>, app: &App, area: Rect, now: Instant, no_c
         } else {
             format!("{} {}", outcome.symbol(), outcome.label())
         }));
-        let style = if selected == Some(lane.key.as_str()) {
-            selected_style(outcome_style(outcome, no_color), no_color)
+        let style = if is_selected {
+            outcome_style(outcome, no_color).add_modifier(Modifier::BOLD)
         } else {
             outcome_style(outcome, no_color)
         };
@@ -461,11 +457,10 @@ fn render_agent_requests(
         .map(|(index, trace)| {
             let selected = app.selected_trace == Some(trace.id);
             let mut cells = vec![
-                Cell::from(format!(
-                    "{}{:02}",
-                    if selected { "›" } else { " " },
-                    index + 1
-                )),
+                Cell::from(Line::from(vec![
+                    selection_marker(selected, no_color),
+                    Span::raw(format!("{:02}", index + 1)),
+                ])),
                 Cell::from(shorten_capability(&trace.capability)),
                 Cell::from(short_uuid(trace.id)),
                 Cell::from(trace.model.clone()),
@@ -486,7 +481,7 @@ fn render_agent_requests(
                 trace.outcome.label()
             )));
             Row::new(cells).style(if selected {
-                selected_style(outcome_style(trace.outcome, no_color), no_color)
+                outcome_style(trace.outcome, no_color).add_modifier(Modifier::BOLD)
             } else {
                 outcome_style(trace.outcome, no_color)
             })
@@ -608,6 +603,9 @@ fn render_trace(frame: &mut Frame<'_>, app: &App, area: Rect, now: Instant, no_c
         frame.render_widget(Paragraph::new("Trace is no longer available"), area);
         return;
     };
+    let agent_name = app
+        .lane(agent_key)
+        .map_or(trace.agent_id.as_str(), |lane| lane.name.as_str());
     frame.render_widget(
         Paragraph::new(vec![
             Line::styled(
@@ -622,7 +620,7 @@ fn render_trace(frame: &mut Frame<'_>, app: &App, area: Rect, now: Instant, no_c
             ),
             Line::raw(format!(
                 " {} · {} · {} · {}",
-                trace.agent_id, trace.capability, trace.provider, trace.model
+                agent_name, trace.capability, trace.provider, trace.model
             )),
         ]),
         sections[0],
@@ -689,9 +687,9 @@ fn render_trace(frame: &mut Frame<'_>, app: &App, area: Rect, now: Instant, no_c
         if app.search_active {
             "Search Trace: type · Enter Keep · Esc Cancel"
         } else if area.width < 70 {
-            "↑↓ Observation  → Inspect  Tab Detail  ← Back"
+            "↑↓ Preview  Tab Detail  ← Back"
         } else {
-            "↑↓ Observation  →/Enter Inspect  Tab Detail  T Tree/Timeline  / Search  E Editor  ← Back"
+            "↑↓ Preview  Tab Detail  T Tree/Timeline  / Search  E Editor  B Dashboard  ← Back"
         },
         app.notice.as_deref(),
     );
@@ -733,16 +731,17 @@ fn render_observations(frame: &mut Frame<'_>, pane: TraceObservationPane<'_>) {
         outcome_style(trace.outcome, no_color),
         root_cursor,
         root_selected,
-        no_color,
     );
     let root = root_matches.then(|| {
         Row::new([
-            Cell::from(format!(
-                "{}{}{} Generation",
-                if root_cursor { "›" } else { " " },
-                if root_selected { "●" } else { " " },
-                if searching { " *" } else { "" },
-            )),
+            Cell::from(Line::from(vec![
+                selection_marker(root_cursor, no_color),
+                Span::raw(format!(
+                    "{}{} Generation",
+                    if root_selected { "●" } else { " " },
+                    if searching { " *" } else { "" },
+                )),
+            ])),
             Cell::from(format_duration(trace.elapsed(now))),
         ])
         .style(root_style)
@@ -762,22 +761,23 @@ fn render_observations(frame: &mut Frame<'_>, pane: TraceObservationPane<'_>) {
         let is_selected = selected_observation == Some(observation.id);
         let indent = "  ".repeat(observation_depth(trace, observation));
         Row::new([
-            Cell::from(format!(
-                "{}{}{} {indent}{} {} ({})",
-                if is_cursor { "›" } else { " " },
-                if is_selected { "●" } else { " " },
-                if searching { " *" } else { "" },
-                stage_status_symbol(status),
-                observation.name,
-                observation.observation_type.label(),
-            )),
+            Cell::from(Line::from(vec![
+                selection_marker(is_cursor, no_color),
+                Span::raw(format!(
+                    "{}{} {indent}{} {} ({})",
+                    if is_selected { "●" } else { " " },
+                    if searching { " *" } else { "" },
+                    stage_status_symbol(status),
+                    observation.name,
+                    observation.observation_type.label(),
+                )),
+            ])),
             Cell::from(detail),
         ])
         .style(selection_style(
             stage_style(status, no_color),
             is_cursor,
             is_selected,
-            no_color,
         ))
     });
     let visible_rows = area.height.saturating_sub(2) as usize;
@@ -910,8 +910,9 @@ fn render_trace_detail(
                 },
             );
             let runtime_result = trace_result_summary(trace);
-            vec![
-                Line::raw(runtime_result),
+            let mut lines = vec![Line::raw(runtime_result)];
+            lines.extend(trace_summary_io_lines(trace));
+            lines.extend([
                 Line::raw(format!("Total: {}", format_duration(trace.elapsed(now)))),
                 Line::raw(format!(
                     "Longest observed: {}",
@@ -937,7 +938,8 @@ fn render_trace_detail(
                     trace.error.as_deref().unwrap_or("none")
                 )),
                 search_status_line(search, search_match),
-            ]
+            ]);
+            lines
         }
         TraceTab::Io => render_io_lines(trace, search, search_match),
         TraceTab::Metadata => vec![
@@ -1089,8 +1091,8 @@ fn render_observation_detail(
         ],
         (TraceTab::Io, Some(observation)) => {
             let mut lines = Vec::new();
-            append_json_lines(&mut lines, "INPUT", observation.input.as_ref());
-            append_json_lines(&mut lines, "OUTPUT", observation.output.as_ref());
+            append_io_lines(&mut lines, "INPUT", observation.input.as_ref());
+            append_io_lines(&mut lines, "OUTPUT", observation.output.as_ref());
             lines.push(search_status_line(search, search_match));
             lines
         }
@@ -1155,17 +1157,6 @@ fn render_observation_detail(
                 .feedback
                 .iter()
                 .filter(|feedback| feedback.observation_id == observation_id)
-                .map(|feedback| {
-                    Line::raw(format!(
-                        "{}: {}{}",
-                        feedback_event_label(feedback.event),
-                        feedback_outcome_label(feedback.outcome),
-                        feedback
-                            .message
-                            .as_deref()
-                            .map_or_else(String::new, |message| format!(" · {message}"))
-                    ))
-                })
                 .collect::<Vec<_>>();
             if feedback.is_empty() {
                 vec![
@@ -1173,10 +1164,12 @@ fn render_observation_detail(
                     search_status_line(search, search_match),
                 ]
             } else {
-                feedback
-                    .into_iter()
-                    .chain(std::iter::once(search_status_line(search, search_match)))
-                    .collect()
+                let mut lines = Vec::new();
+                for feedback in feedback {
+                    append_feedback_lines(&mut lines, feedback);
+                }
+                lines.push(search_status_line(search, search_match));
+                lines
             }
         }
         (TraceTab::Events, Some(observation)) => vec![
@@ -1236,29 +1229,277 @@ fn render_io_lines(trace: &TraceRecord, search: &str, matched: bool) -> Vec<Line
             "REDACTED + BOUNDED"
         }
     ))];
-    append_json_lines(&mut lines, "INPUT", trace.input.as_ref());
-    append_json_lines(&mut lines, "OUTPUT", trace.output.as_ref());
+    append_io_lines(&mut lines, "INPUT", trace.input.as_ref());
+    append_io_lines(&mut lines, "OUTPUT", trace.output.as_ref());
     lines.push(search_status_line(search, matched));
     lines
 }
 
-fn append_json_lines(
-    lines: &mut Vec<Line<'static>>,
-    label: &str,
-    value: Option<&serde_json::Value>,
-) {
+fn trace_summary_io_lines(trace: &TraceRecord) -> Vec<Line<'static>> {
+    let input_message = trace
+        .input
+        .as_ref()
+        .and_then(|value| chat_messages(value).into_iter().last());
+    let output_message = trace
+        .output
+        .as_ref()
+        .and_then(|value| chat_messages(value).into_iter().next());
+    if input_message.is_none() && output_message.is_none() {
+        return Vec::new();
+    }
+    let mut lines = vec![section_heading("CONVERSATION".to_string())];
+    if let Some(message) = input_message {
+        append_chat_message(&mut lines, message);
+    }
+    if let Some(message) = output_message {
+        append_chat_message(&mut lines, message);
+    }
+    lines
+}
+
+fn append_io_lines(lines: &mut Vec<Line<'static>>, label: &str, value: Option<&serde_json::Value>) {
+    let Some(value) = value else {
+        lines.push(section_heading(format!("{label} · NOT CAPTURED")));
+        return;
+    };
+    let messages = chat_messages(value);
+    if !messages.is_empty() {
+        lines.push(section_heading(format!("{label} · CHAT")));
+        if let Some(model) = value.get("model").and_then(serde_json::Value::as_str) {
+            lines.push(Line::raw(format!("MODEL  {model}")));
+        }
+        for message in messages {
+            append_chat_message(lines, message);
+        }
+        return;
+    }
+    if append_embedding_lines(lines, label, value) {
+        return;
+    }
+    lines.push(section_heading(format!("{label} · DATA")));
+    append_structured_value(lines, value, 0);
+}
+
+fn section_heading(title: String) -> Line<'static> {
+    Line::styled(title, Style::default().add_modifier(Modifier::BOLD))
+}
+
+fn chat_messages(value: &serde_json::Value) -> Vec<&serde_json::Value> {
+    if let Some(messages) = value.get("messages").and_then(serde_json::Value::as_array) {
+        return messages.iter().collect();
+    }
+    if let Some(choices) = value.get("choices").and_then(serde_json::Value::as_array) {
+        let messages = choices
+            .iter()
+            .filter_map(|choice| choice.get("message"))
+            .collect::<Vec<_>>();
+        if !messages.is_empty() {
+            return messages;
+        }
+    }
+    if let Some(message) = value
+        .get("message")
+        .filter(|message| message.get("role").is_some())
+    {
+        return vec![message];
+    }
+    value
+        .as_array()
+        .filter(|values| values.iter().any(|item| item.get("role").is_some()))
+        .map_or_else(Vec::new, |values| values.iter().collect())
+}
+
+fn append_chat_message(lines: &mut Vec<Line<'static>>, message: &serde_json::Value) {
+    let role = message
+        .get("role")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("message")
+        .to_ascii_uppercase();
+    let content = message_content(message.get("content"));
+    if content.is_empty() {
+        lines.push(Line::raw(role));
+    } else {
+        for (index, text) in content.into_iter().enumerate() {
+            lines.push(Line::raw(if index == 0 {
+                format!("{role}  {text}")
+            } else {
+                format!("{}  {text}", " ".repeat(role.chars().count()))
+            }));
+        }
+    }
+    if let Some(tool_calls) = message
+        .get("tool_calls")
+        .or_else(|| message.get("toolCalls"))
+        .and_then(serde_json::Value::as_array)
+    {
+        for tool_call in tool_calls {
+            append_tool_call(lines, tool_call);
+        }
+    }
+}
+
+fn message_content(value: Option<&serde_json::Value>) -> Vec<String> {
+    match value {
+        None | Some(serde_json::Value::Null) => Vec::new(),
+        Some(serde_json::Value::String(text)) => text.lines().map(str::to_string).collect(),
+        Some(serde_json::Value::Array(parts)) => parts
+            .iter()
+            .filter_map(|part| match part {
+                serde_json::Value::String(text) => Some(text.clone()),
+                serde_json::Value::Object(object) => object
+                    .get("text")
+                    .or_else(|| object.get("input_text"))
+                    .or_else(|| object.get("output_text"))
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string)
+                    .or_else(|| {
+                        object
+                            .get("type")
+                            .and_then(serde_json::Value::as_str)
+                            .filter(|kind| kind.contains("image") || kind.contains("media"))
+                            .map(|_| "[image/media omitted]".to_string())
+                    }),
+                _ => None,
+            })
+            .collect(),
+        Some(value) => vec![scalar_text(value)],
+    }
+}
+
+fn append_tool_call(lines: &mut Vec<Line<'static>>, tool_call: &serde_json::Value) {
+    let function = tool_call.get("function").unwrap_or(tool_call);
+    let name = function
+        .get("name")
+        .or_else(|| function.get("toolName"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("unnamed tool");
     lines.push(Line::styled(
-        format!("{label}:"),
+        format!("TOOL  {name}"),
         Style::default().add_modifier(Modifier::BOLD),
     ));
-    match value {
-        Some(value) => {
-            let rendered =
-                serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string());
-            lines.extend(rendered.lines().map(|line| Line::raw(line.to_string())));
+    let Some(arguments) = function
+        .get("arguments")
+        .or_else(|| function.get("args"))
+        .or_else(|| function.get("input"))
+    else {
+        return;
+    };
+    if let Some(encoded) = arguments.as_str() {
+        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(encoded) {
+            append_structured_value(lines, &parsed, 2);
+        } else {
+            lines.push(Line::raw(format!("  arguments: {encoded}")));
         }
-        None => lines.push(Line::raw("<not captured>")),
+    } else {
+        append_structured_value(lines, arguments, 2);
     }
+}
+
+fn append_embedding_lines(
+    lines: &mut Vec<Line<'static>>,
+    label: &str,
+    value: &serde_json::Value,
+) -> bool {
+    if let Some(input) = value.get("input") {
+        lines.push(section_heading(format!("{label} · TEXT")));
+        append_structured_value(lines, input, 0);
+        return true;
+    }
+    let Some(data) = value.get("data").and_then(serde_json::Value::as_array) else {
+        return false;
+    };
+    let Some(first_embedding) = data
+        .first()
+        .and_then(|item| item.get("embedding"))
+        .and_then(serde_json::Value::as_array)
+    else {
+        return false;
+    };
+    lines.push(section_heading(format!("{label} · EMBEDDINGS")));
+    lines.push(Line::raw(format!(
+        "{} vectors · {} captured dimensions{}",
+        data.len(),
+        first_embedding.len(),
+        if first_embedding.len() >= 16 {
+            " (bounded)"
+        } else {
+            ""
+        }
+    )));
+    true
+}
+
+fn append_structured_value(
+    lines: &mut Vec<Line<'static>>,
+    value: &serde_json::Value,
+    indent: usize,
+) {
+    let padding = " ".repeat(indent);
+    match value {
+        serde_json::Value::Object(object) => {
+            if object.is_empty() {
+                lines.push(Line::raw(format!("{padding}<empty>")));
+                return;
+            }
+            for (key, value) in object {
+                if is_scalar(value) {
+                    lines.push(Line::raw(format!(
+                        "{padding}{}: {}",
+                        readable_key(key),
+                        scalar_text(value)
+                    )));
+                } else {
+                    lines.push(Line::raw(format!("{padding}{}:", readable_key(key))));
+                    append_structured_value(lines, value, indent.saturating_add(2));
+                }
+            }
+        }
+        serde_json::Value::Array(values) => {
+            if values.is_empty() {
+                lines.push(Line::raw(format!("{padding}<empty>")));
+            } else if values.iter().all(serde_json::Value::is_number) {
+                lines.push(Line::raw(format!(
+                    "{padding}<{} numeric values>",
+                    values.len()
+                )));
+            } else if values.iter().all(is_scalar) {
+                for value in values {
+                    lines.push(Line::raw(format!("{padding}• {}", scalar_text(value))));
+                }
+            } else {
+                for (index, value) in values.iter().enumerate() {
+                    lines.push(Line::raw(format!("{padding}#{}", index + 1)));
+                    append_structured_value(lines, value, indent.saturating_add(2));
+                }
+            }
+        }
+        value => lines.push(Line::raw(format!("{padding}{}", scalar_text(value)))),
+    }
+}
+
+fn is_scalar(value: &serde_json::Value) -> bool {
+    matches!(
+        value,
+        serde_json::Value::Null
+            | serde_json::Value::Bool(_)
+            | serde_json::Value::Number(_)
+            | serde_json::Value::String(_)
+    )
+}
+
+fn scalar_text(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::Null => "null".to_string(),
+        serde_json::Value::Bool(value) => value.to_string(),
+        serde_json::Value::Number(value) => value.to_string(),
+        serde_json::Value::String(value) => value.clone(),
+        serde_json::Value::Array(values) => format!("{} items", values.len()),
+        serde_json::Value::Object(values) => format!("{} fields", values.len()),
+    }
+}
+
+fn readable_key(key: &str) -> String {
+    key.replace('_', " ")
 }
 
 fn render_score_lines(trace: &TraceRecord, search: &str, matched: bool) -> Vec<Line<'static>> {
@@ -1268,25 +1509,11 @@ fn render_score_lines(trace: &TraceRecord, search: &str, matched: bool) -> Vec<L
             Line::raw("Missing feedback is unknown, never a failure."),
         ]
     } else {
-        trace
-            .feedback
-            .iter()
-            .map(|feedback| {
-                Line::raw(format!(
-                    "{}  {}{}{}",
-                    feedback_event_label(feedback.event),
-                    feedback_outcome_label(feedback.outcome),
-                    feedback
-                        .path
-                        .as_deref()
-                        .map_or_else(String::new, |path| { format!(" · {path}") }),
-                    feedback
-                        .message
-                        .as_deref()
-                        .map_or_else(String::new, |message| { format!(" · {message}") })
-                ))
-            })
-            .collect()
+        let mut lines = Vec::new();
+        for feedback in &trace.feedback {
+            append_feedback_lines(&mut lines, feedback);
+        }
+        lines
     };
     lines.push(search_status_line(search, matched));
     lines
@@ -1297,6 +1524,35 @@ fn feedback_event_label(event: FeedbackEvent) -> &'static str {
         FeedbackEvent::OutputAccepted => "output accepted",
         FeedbackEvent::ActionApplied => "action applied",
         FeedbackEvent::FramePresented => "frame presented",
+    }
+}
+
+fn feedback_event_explanation(event: FeedbackEvent) -> &'static str {
+    match event {
+        FeedbackEvent::OutputAccepted => {
+            "Whether the application accepted and parsed the model output"
+        }
+        FeedbackEvent::ActionApplied => {
+            "Whether the requested tool or application action was applied"
+        }
+        FeedbackEvent::FramePresented => {
+            "Whether the resulting frame became visible in the application"
+        }
+    }
+}
+
+fn append_feedback_lines(lines: &mut Vec<Line<'static>>, feedback: &FeedbackRecord) {
+    lines.push(section_heading(format!(
+        "{} · {}",
+        feedback_event_label(feedback.event).to_ascii_uppercase(),
+        feedback_outcome_label(feedback.outcome)
+    )));
+    lines.push(Line::raw(feedback_event_explanation(feedback.event)));
+    if let Some(path) = feedback.path.as_deref() {
+        lines.push(Line::raw(format!("Path: {path}")));
+    }
+    if let Some(message) = feedback.message.as_deref() {
+        lines.push(Line::raw(format!("Detail: {message}")));
     }
 }
 
@@ -1873,16 +2129,19 @@ fn stage_style(status: StageStatus, no_color: bool) -> Style {
     }
 }
 
-fn selection_style(style: Style, cursor: bool, selected: bool, no_color: bool) -> Style {
-    let style = if selected {
+fn selection_style(style: Style, cursor: bool, selected: bool) -> Style {
+    if selected || cursor {
         style.add_modifier(Modifier::BOLD)
     } else {
         style
-    };
-    if cursor {
-        selected_style(style, no_color)
+    }
+}
+
+fn selection_marker(selected: bool, no_color: bool) -> Span<'static> {
+    if selected {
+        Span::styled("›", selected_style(Style::default(), no_color))
     } else {
-        style
+        Span::raw(" ")
     }
 }
 
@@ -1954,6 +2213,7 @@ mod tests {
     use ratatui::backend::TestBackend;
     use ratatui::style::{Color, Modifier};
     use ratatui::Terminal;
+    use serde_json::json;
     use uuid::Uuid;
     use vifu_gateway::optimization::{CombinationKind, RouteCombination};
 
@@ -2315,6 +2575,236 @@ mod tests {
 
         assert_eq!(selected.fg, Color::Cyan);
         assert!(!selected.modifier.contains(Modifier::REVERSED));
+    }
+
+    #[test]
+    fn selected_failed_request_keeps_its_semantic_red_color() {
+        let mut app = App::default();
+        let now = Instant::now();
+        let invocation_id = Uuid::new_v4();
+        app.apply(
+            RuntimeEvent::InvocationStarted {
+                invocation_id,
+                agent_id: "planner".to_string(),
+                agent_name: "Planner".to_string(),
+                source_agent_id: "local".to_string(),
+                capability: "chat".to_string(),
+                provider: "local".to_string(),
+                model: "qwen".to_string(),
+                started_unix_ms: 1,
+            },
+            now,
+        );
+        app.apply(
+            RuntimeEvent::InvocationFinished {
+                invocation_id,
+                elapsed: Duration::from_millis(10),
+                terminal: RuntimeTerminal::ProviderFailed,
+                error: Some("provider request failed".to_string()),
+            },
+            now,
+        );
+        let backend = TestBackend::new(120, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        terminal
+            .draw(|frame| render(frame, &mut app, now, false))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let selected = buffer
+            .content
+            .iter()
+            .find(|cell| cell.symbol() == "›")
+            .expect("selected Agent marker");
+        let failed = buffer
+            .content
+            .iter()
+            .find(|cell| cell.symbol() == "✕")
+            .expect("failed result marker");
+
+        assert_eq!(selected.fg, Color::Cyan);
+        assert_eq!(failed.fg, Color::Red);
+
+        app.open_selected_agent();
+        terminal
+            .draw(|frame| render(frame, &mut app, now, false))
+            .unwrap();
+        let failed = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .find(|cell| cell.symbol() == "✕")
+            .expect("failed Agent request marker");
+
+        assert_eq!(failed.fg, Color::Red);
+    }
+
+    #[test]
+    fn trace_io_renders_chat_messages_and_tool_calls_as_readable_content() {
+        let mut app = App::default();
+        let now = Instant::now();
+        let trace_id = Uuid::new_v4();
+        app.apply(
+            RuntimeEvent::InvocationStarted {
+                invocation_id: trace_id,
+                agent_id: "planner".to_string(),
+                agent_name: "Planner".to_string(),
+                source_agent_id: "remote".to_string(),
+                capability: "chat".to_string(),
+                provider: "openai-compatible".to_string(),
+                model: "gpt-test".to_string(),
+                started_unix_ms: 1,
+            },
+            now,
+        );
+        app.apply(
+            RuntimeEvent::IoCaptured {
+                invocation_id: trace_id,
+                input: Some(json!({
+                    "model": "gpt-test",
+                    "messages": [
+                        {"role": "system", "content": "Keep actions grounded."},
+                        {"role": "user", "content": "Cut the grass."}
+                    ]
+                })),
+                output: Some(json!({
+                    "choices": [{
+                        "message": {
+                            "role": "assistant",
+                            "content": "I will move east.",
+                            "tool_calls": [{
+                                "function": {
+                                    "name": "move",
+                                    "arguments": "{\"direction\":\"east\"}"
+                                }
+                            }]
+                        }
+                    }]
+                })),
+                truncated: false,
+            },
+            now,
+        );
+        app.view = View::Trace {
+            agent_key: "planner\0".to_string(),
+            trace_id,
+            tab: TraceTab::Io,
+            timeline: false,
+            observation_cursor: None,
+            selected_observation: None,
+        };
+
+        let content = rendered_content(&mut app, now, 180, 36);
+
+        assert!(content.contains("INPUT · CHAT"));
+        assert!(content.contains("SYSTEM  Keep actions grounded."));
+        assert!(content.contains("USER  Cut the grass."));
+        assert!(content.contains("OUTPUT · CHAT"));
+        assert!(content.contains("ASSISTANT  I will move east."));
+        assert!(content.contains("TOOL  move"));
+        assert!(content.contains("direction: east"));
+    }
+
+    #[test]
+    fn trace_summary_leads_with_the_current_conversation_and_agent_name() {
+        let mut app = App::default();
+        let now = Instant::now();
+        let trace_id = Uuid::new_v4();
+        let profile_id = Uuid::new_v4().to_string();
+        app.apply(
+            RuntimeEvent::InvocationStarted {
+                invocation_id: trace_id,
+                agent_id: profile_id.clone(),
+                agent_name: "Stardew Valley farming/0".to_string(),
+                source_agent_id: "remote".to_string(),
+                capability: "chat".to_string(),
+                provider: "openai-compatible".to_string(),
+                model: "gpt-test".to_string(),
+                started_unix_ms: 1,
+            },
+            now,
+        );
+        app.apply(
+            RuntimeEvent::IoCaptured {
+                invocation_id: trace_id,
+                input: Some(json!({
+                    "messages": [
+                        {"role": "system", "content": "Long instructions"},
+                        {"role": "user", "content": "Cut the next patch of grass."}
+                    ]
+                })),
+                output: Some(json!({
+                    "choices": [{"message": {"role": "assistant", "content": "Moving east."}}]
+                })),
+                truncated: false,
+            },
+            now,
+        );
+        app.view = View::Trace {
+            agent_key: format!("{profile_id}\0"),
+            trace_id,
+            tab: TraceTab::Summary,
+            timeline: false,
+            observation_cursor: None,
+            selected_observation: None,
+        };
+
+        let content = rendered_content(&mut app, now, 180, 36);
+
+        assert!(content.contains("Stardew Valley farming/0 · chat"));
+        assert!(content.contains("CONVERSATION"));
+        assert!(content.contains("USER  Cut the next patch of grass."));
+        assert!(content.contains("ASSISTANT  Moving east."));
+        assert!(!content.contains("SYSTEM  Long instructions"));
+    }
+
+    #[test]
+    fn score_view_explains_the_application_check() {
+        let mut app = App::default();
+        let now = Instant::now();
+        let trace_id = Uuid::new_v4();
+        app.apply(
+            RuntimeEvent::InvocationStarted {
+                invocation_id: trace_id,
+                agent_id: "planner".to_string(),
+                agent_name: "Planner".to_string(),
+                source_agent_id: "local".to_string(),
+                capability: "chat".to_string(),
+                provider: "local".to_string(),
+                model: "qwen".to_string(),
+                started_unix_ms: 1,
+            },
+            now,
+        );
+        app.apply(
+            RuntimeEvent::ApplicationFeedback {
+                invocation_id: trace_id,
+                observation_id: Uuid::new_v4(),
+                start_offset: Duration::from_millis(10),
+                end_offset: Duration::from_millis(11),
+                event: FeedbackEvent::OutputAccepted,
+                outcome: FeedbackOutcome::Fail,
+                message: Some("could not parse action".to_string()),
+                path: Some("$.action".to_string()),
+            },
+            now,
+        );
+        app.view = View::Trace {
+            agent_key: "planner\0".to_string(),
+            trace_id,
+            tab: TraceTab::Scores,
+            timeline: false,
+            observation_cursor: None,
+            selected_observation: None,
+        };
+
+        let content = rendered_content(&mut app, now, 160, 28);
+
+        assert!(content.contains("OUTPUT ACCEPTED · FAIL"));
+        assert!(content.contains("Whether the application accepted and parsed the model output"));
+        assert!(content.contains("Path: $.action"));
+        assert!(content.contains("could not parse action"));
     }
 
     #[test]

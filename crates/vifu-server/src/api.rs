@@ -10,7 +10,7 @@ use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use base64::Engine;
-use chrono::{Duration as ChronoDuration, Utc};
+use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -38,12 +38,12 @@ use crate::models::{
     ApiKeyPermissions, ApiKeyRecord, AssignProjectOwner, BootstrapGatewayRuntimeRelease,
     Capabilities, ClaimGuestProject, CreateApiKey, CreateBinding, CreateEndpoint, CreateProfile,
     CreateProfileVersion, CreateProject, CreateProjectProvider, CreateRuntimeDeployment,
-    CreatedApiKey, CustomProvider, EndpointRoute, ImportProjectAgent, ImportProjectProfile,
-    ImportProjectProvider, ImportProjectSettings, ProfileCapabilityDraft, ProjectOwnership,
-    ProviderAdapter, ProviderAdapterField, ProviderConnection, ProviderConnectionSecret,
-    RegisterAgentGateway, RuntimeDeployment, RuntimeDeploymentView, SetProfileRollout,
-    SyncProfileSource, TestProfile, UpdateApiKey, UpdateBinding, UpdateEndpoint, UpdateProfile,
-    UpdateProject, UpdateProjectProvider, UpdateRuntimeDeployment,
+    CreatedApiKey, CustomProvider, EndpointRoute, EndpointTrace, ImportProjectAgent,
+    ImportProjectProfile, ImportProjectProvider, ImportProjectSettings, ProfileCapabilityDraft,
+    ProjectOwnership, ProviderAdapter, ProviderAdapterField, ProviderConnection,
+    ProviderConnectionSecret, RegisterAgentGateway, RuntimeDeployment, RuntimeDeploymentView,
+    SetProfileRollout, SyncProfileSource, TestProfile, UpdateApiKey, UpdateBinding, UpdateEndpoint,
+    UpdateProfile, UpdateProject, UpdateProjectProvider, UpdateRuntimeDeployment,
 };
 use crate::openclaw_device;
 use crate::relay::RelayAgentProvider;
@@ -2841,7 +2841,69 @@ pub struct TraceQuery {
     project_id: Option<Uuid>,
     request_id: Option<Uuid>,
     trace_id: Option<Uuid>,
+    from: Option<DateTime<Utc>>,
+    to: Option<DateTime<Utc>>,
+    before_created_at: Option<DateTime<Utc>>,
+    before_trace_id: Option<Uuid>,
     limit: Option<i64>,
+}
+
+impl TraceQuery {
+    fn validate(&self) -> Result<(), ApiError> {
+        if self.before_created_at.is_some() != self.before_trace_id.is_some() {
+            return Err(ApiError::Invalid(
+                "beforeCreatedAt and beforeTraceId must be provided together".to_string(),
+            ));
+        }
+        if self.from.zip(self.to).is_some_and(|(from, to)| from >= to) {
+            return Err(ApiError::Invalid(
+                "from must be earlier than to".to_string(),
+            ));
+        }
+        let exact = self.request_id.is_some() || self.trace_id.is_some();
+        let ranged = self.from.is_some()
+            || self.to.is_some()
+            || self.before_created_at.is_some()
+            || self.before_trace_id.is_some();
+        if exact && ranged {
+            return Err(ApiError::Invalid(
+                "exact trace lookup cannot be combined with date or cursor filters".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn cursor(&self) -> Option<db::TraceCursor> {
+        Some(db::TraceCursor {
+            created_at: self.before_created_at?,
+            trace_id: self.before_trace_id?,
+        })
+    }
+
+    fn limit(&self) -> i64 {
+        self.limit.unwrap_or(100).clamp(1, 500)
+    }
+}
+
+fn trace_page_payload(mut traces: Vec<EndpointTrace>, limit: i64) -> Value {
+    let has_more = traces.len() > usize::try_from(limit).unwrap_or(usize::MAX);
+    if has_more {
+        traces.truncate(usize::try_from(limit).unwrap_or(usize::MAX));
+    }
+    let next_cursor = if has_more {
+        traces.last().map(|trace| {
+            json!({
+                "createdAt": trace.created_at,
+                "traceId": trace.id,
+            })
+        })
+    } else {
+        None
+    };
+    json!({
+        "traces": traces,
+        "nextCursor": next_cursor,
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2941,23 +3003,29 @@ pub async fn list_traces(
     Query(query): Query<TraceQuery>,
 ) -> Result<Json<Value>, ApiError> {
     deployment_admin(&state, &headers, Operation::DeploymentRead).await?;
+    query.validate()?;
     if query.endpoint_id.is_some() && query.project_id.is_some() {
         return Err(ApiError::Invalid(
             "endpointId and projectId cannot be combined".to_string(),
         ));
     }
-    let limit = query.limit.unwrap_or(100).clamp(1, 500);
-    Ok(Json(json!({
-        "traces": db::list_traces(
-            &state.pool,
-            query.endpoint_id,
-            query.project_id,
-            query.request_id,
-            query.trace_id,
-            None,
-            limit,
-        ).await?
-    })))
+    let limit = query.limit();
+    let traces = db::list_traces(
+        &state.pool,
+        db::TraceListOptions {
+            endpoint_id: query.endpoint_id,
+            project_id: query.project_id,
+            request_id: query.request_id,
+            trace_id: query.trace_id,
+            allowed_profile_ids: None,
+            created_from: query.from,
+            created_before: query.to,
+            cursor: query.cursor(),
+            limit: limit.saturating_add(1),
+        },
+    )
+    .await?;
+    Ok(Json(trace_page_payload(traces, limit)))
 }
 
 pub async fn list_trace_spans(
@@ -3212,6 +3280,7 @@ pub async fn list_project_traces(
     Query(query): Query<TraceQuery>,
 ) -> Result<Json<Value>, ApiError> {
     let authorized = authorized_project_trace_read(&state, &headers, &slug).await?;
+    query.validate()?;
     let project = &authorized.project;
     if query
         .project_id
@@ -3224,18 +3293,23 @@ pub async fn list_project_traces(
     if let Some(endpoint_id) = query.endpoint_id {
         project_endpoint(&state, project.project.id, endpoint_id).await?;
     }
-    let limit = query.limit.unwrap_or(100).clamp(1, 500);
-    Ok(Json(json!({
-        "traces": db::list_traces(
-            &state.pool,
-            query.endpoint_id,
-            Some(project.project.id),
-            query.request_id,
-            query.trace_id,
-            authorized.profile_scope.allowed_profile_ids(),
-            limit,
-        ).await?
-    })))
+    let limit = query.limit();
+    let traces = db::list_traces(
+        &state.pool,
+        db::TraceListOptions {
+            endpoint_id: query.endpoint_id,
+            project_id: Some(project.project.id),
+            request_id: query.request_id,
+            trace_id: query.trace_id,
+            allowed_profile_ids: authorized.profile_scope.allowed_profile_ids(),
+            created_from: query.from,
+            created_before: query.to,
+            cursor: query.cursor(),
+            limit: limit.saturating_add(1),
+        },
+    )
+    .await?;
+    Ok(Json(trace_page_payload(traces, limit)))
 }
 
 pub async fn list_project_trace_spans(
@@ -7872,7 +7946,7 @@ mod tests {
         prepare_project_provider_assignment_with_secret_key, profile_slug, project_slug,
         trace_model_parameters, validate_chat_completion_request, validate_embedding_request,
         validate_profile_version_input, validate_timeout, validated_provider_base_url,
-        AppFeedbackInput,
+        AppFeedbackInput, TraceQuery,
     };
     use crate::error::ApiError;
     use crate::models::{ApiKeyPermissions, EndpointPermission, ProfileCapabilityDraft};
@@ -7880,6 +7954,42 @@ mod tests {
     #[test]
     fn derives_profile_slugs() {
         assert_eq!(profile_slug(None, "Town Guide").unwrap(), "town-guide");
+    }
+
+    #[test]
+    fn trace_query_requires_a_complete_cursor_and_valid_date_window() {
+        let now = chrono::Utc::now();
+        let incomplete_cursor = TraceQuery {
+            endpoint_id: None,
+            project_id: None,
+            request_id: None,
+            trace_id: None,
+            from: None,
+            to: None,
+            before_created_at: Some(now),
+            before_trace_id: None,
+            limit: None,
+        };
+        assert!(matches!(
+            incomplete_cursor.validate(),
+            Err(ApiError::Invalid(message)) if message.contains("provided together")
+        ));
+
+        let reversed_window = TraceQuery {
+            endpoint_id: None,
+            project_id: None,
+            request_id: None,
+            trace_id: None,
+            from: Some(now),
+            to: Some(now),
+            before_created_at: None,
+            before_trace_id: None,
+            limit: None,
+        };
+        assert!(matches!(
+            reversed_window.validate(),
+            Err(ApiError::Invalid(message)) if message.contains("earlier than")
+        ));
     }
 
     #[test]
