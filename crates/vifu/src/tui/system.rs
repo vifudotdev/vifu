@@ -96,6 +96,7 @@ fn parse_linux_total_memory(meminfo: &str) -> Option<u64> {
 }
 
 #[cfg(target_os = "macos")]
+#[derive(Default)]
 #[repr(C)]
 struct RusageInfoV2 {
     uuid: [u8; 16],
@@ -115,31 +116,6 @@ struct RusageInfoV2 {
     child_interrupt_wakeups: u64,
     child_pageins: u64,
     child_elapsed_abstime: u64,
-}
-
-#[cfg(target_os = "macos")]
-impl Default for RusageInfoV2 {
-    fn default() -> Self {
-        Self {
-            uuid: [0; 16],
-            user_time: 0,
-            system_time: 0,
-            pkg_idle_wakeups: 0,
-            interrupt_wakeups: 0,
-            pageins: 0,
-            wired_size: 0,
-            resident_size: 0,
-            physical_footprint: 0,
-            process_start_abstime: 0,
-            process_exit_abstime: 0,
-            child_user_time: 0,
-            child_system_time: 0,
-            child_pkg_idle_wakeups: 0,
-            child_interrupt_wakeups: 0,
-            child_pageins: 0,
-            child_elapsed_abstime: 0,
-        }
-    }
 }
 
 #[cfg(target_os = "macos")]
