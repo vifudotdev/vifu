@@ -1,0 +1,45 @@
+{
+  "schemaVersion": 1,
+  "projectId": "godot-ios-embedding",
+  "providers": [
+    {
+      "id": "local-qwen",
+      "type": "llama",
+      "capabilities": ["chat"],
+      "settings": {},
+      "resources": {}
+    }
+  ],
+  "agents": [
+    {
+      "id": "embedded-agent",
+      "name": "Embedded Agent",
+      "provider": "local-qwen",
+      "capabilities": ["chat"],
+      "metadata": {
+        "persona": {
+          "instructions": "You are a helpful on-device assistant. Give clear, concise replies and ask at most one useful follow-up question."
+        },
+        "generation": {
+          "maxTokens": 220,
+          "temperature": 0.72,
+          "topP": 0.9
+        },
+        "source": {
+          "resourceId": "godot-ios-embedding"
+        }
+      }
+    }
+  ],
+  "endpoints": [
+    {
+      "name": "chat",
+      "agent": "embedded-agent",
+      "capability": "chat",
+      "timeoutMs": 120000
+    }
+  ],
+  "metadata": {
+    "source": "godot-ios-embedding-starter"
+  }
+}
