@@ -4,9 +4,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::gateway::GatewayRuntimeOptions;
 
-const CONFIG_FILE_NAME: &str = "config.json";
-const CONFIG_PROFILE_SUFFIX: &str = ".config.json";
-const CONFIG_VERSION: u32 = 1;
+const CONFIG_FILE_NAME: &str = "config.toml";
+const CONFIG_PROFILE_SUFFIX: &str = ".toml";
 const DEFAULT_LOCAL_DATABASE_FILE: &str = "vifu.sqlite";
 
 #[derive(Debug, Clone)]
@@ -17,9 +16,8 @@ pub struct LoadedRuntimeConfig {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(deny_unknown_fields, rename_all = "camelCase")]
+#[serde(deny_unknown_fields)]
 pub struct RuntimeConfig {
-    version: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub server: Option<ServerRuntimeConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -27,10 +25,11 @@ pub struct RuntimeConfig {
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
-#[serde(deny_unknown_fields, rename_all = "camelCase")]
+#[serde(deny_unknown_fields)]
 pub struct ServerRuntimeConfig {
+    pub address: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub listen: Option<String>,
+    pub dashboard: Option<ServerDashboardConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deployment_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -45,8 +44,14 @@ pub struct ServerRuntimeConfig {
     pub guest_bootstrap: Option<GuestBootstrapConfig>,
 }
 
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ServerDashboardConfig {
+    pub address: String,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(deny_unknown_fields, rename_all = "camelCase")]
+#[serde(deny_unknown_fields)]
 pub struct GuestBootstrapConfig {
     #[serde(default)]
     pub enabled: bool,
@@ -57,7 +62,7 @@ pub struct GuestBootstrapConfig {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(deny_unknown_fields, rename_all = "camelCase")]
+#[serde(deny_unknown_fields)]
 pub struct RuntimeExtensionConfig {
     pub manifest: PathBuf,
     pub base_url: String,
@@ -68,18 +73,15 @@ pub struct RuntimeExtensionConfig {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(deny_unknown_fields, rename_all = "camelCase")]
+#[serde(deny_unknown_fields)]
 pub struct AccessTokenAuthorityConfig {
     pub url: String,
 }
 
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
-#[serde(deny_unknown_fields, rename_all = "camelCase")]
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct GatewayRuntimeConfig {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub server_url: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub dashboard_url: Option<String>,
+    pub address: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub guest_bootstrap: Option<bool>,
 }
@@ -117,13 +119,16 @@ impl LoadedRuntimeConfig {
                 self.path.display()
             )
         })?;
-        let server_url = gateway
-            .server_url
-            .clone()
-            .unwrap_or_else(|| vifu_gateway::config::DEFAULT_SERVER_URL.to_string());
+        gateway.validate()?;
+        let server_url = self
+            .config
+            .server
+            .as_ref()
+            .ok_or_else(|| "an Agent Gateway requires a configured Vifu Server".to_string())?
+            .address
+            .clone();
         Ok(GatewayRuntimeOptions {
             server_url,
-            dashboard_url: gateway.dashboard_url.clone(),
             allow_guest_bootstrap: gateway.guest_bootstrap.unwrap_or(true),
             enrollment_token: None,
             session_scope: self
@@ -138,13 +143,22 @@ impl LoadedRuntimeConfig {
             self.config.server.as_ref().ok_or_else(|| {
                 format!("{} does not configure a Vifu Server", self.path.display())
             })?;
+        let local_address = server.local_socket_addr()?;
         let mut config = vifu_server::config::Config::from_env()?;
         config.apply_service_version(env!("CARGO_PKG_VERSION"))?;
-        if let Some(listen) = server.listen.as_deref() {
-            let addr = listen
-                .parse()
-                .map_err(|error| format!("server listen address {listen:?} is invalid: {error}"))?;
-            config.apply_listen_override(addr)?;
+        let listen_address = server_listen_address(
+            config.deployment_mode,
+            config.addr,
+            local_address,
+            &server.address,
+        )?;
+        config.apply_listen_override(listen_address)?;
+        config.apply_server_url(&server.address)?;
+        if let Some(dashboard) = server.dashboard.as_ref() {
+            config.apply_dashboard_addr(&dashboard.address)?;
+        }
+        if local_address.is_some() && server.address.trim_start().starts_with("https://") {
+            config.apply_generated_tls()?;
         }
         config.apply_database_url(server.database_url(&self.path)?)?;
         config.apply_runtime_extensions(server.runtime_extensions(&self.path)?)?;
@@ -160,12 +174,47 @@ impl LoadedRuntimeConfig {
         }
         Ok(config)
     }
+
+    pub fn server_is_local(&self) -> Result<bool, String> {
+        let address_is_local = self
+            .config
+            .server
+            .as_ref()
+            .map(ServerRuntimeConfig::local_socket_addr)
+            .transpose()
+            .map(|address| address.flatten().is_some())?;
+        let deployment_mode = std::env::var("VIFU_DEPLOYMENT_MODE").ok();
+        Ok(address_is_local || deployment_owns_server(deployment_mode.as_deref())?)
+    }
+
+    pub fn server_address(&self) -> Result<&str, String> {
+        self.config
+            .server
+            .as_ref()
+            .map(|server| server.address.as_str())
+            .ok_or_else(|| format!("{} does not configure a Vifu Server", self.path.display()))
+    }
+
+    pub fn gateway_is_local(&self) -> Result<bool, String> {
+        self.config
+            .gateway
+            .as_ref()
+            .map(GatewayRuntimeConfig::local_socket_addr)
+            .transpose()
+            .map(|address| address.flatten().is_some())
+    }
 }
 
 impl RuntimeConfig {
     fn load_or_create(path: &Path) -> Result<Self, String> {
         match std::fs::read_to_string(path) {
-            Ok(raw) => Self::parse(path, &raw),
+            Ok(raw) => {
+                let (config, migrated) = Self::parse_document(path, &raw)?;
+                if migrated {
+                    config.write(path)?;
+                }
+                Ok(config)
+            }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 let config = Self::local_defaults()?;
                 config.write(path)?;
@@ -180,9 +229,9 @@ impl RuntimeConfig {
 
     fn local_defaults() -> Result<Self, String> {
         Ok(Self {
-            version: CONFIG_VERSION,
             server: Some(ServerRuntimeConfig {
-                listen: Some("127.0.0.1:6790".to_string()),
+                address: vifu_gateway::config::DEFAULT_SERVER_URL.to_string(),
+                dashboard: None,
                 deployment_id: None,
                 database_url: None,
                 database_url_file: None,
@@ -191,8 +240,7 @@ impl RuntimeConfig {
                 guest_bootstrap: None,
             }),
             gateway: Some(GatewayRuntimeConfig {
-                server_url: Some(vifu_gateway::config::DEFAULT_SERVER_URL.to_string()),
-                dashboard_url: None,
+                address: vifu_gateway::config::DEFAULT_SERVER_URL.to_string(),
                 guest_bootstrap: None,
             }),
         })
@@ -212,24 +260,11 @@ impl RuntimeConfig {
                 )
             }
         })?;
-        let mut profile = serde_json::from_str::<serde_json::Value>(&raw).map_err(|error| {
-            format!(
-                "Vifu configuration profile {} is invalid: {error}",
-                path.display()
-            )
-        })?;
-        let serde_json::Value::Object(profile) = &mut profile else {
-            return Err(format!(
-                "Vifu configuration profile {} must contain a JSON object",
-                path.display()
-            ));
-        };
-        profile
-            .entry("version")
-            .or_insert(serde_json::Value::from(CONFIG_VERSION));
-        let raw = serde_json::to_string(&profile)
-            .map_err(|error| format!("Vifu configuration profile could not be encoded: {error}"))?;
-        Self::parse(path, &raw)
+        let (config, migrated) = Self::parse_document(path, &raw)?;
+        if migrated {
+            config.write(path)?;
+        }
+        Ok(config)
     }
 
     fn with_overrides(self, path: &Path, overrides: &[String]) -> Result<Self, String> {
@@ -244,30 +279,45 @@ impl RuntimeConfig {
             let segments = config_path.split('.').collect::<Vec<_>>();
             apply_json_override(&mut root, &segments, value)?;
         }
-        let raw = serde_json::to_string(&root)
-            .map_err(|error| format!("Vifu runtime configuration could not be encoded: {error}"))?;
-        Self::parse(path, &raw).map_err(|error| format!("{error} after applying -c/--config"))
+        let config = serde_json::from_value(root).map_err(|error| {
+            format!("Vifu runtime configuration is invalid after applying -c/--config: {error}")
+        })?;
+        Self::validate(path, config).map_err(|error| format!("{error} after applying -c/--config"))
     }
 
     fn write(&self, path: &Path) -> Result<(), String> {
-        let json = serde_json::to_string_pretty(self)
+        let toml = toml::to_string_pretty(self)
             .map_err(|error| format!("Vifu runtime configuration could not be encoded: {error}"))?;
-        vifu_gateway::config::write_private_file(path, &format!("{json}\n"))
+        vifu_gateway::config::write_private_file(path, &toml)
     }
 
+    #[cfg(test)]
     fn parse(path: &Path, raw: &str) -> Result<Self, String> {
-        let config = serde_json::from_str::<Self>(raw).map_err(|error| {
+        Self::parse_document(path, raw).map(|(config, _)| config)
+    }
+
+    fn parse_document(path: &Path, raw: &str) -> Result<(Self, bool), String> {
+        let table = raw.parse::<toml::Table>().map_err(|error| {
             format!(
                 "Vifu runtime configuration {} is invalid: {error}",
                 path.display()
             )
         })?;
-        if config.version != CONFIG_VERSION {
-            return Err(format!(
-                "Vifu runtime configuration {} must use version {CONFIG_VERSION}",
-                path.display()
-            ));
+        match toml::Value::Table(table.clone()).try_into::<Self>() {
+            Ok(config) => Self::validate(path, config).map(|config| (config, false)),
+            Err(current_error) => {
+                let Some(config) = migrate_pre_address_config(table)? else {
+                    return Err(format!(
+                        "Vifu runtime configuration {} is invalid: {current_error}",
+                        path.display()
+                    ));
+                };
+                Self::validate(path, config).map(|config| (config, true))
+            }
         }
+    }
+
+    fn validate(path: &Path, config: Self) -> Result<Self, String> {
         if config.server.is_none() && config.gateway.is_none() {
             return Err(format!(
                 "Vifu runtime configuration {} must configure server, gateway, or both",
@@ -277,8 +327,80 @@ impl RuntimeConfig {
         if let Some(server) = config.server.as_ref() {
             server.validate()?;
         }
+        if let Some(gateway) = config.gateway.as_ref() {
+            if config.server.is_none() {
+                return Err("an Agent Gateway requires a configured Vifu Server".to_string());
+            }
+            gateway.validate()?;
+        }
         Ok(config)
     }
+}
+
+fn migrate_pre_address_config(mut root: toml::Table) -> Result<Option<RuntimeConfig>, String> {
+    let server_has_legacy_fields = root
+        .get("server")
+        .and_then(toml::Value::as_table)
+        .is_some_and(|server| {
+            server.contains_key("api_addr")
+                || server.contains_key("listener")
+                || server.contains_key("tls")
+        });
+    if !root.contains_key("version") && !server_has_legacy_fields {
+        return Ok(None);
+    }
+
+    if let Some(version) = root.remove("version") {
+        if version.as_integer() != Some(1) {
+            return Err("legacy Vifu runtime configuration version must be 1".to_string());
+        }
+    }
+
+    if let Some(server) = root.get_mut("server").and_then(toml::Value::as_table_mut) {
+        let legacy_api_address = server
+            .remove("api_addr")
+            .and_then(|value| value.as_str().map(str::to_string));
+        let legacy_listener_address = server
+            .remove("listener")
+            .and_then(|value| value.as_table().cloned())
+            .and_then(|mut listener| listener.remove("address"))
+            .and_then(|value| value.as_str().map(str::to_string));
+        server.remove("tls");
+
+        if !server.contains_key("address") {
+            let address = legacy_api_address
+                .or_else(|| legacy_listener_address.as_deref().map(origin_from_listener))
+                .unwrap_or_else(|| vifu_gateway::config::DEFAULT_SERVER_URL.to_string());
+            server.insert("address".to_string(), toml::Value::String(address));
+        }
+    }
+
+    if let Some(gateway) = root.get_mut("gateway").and_then(toml::Value::as_table_mut) {
+        if !gateway.contains_key("address") {
+            gateway.insert(
+                "address".to_string(),
+                toml::Value::String(vifu_gateway::config::DEFAULT_SERVER_URL.to_string()),
+            );
+        }
+    }
+
+    toml::Value::Table(root)
+        .try_into::<RuntimeConfig>()
+        .map(Some)
+        .map_err(|error| format!("legacy Vifu runtime configuration is invalid: {error}"))
+}
+
+fn origin_from_listener(listener: &str) -> String {
+    let listener = listener.trim();
+    if let Ok(address) = listener.parse::<std::net::SocketAddr>() {
+        let host = match address.ip() {
+            std::net::IpAddr::V4(ip) if ip.is_unspecified() => "127.0.0.1".to_string(),
+            std::net::IpAddr::V6(ip) if ip.is_unspecified() => "[::1]".to_string(),
+            ip => ip.to_string(),
+        };
+        return format!("http://{host}:{}", address.port());
+    }
+    format!("http://{listener}")
 }
 
 fn parse_config_override(raw: &str) -> Result<(&str, serde_json::Value), String> {
@@ -291,13 +413,19 @@ fn parse_config_override(raw: &str) -> Result<(&str, serde_json::Value), String>
     }
 
     let raw_value = raw_value.trim();
-    let value = serde_json::from_str(raw_value).unwrap_or_else(|_| {
-        serde_json::Value::String(
-            raw_value
-                .trim_matches(|character| character == '"' || character == '\'')
-                .to_string(),
-        )
-    });
+    let document = format!("value = {raw_value}");
+    let value = document
+        .parse::<toml::Table>()
+        .ok()
+        .and_then(|mut table| table.remove("value"))
+        .and_then(|value| serde_json::to_value(value).ok())
+        .unwrap_or_else(|| {
+            serde_json::Value::String(
+                raw_value
+                    .trim_matches(|character| character == '"' || character == '\'')
+                    .to_string(),
+            )
+        });
     Ok((path, value))
 }
 
@@ -336,11 +464,41 @@ const fn default_guest_project_limit() -> u32 {
     10_000
 }
 
+fn deployment_owns_server(value: Option<&str>) -> Result<bool, String> {
+    match value.map(str::trim).filter(|value| !value.is_empty()) {
+        None | Some("local") => Ok(false),
+        Some("self-hosted") => Ok(true),
+        Some(other) => Err(format!(
+            "VIFU_DEPLOYMENT_MODE must be local or self-hosted, got {other}"
+        )),
+    }
+}
+
+fn server_listen_address(
+    deployment_mode: vifu_server::config::DeploymentMode,
+    default_address: std::net::SocketAddr,
+    local_address: Option<std::net::SocketAddr>,
+    configured_address: &str,
+) -> Result<std::net::SocketAddr, String> {
+    if deployment_mode == vifu_server::config::DeploymentMode::SelfHosted {
+        return Ok(std::net::SocketAddr::from((
+            [0, 0, 0, 0],
+            local_address.map_or(default_address.port(), |address| address.port()),
+        )));
+    }
+    local_address.ok_or_else(|| {
+        format!(
+            "server.address {configured_address:?} is remote; only a self-hosted Vifu Server process can serve a remote public address"
+        )
+    })
+}
+
 impl ServerRuntimeConfig {
     fn validate(&self) -> Result<(), String> {
         if self.database_url.is_some() && self.database_url_file.is_some() {
             return Err(
-                "server configuration can set databaseUrl or databaseUrlFile, not both".to_string(),
+                "server configuration can set database_url or database_url_file, not both"
+                    .to_string(),
             );
         }
         match (self.deployment_id.as_deref(), self.authority.as_ref()) {
@@ -351,7 +509,7 @@ impl ServerRuntimeConfig {
             (None, None) => {}
             _ => {
                 return Err(
-                    "server deploymentId and authority must be configured together".to_string(),
+                    "server deployment_id and authority must be configured together".to_string(),
                 )
             }
         }
@@ -361,13 +519,22 @@ impl ServerRuntimeConfig {
                 ..=std::time::Duration::from_secs(30 * 24 * 60 * 60))
                 .contains(&ttl)
             {
-                return Err("guestBootstrap.ttlHours must be between 1 and 720".to_string());
+                return Err("guest_bootstrap.ttl_hours must be between 1 and 720".to_string());
             }
             if !(1..=1_000_000).contains(&guest.max_projects) {
-                return Err("guestBootstrap.maxProjects must be between 1 and 1000000".to_string());
+                return Err(
+                    "guest_bootstrap.max_projects must be between 1 and 1000000".to_string()
+                );
             }
         }
+        vifu_gateway::relay::agent_gateway_websocket_url(&self.address)
+            .map_err(|error| format!("server.address is invalid: {error}"))?;
         Ok(())
+    }
+
+    pub fn local_socket_addr(&self) -> Result<Option<std::net::SocketAddr>, String> {
+        self.validate()?;
+        vifu_gateway::config::local_component_socket_addr(&self.address)
     }
 
     fn database_url(&self, config_path: &Path) -> Result<String, String> {
@@ -375,21 +542,21 @@ impl ServerRuntimeConfig {
         if let Some(database_url) = self.database_url.as_deref() {
             let database_url = database_url.trim();
             if database_url.is_empty() {
-                return Err("server databaseUrl must not be empty".to_string());
+                return Err("server database_url must not be empty".to_string());
             }
             return Ok(database_url.to_string());
         }
         if let Some(path) = self.database_url_file.as_ref() {
             let database_url = std::fs::read_to_string(path).map_err(|error| {
                 format!(
-                    "server databaseUrlFile {} could not be read: {error}",
+                    "server database_url_file {} could not be read: {error}",
                     path.display()
                 )
             })?;
             let database_url = database_url.trim();
             if database_url.is_empty() {
                 return Err(format!(
-                    "server databaseUrlFile {} is empty",
+                    "server database_url_file {} is empty",
                     path.display()
                 ));
             }
@@ -452,6 +619,19 @@ impl ServerRuntimeConfig {
     }
 }
 
+impl GatewayRuntimeConfig {
+    fn validate(&self) -> Result<(), String> {
+        vifu_gateway::relay::agent_gateway_websocket_url(&self.address)
+            .map_err(|error| format!("gateway.address is invalid: {error}"))?;
+        Ok(())
+    }
+
+    fn local_socket_addr(&self) -> Result<Option<std::net::SocketAddr>, String> {
+        self.validate()?;
+        vifu_gateway::config::local_component_socket_addr(&self.address)
+    }
+}
+
 impl AccessTokenAuthorityConfig {
     fn validate(&self) -> Result<(), String> {
         let url = self.url.trim();
@@ -476,7 +656,7 @@ fn validate_deployment_id(value: &str) -> Result<(), String> {
             .is_some_and(|byte| byte.is_ascii_alphanumeric())
         || !bytes.all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
     {
-        return Err("server deploymentId is invalid".to_string());
+        return Err("server deployment_id is invalid".to_string());
     }
     Ok(())
 }
@@ -493,24 +673,24 @@ impl RuntimeExtensionConfig {
                 };
                 let credential = std::fs::read_to_string(&path).map_err(|error| {
                     format!(
-                        "runtime extension credentialFile {} could not be read: {error}",
+                        "runtime extension credential_file {} could not be read: {error}",
                         path.display()
                     )
                 })?;
                 let credential = credential.trim().to_string();
                 if credential.is_empty() {
                     return Err(format!(
-                        "runtime extension credentialFile {} is empty",
+                        "runtime extension credential_file {} is empty",
                         path.display()
                     ));
                 }
                 Ok(credential)
             }
             (Some(_), Some(_)) => {
-                Err("runtime extension can set credential or credentialFile, not both".to_string())
+                Err("runtime extension can set credential or credential_file, not both".to_string())
             }
             (None, None) => {
-                Err("runtime extension must set credential or credentialFile".to_string())
+                Err("runtime extension must set credential or credential_file".to_string())
             }
         }
     }
@@ -520,13 +700,107 @@ impl RuntimeExtensionConfig {
 mod tests {
     use std::path::Path;
 
-    use super::{RuntimeConfig, DEFAULT_LOCAL_DATABASE_FILE};
+    use super::{
+        deployment_owns_server, server_listen_address, RuntimeConfig, DEFAULT_LOCAL_DATABASE_FILE,
+    };
+
+    #[test]
+    fn self_hosted_deployment_owns_the_server_process() {
+        assert!(!deployment_owns_server(None).unwrap());
+        assert!(!deployment_owns_server(Some("local")).unwrap());
+        assert!(deployment_owns_server(Some("self-hosted")).unwrap());
+        assert!(deployment_owns_server(Some("unsupported")).is_err());
+    }
+
+    #[test]
+    fn self_hosted_public_address_uses_the_deployment_internal_port() {
+        let address = server_listen_address(
+            vifu_server::config::DeploymentMode::SelfHosted,
+            "127.0.0.1:6790".parse().unwrap(),
+            None,
+            "https://api.vifu.ai",
+        )
+        .unwrap();
+
+        assert_eq!(address, "0.0.0.0:6790".parse().unwrap());
+    }
+
+    #[test]
+    fn local_mode_does_not_serve_a_remote_public_address() {
+        let error = server_listen_address(
+            vifu_server::config::DeploymentMode::Local,
+            "127.0.0.1:6790".parse().unwrap(),
+            None,
+            "https://api.vifu.ai",
+        )
+        .unwrap_err();
+
+        assert!(error.contains("only a self-hosted Vifu Server process"));
+    }
+
+    #[test]
+    fn accepts_versionless_component_addresses() {
+        let config = RuntimeConfig::parse(
+            Path::new("/tmp/config.toml"),
+            r#"
+[server]
+address = "https://api.example.com"
+
+[gateway]
+address = "http://localhost:6790"
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(config.server.unwrap().address, "https://api.example.com");
+    }
+
+    #[test]
+    fn accepts_remote_gateway_addresses() {
+        let config = RuntimeConfig::parse(
+            Path::new("/tmp/config.toml"),
+            r#"
+[server]
+address = "https://api.example.com"
+
+[gateway]
+address = "https://gateway.example.com"
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            config.gateway.unwrap().address,
+            "https://gateway.example.com"
+        );
+    }
+
+    #[test]
+    fn accepts_canonical_toml_server_configuration() {
+        let config = RuntimeConfig::parse(
+            Path::new("/tmp/config.toml"),
+            r#"
+[server]
+address = "https://macbook.local:6790"
+"#,
+        )
+        .unwrap();
+
+        assert!(config.server.is_some());
+    }
 
     #[test]
     fn accepts_combined_runtime_configuration() {
         let config = RuntimeConfig::parse(
-            Path::new("/tmp/config.json"),
-            r#"{"version":1,"server":{"listen":"127.0.0.1:6790","databaseUrl":"postgres://vifu@127.0.0.1:5432/vifu"},"gateway":{"serverUrl":"http://127.0.0.1:6790"}}"#,
+            Path::new("/tmp/config.toml"),
+            r#"
+[server]
+address = "http://localhost:6790"
+database_url = "postgres://vifu@127.0.0.1:5432/vifu"
+
+[gateway]
+address = "http://localhost:6790"
+"#,
         )
         .unwrap();
         assert!(config.server.is_some());
@@ -534,39 +808,45 @@ mod tests {
     }
 
     #[test]
-    fn accepts_independent_runtime_roles() {
+    fn accepts_server_without_a_gateway() {
         let server_only = RuntimeConfig::parse(
-            Path::new("/tmp/server.json"),
-            r#"{"version":1,"server":{"databaseUrl":"postgres://vifu@127.0.0.1:5432/vifu"}}"#,
+            Path::new("/tmp/server.toml"),
+            r#"
+[server]
+address = "http://localhost:6790"
+database_url = "postgres://vifu@127.0.0.1:5432/vifu"
+"#,
         )
         .unwrap();
         assert!(server_only.server.is_some());
         assert!(server_only.gateway.is_none());
+    }
 
-        let gateway_only = RuntimeConfig::parse(
-            Path::new("/tmp/gateway.json"),
-            r#"{"version":1,"gateway":{"serverUrl":"https://runtime.example.com","dashboardUrl":"https://dashboard.example.com"}}"#,
+    #[test]
+    fn rejects_gateway_without_a_server() {
+        let error = RuntimeConfig::parse(
+            Path::new("/tmp/gateway.toml"),
+            r#"
+[gateway]
+address = "http://localhost:6790"
+"#,
         )
-        .unwrap();
-        assert!(gateway_only.server.is_none());
-        assert_eq!(
-            gateway_only.gateway.unwrap().dashboard_url.as_deref(),
-            Some("https://dashboard.example.com")
-        );
+        .unwrap_err();
+
+        assert!(error.contains("requires a configured Vifu Server"));
     }
 
     #[test]
     fn rejects_configuration_without_a_runtime_role() {
-        let error =
-            RuntimeConfig::parse(Path::new("/tmp/config.json"), r#"{"version":1}"#).unwrap_err();
+        let error = RuntimeConfig::parse(Path::new("/tmp/config.toml"), "").unwrap_err();
         assert!(error.contains("server, gateway, or both"));
     }
 
     #[test]
     fn rejects_unknown_fields() {
         let error = RuntimeConfig::parse(
-            Path::new("/tmp/config.json"),
-            r#"{"version":1,"server":{},"unknown":true}"#,
+            Path::new("/tmp/config.toml"),
+            "unknown = true\n\n[server]\naddress = \"http://localhost:6790\"\n",
         )
         .unwrap_err();
         assert!(error.contains("unknown field"));
@@ -575,23 +855,37 @@ mod tests {
     #[test]
     fn rejects_persisted_gateway_enrollment_tokens() {
         let error = RuntimeConfig::parse(
-            Path::new("/tmp/config.json"),
-            r#"{"version":1,"gateway":{"serverUrl":"https://runtime.example.com","enrollmentToken":"vifu_ge_not-persisted"}}"#,
+            Path::new("/tmp/config.toml"),
+            r#"
+[server]
+address = "https://api.example.com"
+
+[gateway]
+address = "http://localhost:6790"
+enrollment_token = "vifu_ge_not-persisted"
+"#,
         )
         .unwrap_err();
 
-        assert!(error.contains("unknown field `enrollmentToken`"));
+        assert!(error.contains("unknown field `enrollment_token`"));
     }
 
     #[test]
     fn gateway_can_disable_guest_bootstrap() {
         let config = RuntimeConfig::parse(
-            Path::new("/tmp/config.json"),
-            r#"{"version":1,"gateway":{"serverUrl":"https://runtime.example.com","guestBootstrap":false}}"#,
+            Path::new("/tmp/config.toml"),
+            r#"
+[server]
+address = "https://api.example.com"
+
+[gateway]
+address = "http://localhost:6790"
+guest_bootstrap = false
+"#,
         )
         .unwrap();
         let loaded = super::LoadedRuntimeConfig {
-            path: Path::new("/tmp/config.json").to_path_buf(),
+            path: Path::new("/tmp/config.toml").to_path_buf(),
             profile: None,
             config,
         };
@@ -603,12 +897,16 @@ mod tests {
     #[test]
     fn server_config_reports_the_vifu_product_version() {
         let config = RuntimeConfig::parse(
-            Path::new("/tmp/config.json"),
-            r#"{"version":1,"server":{"databaseUrl":"postgres://vifu@127.0.0.1:5432/vifu"}}"#,
+            Path::new("/tmp/config.toml"),
+            r#"
+[server]
+address = "http://localhost:6790"
+database_url = "postgres://vifu@127.0.0.1:5432/vifu"
+"#,
         )
         .unwrap();
         let loaded = super::LoadedRuntimeConfig {
-            path: Path::new("/tmp/config.json").to_path_buf(),
+            path: Path::new("/tmp/config.toml").to_path_buf(),
             profile: None,
             config,
         };
@@ -621,12 +919,17 @@ mod tests {
     #[test]
     fn rejects_ambiguous_database_configuration() {
         let error = RuntimeConfig::parse(
-            Path::new("/tmp/config.json"),
-            r#"{"version":1,"server":{"databaseUrl":"postgres://vifu@127.0.0.1:5432/vifu","databaseUrlFile":"/run/secrets/database_url"}}"#,
+            Path::new("/tmp/config.toml"),
+            r#"
+[server]
+address = "http://localhost:6790"
+database_url = "postgres://vifu@127.0.0.1:5432/vifu"
+database_url_file = "/run/secrets/database_url"
+"#,
         )
         .unwrap_err();
 
-        assert!(error.contains("databaseUrl or databaseUrlFile"));
+        assert!(error.contains("database_url or database_url_file"));
     }
 
     #[test]
@@ -637,16 +940,16 @@ mod tests {
         let database_url_file = directory.join("database_url");
         std::fs::write(&database_url_file, "postgres://vifu@postgres:5432/vifu\n").unwrap();
         let raw = format!(
-            r#"{{"version":1,"server":{{"databaseUrlFile":"{}"}}}}"#,
+            "[server]\naddress = \"http://localhost:6790\"\ndatabase_url_file = {:?}\n",
             database_url_file.display()
         );
 
-        let config = RuntimeConfig::parse(Path::new("/tmp/config.json"), &raw).unwrap();
+        let config = RuntimeConfig::parse(Path::new("/tmp/config.toml"), &raw).unwrap();
         assert_eq!(
             config
                 .server
                 .unwrap()
-                .database_url(Path::new("/tmp/config.json"))
+                .database_url(Path::new("/tmp/config.toml"))
                 .unwrap(),
             "postgres://vifu@postgres:5432/vifu"
         );
@@ -662,11 +965,19 @@ mod tests {
         let credential_file = directory.join("content_runtime_key");
         std::fs::write(&credential_file, "content-runtime-extension-key\n").unwrap();
         let raw = format!(
-            r#"{{"version":1,"server":{{"databaseUrl":"postgres://vifu@127.0.0.1:5432/vifu","runtimeExtensions":[{{"manifest":"runtime-extension.json","baseUrl":"http://content-runtime:6792","credentialFile":"{}"}}]}}}}"#,
+            r#"[server]
+address = "http://localhost:6790"
+database_url = "postgres://vifu@127.0.0.1:5432/vifu"
+
+[[server.runtime_extensions]]
+manifest = "runtime-extension.json"
+base_url = "http://content-runtime:6792"
+credential_file = {:?}
+"#,
             credential_file.display()
         );
 
-        let config = RuntimeConfig::parse(&directory.join("config.json"), &raw).unwrap();
+        let config = RuntimeConfig::parse(&directory.join("config.toml"), &raw).unwrap();
         let extension = &config.server.unwrap().runtime_extensions[0];
         assert_eq!(
             extension.credential(&directory).unwrap(),
@@ -678,9 +989,16 @@ mod tests {
 
     #[test]
     fn loads_access_token_authority() {
-        let raw = r#"{"version":1,"server":{"deploymentId":"dep_01JTESTDEPLOYMENT","authority":{"url":"https://auth.vifu.test/v1/deployments/authorize"}}}"#;
+        let raw = r#"
+[server]
+address = "http://localhost:6790"
+deployment_id = "dep_01JTESTDEPLOYMENT"
 
-        let config = RuntimeConfig::parse(Path::new("/tmp/config.json"), raw).unwrap();
+[server.authority]
+url = "https://auth.vifu.test/v1/deployments/authorize"
+"#;
+
+        let config = RuntimeConfig::parse(Path::new("/tmp/config.toml"), raw).unwrap();
         let authority = config
             .server
             .unwrap()
@@ -696,26 +1014,36 @@ mod tests {
 
     #[test]
     fn rejects_ambiguous_runtime_extension_credentials() {
-        let raw = r#"{"version":1,"server":{"databaseUrl":"postgres://vifu@127.0.0.1:5432/vifu","runtimeExtensions":[{"manifest":"runtime-extension.json","baseUrl":"http://content-runtime:6792","credential":"inline-key-with-safe-length","credentialFile":"extension_key"}]}}"#;
-        let config = RuntimeConfig::parse(Path::new("/tmp/config.json"), raw).unwrap();
+        let raw = r#"
+[server]
+address = "http://localhost:6790"
+database_url = "postgres://vifu@127.0.0.1:5432/vifu"
+
+[[server.runtime_extensions]]
+manifest = "runtime-extension.json"
+base_url = "http://content-runtime:6792"
+credential = "inline-key-with-safe-length"
+credential_file = "extension_key"
+"#;
+        let config = RuntimeConfig::parse(Path::new("/tmp/config.toml"), raw).unwrap();
         let extension = &config.server.unwrap().runtime_extensions[0];
 
         assert!(extension
             .credential(Path::new("/tmp"))
             .unwrap_err()
-            .contains("credential or credentialFile"));
+            .contains("credential or credential_file"));
     }
 
     #[test]
     fn creates_local_defaults_when_runtime_configuration_is_missing() {
         let directory =
             std::env::temp_dir().join(format!("vifu-runtime-config-{}", uuid::Uuid::new_v4()));
-        let path = directory.join("config.json");
+        let path = directory.join("config.toml");
 
         let config = RuntimeConfig::load_or_create(&path).unwrap();
 
         let server = config.server.as_ref().expect("first run enables Server");
-        assert_eq!(server.listen.as_deref(), Some("127.0.0.1:6790"));
+        assert_eq!(server.address, vifu_gateway::config::DEFAULT_SERVER_URL);
         assert_eq!(
             server.database_url(&path).unwrap(),
             format!(
@@ -724,12 +1052,64 @@ mod tests {
             )
         );
         let gateway = config.gateway.as_ref().expect("first run enables Gateway");
-        assert_eq!(
-            gateway.server_url.as_deref(),
-            Some(vifu_gateway::config::DEFAULT_SERVER_URL)
-        );
+        assert_eq!(gateway.address, vifu_gateway::config::DEFAULT_SERVER_URL);
+        assert!(std::fs::read_to_string(&path)
+            .unwrap()
+            .contains("[gateway]\naddress = \"http://127.0.0.1:6790\""));
+        assert!(!std::fs::read_to_string(&path).unwrap().contains("version"));
         assert!(path.exists());
         std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn migrates_pre_address_toml_to_explicit_component_addresses() {
+        let directory =
+            std::env::temp_dir().join(format!("vifu-runtime-config-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("config.toml");
+        std::fs::write(
+            &path,
+            r#"version = 1
+
+[server]
+api_addr = "http://127.0.0.1:6790"
+
+[server.listener]
+address = "127.0.0.1:6790"
+
+[gateway]
+"#,
+        )
+        .unwrap();
+
+        let config = RuntimeConfig::load_or_create(&path).unwrap();
+
+        assert_eq!(
+            config.server.unwrap().address,
+            vifu_gateway::config::DEFAULT_SERVER_URL
+        );
+        assert_eq!(
+            config.gateway.unwrap().address,
+            vifu_gateway::config::DEFAULT_SERVER_URL
+        );
+        let migrated = std::fs::read_to_string(&path).unwrap();
+        assert!(!migrated.contains("version"));
+        assert!(!migrated.contains("api_addr"));
+        assert!(!migrated.contains("listener"));
+        assert_eq!(migrated.matches("address =").count(), 2);
+
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn rejects_unknown_pre_address_config_versions() {
+        let error = RuntimeConfig::parse(
+            Path::new("/tmp/config.toml"),
+            "version = 2\n\n[server]\napi_addr = \"http://localhost:6790\"\n",
+        )
+        .unwrap_err();
+
+        assert!(error.contains("version must be 1"));
     }
 
     #[test]
@@ -737,12 +1117,8 @@ mod tests {
         let directory =
             std::env::temp_dir().join(format!("vifu-runtime-config-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&directory).unwrap();
-        let path = directory.join("config.json");
-        std::fs::write(
-            &path,
-            r#"{"version":1,"server":{"listen":"127.0.0.1:6790"}}"#,
-        )
-        .unwrap();
+        let path = directory.join("config.toml");
+        std::fs::write(&path, "[server]\naddress = \"http://localhost:6790\"\n").unwrap();
 
         let config = RuntimeConfig::load_or_create(&path).unwrap();
         assert_eq!(
@@ -754,7 +1130,7 @@ mod tests {
         );
         assert!(!std::fs::read_to_string(&path)
             .unwrap()
-            .contains("databaseUrl"));
+            .contains("database_url"));
 
         std::fs::remove_dir_all(directory).unwrap();
     }
@@ -762,36 +1138,33 @@ mod tests {
     #[test]
     fn applies_dotted_config_overrides_in_order() {
         let config = RuntimeConfig::parse(
-            Path::new("/tmp/config.json"),
-            r#"{"version":1,"gateway":{"serverUrl":"https://old.example.com"}}"#,
+            Path::new("/tmp/config.toml"),
+            "[server]\naddress = \"https://api.example.com\"\n\n[gateway]\naddress = \"http://localhost:6790\"\n",
         )
         .unwrap()
         .with_overrides(
-            Path::new("/tmp/config.json"),
+            Path::new("/tmp/config.toml"),
             &[
-                "gateway.serverUrl=https://first.example.com".to_string(),
-                "gateway.serverUrl=https://second.example.com/v1?region=jp".to_string(),
+                "gateway.address=http://localhost:6791".to_string(),
+                "gateway.address=http://localhost:6792".to_string(),
             ],
         )
         .unwrap();
 
-        assert_eq!(
-            config.gateway.unwrap().server_url.as_deref(),
-            Some("https://second.example.com/v1?region=jp")
-        );
+        assert_eq!(config.gateway.unwrap().address, "http://localhost:6792");
     }
 
     #[test]
-    fn parses_json_config_override_values() {
+    fn parses_toml_config_override_values() {
         let config = RuntimeConfig::parse(
-            Path::new("/tmp/config.json"),
-            r#"{"version":1,"server":{},"gateway":{"serverUrl":"https://runtime.example.com"}}"#,
+            Path::new("/tmp/config.toml"),
+            "[server]\naddress = \"http://localhost:6790\"\n\n[gateway]\naddress = \"http://localhost:6790\"\n",
         )
         .unwrap()
         .with_overrides(
-            Path::new("/tmp/config.json"),
+            Path::new("/tmp/config.toml"),
             &[
-                "server.guestBootstrap={\"enabled\":true,\"ttlHours\":24,\"maxProjects\":50}"
+                "server.guest_bootstrap={ enabled = true, ttl_hours = 24, max_projects = 50 }"
                     .to_string(),
             ],
         )
@@ -804,14 +1177,53 @@ mod tests {
     }
 
     #[test]
+    fn validates_one_server_address_without_a_listener() {
+        let config = RuntimeConfig::parse(
+            Path::new("/tmp/config.toml"),
+            r#"
+[server]
+address = "https://macbook.local:6790"
+"#,
+        )
+        .unwrap();
+
+        let server = config.server.unwrap();
+        assert_eq!(server.address, "https://macbook.local:6790");
+        assert!(RuntimeConfig::parse(
+            Path::new("/tmp/config.toml"),
+            "[server]\naddress = \"http://macbook.local:6790\"\n",
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn combined_gateway_connects_to_the_configured_server_address() {
+        let config = RuntimeConfig::parse(
+            Path::new("/tmp/config.toml"),
+            "[server]\naddress = \"https://runtime.example.com\"\n\n[gateway]\naddress = \"http://localhost:6790\"\n",
+        )
+        .unwrap();
+        let loaded = super::LoadedRuntimeConfig {
+            path: Path::new("/tmp/config.toml").to_path_buf(),
+            profile: None,
+            config,
+        };
+
+        assert_eq!(
+            loaded.gateway_options().unwrap().server_url,
+            "https://runtime.example.com"
+        );
+    }
+
+    #[test]
     fn rejects_unknown_config_override_paths() {
         let error = RuntimeConfig::parse(
-            Path::new("/tmp/config.json"),
-            r#"{"version":1,"gateway":{"serverUrl":"https://runtime.example.com"}}"#,
+            Path::new("/tmp/config.toml"),
+            "[server]\naddress = \"https://runtime.example.com\"\n\n[gateway]\naddress = \"http://localhost:6790\"\n",
         )
         .unwrap()
         .with_overrides(
-            Path::new("/tmp/config.json"),
+            Path::new("/tmp/config.toml"),
             &["gateway.unknown=true".to_string()],
         )
         .unwrap_err();
@@ -824,8 +1236,8 @@ mod tests {
         let error = RuntimeConfig::local_defaults()
             .unwrap()
             .with_overrides(
-                Path::new("/tmp/config.json"),
-                &["gateway.serverUrl".to_string()],
+                Path::new("/tmp/config.toml"),
+                &["gateway.address".to_string()],
             )
             .unwrap_err();
 
@@ -837,10 +1249,10 @@ mod tests {
         let directory =
             std::env::temp_dir().join(format!("vifu-config-profile-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&directory).unwrap();
-        let profile_path = directory.join("cloud.config.json");
+        let profile_path = directory.join("cloud.toml");
         std::fs::write(
             &profile_path,
-            r#"{"gateway":{"serverUrl":"https://profile.example.com"}}"#,
+            "[server]\naddress = \"https://profile.example.com\"\n\n[gateway]\naddress = \"http://localhost:6790\"\n",
         )
         .unwrap();
 
@@ -848,14 +1260,13 @@ mod tests {
             .unwrap()
             .with_overrides(
                 &profile_path,
-                &["gateway.serverUrl=https://override.example.com".to_string()],
+                &["server.address=https://override.example.com".to_string()],
             )
             .unwrap();
 
-        assert!(config.server.is_none());
         assert_eq!(
-            config.gateway.unwrap().server_url.as_deref(),
-            Some("https://override.example.com")
+            config.server.unwrap().address,
+            "https://override.example.com"
         );
         std::fs::remove_dir_all(directory).unwrap();
     }
@@ -865,8 +1276,12 @@ mod tests {
         let directory =
             std::env::temp_dir().join(format!("vifu-config-profile-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&directory).unwrap();
-        let profile_path = directory.join("self-hosted.config.json");
-        std::fs::write(&profile_path, r#"{"server":{}}"#).unwrap();
+        let profile_path = directory.join("self-hosted.toml");
+        std::fs::write(
+            &profile_path,
+            "[server]\naddress = \"http://localhost:6790\"\n",
+        )
+        .unwrap();
 
         let config = RuntimeConfig::load_profile(&profile_path).unwrap();
 
@@ -884,7 +1299,7 @@ mod tests {
     fn missing_profile_is_reported_without_creating_it() {
         let directory =
             std::env::temp_dir().join(format!("vifu-config-profile-{}", uuid::Uuid::new_v4()));
-        let profile_path = directory.join("missing.config.json");
+        let profile_path = directory.join("missing.toml");
 
         let error = RuntimeConfig::load_profile(&profile_path).unwrap_err();
 

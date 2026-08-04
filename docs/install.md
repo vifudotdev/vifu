@@ -112,7 +112,7 @@ bun run build:console
 cargo run -p vifu
 ```
 
-The first run creates `~/.vifu/config.json` and
+The first run creates `~/.vifu/config.toml` and
 `~/.vifu/providers.json`. With the default configuration, one process runs the
 Server and Agent Gateway roles. Runtime and Gateway state is stored in
 `~/.vifu/runtime.sqlite`; local Server data is stored separately in
@@ -123,6 +123,23 @@ comparison, active requests, or a session route override trigger confirmation.
 Provider credentials and model
 files are not required for this first launch. Add providers when you are ready
 to run a model; see [Agent Providers](../providers/README.md).
+
+The generated configuration makes both network roles explicit:
+
+```toml
+[server]
+address = "http://127.0.0.1:6790"
+
+[gateway]
+address = "http://127.0.0.1:6790"
+```
+
+Each configured component has one address. A local `server.address` starts the
+Server in this process; a remote address connects the CLI to that Server. A
+local `gateway.address` starts the Agent Gateway in this process, and that
+Gateway connects outward to `server.address`. A remote `gateway.address`
+describes a Gateway running elsewhere, such as an iPhone, so the CLI does not
+start another local Gateway.
 
 On Unix systems, Vifu restricts the `~/.vifu` directory to mode `0700` and its
 configuration and local database files to mode `0600`.

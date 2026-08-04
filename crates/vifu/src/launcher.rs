@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::io::IsTerminal;
 use std::process::Command as ProcessCommand;
 use std::time::Duration;
@@ -8,7 +9,10 @@ use vifu_server::config::{Config as ServerConfig, DeploymentMode};
 
 use crate::cli::{help_text, Command, Options};
 use crate::gateway;
-use crate::monitor::{runtime_event_channel, RuntimeEvent, RuntimeHealth};
+use crate::monitor::{
+    runtime_event_channel, RegisteredAgent, RuntimeEvent, RuntimeEventSender, RuntimeHealth,
+    RuntimeStage, RuntimeTerminal, StageStatus,
+};
 use crate::runtime_config::LoadedRuntimeConfig;
 use crate::tui;
 
@@ -38,14 +42,28 @@ pub async fn execute(options: Options) -> Result<(), String> {
 }
 
 async fn start(config: LoadedRuntimeConfig, open_browser: bool) -> Result<(), String> {
-    match (
-        config.config.server.is_some(),
-        config.config.gateway.is_some(),
-    ) {
-        (true, true) => run_combined(config, open_browser).await,
-        (true, false) => run_server_only(config, open_browser).await,
-        (false, true) => run_gateway_only(config).await,
-        (false, false) => unreachable!("runtime configuration validates roles"),
+    match start_plan(config.server_is_local()?, config.gateway_is_local()?) {
+        StartPlan::Combined => run_combined(config, open_browser).await,
+        StartPlan::ServerOnly => run_server_only(config, open_browser).await,
+        StartPlan::GatewayOnly => run_gateway_only(config).await,
+        StartPlan::RemoteServerOnly => run_remote_server_only(config, open_browser).await,
+    }
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+enum StartPlan {
+    Combined,
+    ServerOnly,
+    GatewayOnly,
+    RemoteServerOnly,
+}
+
+fn start_plan(server_is_local: bool, gateway_is_local: bool) -> StartPlan {
+    match (server_is_local, gateway_is_local) {
+        (true, true) => StartPlan::Combined,
+        (true, false) => StartPlan::ServerOnly,
+        (false, true) => StartPlan::GatewayOnly,
+        (false, false) => StartPlan::RemoteServerOnly,
     }
 }
 
@@ -55,17 +73,19 @@ async fn status(config: LoadedRuntimeConfig) -> Result<(), String> {
     if let Some(profile) = config.profile.as_ref() {
         println!("Profile: {profile}");
     }
+    let gateway_is_local = config.gateway_is_local()?;
     println!("Server: {}", role_status(config.config.server.is_some()));
     println!(
         "Agent Gateway: {}",
         role_status(config.config.gateway.is_some())
     );
-    if config.config.gateway.is_some() {
+    if gateway_is_local {
         let gateway_options = config.gateway_options()?;
-        let dashboard_url = gateway_options.dashboard_url.clone();
         let session_scope = gateway_options.session_scope.clone();
         let gateway = gateway_options.load_config()?;
-        gateway::status(&gateway, dashboard_url.as_deref(), &session_scope).await?;
+        gateway::status(&gateway, &session_scope).await?;
+    } else if let Some(gateway) = config.config.gateway.as_ref() {
+        println!("Agent Gateway location: remote ({})", gateway.address);
     }
     Ok(())
 }
@@ -76,12 +96,13 @@ async fn doctor(config: LoadedRuntimeConfig) -> Result<(), String> {
     if let Some(profile) = config.profile.as_ref() {
         println!("Profile: {profile}");
     }
-    if config.config.gateway.is_some() {
+    if config.gateway_is_local()? {
         let gateway_options = config.gateway_options()?;
-        let dashboard_url = gateway_options.dashboard_url.clone();
         let session_scope = gateway_options.session_scope.clone();
         let gateway = gateway_options.load_config()?;
-        gateway::doctor(&gateway, dashboard_url.as_deref(), &session_scope).await?;
+        gateway::doctor(&gateway, &session_scope).await?;
+    } else if let Some(gateway) = config.config.gateway.as_ref() {
+        println!("Agent Gateway: remote ({})", gateway.address);
     } else {
         println!("Agent Gateway: not configured");
     }
@@ -195,19 +216,98 @@ async fn run_gateway_only(config: LoadedRuntimeConfig) -> Result<(), String> {
     }
 }
 
+async fn run_remote_server_only(
+    config: LoadedRuntimeConfig,
+    open_browser: bool,
+) -> Result<(), String> {
+    let server_address = config.server_address()?.to_string();
+    if tui::should_run() {
+        let (monitor_tx, monitor_rx) = runtime_event_channel();
+        let credential = vifu_server::config::Config::from_env()?.admin_key;
+        let remote_monitor = tokio::spawn(stream_remote_server_monitor(
+            server_address.clone(),
+            credential,
+            monitor_tx,
+        ));
+        let result = tui::run(monitor_rx, Some(server_address), None)
+            .await
+            .map_err(|error| format!("Vifu TUI failed: {error}"));
+        remote_monitor.abort();
+        return result;
+    }
+    announce_console(Some(server_address), open_browser);
+    shutdown_signal().await;
+    Ok(())
+}
+
+async fn stream_remote_server_monitor(
+    server_address: String,
+    credential: String,
+    monitor: RuntimeEventSender,
+) {
+    let (server_events, receiver) = tokio::sync::broadcast::channel(2_048);
+    let bridge = tokio::spawn(bridge_server_monitor(receiver, monitor.clone()));
+    loop {
+        let _ = monitor.send(RuntimeEvent::HealthChanged {
+            health: RuntimeHealth::Reconnecting,
+            message: Some("Connecting to Vifu Server".to_string()),
+        });
+        match vifu_server::monitor::RemoteMonitorClient::connect(&server_address, &credential).await
+        {
+            Ok(mut client) => {
+                let _ = monitor.send(RuntimeEvent::HealthChanged {
+                    health: RuntimeHealth::Live,
+                    message: None,
+                });
+                loop {
+                    match client.next_event().await {
+                        Ok(Some(event)) => {
+                            let _ = server_events.send(event);
+                        }
+                        Ok(None) => break,
+                        Err(error) => {
+                            let _ = monitor.send(RuntimeEvent::HealthChanged {
+                                health: RuntimeHealth::Reconnecting,
+                                message: Some(crate::monitor::safe_error_message(&error)),
+                            });
+                            break;
+                        }
+                    }
+                }
+            }
+            Err(error) => {
+                let _ = monitor.send(RuntimeEvent::HealthChanged {
+                    health: RuntimeHealth::Reconnecting,
+                    message: Some(crate::monitor::safe_error_message(&error)),
+                });
+            }
+        }
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        if bridge.is_finished() {
+            break;
+        }
+    }
+    bridge.abort();
+}
+
 async fn run_combined_tui(config: LoadedRuntimeConfig) -> Result<(), String> {
     let server_config = config.server_config()?;
     let console_url = local_console_url(&server_config);
     let gateway_options = config.gateway_options()?;
     let dashboard_url = console_url
         .clone()
-        .or_else(|| gateway_options.dashboard_url.clone());
+        .or_else(|| Some(gateway_options.server_url.clone()));
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let (monitor_tx, monitor_rx) = runtime_event_channel();
+    let server_state = vifu_server::connect(server_config)
+        .await
+        .map_err(|error| error.to_string())?;
+    let server_monitor = server_state.monitor.subscribe();
+    let monitor_bridge = tokio::spawn(bridge_server_monitor(server_monitor, monitor_tx.clone()));
     let gateway_control = gateway::GatewayControl::new();
     let optimization = gateway_control.optimization();
-    let mut server = tokio::spawn(vifu_server::serve(
-        server_config,
+    let mut server = tokio::spawn(vifu_server::serve_state(
+        server_state,
         wait_for_shutdown(shutdown_rx.clone()),
     ));
     let mut gateway = tokio::spawn(gateway::run(
@@ -224,6 +324,7 @@ async fn run_combined_tui(config: LoadedRuntimeConfig) -> Result<(), String> {
         result = &mut gateway => CombinedRuntimeOutcome::Gateway(result),
     };
     let _ = shutdown_tx.send(true);
+    monitor_bridge.abort();
     match outcome {
         CombinedRuntimeOutcome::Shutdown | CombinedRuntimeOutcome::Tui(Ok(())) => {
             let _ = server.await;
@@ -249,6 +350,7 @@ async fn run_combined_tui(config: LoadedRuntimeConfig) -> Result<(), String> {
 async fn run_server_only_tui(config: LoadedRuntimeConfig) -> Result<(), String> {
     let server_config = config.server_config()?;
     let console_url = local_console_url(&server_config);
+    let readiness_addr = server_config.addr;
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let (monitor_tx, monitor_rx) = runtime_event_channel();
     let _ = monitor_tx.send(RuntimeEvent::HealthChanged {
@@ -256,20 +358,22 @@ async fn run_server_only_tui(config: LoadedRuntimeConfig) -> Result<(), String> 
         message: None,
     });
     let _ = monitor_tx.send(RuntimeEvent::LoadedModelsChanged(0));
-    if let Some(readiness_url) = console_url.clone() {
-        let readiness_monitor = monitor_tx.clone();
-        std::mem::drop(tokio::spawn(async move {
-            if wait_for_console(&readiness_url).await.is_ok() {
-                let _ = readiness_monitor.send(RuntimeEvent::HealthChanged {
-                    health: RuntimeHealth::Live,
-                    message: None,
-                });
-            }
-        }));
-    }
-    drop(monitor_tx);
-    let mut server = tokio::spawn(vifu_server::serve(
-        server_config,
+    let readiness_monitor = monitor_tx.clone();
+    std::mem::drop(tokio::spawn(async move {
+        if wait_for_server(readiness_addr).await.is_ok() {
+            let _ = readiness_monitor.send(RuntimeEvent::HealthChanged {
+                health: RuntimeHealth::Live,
+                message: None,
+            });
+        }
+    }));
+    let server_state = vifu_server::connect(server_config)
+        .await
+        .map_err(|error| error.to_string())?;
+    let server_monitor = server_state.monitor.subscribe();
+    let monitor_bridge = tokio::spawn(bridge_server_monitor(server_monitor, monitor_tx));
+    let mut server = tokio::spawn(vifu_server::serve_state(
+        server_state,
         wait_for_shutdown(shutdown_rx),
     ));
     let mut terminal = Box::pin(tui::run(monitor_rx, console_url, None));
@@ -279,6 +383,7 @@ async fn run_server_only_tui(config: LoadedRuntimeConfig) -> Result<(), String> 
         result = &mut server => SingleRuntimeOutcome::Role(result),
     };
     let _ = shutdown_tx.send(true);
+    monitor_bridge.abort();
     match outcome {
         SingleRuntimeOutcome::Shutdown | SingleRuntimeOutcome::Tui(Ok(())) => {
             let _ = server.await;
@@ -292,9 +397,196 @@ async fn run_server_only_tui(config: LoadedRuntimeConfig) -> Result<(), String> 
     }
 }
 
+async fn bridge_server_monitor(
+    mut receiver: tokio::sync::broadcast::Receiver<vifu_server::monitor::ServerMonitorEvent>,
+    sender: RuntimeEventSender,
+) {
+    let mut invocations = HashMap::<(String, String), uuid::Uuid>::new();
+    let mut gateway_agents = HashMap::<String, Vec<RegisteredAgent>>::new();
+    loop {
+        let event = match receiver.recv().await {
+            Ok(event) => event,
+            Err(tokio::sync::broadcast::error::RecvError::Lagged(dropped)) => {
+                let _ = sender.send(RuntimeEvent::MonitorEventsDropped {
+                    dropped_events: usize::try_from(dropped).unwrap_or(usize::MAX),
+                });
+                continue;
+            }
+            Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+        };
+        match event {
+            vifu_server::monitor::ServerMonitorEvent::Snapshot { gateways } => {
+                gateway_agents.clear();
+                for gateway in gateways {
+                    let agents = gateway
+                        .agents
+                        .iter()
+                        .flat_map(RegisteredAgent::from_descriptor)
+                        .map(|mut agent| {
+                            agent.id = monitor_agent_id(&gateway.gateway_id, &agent.id);
+                            agent
+                        })
+                        .collect::<Vec<_>>();
+                    gateway_agents.insert(gateway.gateway_id, agents);
+                }
+                let roster = gateway_agents.values().flatten().cloned().collect();
+                let _ = sender.send(RuntimeEvent::AgentsRegistered(roster));
+            }
+            vifu_server::monitor::ServerMonitorEvent::GatewayConnected { gateway_id, agents } => {
+                let agents = agents
+                    .iter()
+                    .flat_map(RegisteredAgent::from_descriptor)
+                    .map(|mut agent| {
+                        agent.id = monitor_agent_id(&gateway_id, &agent.id);
+                        agent
+                    })
+                    .collect::<Vec<_>>();
+                gateway_agents.insert(gateway_id, agents);
+                let roster = gateway_agents.values().flatten().cloned().collect();
+                let _ = sender.send(RuntimeEvent::AgentsRegistered(roster));
+                let _ = sender.send(RuntimeEvent::HealthChanged {
+                    health: RuntimeHealth::Live,
+                    message: None,
+                });
+            }
+            vifu_server::monitor::ServerMonitorEvent::GatewayDisconnected { gateway_id } => {
+                gateway_agents.remove(&gateway_id);
+                let roster = gateway_agents.values().flatten().cloned().collect();
+                let _ = sender.send(RuntimeEvent::AgentsRegistered(roster));
+                let _ = sender.send(RuntimeEvent::HealthChanged {
+                    health: if gateway_agents.is_empty() {
+                        RuntimeHealth::Reconnecting
+                    } else {
+                        RuntimeHealth::Live
+                    },
+                    message: Some(format!("Device Gateway {gateway_id} disconnected")),
+                });
+            }
+            vifu_server::monitor::ServerMonitorEvent::RuntimeTelemetry { gateway_id, batch } => {
+                let invocation_key = (gateway_id.clone(), batch.trace_id.clone());
+                let invocation_id = *invocations
+                    .entry(invocation_key.clone())
+                    .or_insert_with(uuid::Uuid::new_v4);
+                let agent_id = monitor_agent_id(&gateway_id, &batch.agent_id);
+                let agent_name = gateway_agents
+                    .get(&gateway_id)
+                    .and_then(|agents| agents.iter().find(|agent| agent.id == agent_id))
+                    .map_or_else(|| batch.agent_id.clone(), |agent| agent.name.clone());
+                let _ = sender.send(RuntimeEvent::IdentityChanged {
+                    project: Some(batch.project_id.clone()),
+                    deployment: Some(batch.deployment_id.to_string()),
+                });
+                if batch.dropped_events > 0 {
+                    let _ = sender.send(RuntimeEvent::MonitorEventsDropped {
+                        dropped_events: usize::try_from(batch.dropped_events).unwrap_or(usize::MAX),
+                    });
+                }
+                for telemetry in batch.events {
+                    match telemetry {
+                        vifu_gateway::protocol::TraceTelemetry::InvocationStarted {
+                            provider_key,
+                            capability,
+                            model,
+                        } => {
+                            let _ = sender.send(RuntimeEvent::InvocationStarted {
+                                invocation_id,
+                                agent_id: agent_id.clone(),
+                                agent_name: agent_name.clone(),
+                                source_agent_id: agent_id.clone(),
+                                capability,
+                                provider: provider_key.clone(),
+                                model: model.unwrap_or(provider_key),
+                                started_unix_ms: batch.started_at_ms,
+                            });
+                        }
+                        vifu_gateway::protocol::TraceTelemetry::ProviderStage {
+                            observation_id,
+                            stage,
+                            status,
+                            start_offset_ms,
+                            end_offset_ms,
+                            elapsed_ms,
+                            request_elapsed_ms,
+                            input_tokens,
+                            output_tokens,
+                            resident,
+                            error,
+                        } => {
+                            let _ = sender.send(RuntimeEvent::StageChanged {
+                                invocation_id,
+                                observation_id,
+                                stage: runtime_stage(stage),
+                                status: match status {
+                                    vifu_gateway::protocol::TraceStageStatus::Started => {
+                                        StageStatus::Active
+                                    }
+                                    vifu_gateway::protocol::TraceStageStatus::Completed => {
+                                        StageStatus::Passed
+                                    }
+                                    vifu_gateway::protocol::TraceStageStatus::Failed => {
+                                        StageStatus::Failed
+                                    }
+                                },
+                                start_offset: Duration::from_millis(start_offset_ms),
+                                end_offset: end_offset_ms.map(Duration::from_millis),
+                                elapsed: Duration::from_millis(elapsed_ms.unwrap_or(0)),
+                                request_elapsed: request_elapsed_ms.map(Duration::from_millis),
+                                input_tokens,
+                                output_tokens,
+                                resident,
+                                error,
+                            });
+                        }
+                        vifu_gateway::protocol::TraceTelemetry::Delivery { .. } => {}
+                    }
+                }
+                if let Some(terminal) = batch.terminal {
+                    match terminal.status {
+                        vifu_gateway::protocol::RuntimeTelemetryTerminalStatus::Cancelled => {
+                            let _ =
+                                sender.send(RuntimeEvent::InvocationCancelled { invocation_id });
+                        }
+                        vifu_gateway::protocol::RuntimeTelemetryTerminalStatus::Completed
+                        | vifu_gateway::protocol::RuntimeTelemetryTerminalStatus::Error => {
+                            let _ = sender.send(RuntimeEvent::InvocationFinished {
+                                invocation_id,
+                                elapsed: Duration::from_millis(terminal.duration_ms),
+                                terminal: match terminal.status {
+                                    vifu_gateway::protocol::RuntimeTelemetryTerminalStatus::Completed => {
+                                        RuntimeTerminal::Delivered
+                                    }
+                                    _ => RuntimeTerminal::ProviderFailed,
+                                },
+                                error: terminal.error,
+                            });
+                        }
+                    }
+                    invocations.remove(&invocation_key);
+                }
+            }
+        }
+    }
+}
+
+fn monitor_agent_id(gateway_id: &str, agent_id: &str) -> String {
+    format!("{gateway_id}/{agent_id}")
+}
+
+fn runtime_stage(stage: vifu_gateway::relay::ProviderStage) -> RuntimeStage {
+    match stage {
+        vifu_gateway::relay::ProviderStage::Queue => RuntimeStage::Queue,
+        vifu_gateway::relay::ProviderStage::Load => RuntimeStage::Load,
+        vifu_gateway::relay::ProviderStage::Tokenize => RuntimeStage::Tokenize,
+        vifu_gateway::relay::ProviderStage::Prefill => RuntimeStage::Prefill,
+        vifu_gateway::relay::ProviderStage::FirstToken => RuntimeStage::FirstToken,
+        vifu_gateway::relay::ProviderStage::Decode => RuntimeStage::Decode,
+        vifu_gateway::relay::ProviderStage::Validate => RuntimeStage::Validate,
+    }
+}
+
 async fn run_gateway_only_tui(config: LoadedRuntimeConfig) -> Result<(), String> {
     let gateway_options = config.gateway_options()?;
-    let dashboard_url = gateway_options.dashboard_url.clone();
+    let dashboard_url = Some(gateway_options.server_url.clone());
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let (monitor_tx, monitor_rx) = runtime_event_channel();
     let gateway_control = gateway::GatewayControl::new();
@@ -350,8 +642,10 @@ fn join_result(
 }
 
 fn local_console_url(config: &ServerConfig) -> Option<String> {
-    (config.deployment_mode == DeploymentMode::Local && config.addr.ip().is_loopback())
-        .then(|| format!("http://{}", config.addr))
+    config.server_url.clone().or_else(|| {
+        (config.deployment_mode == DeploymentMode::Local && config.addr.ip().is_loopback())
+            .then(|| format!("http://{}", config.addr))
+    })
 }
 
 fn announce_console(console_url: Option<String>, open_browser: bool) {
@@ -403,6 +697,27 @@ async fn wait_for_console(url: &str) -> Result<(), String> {
         }
     }
     Err(format!("the local Server did not become ready at {url}"))
+}
+
+async fn wait_for_server(address: std::net::SocketAddr) -> Result<(), String> {
+    let address = match address.ip() {
+        std::net::IpAddr::V4(ip) if ip.is_unspecified() => {
+            std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, address.port()))
+        }
+        std::net::IpAddr::V6(ip) if ip.is_unspecified() => {
+            std::net::SocketAddr::from((std::net::Ipv6Addr::LOCALHOST, address.port()))
+        }
+        _ => address,
+    };
+    for attempt in 0..50 {
+        if tokio::net::TcpStream::connect(address).await.is_ok() {
+            return Ok(());
+        }
+        if attempt < 49 {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+    Err(format!("the Vifu Server did not become ready at {address}"))
 }
 
 fn console_socket_address(url: &str) -> Result<std::net::SocketAddr, String> {
@@ -500,7 +815,46 @@ fn init_tracing(suppress_terminal_output: bool) {
 mod tests {
     use tokio::net::TcpListener;
 
-    use super::{auto_browser_policy, join_result, wait_for_console};
+    use super::{
+        auto_browser_policy, join_result, monitor_agent_id, start_plan, wait_for_console, StartPlan,
+    };
+
+    #[test]
+    fn remote_server_with_local_gateway_starts_only_the_gateway() {
+        assert_eq!(start_plan(false, true), StartPlan::GatewayOnly);
+    }
+
+    #[test]
+    fn remote_server_without_gateway_starts_no_local_component() {
+        assert_eq!(start_plan(false, false), StartPlan::RemoteServerOnly);
+    }
+
+    #[test]
+    fn local_server_with_local_gateway_starts_both_components() {
+        assert_eq!(start_plan(true, true), StartPlan::Combined);
+    }
+
+    #[test]
+    fn local_server_with_remote_gateway_starts_only_the_server() {
+        assert_eq!(start_plan(true, false), StartPlan::ServerOnly);
+    }
+
+    #[test]
+    fn remote_server_with_remote_gateway_starts_no_local_component() {
+        assert_eq!(start_plan(false, false), StartPlan::RemoteServerOnly);
+    }
+
+    #[test]
+    fn server_monitor_namespaces_the_same_agent_on_different_devices() {
+        assert_eq!(
+            monitor_agent_id("iphone-a", "companion-agent"),
+            "iphone-a/companion-agent"
+        );
+        assert_ne!(
+            monitor_agent_id("iphone-a", "companion-agent"),
+            monitor_agent_id("iphone-b", "companion-agent")
+        );
+    }
 
     #[test]
     fn automatic_browser_launch_requires_a_fully_interactive_terminal() {

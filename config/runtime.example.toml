@@ -1,0 +1,6 @@
+[server]
+address = "http://127.0.0.1:6790"
+database_url = "postgres://vifu@127.0.0.1:5432/vifu"
+
+[gateway]
+address = "http://127.0.0.1:6790"

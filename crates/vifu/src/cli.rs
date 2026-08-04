@@ -99,13 +99,15 @@ Usage:
   vifu --status          Show configured runtime and Agent Gateway state
   vifu --doctor          Diagnose local setup
 Configuration:
-  ~/.vifu/config.json    Created with local Server and Agent Gateway defaults
+  ~/.vifu/config.toml    Created with local Server and Agent Gateway defaults
   ~/.vifu/providers.json Runtime provider registry loaded by the Agent Gateway
-  -p, --profile <name>   Use ~/.vifu/<name>.config.json instead of the base config
+  server.address         Local or remote Vifu Server origin
+  gateway.address        Local Agent Gateway origin
+  -p, --profile <name>   Use ~/.vifu/<name>.toml instead of the base config
   -c, --config <key=value>
                          Override a configuration value for this run. Use a
-                         dotted path such as gateway.serverUrl. Values are
-                         parsed as JSON, or used as strings when unquoted.
+                         dotted path such as server.address. Values are parsed
+                         as TOML, or used as strings when unquoted.
 
 Options:
   --no-browser           Compatibility option. Interactive Start opens the
@@ -149,6 +151,8 @@ mod tests {
         assert!(help.contains("--no-browser"));
         assert!(help.contains("Compatibility option"));
         assert!(help.contains("headless Start never"));
+        assert!(help.contains("server.address"));
+        assert!(help.contains("gateway.address"));
     }
 
     #[test]
@@ -156,16 +160,16 @@ mod tests {
         let options = Options::parse([
             "vifu",
             "-c",
-            "gateway.serverUrl=https://runtime.example.com/v1?region=jp",
-            "--config=server.listen=127.0.0.1:6795",
+            "server.address=https://runtime.example.com",
+            "--config=gateway.address=http://localhost:6795",
         ])
         .unwrap();
 
         assert_eq!(
             options.config_overrides,
             vec![
-                "gateway.serverUrl=https://runtime.example.com/v1?region=jp",
-                "server.listen=127.0.0.1:6795",
+                "server.address=https://runtime.example.com",
+                "gateway.address=http://localhost:6795",
             ]
         );
     }

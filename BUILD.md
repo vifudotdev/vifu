@@ -28,7 +28,7 @@ cargo run -p vifu
 ```
 
 The default build includes the llama.cpp and Local Whisper Providers. Vifu
-creates `~/.vifu/config.json` and `~/.vifu/providers.json`, starts both roles
+creates `~/.vifu/config.toml` and `~/.vifu/providers.json`, starts both roles
 on loopback, and opens the live Runtime TUI in an interactive terminal. Press
 `B` to open the local Dashboard. Press `Q` to stop Vifu; an active comparison,
 active requests, or a session route override trigger confirmation. Runtime and
@@ -44,19 +44,18 @@ The release workflow verifies this bundle and sets
 `VIFU_REQUIRE_CONSOLE_ASSETS=1`, so a release build cannot silently embed the
 development fallback page.
 
-To run a Gateway-only process on a machine that already has a Server, replace
-the generated runtime configuration with a gateway-only configuration:
+To run a local Gateway against a Server on another machine, replace the
+generated runtime configuration with explicit Server and Gateway addresses:
 
 ```bash
 mkdir -p ~/.vifu
-cat > ~/.vifu/config.json <<'JSON'
-{
-  "version": 1,
-  "gateway": {
-    "serverUrl": "https://runtime.example.com"
-  }
-}
-JSON
+cat > ~/.vifu/config.toml <<'TOML'
+[server]
+address = "https://runtime.example.com"
+
+[gateway]
+address = "http://localhost:6790"
+TOML
 cat > ~/.vifu/providers.json <<'JSON'
 {
   "providers": [
@@ -91,14 +90,13 @@ the Agent Gateway at it:
 
 ```bash
 mkdir -p ~/.vifu
-cat > ~/.vifu/config.json <<'JSON'
-{
-  "version": 1,
-  "gateway": {
-    "serverUrl": "http://127.0.0.1:6790"
-  }
-}
-JSON
+cat > ~/.vifu/config.toml <<'TOML'
+[server]
+address = "http://127.0.0.1:6790"
+
+[gateway]
+address = "http://127.0.0.1:6790"
+TOML
 cat > ~/.vifu/providers.json <<'JSON'
 {
   "providers": [
@@ -193,7 +191,7 @@ docker compose build --pull --no-cache
 docker compose up -d --wait
 curl --fail --silent http://127.0.0.1:6790/health
 curl --fail --silent http://127.0.0.1:6790/v1/status
-curl --fail --silent http://127.0.0.1:6791/project > /dev/null
+curl --fail --silent http://127.0.0.1:6790/project > /dev/null
 ```
 
 The full Agent Gateway and persistence test creates an isolated stack on random

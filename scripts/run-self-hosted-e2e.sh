@@ -90,11 +90,9 @@ else
   env_file="$state_dir/.env"
   write_e2e_env "$env_file"
   server_port="$(free_port)"
-  dashboard_port="$(free_port "$server_port")"
-  browser_dashboard_port="$dashboard_port"
+  browser_dashboard_port="$server_port"
   {
     printf '%s\n' "VIFU_SERVER_PORT=$server_port"
-    printf '%s\n' "VIFU_DASHBOARD_PORT=$dashboard_port"
     printf '%s\n' "POSTGRES_PORT=0"
   } >> "$env_file"
   compose_project="vifu-e2e-$$"
@@ -109,7 +107,7 @@ set -a
 . "$env_file"
 set +a
 if [ -z "$browser_dashboard_port" ]; then
-  browser_dashboard_port="${VIFU_DASHBOARD_PORT:-6791}"
+  browser_dashboard_port="${VIFU_SERVER_PORT:-6790}"
 fi
 if [ -z "${VIFU_ADMIN_KEY:-}" ]; then
   printf '%s\n' "VIFU_ADMIN_KEY is missing. Set VIFU_E2E_ADMIN_KEY or use an E2E env file with an explicit admin key." >&2
@@ -121,10 +119,10 @@ if [ -n "${VIFU_E2E_OPENCLAW_PORT:-}" ]; then
 elif [ "$use_existing_openclaw" = "1" ]; then
   openclaw_port="18789"
 else
-  openclaw_port="$(free_port "${server_port:-}" "${dashboard_port:-}")"
+  openclaw_port="$(free_port "${server_port:-}")"
 fi
 enable_openai_mock="${VIFU_E2E_ENABLE_OPENAI_MOCK:-1}"
-openai_mock_port="${VIFU_E2E_OPENAI_MOCK_PORT:-$(free_port "${server_port:-}" "${dashboard_port:-}" "$openclaw_port")}"
+openai_mock_port="${VIFU_E2E_OPENAI_MOCK_PORT:-$(free_port "${server_port:-}" "$openclaw_port")}"
 agent_gateway_log="$state_dir/agent-gateway.log"
 mock_log="$state_dir/openclaw.log"
 openai_mock_log="$state_dir/openai-compatible.log"
@@ -305,9 +303,9 @@ fi
 chmod 0644 "$gateway_home/providers.json"
 
 if [ "$managed_stack" != "1" ]; then
-  printf '{\n  "version": 1,\n  "gateway": { "serverUrl": "%s" }\n}\n' \
-    "$(json_escape "${VIFU_E2E_API_URL:-http://127.0.0.1:6790}")" > "$gateway_home/config.json"
-  chmod 0644 "$gateway_home/config.json"
+  printf '[server]\naddress = "%s"\n\n[gateway]\naddress = "http://localhost:6790"\n' \
+    "$(json_escape "${VIFU_E2E_API_URL:-http://127.0.0.1:6790}")" > "$gateway_home/config.toml"
+  chmod 0644 "$gateway_home/config.toml"
 fi
 
 if [ "$managed_stack" = "1" ]; then
@@ -321,14 +319,12 @@ configs:
 $providers_config
   e2e_pairing_gateway_config:
     content: |
-      {
-        "version": 1,
-        "gateway": {
-          "serverUrl": "http://backend:6790",
-          "dashboardUrl": "http://$docker_access_host:$browser_dashboard_port",
-          "guestBootstrap": false
-        }
-      }
+      [server]
+      address = "http://backend:6790"
+
+      [gateway]
+      address = "http://localhost:6790"
+      guest_bootstrap = false
 
 services:
   runtime-state:
@@ -372,7 +368,7 @@ services:
         target: /home/vifu/.vifu/providers.json
         mode: 0444
       - source: e2e_pairing_gateway_config
-        target: /home/vifu/.vifu/config.json
+        target: /home/vifu/.vifu/config.toml
         mode: 0444
     volumes:
       - vifu_pairing_runtime_state:/home/vifu/.vifu
@@ -410,14 +406,12 @@ configs:
 $providers_config
   e2e_pairing_gateway_config:
     content: |
-      {
-        "version": 1,
-        "gateway": {
-          "serverUrl": "http://backend:6790",
-          "dashboardUrl": "http://$docker_access_host:$browser_dashboard_port",
-          "guestBootstrap": false
-        }
-      }
+      [server]
+      address = "http://backend:6790"
+
+      [gateway]
+      address = "http://localhost:6790"
+      guest_bootstrap = false
 
 services:
   runtime-state:
@@ -465,7 +459,7 @@ services:
         target: /home/vifu/.vifu/providers.json
         mode: 0444
       - source: e2e_pairing_gateway_config
-        target: /home/vifu/.vifu/config.json
+        target: /home/vifu/.vifu/config.toml
         mode: 0444
     volumes:
       - vifu_pairing_runtime_state:/home/vifu/.vifu
@@ -519,7 +513,7 @@ EOF
   chmod 0600 "$compose_override"
   compose up -d --build --wait
   export VIFU_E2E_API_URL="http://$docker_access_host:$VIFU_SERVER_PORT"
-  export VIFU_E2E_DASHBOARD_URL="http://$docker_access_host:$VIFU_DASHBOARD_PORT"
+  export VIFU_E2E_DASHBOARD_URL="$VIFU_E2E_API_URL"
 else
   cargo build -p vifu
   HOME="$gateway_root" \
@@ -570,7 +564,7 @@ until curl --fail --silent "${VIFU_E2E_API_URL:-http://127.0.0.1:6790}/v1/status
 done
 
 attempt=0
-until curl --fail --silent "${VIFU_E2E_DASHBOARD_URL:-http://127.0.0.1:6791}/project" >/dev/null; do
+until curl --fail --silent "${VIFU_E2E_DASHBOARD_URL:-http://127.0.0.1:6790}/project" >/dev/null; do
   attempt=$((attempt + 1))
   if [ "$attempt" -ge 60 ]; then exit 1; fi
   sleep 1

@@ -3,26 +3,24 @@ name: vifu
 configs:
   server_runtime_config:
     content: |
-      {
-        "version": 1,
-        "server": {
-          "listen": "0.0.0.0:6790",
-          "databaseUrlFile": "/run/vifu/secrets/database_url",
-          "guestBootstrap": {
-            "enabled": ${VIFU_GUEST_BOOTSTRAP_ENABLED:-true},
-            "ttlHours": ${VIFU_GUEST_BOOTSTRAP_TTL_HOURS:-168},
-            "maxProjects": ${VIFU_GUEST_BOOTSTRAP_MAX_PROJECTS:-10000}
-          }
-        }
-      }
+      [server]
+      address = "${VIFU_SERVER_API_ADDR:-http://localhost:6790}"
+      database_url_file = "/run/vifu/secrets/database_url"
+
+      [server.dashboard]
+      address = "dashboard:6791"
+
+      [server.guest_bootstrap]
+      enabled = ${VIFU_GUEST_BOOTSTRAP_ENABLED:-true}
+      ttl_hours = ${VIFU_GUEST_BOOTSTRAP_TTL_HOURS:-168}
+      max_projects = ${VIFU_GUEST_BOOTSTRAP_MAX_PROJECTS:-10000}
   gateway_runtime_config:
     content: |
-      {
-        "version": 1,
-        "gateway": {
-          "serverUrl": "http://backend:6790"
-        }
-      }
+      [server]
+      address = "http://backend:6790"
+
+      [gateway]
+      address = "http://localhost:6790"
   pgadmin_servers:
     content: |
       {
@@ -205,7 +203,7 @@ services:
       - vifu_server_state:/home/vifu/.vifu
     configs:
       - source: server_runtime_config
-        target: /home/vifu/.vifu/config.json
+        target: /home/vifu/.vifu/config.toml
         mode: 0444
     restart: unless-stopped
     healthcheck:
@@ -228,8 +226,6 @@ services:
       VIFU_ADMIN_KEY_FILE: /run/vifu/secrets/admin_key
       HOSTNAME: 0.0.0.0
       PORT: 6791
-    ports:
-      - "${VIFU_BIND_HOST:-127.0.0.1}:${VIFU_DASHBOARD_PORT:-6791}:6791"
     volumes:
       - vifu_secrets:/run/vifu/secrets:ro
     restart: unless-stopped
@@ -252,7 +248,7 @@ services:
       - vifu_runtime_state:/home/vifu/.vifu
     configs:
       - source: gateway_runtime_config
-        target: /home/vifu/.vifu/config.json
+        target: /home/vifu/.vifu/config.toml
         mode: 0444
     extra_hosts:
       - "host.docker.internal:host-gateway"

@@ -79,7 +79,7 @@ jobs:
           cp "target/${{ matrix.target }}/release/${{ matrix.binary }}" "dist/$asset/vifu"
           cp LICENSE "dist/$asset/LICENSE"
           cp README.md "dist/$asset/README.md"
-          cp config/runtime.example.json "dist/$asset/config/runtime.example.json"
+          cp config/runtime.example.toml "dist/$asset/config/runtime.example.toml"
           tar -C dist -czf "dist/$asset.tar.gz" "$asset"
           (
             cd dist
@@ -94,7 +94,7 @@ jobs:
           Copy-Item "target/${{ matrix.target }}/release/${{ matrix.binary }}" "dist/$asset/vifu.exe"
           Copy-Item LICENSE "dist/$asset/LICENSE"
           Copy-Item README.md "dist/$asset/README.md"
-          Copy-Item config/runtime.example.json "dist/$asset/config/runtime.example.json"
+          Copy-Item config/runtime.example.toml "dist/$asset/config/runtime.example.toml"
           Compress-Archive -Path "dist/$asset" -DestinationPath "dist/$asset.zip"
           $hash = (Get-FileHash "dist/$asset.zip" -Algorithm SHA256).Hash.ToLower()
           [IO.File]::WriteAllText(

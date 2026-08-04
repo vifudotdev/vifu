@@ -28,6 +28,6 @@ stable endpoints, Gateway transport, and traces.
 
 ## Reference
 
-- [Runtime configuration example](../config/runtime.example.json)
+- [Runtime configuration example](../config/runtime.example.toml)
 - [Positioning and related projects](comparison.md)
 - [Build and test](../BUILD.md)

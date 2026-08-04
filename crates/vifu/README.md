@@ -2,7 +2,7 @@
 
 `vifu` is the Vifu Agent Runtime application for operating agents behind stable
 product endpoints. One executable runs Vifu Server, Agent Gateway, or both
-according to `~/.vifu/config.json`.
+according to `~/.vifu/config.toml`.
 
 ## Install the binary
 

@@ -1,7 +1,7 @@
 import { readFile, writeFile } from "node:fs/promises";
 
 const apiBaseUrl = (process.env.VIFU_E2E_API_URL || "http://127.0.0.1:6790").replace(/\/+$/, "");
-const dashboardBaseUrl = (process.env.VIFU_E2E_DASHBOARD_URL || "http://127.0.0.1:6791").replace(/\/+$/, "");
+const dashboardBaseUrl = (process.env.VIFU_E2E_DASHBOARD_URL || apiBaseUrl).replace(/\/+$/, "");
 const adminKey = process.env.VIFU_E2E_ADMIN_KEY || process.env.VIFU_ADMIN_KEY || "";
 const statePath = process.env.VIFU_E2E_STATE_PATH || "/tmp/vifu-self-hosted-e2e.json";
 const openClawMockUrl = process.env.VIFU_E2E_OPENCLAW_MOCK_URL?.replace(/\/+$/, "") || null;

@@ -27,7 +27,8 @@ Start Vifu with its operations Dashboard:
 docker compose up -d
 ```
 
-Open `http://localhost:6791`.
+Open `http://localhost:6790`. The same address serves the Dashboard, API, and
+Agent Gateway connection.
 
 Read the generated Admin Key and enter it in the Console:
 
@@ -85,13 +86,24 @@ A Gateway running outside the managed deployment enrolls into a project once:
 
 1. Open the project in the Console and select **Deployments**.
 2. Create or select a deployment, then choose **Pair gateway**.
-3. Set that Server URL in the Gateway's `~/.vifu/config.json`.
+3. Set that Server address in the Gateway's `~/.vifu/config.toml`.
 4. Provide the displayed one-time token on the Gateway's next start through
    `VIFU_AGENT_GATEWAY_ENROLLMENT_TOKEN_FILE`.
 
+The configuration names both components explicitly. Here the Server is remote
+and the Gateway is local, so this process starts only the Gateway:
+
+```toml
+[server]
+address = "https://api.vifu.ai"
+
+[gateway]
+address = "http://localhost:6790"
+```
+
 For example, point the file variable at a private temporary file containing
 only the token, start `vifu`, then remove the file after enrollment succeeds.
-The token is consumed by Server and is not copied into `config.json`.
+The token is consumed by Server and is not copied into `config.toml`.
 
 Enrollment tokens expire after five minutes, can be used once, and are never
 written to the persistent runtime configuration. Issuing a new unused token for
@@ -100,6 +112,12 @@ reconnects with its stable Machine identity and Server-issued Device Token in
 the Server-scoped record inside `~/.vifu/runtime.sqlite`. If authorization is
 required again, Vifu prints a Dashboard link and keeps retrying while the
 operator reviews the request.
+
+To use a second Vifu CLI only as the remote TUI, configure its remote
+`server.address` and omit `[gateway]`. Provide that deployment's admin
+credential through `VIFU_ADMIN_KEY` or `VIFU_ADMIN_KEY_FILE`. The CLI opens an
+authenticated monitor WebSocket on the same Server origin and receives the
+current Gateway snapshot followed by live runtime events.
 
 Each project starts with a `development` deployment. More deployments can use
 different Gateways and active Runtime Releases while keeping the same project
@@ -155,6 +173,13 @@ as Tailscale; do not expose it directly to the public Internet.
 Copy `.env.example` once and set deployment-local values there. Runtime role and
 network settings are defined by `docker-compose.yml`; generated deployment
 secrets remain in the named `vifu_secrets` volume across normal restarts.
+Set `VIFU_SERVER_API_ADDR` to the HTTPS address used by clients when an ingress,
+reverse proxy, or tunnel exposes Vifu outside the local machine.
+
+The corresponding Server configuration uses `server.address` for that one
+public origin. In `self-hosted` deployment mode the process owns the Server and
+uses its deployment-managed internal port (6790 by default); the internal bind
+is not a second client address and does not belong in `config.toml`.
 
 Provider integrations are configured independently. Runtime-owned providers live
 in the `providers.json` loaded by the Agent Gateway, while project-local

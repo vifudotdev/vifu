@@ -55,7 +55,7 @@ Agent Gateway: connected
 Open the Dashboard:
 
 ```text
-http://localhost:6791/project
+http://localhost:6790/project
 ```
 
 ## Integration Boundary
