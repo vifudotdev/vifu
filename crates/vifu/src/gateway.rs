@@ -69,7 +69,6 @@ impl GatewayControl {
 #[derive(Debug, Clone)]
 pub struct GatewayRuntimeOptions {
     pub server_url: String,
-    pub dashboard_url: Option<String>,
     pub allow_guest_bootstrap: bool,
     pub enrollment_token: Option<String>,
     pub session_scope: String,
@@ -683,11 +682,7 @@ pub async fn run(
             },
         );
         if verbose {
-            print_session(
-                &session,
-                &config.server_url,
-                options.dashboard_url.as_deref(),
-            );
+            print_session(&session, &config.server_url);
         }
         let session_persistence =
             session_store.persistence(session_key, GatewaySecretStorage::Persisted);
@@ -715,7 +710,7 @@ pub async fn run(
         ));
         let runtime = relay::AgentGatewayRuntime {
             server_url: &config.server_url,
-            dashboard_url: options.dashboard_url.as_deref(),
+            server_certificate_der: None,
             agent_gateway_bootstrap_token: config.agent_gateway_bootstrap_token.as_deref(),
             enrollment_token: config.enrollment_token.take(),
             allow_guest_bootstrap: options.allow_guest_bootstrap,
@@ -729,30 +724,29 @@ pub async fn run(
             session_path: None,
             runtime_database_path: &runtime_database_file,
             embedded_runtime: None,
+            embedded_monitor: None,
             output_policy: if verbose {
                 relay::GatewayOutputPolicy::Terminal
             } else {
                 relay::GatewayOutputPolicy::Observer
             },
         };
-        let guest_project_observer = match (options.dashboard_url.clone(), monitor.clone()) {
-            (None, None) => None,
-            (dashboard_url, monitor) => {
+        let guest_project_observer = match monitor.clone() {
+            None => {
+                let server_url = config.server_url.clone();
                 Some(Arc::new(move |guest: &session::GuestProjectSummary| {
-                    if monitor.is_none() {
-                        if let Some(dashboard_url) = dashboard_url.as_deref() {
-                            print_guest_management_link(dashboard_url, guest);
-                        }
-                    }
-                    send_monitor(
-                        monitor.as_ref(),
-                        RuntimeEvent::IdentityChanged {
-                            project: Some(guest.project_slug.clone()),
-                            deployment: Some(guest.deployment.clone()),
-                        },
-                    );
+                    print_guest_management_link(&server_url, guest);
                 }) as relay::GuestProjectObserver)
             }
+            Some(monitor) => Some(Arc::new(move |guest: &session::GuestProjectSummary| {
+                send_monitor(
+                    Some(&monitor),
+                    RuntimeEvent::IdentityChanged {
+                        project: Some(guest.project_slug.clone()),
+                        deployment: Some(guest.deployment.clone()),
+                    },
+                );
+            }) as relay::GuestProjectObserver),
         };
         let runtime_roster_task = RuntimeRosterTask::default();
         let authorization_observer = {
@@ -954,11 +948,7 @@ async fn wait_for_shutdown(shutdown: &mut watch::Receiver<bool>) {
     let _ = shutdown.changed().await;
 }
 
-pub async fn status(
-    config: &Config,
-    dashboard_url: Option<&str>,
-    session_scope: &str,
-) -> Result<(), String> {
+pub async fn status(config: &Config, session_scope: &str) -> Result<(), String> {
     println!("Vifu Agent Gateway status");
     println!("State: {}", config.home_dir.display());
     print_server_config(config)?;
@@ -971,15 +961,11 @@ pub async fn status(
     print_local_whisper_provider_status(config)?;
     print_openai_compatible_provider_status(config).await;
     print_agent_provider_status(config).await;
-    print_stored_session(config, dashboard_url, session_scope)?;
+    print_stored_session(config, session_scope)?;
     Ok(())
 }
 
-pub async fn doctor(
-    config: &Config,
-    dashboard_url: Option<&str>,
-    session_scope: &str,
-) -> Result<(), String> {
+pub async fn doctor(config: &Config, session_scope: &str) -> Result<(), String> {
     println!("Vifu Agent Gateway doctor");
     println!("State directory: {}", config.home_dir.display());
     print_server_config(config)?;
@@ -992,7 +978,7 @@ pub async fn doctor(
     print_local_whisper_provider_status(config)?;
     print_openai_compatible_provider_status(config).await;
     let providers = print_agent_provider_status(config).await;
-    print_stored_session(config, dashboard_url, session_scope)?;
+    print_stored_session(config, session_scope)?;
     for (provider, report) in providers {
         match report.status {
             ProbeStatus::Online => {
@@ -1454,20 +1440,16 @@ fn print_server_config(config: &Config) -> Result<(), String> {
     Ok(())
 }
 
-fn print_stored_session(
-    config: &Config,
-    dashboard_url: Option<&str>,
-    session_scope: &str,
-) -> Result<(), String> {
+fn print_stored_session(config: &Config, session_scope: &str) -> Result<(), String> {
     let (store, key) = gateway_session_store(config, session_scope)?;
     match store.load(&key, None, None)? {
-        Some(summary) => print_session(&summary, &config.server_url, dashboard_url),
+        Some(summary) => print_session(&summary, &config.server_url),
         None => println!("Session: not established"),
     }
     Ok(())
 }
 
-fn print_session(session: &SessionSummary, server_url: &str, dashboard_url: Option<&str>) {
+fn print_session(session: &SessionSummary, server_url: &str) {
     println!();
     println!(
         "Gateway: {}",
@@ -1491,9 +1473,7 @@ fn print_session(session: &SessionSummary, server_url: &str, dashboard_url: Opti
         println!("  Name:     {}", guest.project_slug);
         println!("  Endpoint: {endpoint}");
         println!("  Expires:  {}", guest.expires_at);
-        if let Some(dashboard_url) = dashboard_url {
-            print_guest_management_link(dashboard_url, guest);
-        }
+        print_guest_management_link(server_url, guest);
     }
 }
 

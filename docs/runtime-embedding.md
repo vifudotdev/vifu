@@ -175,7 +175,6 @@ let gateway = try VifuEmbeddedGateway(
     runtime: runtime,
     config: VifuEmbeddedGatewayConfig(
         serverUrl: serverURL,
-        dashboardUrl: "https://dashboard.example.com",
         runtimeDatabasePath: runtimeDatabaseURL.path
     )
 )
@@ -211,8 +210,7 @@ let gateway = EmbeddedRuntimeGateway::new(
     EmbeddedRuntimeGatewayConfig::new(
         "https://runtime.example.com",
         "runtime.sqlite",
-    )
-    .with_dashboard_url("https://dashboard.example.com"),
+    ),
 )?;
 let identity = MachineIdentity::from_encoded_private_key(&machine_private_key)?;
 gateway.start(identity, device_token, enrollment_token)?;

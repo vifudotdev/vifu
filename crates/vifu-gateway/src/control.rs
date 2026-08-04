@@ -149,6 +149,14 @@ struct BootstrapRuntimeRelease<'a> {
     manifest: &'a RuntimeManifest,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ReportRuntimeReleaseApplied<'a> {
+    deployment_id: Uuid,
+    release_version: u64,
+    content_hash: &'a str,
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct BootstrapRuntimeReleaseResponse {
@@ -172,11 +180,20 @@ pub struct RuntimeControlClient {
     trace_observations_url: Url,
     comparisons_url: Url,
     release_url: Url,
+    release_applied_url: Url,
     credential: String,
 }
 
 impl RuntimeControlClient {
     pub fn new(server_url: &str, credential: impl Into<String>) -> Result<Self, String> {
+        Self::new_with_server_certificate(server_url, credential, None)
+    }
+
+    pub fn new_with_server_certificate(
+        server_url: &str,
+        credential: impl Into<String>,
+        server_certificate_der: Option<&[u8]>,
+    ) -> Result<Self, String> {
         agent_gateway_websocket_url(server_url)?;
         let config_url = endpoint_url(server_url, "runtime-config")?;
         let agents_url = endpoint_url(server_url, "runtime-agents")?;
@@ -184,14 +201,16 @@ impl RuntimeControlClient {
         let trace_observations_url = endpoint_url(server_url, "runtime-trace-observations")?;
         let comparisons_url = endpoint_url(server_url, "runtime-comparisons")?;
         let release_url = endpoint_url(server_url, "runtime-releases/bootstrap")?;
+        let release_applied_url = endpoint_url(server_url, "runtime-releases/applied")?;
         Ok(Self {
-            client: reqwest::Client::new(),
+            client: http_client(server_certificate_der)?,
             config_url,
             agents_url,
             traces_url,
             trace_observations_url,
             comparisons_url,
             release_url,
+            release_applied_url,
             credential: credential.into(),
         })
     }
@@ -205,6 +224,31 @@ impl RuntimeControlClient {
             .await
             .map_err(|error| format!("runtime configuration request failed: {error}"))?;
         decode_response(response, "runtime configuration").await
+    }
+
+    pub async fn report_release_applied(
+        &self,
+        deployment_id: Uuid,
+        release: &RuntimeRelease,
+    ) -> Result<(), String> {
+        let response = self
+            .client
+            .post(self.release_applied_url.clone())
+            .bearer_auth(&self.credential)
+            .json(&ReportRuntimeReleaseApplied {
+                deployment_id,
+                release_version: release.version,
+                content_hash: &release.content_hash,
+            })
+            .send()
+            .await
+            .map_err(|error| format!("runtime release apply acknowledgement failed: {error}"))?;
+        if response.status() == StatusCode::NOT_FOUND {
+            return Ok(());
+        }
+        decode_response::<serde_json::Value>(response, "runtime release apply acknowledgement")
+            .await?;
+        Ok(())
     }
 
     pub async fn runtime_agents(&self) -> Result<GatewayRuntimeAgents, String> {
@@ -222,8 +266,16 @@ impl RuntimeControlClient {
         server_url: &str,
         credential: &str,
     ) -> Result<GuestProjectBootstrap, String> {
+        Self::bootstrap_guest_project_with_server_certificate(server_url, credential, None).await
+    }
+
+    pub async fn bootstrap_guest_project_with_server_certificate(
+        server_url: &str,
+        credential: &str,
+        server_certificate_der: Option<&[u8]>,
+    ) -> Result<GuestProjectBootstrap, String> {
         let url = server_endpoint_url(server_url, "v1/guest/bootstrap")?;
-        let response = reqwest::Client::new()
+        let response = http_client(server_certificate_der)?
             .post(url)
             .bearer_auth(credential)
             .send()
@@ -369,6 +421,23 @@ impl RuntimeControlClient {
     }
 }
 
+fn http_client(server_certificate_der: Option<&[u8]>) -> Result<reqwest::Client, String> {
+    let mut builder = reqwest::Client::builder();
+    if let Some(der) = server_certificate_der {
+        if der.is_empty() {
+            return Err("the pinned server certificate is empty".to_string());
+        }
+        let certificate = reqwest::Certificate::from_der(der)
+            .map_err(|error| format!("the pinned server certificate is invalid: {error}"))?;
+        builder = builder
+            .tls_built_in_root_certs(false)
+            .add_root_certificate(certificate);
+    }
+    builder
+        .build()
+        .map_err(|error| format!("the runtime control TLS client could not be created: {error}"))
+}
+
 fn classify_trace_observation_status(
     status: StatusCode,
     message: String,
@@ -418,7 +487,7 @@ fn endpoint_url(server_url: &str, endpoint: &str) -> Result<Url, String> {
 fn server_endpoint_url(server_url: &str, endpoint: &str) -> Result<Url, String> {
     let _ = agent_gateway_websocket_url(server_url)?;
     let mut url = Url::parse(server_url.trim())
-        .map_err(|_| "gateway.serverUrl must be a valid HTTP or HTTPS URL".to_string())?;
+        .map_err(|_| "Vifu Server address must be a valid HTTP or HTTPS URL".to_string())?;
     let base_path = url.path().trim_end_matches('/');
     url.set_path(&format!("{base_path}/{}", endpoint.trim_start_matches('/')));
     Ok(url)
@@ -515,6 +584,22 @@ mod tests {
             }))
             .unwrap();
         assert_eq!(configuration.deployments[0].project_slug, "moon-train");
+    }
+
+    #[test]
+    fn rejects_empty_or_invalid_pinned_server_certificates() {
+        assert!(RuntimeControlClient::new_with_server_certificate(
+            "https://macbook.local:6791",
+            "device-token",
+            Some(&[]),
+        )
+        .is_err());
+        assert!(RuntimeControlClient::new_with_server_certificate(
+            "https://macbook.local:6791",
+            "device-token",
+            Some(b"not-a-certificate"),
+        )
+        .is_err());
     }
 
     #[test]

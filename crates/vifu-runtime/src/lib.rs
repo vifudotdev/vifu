@@ -17,7 +17,8 @@ pub use application::{
     InvocationData, InvocationEvent, InvocationEventKind, InvocationHandle, InvocationInput,
     InvocationOutput, InvocationPoll, InvocationStatus, InvocationTraceEvent, MemoryRuntimeStore,
     ProviderEvent, ProviderEventSink, ProviderFuture, ProviderRequest, ProviderResponse,
-    ProviderStage, RuntimeError, RuntimeSession, RuntimeStore, VifuRuntime,
+    ProviderStage, RuntimeError, RuntimeMonitorEvent, RuntimeMonitorObserver,
+    RuntimeMonitorStageStatus, RuntimeMonitorStatus, RuntimeSession, RuntimeStore, VifuRuntime,
 };
 pub use bridge::{
     RuntimeBridge, RuntimeBridgeCancelParams, RuntimeBridgeError, RuntimeBridgeHelloParams,
@@ -69,7 +70,8 @@ pub mod prelude {
         ProviderEventSink, ProviderFuture, ProviderRequest, ProviderRequirement, ProviderResponse,
         ProviderStage, RuntimeAdvance, RuntimeBridge, RuntimeBridgeError, RuntimeCommand,
         RuntimeCommandQueue, RuntimeError, RuntimeEvent, RuntimeEventQueue, RuntimeManifest,
-        RuntimeRelease, RuntimeSchedule, RuntimeSession, RuntimeSnapshot, RuntimeState,
-        RuntimeStore, RuntimeTraceRecord, VifuRuntime, VifuRuntimePlugin,
+        RuntimeMonitorEvent, RuntimeMonitorObserver, RuntimeMonitorStageStatus,
+        RuntimeMonitorStatus, RuntimeRelease, RuntimeSchedule, RuntimeSession, RuntimeSnapshot,
+        RuntimeState, RuntimeStore, RuntimeTraceRecord, VifuRuntime, VifuRuntimePlugin,
     };
 }

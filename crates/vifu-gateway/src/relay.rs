@@ -11,10 +11,10 @@ use base64::Engine;
 use futures_util::{SinkExt, StreamExt};
 use tokio::sync::{mpsc, oneshot, OwnedSemaphorePermit, Semaphore};
 use tokio::task::JoinHandle;
-use tokio_tungstenite::connect_async_with_config;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::{connect_async_tls_with_config, Connector};
 use url::Url;
 use uuid::Uuid;
 
@@ -24,6 +24,7 @@ use crate::openclaw::{self, Endpoint};
 use crate::optimization::SessionRouteOverrides;
 use crate::protocol::{
     self, canonical_trace_io_summary, AgentDescriptor, AgentGatewayCommand, ApplicationFeedback,
+    RuntimeTelemetryBatch, RuntimeTelemetryTerminal, RuntimeTelemetryTerminalStatus,
     TraceDeliveryStatus, TraceIoSummary, TraceStageStatus, TraceTelemetry, TraceTelemetryBatch,
     MAX_TRACE_DROPPED_EVENTS, MAX_TRACE_TELEMETRY_EVENTS,
 };
@@ -33,7 +34,8 @@ use crate::session_store::GatewaySessionPersistence;
 
 use vifu_runtime::{
     AgentDefinition, AgentProvider, CancellationToken, InvocationData, ProviderRequest,
-    RuntimeSnapshot, VifuRuntime,
+    RuntimeMonitorEvent, RuntimeMonitorStageStatus, RuntimeMonitorStatus, RuntimeSnapshot,
+    VifuRuntime,
 };
 pub use vifu_runtime::{ProviderEvent, ProviderEventSink, ProviderStage};
 #[cfg(feature = "sqlite")]
@@ -47,6 +49,49 @@ const MAX_CONCURRENT_TELEMETRY_UPLOADS: usize = 4;
 const MAX_CONCURRENT_REJECTION_DELIVERIES: usize = 64;
 const TELEMETRY_RETRY_INITIAL_DELAY: Duration = Duration::from_millis(250);
 const TELEMETRY_RETRY_MAX_DELAY: Duration = Duration::from_secs(5);
+const EMBEDDED_TRACE_RETENTION: Duration = Duration::from_secs(150);
+
+/// Bounded bridge between an embedded runtime callback and the Gateway socket.
+#[derive(Clone)]
+pub struct EmbeddedRuntimeMonitor {
+    receiver: Arc<tokio::sync::Mutex<mpsc::Receiver<RuntimeMonitorEvent>>>,
+    deployment_id: Arc<Mutex<Option<Uuid>>>,
+    dropped_events: Arc<std::sync::atomic::AtomicU32>,
+}
+
+impl EmbeddedRuntimeMonitor {
+    pub fn new(
+        receiver: mpsc::Receiver<RuntimeMonitorEvent>,
+        dropped_events: Arc<std::sync::atomic::AtomicU32>,
+    ) -> Self {
+        Self {
+            receiver: Arc::new(tokio::sync::Mutex::new(receiver)),
+            deployment_id: Arc::new(Mutex::new(None)),
+            dropped_events,
+        }
+    }
+
+    #[cfg(feature = "sqlite")]
+    fn set_deployment_id(&self, deployment_id: Uuid) {
+        if let Ok(mut stored) = self.deployment_id.lock() {
+            *stored = Some(deployment_id);
+        }
+    }
+
+    fn deployment_id(&self) -> Option<Uuid> {
+        self.deployment_id.lock().ok().and_then(|value| *value)
+    }
+
+    async fn receive(&self) -> Option<RuntimeMonitorEvent> {
+        self.receiver.lock().await.recv().await
+    }
+
+    fn take_dropped_events(&self) -> u32 {
+        self.dropped_events
+            .swap(0, std::sync::atomic::Ordering::AcqRel)
+            .min(protocol::MAX_TRACE_DROPPED_EVENTS)
+    }
+}
 
 struct OutboundCommand {
     command: AgentGatewayCommand,
@@ -77,6 +122,40 @@ impl OutboundCommand {
 struct PendingTelemetryBatch {
     request_id: Uuid,
     batch: TraceTelemetryBatch,
+}
+
+struct EmbeddedMonitorTrace {
+    deployment_id: Uuid,
+    trace_id: String,
+    invocation_id: String,
+    project_id: String,
+    endpoint: String,
+    agent_id: String,
+    started_at_ms: u64,
+    last_event_at: Instant,
+    stage_observations: HashMap<ProviderStage, Uuid>,
+}
+
+impl EmbeddedMonitorTrace {
+    fn batch(
+        &self,
+        events: Vec<TraceTelemetry>,
+        dropped_events: u32,
+        terminal: Option<RuntimeTelemetryTerminal>,
+    ) -> RuntimeTelemetryBatch {
+        RuntimeTelemetryBatch {
+            deployment_id: self.deployment_id,
+            trace_id: self.trace_id.clone(),
+            invocation_id: self.invocation_id.clone(),
+            project_id: self.project_id.clone(),
+            endpoint: self.endpoint.clone(),
+            agent_id: self.agent_id.clone(),
+            started_at_ms: self.started_at_ms,
+            events,
+            dropped_events,
+            terminal,
+        }
+    }
 }
 
 #[derive(Default)]
@@ -226,7 +305,7 @@ impl InvocationTelemetry {
 
 pub struct AgentGatewayRuntime<'a> {
     pub server_url: &'a str,
-    pub dashboard_url: Option<&'a str>,
+    pub server_certificate_der: Option<&'a [u8]>,
     pub agent_gateway_bootstrap_token: Option<&'a str>,
     pub enrollment_token: Option<String>,
     pub allow_guest_bootstrap: bool,
@@ -240,6 +319,7 @@ pub struct AgentGatewayRuntime<'a> {
     pub session_path: Option<&'a Path>,
     pub runtime_database_path: &'a Path,
     pub embedded_runtime: Option<&'a VifuRuntime>,
+    pub embedded_monitor: Option<EmbeddedRuntimeMonitor>,
     pub output_policy: GatewayOutputPolicy,
 }
 
@@ -826,7 +906,7 @@ async fn run_agent_gateway_inner(
                 retry_after,
             }) => {
                 let auth_url =
-                    pairing_authorization_url(runtime.dashboard_url, &auth_url).unwrap_or(auth_url);
+                    pairing_authorization_url(runtime.server_url, &auth_url).unwrap_or(auth_url);
                 let changed = session.pairing.as_ref().is_none_or(|pairing| {
                     pairing.request_id != request_id || pairing.auth_url != auth_url
                 });
@@ -917,23 +997,17 @@ fn terminal_link(url: &str) -> String {
     }
 }
 
-fn pairing_authorization_url(
-    dashboard_url: Option<&str>,
-    authorization_url: &str,
-) -> Result<String, String> {
+fn pairing_authorization_url(server_url: &str, authorization_url: &str) -> Result<String, String> {
     if let Ok(url) = Url::parse(authorization_url) {
         if matches!(url.scheme(), "http" | "https") {
             return Ok(url.to_string());
         }
         return Err("Gateway pairing URL must use HTTP or HTTPS".to_string());
     }
-    let dashboard_url = dashboard_url.ok_or_else(|| {
-        "Gateway pairing requires gateway.dashboardUrl for a relative authorization URL".to_string()
-    })?;
-    let mut base = Url::parse(dashboard_url)
-        .map_err(|_| "gateway.dashboardUrl must be a valid HTTP or HTTPS URL".to_string())?;
+    let mut base = Url::parse(server_url)
+        .map_err(|_| "server URL must be a valid HTTP or HTTPS URL".to_string())?;
     if !matches!(base.scheme(), "http" | "https") {
-        return Err("gateway.dashboardUrl must use HTTP or HTTPS".to_string());
+        return Err("server URL must use HTTP or HTTPS".to_string());
     }
     base.set_path("/");
     base.set_query(None);
@@ -995,12 +1069,12 @@ fn print_guest_project(
 
 pub fn guest_claim_url(dashboard_url: &str, claim_token: &str) -> Result<String, String> {
     let mut url = Url::parse(dashboard_url.trim())
-        .map_err(|_| "gateway.dashboardUrl must be a valid HTTP or HTTPS URL".to_string())?;
+        .map_err(|_| "dashboard URL must be a valid HTTP or HTTPS URL".to_string())?;
     if !matches!(url.scheme(), "http" | "https")
         || !url.username().is_empty()
         || url.password().is_some()
     {
-        return Err("gateway.dashboardUrl must be a valid HTTP or HTTPS URL".to_string());
+        return Err("dashboard URL must be a valid HTTP or HTTPS URL".to_string());
     }
     url.set_path("/pair");
     url.set_query(None);
@@ -1013,7 +1087,7 @@ pub fn guest_claim_url(dashboard_url: &str, claim_token: &str) -> Result<String,
 
 pub fn guest_endpoint_url(server_url: &str, endpoint_path: &str) -> Result<String, String> {
     let mut url = Url::parse(server_url.trim())
-        .map_err(|_| "gateway.serverUrl must be a valid HTTP or HTTPS URL".to_string())?;
+        .map_err(|_| "Vifu Server address must be a valid HTTP or HTTPS URL".to_string())?;
     let base_path = url.path().trim_end_matches('/');
     url.set_path(&format!(
         "{base_path}/{}",
@@ -1563,6 +1637,25 @@ fn safe_observer_error(value: &str) -> String {
     sanitize_error(value)
 }
 
+fn pinned_websocket_connector(certificate_der: &[u8]) -> Result<Connector, String> {
+    if certificate_der.is_empty() {
+        return Err("the pinned server certificate is empty".to_string());
+    }
+    let mut roots = rustls::RootCertStore::empty();
+    roots
+        .add(rustls::pki_types::CertificateDer::from(
+            certificate_der.to_vec(),
+        ))
+        .map_err(|error| format!("the pinned server certificate is invalid: {error}"))?;
+    let provider = std::sync::Arc::new(rustls::crypto::ring::default_provider());
+    let config = rustls::ClientConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .map_err(|error| format!("the pinned TLS client could not be created: {error}"))?
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    Ok(Connector::Rustls(std::sync::Arc::new(config)))
+}
+
 async fn run_connection(
     websocket_url: &str,
     runtime: &AgentGatewayRuntime<'_>,
@@ -1578,9 +1671,15 @@ async fn run_connection(
     let websocket_config = WebSocketConfig::default()
         .max_message_size(Some(gateway_frame::MAX_GATEWAY_FRAME_BYTES))
         .max_frame_size(Some(gateway_frame::MAX_GATEWAY_FRAME_BYTES));
-    let (mut socket, _) = connect_async_with_config(request, Some(websocket_config), false)
-        .await
-        .map_err(|error| AgentGatewayConnectionError::Failed(error.to_string()))?;
+    let connector = runtime
+        .server_certificate_der
+        .map(pinned_websocket_connector)
+        .transpose()
+        .map_err(AgentGatewayConnectionError::Failed)?;
+    let (mut socket, _) =
+        connect_async_tls_with_config(request, Some(websocket_config), false, connector)
+            .await
+            .map_err(|error| AgentGatewayConnectionError::Failed(error.to_string()))?;
 
     let challenge = tokio::time::timeout(Duration::from_secs(10), receive_command(&mut socket))
         .await
@@ -1619,6 +1718,15 @@ async fn run_connection(
         session.device_token.as_deref(),
     );
     let signature = session.identity.sign(&signature_payload)?;
+    let mut features = vec![
+        "config-sync-v1",
+        "trace-upload-v1",
+        "embedded-runtime-v1",
+        protocol::APPLICATION_FEEDBACK_FEATURE,
+    ];
+    if runtime.embedded_monitor.is_some() {
+        features.push(protocol::EMBEDDED_LIVE_MONITOR_FEATURE);
+    }
 
     send_command(
         &mut socket,
@@ -1628,12 +1736,7 @@ async fn run_connection(
             agents: runtime.agents.to_vec(),
             metadata: serde_json::json!({
                 "adapter": "vifu",
-                "features": [
-                    "config-sync-v1",
-                    "trace-upload-v1",
-                    "embedded-runtime-v1",
-                    protocol::APPLICATION_FEEDBACK_FEATURE,
-                ],
+                "features": features,
                 "providers": runtime.providers.iter().map(|provider| serde_json::json!({
                     "id": provider.id(),
                     "type": provider.provider_type(),
@@ -1724,9 +1827,10 @@ async fn run_connection(
         && runtime.agent_gateway_bootstrap_token.is_none()
         && session.guest_project.is_none()
     {
-        let guest = RuntimeControlClient::bootstrap_guest_project(
+        let guest = RuntimeControlClient::bootstrap_guest_project_with_server_certificate(
             runtime.server_url,
             session.device_token()?,
+            runtime.server_certificate_der,
         )
         .await?;
         apply_guest_project(
@@ -1749,7 +1853,11 @@ async fn run_connection(
     if let Some(message) = configuration_sync_error.as_deref() {
         terminal_stderr(runtime.output_policy, message);
     }
-    let telemetry_client = RuntimeControlClient::new(runtime.server_url, session.device_token()?)?;
+    let telemetry_client = RuntimeControlClient::new_with_server_certificate(
+        runtime.server_url,
+        session.device_token()?,
+        runtime.server_certificate_der,
+    )?;
     trigger_telemetry_flush(
         &telemetry_client,
         telemetry_backlog,
@@ -1774,12 +1882,21 @@ async fn run_connection(
     let mut calls = HashMap::<Uuid, JoinHandle<()>>::new();
     let mut configuration_sync = tokio::time::interval(Duration::from_secs(30));
     configuration_sync.tick().await;
+    let mut embedded_monitoring_ready = false;
+    let mut embedded_traces = HashMap::<String, EmbeddedMonitorTrace>::new();
 
     let outcome = loop {
         reap_finished(&mut calls);
         tokio::select! {
             _ = tokio::signal::ctrl_c() => break ConnectionOutcome::Shutdown,
             _ = configuration_sync.tick() => {
+                for command in expire_embedded_runtime_traces(
+                    runtime.embedded_monitor.as_ref(),
+                    &mut embedded_traces,
+                    Instant::now(),
+                )? {
+                    send_command(&mut socket, &command).await?;
+                }
                 match sync_runtime_state(runtime, session).await {
                     Ok(()) => observe_connection_status(
                         runtime,
@@ -1809,6 +1926,20 @@ async fn run_connection(
                     let _ = delivery.send(result.is_ok());
                 }
                 result?;
+            }
+            event = receive_embedded_monitor_event(runtime.embedded_monitor.as_ref()),
+                if embedded_monitoring_ready && runtime.embedded_monitor.is_some() => {
+                let Some(event) = event else {
+                    embedded_monitoring_ready = false;
+                    continue;
+                };
+                if let Some(command) = embedded_runtime_telemetry_command(
+                    runtime.embedded_monitor.as_ref(),
+                    &mut embedded_traces,
+                    event,
+                ) {
+                    send_command(&mut socket, &command).await?;
+                }
             }
             incoming = receive_command(&mut socket) => {
                 let incoming = match incoming {
@@ -2169,6 +2300,9 @@ async fn run_connection(
                             }
                         }
                     }
+                    AgentGatewayCommand::RuntimeMonitoringReady => {
+                        embedded_monitoring_ready = runtime.embedded_monitor.is_some();
+                    }
                     AgentGatewayCommand::Error {
                         request_id: None,
                         code,
@@ -2222,6 +2356,166 @@ async fn run_connection(
     }
     let _ = socket.close(None).await;
     Ok(outcome)
+}
+
+async fn receive_embedded_monitor_event(
+    monitor: Option<&EmbeddedRuntimeMonitor>,
+) -> Option<RuntimeMonitorEvent> {
+    match monitor {
+        Some(monitor) => monitor.receive().await,
+        None => std::future::pending().await,
+    }
+}
+
+fn embedded_runtime_telemetry_command(
+    monitor: Option<&EmbeddedRuntimeMonitor>,
+    traces: &mut HashMap<String, EmbeddedMonitorTrace>,
+    event: RuntimeMonitorEvent,
+) -> Option<AgentGatewayCommand> {
+    let monitor = monitor?;
+    match event {
+        RuntimeMonitorEvent::InvocationStarted {
+            trace_id,
+            invocation_id,
+            project_id,
+            endpoint,
+            agent_id,
+            provider_id,
+            capability,
+            started_at_ms,
+        } => {
+            let trace = EmbeddedMonitorTrace {
+                deployment_id: monitor.deployment_id()?,
+                trace_id: trace_id.clone(),
+                invocation_id,
+                project_id,
+                endpoint,
+                agent_id,
+                started_at_ms,
+                last_event_at: Instant::now(),
+                stage_observations: HashMap::new(),
+            };
+            let dropped_events = monitor.take_dropped_events();
+            let batch = trace.batch(
+                vec![TraceTelemetry::InvocationStarted {
+                    provider_key: provider_id,
+                    capability,
+                    model: None,
+                }],
+                dropped_events,
+                None,
+            );
+            traces.insert(trace_id, trace);
+            Some(AgentGatewayCommand::RuntimeTelemetry { batch })
+        }
+        RuntimeMonitorEvent::ProviderStage {
+            trace_id,
+            stage,
+            status,
+            elapsed_ms,
+            request_elapsed_ms,
+            error,
+            ..
+        } => {
+            let trace = traces.get_mut(&trace_id)?;
+            trace.last_event_at = Instant::now();
+            let observation_id = *trace
+                .stage_observations
+                .entry(stage)
+                .or_insert_with(Uuid::new_v4);
+            let start_offset_ms = request_elapsed_ms.saturating_sub(elapsed_ms.unwrap_or(0));
+            let end_offset_ms = match status {
+                RuntimeMonitorStageStatus::Started => None,
+                RuntimeMonitorStageStatus::Completed | RuntimeMonitorStageStatus::Failed => {
+                    Some(request_elapsed_ms)
+                }
+            };
+            let telemetry = TraceTelemetry::ProviderStage {
+                observation_id,
+                stage,
+                status: match status {
+                    RuntimeMonitorStageStatus::Started => TraceStageStatus::Started,
+                    RuntimeMonitorStageStatus::Completed => TraceStageStatus::Completed,
+                    RuntimeMonitorStageStatus::Failed => TraceStageStatus::Failed,
+                },
+                start_offset_ms,
+                end_offset_ms,
+                elapsed_ms,
+                request_elapsed_ms: Some(request_elapsed_ms),
+                input_tokens: None,
+                output_tokens: None,
+                resident: None,
+                error: error.map(|error| safe_observer_error(&error)),
+            };
+            let dropped_events = monitor.take_dropped_events();
+            Some(AgentGatewayCommand::RuntimeTelemetry {
+                batch: trace.batch(vec![telemetry], dropped_events, None),
+            })
+        }
+        RuntimeMonitorEvent::InvocationFinished {
+            trace_id,
+            status,
+            duration_ms,
+            ended_at_ms,
+            error,
+            ..
+        } => {
+            let trace = traces.remove(&trace_id)?;
+            let dropped_events = monitor.take_dropped_events();
+            let terminal = RuntimeTelemetryTerminal {
+                status: match status {
+                    RuntimeMonitorStatus::Completed => RuntimeTelemetryTerminalStatus::Completed,
+                    RuntimeMonitorStatus::Cancelled => RuntimeTelemetryTerminalStatus::Cancelled,
+                    RuntimeMonitorStatus::Error => RuntimeTelemetryTerminalStatus::Error,
+                },
+                duration_ms,
+                ended_at_ms,
+                error: error.map(|error| safe_observer_error(&error)),
+            };
+            Some(AgentGatewayCommand::RuntimeTelemetry {
+                batch: trace.batch(Vec::new(), dropped_events, Some(terminal)),
+            })
+        }
+    }
+}
+
+fn expire_embedded_runtime_traces(
+    monitor: Option<&EmbeddedRuntimeMonitor>,
+    traces: &mut HashMap<String, EmbeddedMonitorTrace>,
+    now: Instant,
+) -> Result<Vec<AgentGatewayCommand>, String> {
+    let Some(monitor) = monitor else {
+        return Ok(Vec::new());
+    };
+    let expired = traces
+        .iter()
+        .filter(|(_, trace)| {
+            now.saturating_duration_since(trace.last_event_at) >= EMBEDDED_TRACE_RETENTION
+        })
+        .map(|(trace_id, _)| trace_id.clone())
+        .collect::<Vec<_>>();
+    if expired.is_empty() {
+        return Ok(Vec::new());
+    }
+    let ended_at_ms = unix_time_ms()?;
+    let mut dropped_events = monitor.take_dropped_events();
+    let mut commands = Vec::with_capacity(expired.len());
+    for trace_id in expired {
+        let Some(trace) = traces.remove(&trace_id) else {
+            continue;
+        };
+        let terminal = RuntimeTelemetryTerminal {
+            status: RuntimeTelemetryTerminalStatus::Error,
+            duration_ms: ended_at_ms.saturating_sub(trace.started_at_ms),
+            ended_at_ms,
+            error: Some("embedded telemetry ended without a terminal event".to_string()),
+        };
+        commands.push(AgentGatewayCommand::RuntimeTelemetry {
+            batch: trace.batch(Vec::new(), dropped_events, Some(terminal)),
+        });
+        dropped_events = 0;
+    }
+    Ok(commands)
 }
 
 fn trigger_telemetry_flush(
@@ -2344,7 +2638,11 @@ async fn sync_runtime_state(
     runtime: &AgentGatewayRuntime<'_>,
     session: &SessionSummary,
 ) -> Result<(), String> {
-    let client = RuntimeControlClient::new(runtime.server_url, session.device_token()?)?;
+    let client = RuntimeControlClient::new_with_server_certificate(
+        runtime.server_url,
+        session.device_token()?,
+        runtime.server_certificate_der,
+    )?;
     let configuration = client.configuration().await?;
     if configuration.gateway_id != session.authorized_gateway_id()? {
         return Err("server returned configuration for another Agent Gateway".to_string());
@@ -2352,6 +2650,14 @@ async fn sync_runtime_state(
     let store = SqliteRuntimeStore::open(runtime.runtime_database_path)
         .map_err(|error| error.to_string())?;
     for mut deployment in configuration.deployments {
+        if runtime
+            .embedded_runtime
+            .is_some_and(|embedded| embedded.project_id() == deployment.project_slug)
+        {
+            if let Some(monitor) = runtime.embedded_monitor.as_ref() {
+                monitor.set_deployment_id(deployment.deployment_id);
+            }
+        }
         if deployment.policies.config_sync {
             if deployment.release.is_none() {
                 if let Some(embedded) = runtime
@@ -2375,9 +2681,6 @@ async fn sync_runtime_state(
                 store
                     .save_release(release)
                     .map_err(|error| error.to_string())?;
-                store
-                    .set_active_release(&deployment.project_slug, release.version)
-                    .map_err(|error| error.to_string())?;
                 if let Some(embedded) = runtime
                     .embedded_runtime
                     .filter(|embedded| embedded.project_id() == deployment.project_slug)
@@ -2389,6 +2692,12 @@ async fn sync_runtime_state(
                         .activate_release(release.version)
                         .map_err(|error| error.to_string())?;
                 }
+                store
+                    .set_active_release(&deployment.project_slug, release.version)
+                    .map_err(|error| error.to_string())?;
+                client
+                    .report_release_applied(deployment.deployment_id, release)
+                    .await?;
             }
         }
         if deployment.policies.trace_mode == "off" {
@@ -2475,26 +2784,26 @@ fn selected_provider_key(
 
 pub fn agent_gateway_websocket_url(server_url: &str) -> Result<String, String> {
     let mut url = Url::parse(server_url.trim())
-        .map_err(|_| "gateway.serverUrl must be a valid HTTP or HTTPS URL".to_string())?;
+        .map_err(|_| "Vifu Server address must be a valid HTTP or HTTPS URL".to_string())?;
     if !url.username().is_empty()
         || url.password().is_some()
         || url.query().is_some()
         || url.fragment().is_some()
     {
         return Err(
-            "gateway.serverUrl must not include credentials, a query, or a fragment".to_string(),
+            "Vifu Server address must not include credentials, a query, or a fragment".to_string(),
         );
     }
     let websocket_scheme = match url.scheme() {
         "http" if is_local_plaintext_server(&url) => "ws",
         "http" => {
             return Err(
-                "Remote gateway.serverUrl values must use https so agent gateway credentials are encrypted"
+                "Remote Vifu Server addresses must use https so agent gateway credentials are encrypted"
                     .to_string(),
             );
         }
         "https" => "wss",
-        _ => return Err("gateway.serverUrl must use http or https".to_string()),
+        _ => return Err("Vifu Server address must use http or https".to_string()),
     };
     url.set_scheme(websocket_scheme)
         .map_err(|_| "could not build agent gateway WebSocket URL".to_string())?;
@@ -2631,35 +2940,97 @@ fn sanitize_error(value: &str) -> String {
 mod tests {
     use base64::Engine;
     use serde_json::json;
+    use std::collections::HashMap;
+    use std::sync::atomic::{AtomicU32, Ordering};
     use std::sync::Arc;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use url::Url;
     use uuid::Uuid;
 
     use super::{
         agent_gateway_error, agent_gateway_websocket_url, decode_command,
-        dispatch_preflight_failure, encode_command, enqueue_telemetry_batch, guest_claim_url,
-        handle_telemetry_flush_result, observe_capture_dropped, queue_error, resolve_provider,
-        runtime_profile_name, safe_observer_error, safe_trace_telemetry, sanitize_error,
-        trigger_telemetry_flush, try_capture, write_terminal_line, AgentGatewayProvider,
-        GatewayCaptureEvent, GatewayInvocationTerminal, GatewayOutputPolicy, GatewayRuntimeEvent,
+        dispatch_preflight_failure, embedded_runtime_telemetry_command, encode_command,
+        enqueue_telemetry_batch, expire_embedded_runtime_traces, guest_claim_url,
+        handle_telemetry_flush_result, observe_capture_dropped, pairing_authorization_url,
+        queue_error, resolve_provider, runtime_profile_name, safe_observer_error,
+        safe_trace_telemetry, sanitize_error, trigger_telemetry_flush, try_capture,
+        write_terminal_line, AgentGatewayProvider, EmbeddedRuntimeMonitor, GatewayCaptureEvent,
+        GatewayInvocationTerminal, GatewayOutputPolicy, GatewayRuntimeEvent,
         InProcessGatewayProvider, InvocationDelivery, InvocationTelemetry, OpenClawGatewayProvider,
         PendingTelemetryBatch, RuntimeControlClient, SessionRouteOverrides, TelemetryBacklogState,
-        MAX_PENDING_TELEMETRY_BATCHES,
+        EMBEDDED_TRACE_RETENTION, MAX_PENDING_TELEMETRY_BATCHES,
     };
     use crate::control::TraceObservationUploadError;
     use crate::gateway_frame;
     use crate::openclaw::Endpoint;
     use crate::protocol::{
-        AgentGatewayCommand, TraceStageStatus, TraceTelemetry, TraceTelemetryBatch,
-        AGENT_GATEWAY_HEARTBEAT_EVENT, AGENT_GATEWAY_HELLO_METHOD, AGENT_GATEWAY_HELLO_REQUEST_ID,
-        VERSION,
+        AgentGatewayCommand, RuntimeTelemetryTerminalStatus, TraceStageStatus, TraceTelemetry,
+        TraceTelemetryBatch, AGENT_GATEWAY_HEARTBEAT_EVENT, AGENT_GATEWAY_HELLO_METHOD,
+        AGENT_GATEWAY_HELLO_REQUEST_ID, VERSION,
     };
     use vifu_runtime::{
         AgentProvider, CancellationToken, InvocationData, ProviderEvent, ProviderFuture,
-        ProviderRequest, ProviderResponse,
+        ProviderRequest, ProviderResponse, ProviderStage, RuntimeMonitorEvent,
+        RuntimeMonitorStageStatus,
     };
+
+    fn embedded_monitor(dropped: u32) -> (EmbeddedRuntimeMonitor, Arc<AtomicU32>) {
+        let (_sender, receiver) = tokio::sync::mpsc::channel(1);
+        let dropped_events = Arc::new(AtomicU32::new(dropped));
+        let monitor = EmbeddedRuntimeMonitor::new(receiver, Arc::clone(&dropped_events));
+        *monitor.deployment_id.lock().unwrap() = Some(Uuid::nil());
+        (monitor, dropped_events)
+    }
+
+    #[test]
+    fn missing_trace_does_not_consume_the_drop_report() {
+        let (monitor, dropped_events) = embedded_monitor(3);
+        let mut traces = HashMap::new();
+        let event = RuntimeMonitorEvent::ProviderStage {
+            trace_id: "missing-trace".to_string(),
+            invocation_id: "missing-invocation".to_string(),
+            stage: ProviderStage::Decode,
+            status: RuntimeMonitorStageStatus::Started,
+            elapsed_ms: None,
+            request_elapsed_ms: 1,
+            error: None,
+        };
+
+        assert!(embedded_runtime_telemetry_command(Some(&monitor), &mut traces, event).is_none());
+        assert_eq!(dropped_events.load(Ordering::Acquire), 3);
+    }
+
+    #[test]
+    fn expired_embedded_trace_emits_a_terminal_reconciliation() {
+        let (monitor, _) = embedded_monitor(2);
+        let mut traces = HashMap::new();
+        let started = RuntimeMonitorEvent::InvocationStarted {
+            trace_id: "trace-1".to_string(),
+            invocation_id: "invocation-1".to_string(),
+            project_id: "ios-embedding".to_string(),
+            endpoint: "chat".to_string(),
+            agent_id: "embedded-agent".to_string(),
+            provider_id: "local-qwen".to_string(),
+            capability: "chat".to_string(),
+            started_at_ms: 1,
+        };
+        let _ = embedded_runtime_telemetry_command(Some(&monitor), &mut traces, started).unwrap();
+        traces.get_mut("trace-1").unwrap().last_event_at =
+            Instant::now() - EMBEDDED_TRACE_RETENTION - Duration::from_secs(1);
+
+        let commands =
+            expire_embedded_runtime_traces(Some(&monitor), &mut traces, Instant::now()).unwrap();
+
+        assert!(traces.is_empty());
+        let AgentGatewayCommand::RuntimeTelemetry { batch } = &commands[0] else {
+            panic!("expiration must emit runtime telemetry");
+        };
+        assert_eq!(
+            batch.terminal.as_ref().unwrap().status,
+            RuntimeTelemetryTerminalStatus::Error
+        );
+    }
 
     struct PersonaProvider;
 
@@ -2674,6 +3045,14 @@ mod tests {
         assert_eq!(
             runtime_profile_name(&binding, "stardew-valley-llama"),
             "Stardew Valley combat/0"
+        );
+    }
+
+    #[test]
+    fn relative_pairing_path_uses_the_same_server_origin() {
+        assert_eq!(
+            pairing_authorization_url("https://api.vifu.example", "/pair?request=test").unwrap(),
+            "https://api.vifu.example/pair?request=test"
         );
     }
 

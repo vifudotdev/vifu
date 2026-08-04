@@ -1,6 +1,7 @@
 use std::fmt;
 use std::fs::OpenOptions;
 use std::io::Write;
+use std::net::{IpAddr, SocketAddr, TcpListener, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 
 #[cfg(unix)]
@@ -166,11 +167,75 @@ fn is_local_server_url(server_url: &str) -> bool {
     let Some(host) = url.host_str() else {
         return false;
     };
+    is_loopback_host(host) || (!host.is_empty() && !host.contains('.'))
+}
+
+/// Returns true when a Vifu Server URL resolves explicitly to loopback.
+pub fn is_loopback_server_url(server_url: &str) -> bool {
+    let Ok(url) = url::Url::parse(server_url.trim()) else {
+        return false;
+    };
+    url.host_str().is_some_and(is_loopback_host)
+}
+
+/// Resolves a component origin to a socket on this machine.
+///
+/// Fully qualified Internet hosts are treated as remote without DNS lookup.
+/// Loopback, single-label, `.local`, and literal IP hosts are checked against
+/// interfaces owned by the current machine.
+pub fn local_component_socket_addr(address: &str) -> Result<Option<SocketAddr>, String> {
+    let url = url::Url::parse(address.trim())
+        .map_err(|error| format!("component address is invalid: {error}"))?;
+    let host = url
+        .host_str()
+        .ok_or_else(|| "component address must include a host".to_string())?;
+    if !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+        || url.path() != "/"
+    {
+        return Err(
+            "component address must be an origin without credentials, a path, query, or fragment"
+                .to_string(),
+        );
+    }
+    let port = url
+        .port_or_known_default()
+        .ok_or_else(|| "component address must include a port for its URL scheme".to_string())?;
+    if host.eq_ignore_ascii_case("localhost") {
+        return Ok(Some(SocketAddr::from(([127, 0, 0, 1], port))));
+    }
+    if let Ok(ip) = host.parse::<IpAddr>() {
+        return Ok(is_local_interface(ip).then_some(SocketAddr::new(ip, port)));
+    }
+    if host.contains('.') && !host.ends_with(".local") {
+        return Ok(None);
+    }
+    let mut addresses = (host, port)
+        .to_socket_addrs()
+        .map_err(|error| {
+            format!("local component address {address:?} could not be resolved: {error}")
+        })?
+        .collect::<Vec<_>>();
+    addresses.sort_by_key(|candidate| candidate.is_ipv6());
+    Ok(addresses
+        .into_iter()
+        .find(|candidate| is_local_interface(candidate.ip())))
+}
+
+fn is_local_interface(ip: IpAddr) -> bool {
+    if ip.is_loopback() {
+        return true;
+    }
+    TcpListener::bind(SocketAddr::new(ip, 0)).is_ok()
+}
+
+fn is_loopback_host(host: &str) -> bool {
     host.eq_ignore_ascii_case("localhost")
         || host
             .parse::<std::net::IpAddr>()
             .is_ok_and(|address| address.is_loopback())
-        || (!host.is_empty() && !host.contains('.'))
 }
 
 /// Returns true when a configured HTTP provider resolves to this machine.
@@ -476,9 +541,9 @@ pub fn default_home_dir() -> Result<PathBuf, String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        read_provider_registry_file, write_private_file, write_provider_registry_file,
-        AgentProviderAuthDefinition, AgentProviderDefinition, AgentProvidersFile, Config,
-        DEFAULT_OPENCLAW_URL, DEFAULT_SERVER_URL,
+        local_component_socket_addr, read_provider_registry_file, write_private_file,
+        write_provider_registry_file, AgentProviderAuthDefinition, AgentProviderDefinition,
+        AgentProvidersFile, Config, DEFAULT_OPENCLAW_URL, DEFAULT_SERVER_URL,
     };
     use serde_json::json;
     use std::fs;
@@ -490,6 +555,22 @@ mod tests {
     fn default_urls_target_local_services() {
         assert_eq!(DEFAULT_OPENCLAW_URL, "http://127.0.0.1:18789");
         assert_eq!(DEFAULT_SERVER_URL, "http://127.0.0.1:6790");
+    }
+
+    #[test]
+    fn local_component_address_resolves_loopback_without_a_listener() {
+        assert_eq!(
+            local_component_socket_addr("http://localhost:6790").unwrap(),
+            Some("127.0.0.1:6790".parse().unwrap())
+        );
+    }
+
+    #[test]
+    fn public_component_address_is_remote_without_dns_lookup() {
+        assert_eq!(
+            local_component_socket_addr("https://api.example.com").unwrap(),
+            None
+        );
     }
 
     #[cfg(unix)]

@@ -638,6 +638,7 @@ fn generate_chat(
         .as_ref()
         .map(parse_structured_output)
         .transpose()?;
+    let generation = agent_generation(&request.agent.metadata);
     let grammar = structured_output
         .as_ref()
         .map(|format| {
@@ -680,6 +681,7 @@ fn generate_chat(
 
     let max_tokens = input
         .max_tokens
+        .or(generation.max_tokens)
         .unwrap_or(default_max_tokens)
         .clamp(1, MAX_GENERATED_TOKENS);
     let mut context = model
@@ -718,9 +720,14 @@ fn generate_chat(
 
     let temperature = input
         .temperature
+        .or(generation.temperature)
         .unwrap_or(DEFAULT_TEMPERATURE)
         .clamp(0.0, 2.0);
-    let top_p = input.top_p.unwrap_or(DEFAULT_TOP_P).clamp(0.0, 1.0);
+    let top_p = input
+        .top_p
+        .or(generation.top_p)
+        .unwrap_or(DEFAULT_TOP_P)
+        .clamp(0.0, 1.0);
     let mut samplers = Vec::with_capacity(5);
     if let Some(grammar) = grammar.as_deref() {
         samplers.push(
@@ -1627,11 +1634,69 @@ fn base64_value(byte: u8) -> Result<u8, RuntimeError> {
 }
 
 fn agent_instructions(metadata: &Value) -> Option<String> {
+    let persona = metadata.get("persona").and_then(Value::as_object);
+    let mut sections = Vec::new();
+    if let Some(instructions) = persona
+        .and_then(|persona| {
+            persona
+                .get("instructions")
+                .or_else(|| persona.get("systemPrompt"))
+        })
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        sections.push(instructions.to_string());
+    }
+    if let Some(files) = persona
+        .and_then(|persona| persona.get("files"))
+        .and_then(Value::as_object)
+    {
+        let mut files = files.iter().collect::<Vec<_>>();
+        files.sort_by(|left, right| left.0.cmp(right.0));
+        sections.extend(files.into_iter().filter_map(|(name, content)| {
+            content
+                .as_str()
+                .map(str::trim)
+                .filter(|content| !content.is_empty())
+                .map(|content| format!("# {name}\n{content}"))
+        }));
+    }
+    if !sections.is_empty() {
+        return Some(sections.join("\n\n"));
+    }
     metadata
         .get("instructions")
         .or_else(|| metadata.get("systemPrompt"))
         .and_then(Value::as_str)
         .map(str::to_owned)
+}
+
+#[derive(Default)]
+struct AgentGeneration {
+    max_tokens: Option<u32>,
+    temperature: Option<f32>,
+    top_p: Option<f32>,
+}
+
+fn agent_generation(metadata: &Value) -> AgentGeneration {
+    let Some(generation) = metadata.get("generation") else {
+        return AgentGeneration::default();
+    };
+    AgentGeneration {
+        max_tokens: generation
+            .get("maxTokens")
+            .and_then(Value::as_u64)
+            .and_then(|value| u32::try_from(value).ok()),
+        temperature: generation
+            .get("temperature")
+            .and_then(Value::as_f64)
+            .map(|value| value as f32),
+        top_p: generation
+            .get("topP")
+            .and_then(Value::as_f64)
+            .map(|value| value as f32),
+    }
 }
 
 fn provider_error(message: &str) -> RuntimeError {
@@ -1752,6 +1817,25 @@ mod tests {
             agent_instructions(&json!({ "instructions": "Stay in character." })),
             Some("Stay in character.".to_string())
         );
+        assert_eq!(
+            agent_instructions(&json!({
+                "persona": {
+                    "systemPrompt": "Stay curious.",
+                    "files": { "SOUL.md": "Protect the traveler." }
+                }
+            })),
+            Some("Stay curious.\n\n# SOUL.md\nProtect the traveler.".to_string())
+        );
+    }
+
+    #[test]
+    fn extracts_versioned_agent_generation_defaults() {
+        let generation = agent_generation(&json!({
+            "generation": { "maxTokens": 384, "temperature": 0.4, "topP": 0.8 }
+        }));
+        assert_eq!(generation.max_tokens, Some(384));
+        assert_eq!(generation.temperature, Some(0.4));
+        assert_eq!(generation.top_p, Some(0.8));
     }
 
     #[test]

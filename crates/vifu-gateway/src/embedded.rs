@@ -1,6 +1,7 @@
 use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
@@ -12,10 +13,14 @@ use vifu_runtime::{InvocationData, InvocationInput, RuntimeManifest, VifuRuntime
 use crate::identity::MachineIdentity;
 use crate::protocol::AgentDescriptor;
 use crate::relay::{self, AgentGatewayRuntime};
-use crate::relay::{AgentGatewayProvider, GatewayProviderError};
+use crate::relay::{
+    AgentGatewayProvider, GatewayConnectionState, GatewayProviderError, GatewayRuntimeEvent,
+};
 use crate::session::SessionSummary;
 #[cfg(feature = "sqlite")]
 use crate::session_store::{gateway_session_state_key, GatewaySecretStorage, GatewaySessionStore};
+
+const EMBEDDED_MONITOR_QUEUE_CAPACITY: usize = 256;
 
 /// Exposes one logical provider in an embedded [`VifuRuntime`] to Vifu Server.
 ///
@@ -143,21 +148,22 @@ impl AgentGatewayProvider for EmbeddedRuntimeGatewayProvider {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EmbeddedRuntimeGatewayConfig {
     pub server_url: String,
-    pub dashboard_url: Option<String>,
     pub runtime_database_path: PathBuf,
+    pub server_certificate_der: Option<Vec<u8>>,
 }
 
 impl EmbeddedRuntimeGatewayConfig {
     pub fn new(server_url: impl Into<String>, runtime_database_path: impl Into<PathBuf>) -> Self {
         Self {
             server_url: server_url.into(),
-            dashboard_url: None,
             runtime_database_path: runtime_database_path.into(),
+            server_certificate_der: None,
         }
     }
 
-    pub fn with_dashboard_url(mut self, dashboard_url: impl Into<String>) -> Self {
-        self.dashboard_url = Some(dashboard_url.into());
+    /// Trusts exactly the self-signed Vifu Server certificate distributed by pairing.
+    pub fn with_server_certificate_der(mut self, certificate_der: Vec<u8>) -> Self {
+        self.server_certificate_der = Some(certificate_der);
         self
     }
 }
@@ -166,7 +172,11 @@ impl EmbeddedRuntimeGatewayConfig {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EmbeddedRuntimeGatewayState {
     Stopped,
-    Running,
+    Connecting,
+    Connected,
+    Reconnecting,
+    AuthorizationRequired,
+    Degraded,
     Failed,
 }
 
@@ -223,6 +233,13 @@ impl EmbeddedRuntimeGateway {
     /// Creates a stopped gateway and validates its network identity.
     pub fn new(runtime: VifuRuntime, config: EmbeddedRuntimeGatewayConfig) -> Result<Self, String> {
         relay::agent_gateway_websocket_url(&config.server_url)?;
+        if config
+            .server_certificate_der
+            .as_ref()
+            .is_some_and(Vec::is_empty)
+        {
+            return Err("the pinned server certificate is empty".to_string());
+        }
         if config.runtime_database_path.as_os_str().is_empty() {
             return Err("runtime database path is required".to_string());
         }
@@ -268,9 +285,25 @@ impl EmbeddedRuntimeGateway {
         }
 
         let server_url = self.config.server_url.clone();
-        let dashboard_url = self.config.dashboard_url.clone();
         let runtime_database_path = self.config.runtime_database_path.clone();
+        let server_certificate_der = self.config.server_certificate_der.clone();
         let embedded_runtime = self.runtime.clone();
+        let (monitor_sender, monitor_receiver) =
+            tokio::sync::mpsc::channel(EMBEDDED_MONITOR_QUEUE_CAPACITY);
+        let monitor_drops = Arc::new(AtomicU32::new(0));
+        let observer_drops = Arc::clone(&monitor_drops);
+        self.runtime
+            .set_monitor_observer(Some(Arc::new(move |event| {
+                if monitor_sender.try_send(event).is_err() {
+                    let _ = observer_drops.fetch_update(
+                        Ordering::Relaxed,
+                        Ordering::Relaxed,
+                        |dropped| Some(dropped.saturating_add(1)),
+                    );
+                }
+            })))
+            .map_err(|error| error.public_message())?;
+        let embedded_monitor = relay::EmbeddedRuntimeMonitor::new(monitor_receiver, monitor_drops);
         let status = Arc::clone(&self.status);
         let guest_project = Arc::clone(&self.guest_project);
         #[cfg(feature = "sqlite")]
@@ -278,7 +311,7 @@ impl EmbeddedRuntimeGateway {
         #[cfg(feature = "sqlite")]
         let pairing = Arc::clone(&self.pairing);
         let (shutdown, shutdown_receiver) = tokio::sync::oneshot::channel();
-        set_gateway_status(&status, EmbeddedRuntimeGatewayState::Running, None)?;
+        set_gateway_status(&status, EmbeddedRuntimeGatewayState::Connecting, None)?;
         clear_guest_project(&guest_project)?;
         let thread = match std::thread::Builder::new()
             .name("vifu-embedded-gateway".to_string())
@@ -355,22 +388,46 @@ impl EmbeddedRuntimeGateway {
                                 });
                             let allow_guest_bootstrap =
                                 cfg!(feature = "sqlite") && enrollment_token.is_none();
+                            let connection_status = Arc::clone(&status);
+                            let runtime_observer = Arc::new(move |event: GatewayRuntimeEvent| {
+                                let GatewayRuntimeEvent::ConnectionStatus { state, message } =
+                                    event
+                                else {
+                                    return;
+                                };
+                                let state = match state {
+                                    GatewayConnectionState::Connected => {
+                                        EmbeddedRuntimeGatewayState::Connected
+                                    }
+                                    GatewayConnectionState::Reconnecting => {
+                                        EmbeddedRuntimeGatewayState::Reconnecting
+                                    }
+                                    GatewayConnectionState::AuthorizationRequired => {
+                                        EmbeddedRuntimeGatewayState::AuthorizationRequired
+                                    }
+                                    GatewayConnectionState::Degraded => {
+                                        EmbeddedRuntimeGatewayState::Degraded
+                                    }
+                                };
+                                let _ = set_gateway_status(&connection_status, state, message);
+                            });
                             let gateway = AgentGatewayRuntime {
                                 server_url: &server_url,
-                                dashboard_url: dashboard_url.as_deref(),
+                                server_certificate_der: server_certificate_der.as_deref(),
                                 agent_gateway_bootstrap_token: None,
                                 enrollment_token,
                                 allow_guest_bootstrap,
                                 providers: &providers,
                                 agents: &agents,
                                 route_overrides: None,
-                                runtime_observer: None,
+                                runtime_observer: Some(runtime_observer),
                                 capture_sender: None,
                                 config_epoch: 0,
                                 provider_models: None,
                                 session_path: None,
                                 runtime_database_path: &runtime_database_path,
                                 embedded_runtime: Some(&embedded_runtime),
+                                embedded_monitor: Some(embedded_monitor),
                                 output_policy: relay::GatewayOutputPolicy::Terminal,
                             };
                             #[cfg(feature = "sqlite")]
@@ -406,6 +463,7 @@ impl EmbeddedRuntimeGateway {
             }) {
             Ok(thread) => thread,
             Err(error) => {
+                let _ = self.runtime.set_monitor_observer(None);
                 set_gateway_status(
                     &self.status,
                     EmbeddedRuntimeGatewayState::Failed,
@@ -464,6 +522,9 @@ impl EmbeddedRuntimeGateway {
             task.thread
                 .join()
                 .map_err(|_| "embedded gateway worker stopped unexpectedly".to_string())?;
+            self.runtime
+                .set_monitor_observer(None)
+                .map_err(|error| error.public_message())?;
         }
         set_gateway_status(&self.status, EmbeddedRuntimeGatewayState::Stopped, None)
     }
@@ -529,6 +590,21 @@ fn gateway_components(
                     Value::String(provider_type),
                 );
             }
+            if let Some(provider) = manifest
+                .providers
+                .iter()
+                .find(|provider| provider.id == agent.provider)
+            {
+                metadata.insert("providerSettings".to_string(), provider.settings.clone());
+                metadata.insert(
+                    "providerResources".to_string(),
+                    serde_json::json!(provider.resources),
+                );
+                metadata.insert(
+                    "providerCapabilities".to_string(),
+                    serde_json::json!(provider.capabilities),
+                );
+            }
             metadata.insert(
                 "capabilities".to_string(),
                 serde_json::json!(agent.capabilities),
@@ -582,12 +658,14 @@ fn clear_guest_project(guest_project: &Mutex<Option<EmbeddedGuestProject>>) -> R
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
 
     use serde_json::json;
     use vifu_runtime::{
-        AgentDefinition, AgentProvider, CancellationToken, EndpointDefinition, ProviderFuture,
-        ProviderRequest, ProviderRequirement, ProviderResponse, RuntimeError, RuntimeManifest,
+        AgentDefinition, AgentProvider, CancellationToken, EndpointDefinition, InvocationInput,
+        ProviderFuture, ProviderRequest, ProviderRequirement, ProviderResponse, RuntimeError,
+        RuntimeManifest,
     };
 
     use super::*;
@@ -663,6 +741,37 @@ mod tests {
         assert_eq!(output, json!({ "message": "hello" }));
     }
 
+    #[tokio::test]
+    async fn dropping_a_stopped_gateway_preserves_a_replacement_monitor() {
+        let runtime = runtime();
+        let observed = Arc::new(AtomicUsize::new(0));
+        let observer_count = Arc::clone(&observed);
+        runtime
+            .set_monitor_observer(Some(Arc::new(move |_| {
+                observer_count.fetch_add(1, Ordering::Relaxed);
+            })))
+            .unwrap();
+        let gateway = EmbeddedRuntimeGateway::new(
+            runtime.clone(),
+            EmbeddedRuntimeGatewayConfig::new(
+                "http://127.0.0.1:6790",
+                std::env::temp_dir().join(format!("vifu-gateway-{}.sqlite", uuid::Uuid::new_v4())),
+            ),
+        )
+        .unwrap();
+
+        drop(gateway);
+        runtime
+            .invoke(InvocationInput::json(
+                "mizuki-chat",
+                json!({ "message": "hello" }),
+            ))
+            .await
+            .unwrap();
+
+        assert!(observed.load(Ordering::Relaxed) >= 2);
+    }
+
     #[test]
     fn requires_an_explicit_endpoint_when_an_agent_has_more_than_one() {
         let runtime = runtime();
@@ -704,6 +813,7 @@ mod tests {
         assert_eq!(agents[0].metadata["providerKey"], "local-llama");
         assert_eq!(agents[0].metadata["providerType"], "vifu-runtime");
         assert_eq!(agents[0].metadata["localProviderType"], "local-llama");
+        assert_eq!(agents[0].metadata["providerCapabilities"], json!(["chat"]));
     }
 
     #[test]
@@ -718,7 +828,7 @@ mod tests {
     #[test]
     fn guest_project_updates_preserve_the_embedded_gateway_lifecycle() {
         let status = Mutex::new(EmbeddedRuntimeGatewayStatus {
-            state: EmbeddedRuntimeGatewayState::Running,
+            state: EmbeddedRuntimeGatewayState::Connecting,
             last_error: None,
         });
         let guest_project = Mutex::new(None);
@@ -736,7 +846,7 @@ mod tests {
         set_guest_project(&guest_project, &guest).unwrap();
 
         let status = status.into_inner().unwrap();
-        assert_eq!(status.state, EmbeddedRuntimeGatewayState::Running);
+        assert_eq!(status.state, EmbeddedRuntimeGatewayState::Connecting);
         assert_eq!(
             guest_project.into_inner().unwrap().unwrap().project_slug,
             guest.project_slug

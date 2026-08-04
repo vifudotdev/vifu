@@ -247,7 +247,7 @@ pub enum InvocationEventKind {
 }
 
 /// A provider stage that can be rendered as an observation in a live trace.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum ProviderStage {
     Queue,
@@ -285,6 +285,68 @@ pub enum ProviderEvent {
         metadata: Value,
     },
 }
+
+/// Terminal outcome reported to an embedded runtime monitor.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum RuntimeMonitorStatus {
+    Completed,
+    Cancelled,
+    Error,
+}
+
+/// State of a provider stage reported to an embedded runtime monitor.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum RuntimeMonitorStageStatus {
+    Started,
+    Completed,
+    Failed,
+}
+
+/// Payload-safe lifecycle metadata for one embedded runtime invocation.
+///
+/// Prompt content and streamed output are intentionally excluded. Hosts may
+/// forward these events to a remote monitor without exposing model input or
+/// output data.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "camelCase")]
+pub enum RuntimeMonitorEvent {
+    InvocationStarted {
+        trace_id: String,
+        invocation_id: String,
+        project_id: String,
+        endpoint: String,
+        agent_id: String,
+        provider_id: String,
+        capability: String,
+        started_at_ms: u64,
+    },
+    ProviderStage {
+        trace_id: String,
+        invocation_id: String,
+        stage: ProviderStage,
+        status: RuntimeMonitorStageStatus,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        elapsed_ms: Option<u64>,
+        request_elapsed_ms: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+    },
+    InvocationFinished {
+        trace_id: String,
+        invocation_id: String,
+        status: RuntimeMonitorStatus,
+        duration_ms: u64,
+        ended_at_ms: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+    },
+}
+
+/// Thread-safe callback installed by an embedding host that wants live,
+/// payload-safe runtime lifecycle metadata.
+pub type RuntimeMonitorObserver = Arc<dyn Fn(RuntimeMonitorEvent) + Send + Sync>;
 
 /// One ordered event produced by an invocation.
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
@@ -902,6 +964,7 @@ struct RuntimeCore {
     session_locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     invocations: Mutex<InvocationRegistry>,
     next_invocation: AtomicU64,
+    monitor_observer: RwLock<Option<RuntimeMonitorObserver>>,
 }
 
 struct InvocationEntry {
@@ -1087,28 +1150,36 @@ impl RuntimeCore {
         cancellation: CancellationToken,
     ) -> Result<InvocationOutput, RuntimeError> {
         let endpoint = input.endpoint.clone();
+        let created_at_ms = crate::unix_time_ms();
+        let trace_id = format!("trace-{created_at_ms}-{invocation_id}");
         let started = Instant::now();
         let result = self
-            .invoke_provider(invocation_id.clone(), input, cancellation)
+            .invoke_provider(
+                trace_id.clone(),
+                created_at_ms,
+                invocation_id.clone(),
+                input,
+                cancellation,
+            )
             .await;
-        let created_at_ms = crate::unix_time_ms();
+        let elapsed_ms = duration_ms(started.elapsed());
         let trace = match &result {
             Ok(output) => RuntimeTraceRecord {
-                id: format!("trace-{created_at_ms}-{invocation_id}"),
+                id: trace_id.clone(),
                 project_id: self.project_id.clone(),
-                invocation_id,
-                endpoint,
+                invocation_id: invocation_id.clone(),
+                endpoint: endpoint.clone(),
                 agent: Some(output.agent.clone()),
                 provider: Some(output.provider.clone()),
                 capability: Some(output.capability.clone()),
                 status: "completed".to_string(),
-                duration_ms: duration_ms(started.elapsed()),
+                duration_ms: elapsed_ms,
                 created_at_ms,
             },
             Err(error) => RuntimeTraceRecord {
-                id: format!("trace-{created_at_ms}-{invocation_id}"),
+                id: trace_id.clone(),
                 project_id: self.project_id.clone(),
-                invocation_id,
+                invocation_id: invocation_id.clone(),
                 endpoint,
                 agent: None,
                 provider: None,
@@ -1118,16 +1189,33 @@ impl RuntimeCore {
                     _ => "error",
                 }
                 .to_string(),
-                duration_ms: duration_ms(started.elapsed()),
+                duration_ms: elapsed_ms,
                 created_at_ms,
             },
         };
         let _ = self.store.enqueue_trace(&trace);
+        self.emit_monitor_event(RuntimeMonitorEvent::InvocationFinished {
+            trace_id,
+            invocation_id,
+            status: match &result {
+                Ok(_) => RuntimeMonitorStatus::Completed,
+                Err(RuntimeError::Cancelled) => RuntimeMonitorStatus::Cancelled,
+                Err(_) => RuntimeMonitorStatus::Error,
+            },
+            duration_ms: elapsed_ms,
+            // Derive the terminal timestamp from the invocation start and a
+            // monotonic duration. A wall-clock adjustment during the request
+            // must not produce an end time before the start time.
+            ended_at_ms: created_at_ms.saturating_add(elapsed_ms),
+            error: result.as_ref().err().map(RuntimeError::public_message),
+        });
         result
     }
 
     async fn invoke_provider(
         self: &Arc<Self>,
+        trace_id: String,
+        started_at_ms: u64,
         invocation_id: String,
         input: InvocationInput,
         cancellation: CancellationToken,
@@ -1180,6 +1268,17 @@ impl RuntimeCore {
             return Err(RuntimeError::Cancelled);
         }
 
+        self.emit_monitor_event(RuntimeMonitorEvent::InvocationStarted {
+            trace_id: trace_id.clone(),
+            invocation_id: invocation_id.clone(),
+            project_id: self.project_id.clone(),
+            endpoint: endpoint.name.clone(),
+            agent_id: agent.id.clone(),
+            provider_id: agent.provider.clone(),
+            capability: endpoint.capability.clone(),
+            started_at_ms,
+        });
+
         let snapshot = self.load_snapshot(&input.session_id)?;
         let request = ProviderRequest {
             project_id: self.project_id.clone(),
@@ -1192,7 +1291,8 @@ impl RuntimeCore {
             snapshot: snapshot.clone(),
         };
         let started = Instant::now();
-        let events = self.provider_event_sink(&InvocationHandle(invocation_id.clone()));
+        let events =
+            self.provider_event_sink(&InvocationHandle(invocation_id.clone()), trace_id, started);
         let provider_call = provider.invoke_with_events(request, cancellation.clone(), events);
         let response = tokio::select! {
             _ = cancellation.cancelled() => return Err(RuntimeError::Cancelled),
@@ -1274,14 +1374,64 @@ impl RuntimeCore {
         }
     }
 
-    fn provider_event_sink(self: &Arc<Self>, handle: &InvocationHandle) -> ProviderEventSink {
+    fn provider_event_sink(
+        self: &Arc<Self>,
+        handle: &InvocationHandle,
+        trace_id: String,
+        request_started: Instant,
+    ) -> ProviderEventSink {
         let core = Arc::clone(self);
         let handle = handle.clone();
-        ProviderEventSink::new(move |data| {
+        ProviderEventSink::new(move |event| {
             if let Ok(mut invocations) = core.invocations.lock() {
-                invocations.push_provider_event(&handle, data);
+                invocations.push_provider_event(&handle, event.clone());
             }
+            let (stage, status, elapsed_ms, error) = match event {
+                ProviderEvent::OutputDelta { .. } => return,
+                ProviderEvent::StageStarted { stage, .. } => {
+                    (stage, RuntimeMonitorStageStatus::Started, None, None)
+                }
+                ProviderEvent::StageCompleted {
+                    stage, elapsed_ms, ..
+                } => (
+                    stage,
+                    RuntimeMonitorStageStatus::Completed,
+                    Some(elapsed_ms),
+                    None,
+                ),
+                ProviderEvent::StageFailed {
+                    stage,
+                    elapsed_ms,
+                    error,
+                    ..
+                } => (
+                    stage,
+                    RuntimeMonitorStageStatus::Failed,
+                    Some(elapsed_ms),
+                    Some(error),
+                ),
+            };
+            core.emit_monitor_event(RuntimeMonitorEvent::ProviderStage {
+                trace_id: trace_id.clone(),
+                invocation_id: handle.0.clone(),
+                stage,
+                status,
+                elapsed_ms,
+                request_elapsed_ms: duration_ms(request_started.elapsed()),
+                error,
+            });
         })
+    }
+
+    fn emit_monitor_event(&self, event: RuntimeMonitorEvent) {
+        let observer = self
+            .monitor_observer
+            .read()
+            .ok()
+            .and_then(|observer| observer.clone());
+        if let Some(observer) = observer {
+            observer(event);
+        }
     }
 }
 
@@ -1463,6 +1613,7 @@ impl VifuRuntime {
             session_locks: Mutex::new(HashMap::new()),
             invocations: Mutex::new(InvocationRegistry::default()),
             next_invocation: AtomicU64::new(1),
+            monitor_observer: RwLock::new(None),
         });
         let worker = Arc::new(Mutex::new(None));
         Ok(Self { core, worker })
@@ -1470,6 +1621,19 @@ impl VifuRuntime {
 
     pub fn project_id(&self) -> &str {
         &self.core.project_id
+    }
+
+    /// Installs or clears the payload-safe runtime lifecycle observer.
+    pub fn set_monitor_observer(
+        &self,
+        observer: Option<RuntimeMonitorObserver>,
+    ) -> Result<(), RuntimeError> {
+        *self
+            .core
+            .monitor_observer
+            .write()
+            .map_err(|_| RuntimeError::Internal)? = observer;
+        Ok(())
     }
 
     pub fn register_provider(

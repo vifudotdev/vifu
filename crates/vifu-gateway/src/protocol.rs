@@ -35,6 +35,9 @@ pub const AGENT_GATEWAY_HEARTBEAT_EVENT: &str = "gateway.heartbeat";
 pub const AGENT_GATEWAY_HEARTBEAT_ACK_EVENT: &str = "gateway.heartbeatAck";
 pub const AGENT_GATEWAY_ERROR_EVENT: &str = "gateway.error";
 pub const RUNTIME_CONFIG_CHANGED_EVENT: &str = "runtime.config.changed";
+pub const EMBEDDED_LIVE_MONITOR_FEATURE: &str = "embedded-live-monitor-v1";
+pub const RUNTIME_MONITORING_READY_EVENT: &str = "runtime.monitoring.ready";
+pub const RUNTIME_TELEMETRY_EVENT: &str = "runtime.telemetry";
 pub const APPLICATION_FEEDBACK_EVENT: &str = "trace.applicationFeedback";
 pub const APPLICATION_FEEDBACK_FEATURE: &str = "trace.application-feedback.v1";
 
@@ -201,6 +204,43 @@ pub struct TraceTelemetryBatch {
     pub root_output_summary: Option<TraceIoSummary>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum RuntimeTelemetryTerminalStatus {
+    Completed,
+    Cancelled,
+    Error,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RuntimeTelemetryTerminal {
+    pub status: RuntimeTelemetryTerminalStatus,
+    pub duration_ms: u64,
+    pub ended_at_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// One bounded, payload-safe update from an embedded runtime invocation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RuntimeTelemetryBatch {
+    pub deployment_id: Uuid,
+    pub trace_id: String,
+    pub invocation_id: String,
+    pub project_id: String,
+    pub endpoint: String,
+    pub agent_id: String,
+    pub started_at_ms: u64,
+    #[serde(default)]
+    pub events: Vec<TraceTelemetry>,
+    #[serde(default)]
+    pub dropped_events: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal: Option<RuntimeTelemetryTerminal>,
+}
+
 /// Internal semantic command for relay state machines.
 ///
 /// The WebSocket wire contract is `GatewayFrame`; do not serialize this enum directly.
@@ -269,6 +309,10 @@ pub enum AgentGatewayCommand {
     },
     RuntimeConfigChanged {
         deployment_ids: Vec<Uuid>,
+    },
+    RuntimeMonitoringReady,
+    RuntimeTelemetry {
+        batch: RuntimeTelemetryBatch,
     },
     ApplicationFeedback {
         request_id: Uuid,
@@ -376,6 +420,10 @@ struct ErrorEventPayload {
 struct RuntimeConfigChangedPayload {
     deployment_ids: Vec<Uuid>,
 }
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RuntimeMonitoringReadyPayload {}
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -553,6 +601,13 @@ pub fn to_gateway_frame(command: &AgentGatewayCommand) -> Result<GatewayFrame, S
                 deployment_ids: deployment_ids.clone(),
             },
         ),
+        AgentGatewayCommand::RuntimeMonitoringReady => event_frame(
+            RUNTIME_MONITORING_READY_EVENT,
+            &RuntimeMonitoringReadyPayload {},
+        ),
+        AgentGatewayCommand::RuntimeTelemetry { batch } => {
+            event_frame(RUNTIME_TELEMETRY_EVENT, batch)
+        }
         AgentGatewayCommand::ApplicationFeedback {
             request_id,
             observation_id,
@@ -729,6 +784,20 @@ fn from_event_frame(event: EventFrame) -> Result<AgentGatewayCommand, String> {
             Ok(AgentGatewayCommand::RuntimeConfigChanged {
                 deployment_ids: payload.deployment_ids,
             })
+        }
+        RUNTIME_MONITORING_READY_EVENT => {
+            decode_required::<RuntimeMonitoringReadyPayload>(
+                event.payload,
+                "runtime.monitoring.ready payload",
+            )?;
+            Ok(AgentGatewayCommand::RuntimeMonitoringReady)
+        }
+        RUNTIME_TELEMETRY_EVENT => {
+            let batch = decode_required::<RuntimeTelemetryBatch>(
+                event.payload,
+                "runtime.telemetry payload",
+            )?;
+            Ok(AgentGatewayCommand::RuntimeTelemetry { batch })
         }
         APPLICATION_FEEDBACK_EVENT => {
             let payload = decode_required::<ApplicationFeedbackPayload>(
@@ -929,6 +998,8 @@ pub fn validate_command(command: &AgentGatewayCommand) -> Result<(), String> {
                 Err("runtime configuration notification contains duplicates".to_string())
             }
         }
+        AgentGatewayCommand::RuntimeMonitoringReady => Ok(()),
+        AgentGatewayCommand::RuntimeTelemetry { batch } => validate_runtime_telemetry_batch(batch),
         AgentGatewayCommand::ApplicationFeedback {
             start_offset_ms,
             end_offset_ms,
@@ -947,6 +1018,40 @@ pub fn validate_command(command: &AgentGatewayCommand) -> Result<(), String> {
             Ok(())
         }
     }
+}
+
+pub fn validate_runtime_telemetry_batch(batch: &RuntimeTelemetryBatch) -> Result<(), String> {
+    validate_identifier("runtime trace id", &batch.trace_id)?;
+    validate_identifier("runtime invocation id", &batch.invocation_id)?;
+    validate_identifier("runtime project id", &batch.project_id)?;
+    validate_identifier("runtime endpoint", &batch.endpoint)?;
+    validate_identifier("runtime agent id", &batch.agent_id)?;
+    if batch.started_at_ms == 0 {
+        return Err("runtime telemetry start time is required".to_string());
+    }
+    if batch.events.is_empty() && batch.terminal.is_none() {
+        return Err("runtime telemetry must include events or a terminal outcome".to_string());
+    }
+    if batch.events.len() > MAX_TRACE_TELEMETRY_EVENTS {
+        return Err("runtime telemetry batch size is out of range".to_string());
+    }
+    if batch.dropped_events > MAX_TRACE_DROPPED_EVENTS {
+        return Err("runtime telemetry dropped event count is out of range".to_string());
+    }
+    for telemetry in &batch.events {
+        validate_trace_telemetry(telemetry)?;
+    }
+    if let Some(terminal) = &batch.terminal {
+        if terminal.duration_ms > MAX_TRACE_DURATION_MS
+            || terminal.ended_at_ms < batch.started_at_ms
+        {
+            return Err("runtime telemetry terminal timing is out of range".to_string());
+        }
+        if let Some(error) = terminal.error.as_deref() {
+            validate_text("runtime telemetry error", error, 1, 512)?;
+        }
+    }
+    Ok(())
 }
 
 pub fn validate_trace_telemetry_batch(batch: &TraceTelemetryBatch) -> Result<(), String> {
@@ -1420,10 +1525,11 @@ mod tests {
 
     use super::{
         canonical_trace_io_summary, from_gateway_frame, to_gateway_frame,
-        validate_trace_telemetry_batch, AgentDescriptor, AgentGatewayCommand, ApplicationFeedback,
-        ApplicationFeedbackEvent, ApplicationFeedbackOutcome, GatewayHelloAuth,
-        GatewayMachineProof, TraceIoSummary, TraceStageStatus, TraceTelemetry, TraceTelemetryBatch,
-        MAX_TRACE_IO_SUMMARY_BYTES, VERSION,
+        validate_runtime_telemetry_batch, validate_trace_telemetry_batch, AgentDescriptor,
+        AgentGatewayCommand, ApplicationFeedback, ApplicationFeedbackEvent,
+        ApplicationFeedbackOutcome, GatewayHelloAuth, GatewayMachineProof, RuntimeTelemetryBatch,
+        RuntimeTelemetryTerminal, RuntimeTelemetryTerminalStatus, TraceIoSummary, TraceStageStatus,
+        TraceTelemetry, TraceTelemetryBatch, MAX_TRACE_IO_SUMMARY_BYTES, VERSION,
     };
     use crate::gateway_frame;
     use vifu_runtime::ProviderStage;
@@ -1577,6 +1683,61 @@ mod tests {
         let value = round_trip_command_over_gateway_frame(&feedback);
         assert_eq!(value["payload"]["startOffsetMs"], 23);
         assert_eq!(value["payload"]["endOffsetMs"], 23);
+    }
+
+    #[test]
+    fn round_trips_payload_safe_embedded_runtime_telemetry() {
+        let batch = RuntimeTelemetryBatch {
+            deployment_id: Uuid::new_v4(),
+            trace_id: "trace-123-invocation-1".to_string(),
+            invocation_id: "invocation-1".to_string(),
+            project_id: "ios-embedding".to_string(),
+            endpoint: "embedded-chat".to_string(),
+            agent_id: "embedded-agent".to_string(),
+            started_at_ms: 1_234,
+            events: vec![TraceTelemetry::InvocationStarted {
+                provider_key: "local-llama".to_string(),
+                capability: "chat".to_string(),
+                model: None,
+            }],
+            dropped_events: 0,
+            terminal: Some(RuntimeTelemetryTerminal {
+                status: RuntimeTelemetryTerminalStatus::Completed,
+                duration_ms: 50,
+                ended_at_ms: 1_284,
+                error: None,
+            }),
+        };
+        let value = round_trip_command_over_gateway_frame(&AgentGatewayCommand::RuntimeTelemetry {
+            batch: batch.clone(),
+        });
+        assert_eq!(value["event"], "runtime.telemetry");
+        assert_eq!(value["payload"]["traceId"], batch.trace_id);
+        assert!(value["payload"].get("rootInputSummary").is_none());
+        assert!(value["payload"].get("rootOutputSummary").is_none());
+
+        let ready =
+            round_trip_command_over_gateway_frame(&AgentGatewayCommand::RuntimeMonitoringReady);
+        assert_eq!(ready["event"], "runtime.monitoring.ready");
+    }
+
+    #[test]
+    fn rejects_empty_embedded_runtime_telemetry() {
+        let batch = RuntimeTelemetryBatch {
+            deployment_id: Uuid::new_v4(),
+            trace_id: "trace-123-invocation-1".to_string(),
+            invocation_id: "invocation-1".to_string(),
+            project_id: "ios-embedding".to_string(),
+            endpoint: "embedded-chat".to_string(),
+            agent_id: "embedded-agent".to_string(),
+            started_at_ms: 1_234,
+            events: Vec::new(),
+            dropped_events: 0,
+            terminal: None,
+        };
+        assert!(validate_runtime_telemetry_batch(&batch)
+            .unwrap_err()
+            .contains("events or a terminal"));
     }
 
     #[test]
