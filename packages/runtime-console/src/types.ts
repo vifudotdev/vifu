@@ -54,6 +54,13 @@ export type RuntimeDeployment = {
   remoteInvocationEnabled: boolean;
   activeReleaseVersion: number | null;
   gatewayIds: string[];
+  applyStates?: Array<{
+    deploymentId: string;
+    gatewayId: string;
+    releaseVersion: number;
+    contentHash: string;
+    appliedAt: string;
+  }>;
   createdAt: string;
   updatedAt: string;
 };

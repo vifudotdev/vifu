@@ -3057,6 +3057,61 @@ button:disabled {
   gap: 0;
 }
 
+.profile-generation-editor {
+  display: grid;
+  gap: 18px;
+  border-bottom: 1px solid var(--line);
+  padding: 18px;
+}
+
+.profile-generation-editor h3 {
+  margin: 0;
+  font-size: 14px;
+}
+
+.profile-generation-editor p {
+  margin: 4px 0 0;
+  color: var(--text-muted);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.profile-generation-fields {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.profile-generation-fields label {
+  display: grid;
+  gap: 5px;
+}
+
+.profile-generation-fields label > span {
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.profile-generation-fields input {
+  width: 100%;
+  min-width: 0;
+  min-height: 42px;
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  background: var(--surface);
+  padding: 7px 9px;
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+}
+
+.profile-generation-fields small {
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
 .profile-panel-stack > section,
 .profile-capabilities > header,
 .profile-versions > header,
@@ -5946,7 +6001,7 @@ button:disabled {
 
   .profile-workbench-tabs {
     display: grid;
-    grid-template-columns: repeat(6, minmax(0, 1fr));
+    grid-template-columns: repeat(7, minmax(0, 1fr));
     padding: 0 4px;
   }
 
@@ -5964,6 +6019,7 @@ button:disabled {
   }
 
   .profile-overview-status,
+  .profile-generation-fields,
   .profile-presentation-editor,
   .profile-capability-fields,
   .profile-test-version-fields,
@@ -6436,7 +6492,7 @@ button:disabled {
 .deployment-gateways > div {
   min-width: 0;
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 28px 28px;
+  grid-template-columns: minmax(0, 1fr) auto 28px 28px;
   align-items: center;
   gap: 4px;
 }
@@ -6621,6 +6677,48 @@ button:disabled {
   white-space: nowrap;
 }
 
+.enrollment-qr {
+  width: 180px;
+  height: 180px;
+  padding: 8px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: #fff;
+  grid-column: 1;
+  grid-row: 1 / span 4;
+}
+
+.enrollment-panel.has-qr {
+  grid-template-columns: 180px minmax(0, 1fr) auto;
+}
+
+.enrollment-panel.has-qr > div:first-child,
+.enrollment-panel.has-qr > code,
+.enrollment-panel.has-qr > .enrollment-fingerprint,
+.enrollment-panel.has-qr > [role="alert"] {
+  grid-column: 2 / -1;
+}
+
+.enrollment-fingerprint {
+  overflow-wrap: anywhere;
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+}
+
+.gateway-apply-status {
+  margin-left: auto;
+  font-size: 10px;
+  white-space: nowrap;
+}
+
+.gateway-apply-status.applied {
+  color: var(--success);
+}
+
+.gateway-apply-status.pending {
+  color: var(--muted);
+}
+
 .guest-project-claim {
   gap: 14px;
   margin-top: 28px;
@@ -6651,8 +6749,22 @@ button:disabled {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
-  .enrollment-panel {
+  .enrollment-panel,
+  .enrollment-panel.has-qr {
     grid-template-columns: minmax(0, 1fr);
+  }
+
+  .enrollment-panel.has-qr > .enrollment-qr,
+  .enrollment-panel.has-qr > div:first-child,
+  .enrollment-panel.has-qr > code,
+  .enrollment-panel.has-qr > .enrollment-fingerprint,
+  .enrollment-panel.has-qr > [role="alert"] {
+    grid-column: 1;
+    grid-row: auto;
+  }
+
+  .enrollment-panel.has-qr > .enrollment-qr {
+    justify-self: center;
   }
 
   .release-list article,

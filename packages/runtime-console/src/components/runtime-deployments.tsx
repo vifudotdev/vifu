@@ -13,7 +13,7 @@ import {
   Star,
   Unplug,
 } from "lucide-react";
-import { useMemo, useState, type ChangeEvent, type FormEvent } from "react";
+import { useEffect, useMemo, useState, type ChangeEvent, type FormEvent } from "react";
 import { useRuntimeConsoleHost, useRuntimeConsoleRouter } from "../host";
 import type {
   ProjectSettings,
@@ -26,7 +26,32 @@ type Enrollment = {
   deployment: string;
   enrollmentToken: string;
   expiresAt: string;
+  pairing?: {
+    serverUrl: string;
+    certificateDer?: string | null;
+    certificateSha256?: string | null;
+    pairingUri: string;
+    pairingQrSvg?: string | null;
+  } | null;
 };
+
+export const MAX_APPLY_POLL_ATTEMPTS = 6;
+
+export function runtimeApplyPollDelay(attempt: number): number {
+  return Math.min(2_000 * (2 ** Math.max(0, attempt)), 30_000);
+}
+
+export function runtimeApplyTarget(deployments: RuntimeDeployment[]): string {
+  return deployments.map((deployment) => [
+    deployment.id,
+    deployment.activeReleaseVersion ?? "none",
+    [...deployment.gatewayIds].sort().join(","),
+    [...(deployment.applyStates ?? [])]
+      .sort((left, right) => left.gatewayId.localeCompare(right.gatewayId))
+      .map((state) => `${state.gatewayId}:${state.releaseVersion}:${state.contentHash}`)
+      .join(","),
+  ].join("|")).sort().join(";");
+}
 
 export function RuntimeDeploymentsView({
   project,
@@ -49,6 +74,37 @@ export function RuntimeDeploymentsView({
   const [enrollment, setEnrollment] = useState<Enrollment | null>(null);
   const [pending, setPending] = useState<string | null>(null);
   const [message, setMessage] = useState<{ tone: "error" | "success"; text: string } | null>(null);
+  const supportsApplyState = deployments.some((deployment) => deployment.applyStates !== undefined);
+  const waitingForApply = supportsApplyState && deployments.some((deployment) =>
+    deployment.activeReleaseVersion !== null
+    && deployment.gatewayIds.some((gatewayId) => !(deployment.applyStates ?? []).some(
+      (state) => state.gatewayId === gatewayId
+        && state.releaseVersion === deployment.activeReleaseVersion,
+    )),
+  );
+  const applyTarget = useMemo(() => runtimeApplyTarget(deployments), [deployments]);
+  const [applyPoll, setApplyPoll] = useState({ target: applyTarget, attempt: 0 });
+
+  useEffect(() => {
+    if (!waitingForApply) {
+      if (applyPoll.attempt !== 0 || applyPoll.target !== applyTarget) {
+        setApplyPoll({ target: applyTarget, attempt: 0 });
+      }
+      return;
+    }
+    if (applyPoll.target !== applyTarget) {
+      setApplyPoll({ target: applyTarget, attempt: 0 });
+      return;
+    }
+    if (applyPoll.attempt >= MAX_APPLY_POLL_ATTEMPTS) return;
+    const timer = window.setTimeout(() => {
+      setApplyPoll((current) => current.target === applyTarget
+        ? { ...current, attempt: current.attempt + 1 }
+        : { target: applyTarget, attempt: 1 });
+      router.refresh();
+    }, runtimeApplyPollDelay(applyPoll.attempt));
+    return () => window.clearTimeout(timer);
+  }, [router, waitingForApply, applyTarget, applyPoll]);
 
   async function action<T>(key: string, work: () => Promise<T>, success: string): Promise<T | null> {
     setPending(key);
@@ -244,6 +300,7 @@ export function RuntimeDeploymentsView({
                 {deployment.gatewayIds.map((gatewayId) => (
                   <div key={gatewayId}>
                     <code>{gatewayId}</code>
+                    <GatewayApplyStatus deployment={deployment} gatewayId={gatewayId} />
                     <button className="icon-button" type="button" title="Detach from deployment" aria-label={`Detach ${gatewayId}`} onClick={() => detachGateway(deployment, gatewayId)} disabled={pending !== null}><Unplug aria-hidden="true" /></button>
                     <button className="icon-button danger" type="button" title="Revoke gateway" aria-label={`Revoke ${gatewayId}`} onClick={() => revokeGateway(gatewayId)} disabled={pending !== null}><ShieldOff aria-hidden="true" /></button>
                   </div>
@@ -298,6 +355,17 @@ export function RuntimeDeploymentsView({
   );
 }
 
+function GatewayApplyStatus({ deployment, gatewayId }: { deployment: RuntimeDeployment; gatewayId: string }) {
+  const applied = (deployment.applyStates ?? []).find((state) => state.gatewayId === gatewayId);
+  const current = deployment.activeReleaseVersion;
+  const isCurrent = current !== null && applied?.releaseVersion === current;
+  return (
+    <span className={`gateway-apply-status ${isCurrent ? "applied" : "pending"}`}>
+      {isCurrent ? `Applied v${current}` : current ? `Waiting for v${current}` : "No settings"}
+    </span>
+  );
+}
+
 function EnrollmentPanel({ enrollment, onClose }: { enrollment: Enrollment; onClose: () => void }) {
   const [copied, setCopied] = useState(false);
   const [copyFailed, setCopyFailed] = useState(false);
@@ -310,11 +378,26 @@ function EnrollmentPanel({ enrollment, onClose }: { enrollment: Enrollment; onCl
       setCopyFailed(true);
     }
   }
+  async function copyPairingCode() {
+    if (!enrollment.pairing) return;
+    try {
+      await navigator.clipboard.writeText(enrollment.pairing.pairingUri);
+      setCopied(true);
+      setCopyFailed(false);
+    } catch {
+      setCopyFailed(true);
+    }
+  }
+  const qrSource = enrollment.pairing?.pairingQrSvg
+    ? `data:image/svg+xml,${encodeURIComponent(enrollment.pairing.pairingQrSvg)}`
+    : null;
   return (
-    <section className="enrollment-panel" role="status">
-      <div><strong>Pair with {enrollment.deployment}</strong><p>Use this one-time token on the device within five minutes.</p></div>
-      <code>{enrollment.enrollmentToken}</code>
-      <div><button className="secondary-button" type="button" onClick={copyToken}>{copied ? <Check aria-hidden="true" /> : <Clipboard aria-hidden="true" />}{copied ? "Copied" : "Copy token"}</button><button className="quiet-button" type="button" onClick={onClose}>Done</button></div>
+    <section className={`enrollment-panel${qrSource ? " has-qr" : ""}`} role="status">
+      <div><strong>Pair with {enrollment.deployment}</strong><p>Scan or copy this one-time pairing code within five minutes.</p></div>
+      {qrSource ? <img className="enrollment-qr" src={qrSource} alt="Vifu Server pairing code" /> : null}
+      <code>{enrollment.pairing?.pairingUri ?? enrollment.enrollmentToken}</code>
+      <div><button className="secondary-button" type="button" onClick={enrollment.pairing ? copyPairingCode : copyToken}>{copied ? <Check aria-hidden="true" /> : <Clipboard aria-hidden="true" />}{copied ? "Copied" : enrollment.pairing ? "Copy pairing code" : "Copy token"}</button><button className="quiet-button" type="button" onClick={onClose}>Done</button></div>
+      {enrollment.pairing?.certificateSha256 ? <p className="enrollment-fingerprint">TLS {enrollment.pairing.certificateSha256}</p> : enrollment.pairing ? <p>HTTPS uses the device system trust store.</p> : <p>Enter this token together with the Vifu Server URL.</p>}
       {copyFailed ? <p role="alert">Copy failed. Select the token above and copy it manually.</p> : null}
     </section>
   );

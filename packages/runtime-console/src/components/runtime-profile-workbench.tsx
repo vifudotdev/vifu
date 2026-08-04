@@ -13,6 +13,7 @@ import {
   Plus,
   RefreshCw,
   Save,
+  SlidersHorizontal,
   Sparkles,
   Trash2,
   Upload,
@@ -41,7 +42,7 @@ type ProfileWorkbenchProps = {
   onClose: () => void;
 };
 
-type WorkbenchTab = "overview" | "persona" | "capabilities" | "versions" | "test" | "json";
+type WorkbenchTab = "overview" | "persona" | "generation" | "capabilities" | "versions" | "test" | "json";
 
 type CapabilityDraft = Omit<AgentProfileCapability, "id" | "profileVersionId" | "createdAt">;
 
@@ -71,6 +72,7 @@ type TestExecution = {
 const TABS = [
   { id: "overview", label: "Agent", icon: Bot },
   { id: "persona", label: "Behavior", icon: BrainCircuit },
+  { id: "generation", label: "Generation", icon: SlidersHorizontal },
   { id: "capabilities", label: "Abilities", icon: Sparkles },
   { id: "versions", label: "Versions", icon: History },
   { id: "test", label: "Playtest", icon: Gamepad2 },
@@ -139,6 +141,7 @@ export function RuntimeProfileWorkbench({
   const dirty = draft ? draftSignature(draft) !== initialDraftSignature : false;
   const activeVersion = detail?.versions.find((item) => item.version.id === detail.profile.activeVersionId);
   const sourceManaged = draft?.source.type === "openclaw" && draft.source.managed !== false;
+  const deviceRuntime = draft?.source.type === "vifu-runtime";
 
   async function saveVersion() {
     if (!draft) return;
@@ -354,12 +357,19 @@ export function RuntimeProfileWorkbench({
                 syncing={pending === "sync-source"}
               />
             ) : null}
+            {tab === "generation" ? (
+              <GenerationPanel
+                runtime={draft.runtime}
+                onChange={(runtime) => setDraft({ ...draft, runtime })}
+              />
+            ) : null}
             {tab === "capabilities" ? (
               <CapabilitiesPanel
                 capabilities={draft.capabilities}
                 providerAdapters={providerAdapters}
                 providerConnections={providerConnections}
                 sourceManaged={sourceManaged}
+                deviceRuntime={deviceRuntime}
                 settingsHref={host.projectSectionHref(project.slug, "providers")}
                 onChange={(capabilities) => setDraft({ ...draft, capabilities })}
               />
@@ -415,6 +425,55 @@ export function RuntimeProfileWorkbench({
         />
       ) : null}
     </>
+  );
+}
+
+function GenerationPanel({
+  runtime,
+  onChange,
+}: {
+  runtime: Record<string, unknown>;
+  onChange: (runtime: Record<string, unknown>) => void;
+}) {
+  const generation = recordValue(runtime.generation);
+
+  function setNumber(key: "maxTokens" | "temperature" | "topP", raw: string) {
+    const next = { ...generation };
+    if (raw.trim() === "") {
+      delete next[key];
+    } else {
+      next[key] = Number(raw);
+    }
+    const nextRuntime = { ...runtime };
+    if (Object.keys(next).length === 0) delete nextRuntime.generation;
+    else nextRuntime.generation = next;
+    onChange(nextRuntime);
+  }
+
+  return (
+    <section className="profile-generation-editor">
+      <div>
+        <h3>Model generation</h3>
+        <p>Version the response length and sampling defaults with this agent. Invocation values can still override them.</p>
+      </div>
+      <div className="profile-generation-fields">
+        <label>
+          <span>Maximum tokens</span>
+          <input type="number" min={1} max={32768} step={1} value={numberValue(generation.maxTokens)} placeholder="Provider default" onChange={(event) => setNumber("maxTokens", event.target.value)} />
+          <small>1–32,768</small>
+        </label>
+        <label>
+          <span>Temperature</span>
+          <input type="number" min={0} max={2} step={0.05} value={numberValue(generation.temperature)} placeholder="Provider default" onChange={(event) => setNumber("temperature", event.target.value)} />
+          <small>0–2</small>
+        </label>
+        <label>
+          <span>Top P</span>
+          <input type="number" min={0.01} max={1} step={0.05} value={numberValue(generation.topP)} placeholder="Provider default" onChange={(event) => setNumber("topP", event.target.value)} />
+          <small>0.01–1</small>
+        </label>
+      </div>
+    </section>
   );
 }
 
@@ -552,6 +611,7 @@ function CapabilitiesPanel({
   providerAdapters,
   providerConnections,
   sourceManaged,
+  deviceRuntime,
   settingsHref,
   onChange,
 }: {
@@ -559,14 +619,18 @@ function CapabilitiesPanel({
   providerAdapters: ProviderAdapter[];
   providerConnections: ProjectProvider[];
   sourceManaged: boolean;
+  deviceRuntime: boolean;
   settingsHref: string;
   onChange: (capabilities: CapabilityDraft[]) => void;
 }) {
+  const selectableConnections = deviceRuntime
+    ? providerConnections.filter((connection) => connection.providerType === "vifu-runtime")
+    : providerConnections;
   const availableKinds = (Object.keys(CAPABILITY_LABELS) as ProfileCapabilityKind[])
     .filter((kind) => !capabilities.some((capability) => capability.kind === kind));
-  const addableKinds = availableKinds.filter((kind) => providerConnections.some((connection) => providerSupportsCapability(connection.providerType, kind)));
+  const addableKinds = availableKinds.filter((kind) => selectableConnections.some((connection) => providerConnectionSupportsCapability(connection, kind)));
   const [newKind, setNewKind] = useState<ProfileCapabilityKind>(addableKinds[0] ?? "chat");
-  const compatibleConnections = providerConnections.filter((connection) => providerSupportsCapability(connection.providerType, newKind));
+  const compatibleConnections = selectableConnections.filter((connection) => providerConnectionSupportsCapability(connection, newKind));
   const [newProviderKey, setNewProviderKey] = useState(compatibleConnections[0]?.providerKey ?? "");
 
   useEffect(() => {
@@ -602,8 +666,8 @@ function CapabilitiesPanel({
       <header><div><h3>Agent abilities</h3><p>Choose what this agent can do and which provider performs each ability.</p></div></header>
       <div className="profile-capability-list">
         {capabilities.map((capability, index) => {
-          const connection = providerConnections.find((item) => item.providerKey === capability.providerKey);
-          const capabilityConnections = providerConnections.filter((item) => providerSupportsCapability(item.providerType, capability.kind));
+          const connection = selectableConnections.find((item) => item.providerKey === capability.providerKey);
+          const capabilityConnections = selectableConnections.filter((item) => providerConnectionSupportsCapability(item, capability.kind));
           const locked = sourceManaged && capability.providerType === "openclaw" && (capability.kind === "chat" || capability.kind === "tool");
           return (
             <section key={`${capability.kind}:${index}`}>
@@ -617,7 +681,7 @@ function CapabilitiesPanel({
                     value={capability.providerKey}
                     disabled={locked}
                     onChange={(event) => {
-                      const next = providerConnections.find((item) => item.providerKey === event.target.value);
+                      const next = selectableConnections.find((item) => item.providerKey === event.target.value);
                       if (next) updateCapability(index, { providerKey: next.providerKey, providerType: capabilityProviderType(next.providerType), resourceId: null });
                     }}
                   >
@@ -657,7 +721,7 @@ function CapabilitiesPanel({
           </div>
         )}
       </div>
-      <ProviderLegend adapters={providerAdapters} connections={providerConnections} />
+      <ProviderLegend adapters={providerAdapters} connections={selectableConnections} />
     </div>
   );
 }
@@ -941,6 +1005,10 @@ function draftSignature(draft: VersionDraft): string {
   return JSON.stringify(draft);
 }
 
+function numberValue(value: unknown): number | "" {
+  return typeof value === "number" && Number.isFinite(value) ? value : "";
+}
+
 function firstPersonaFile(draft: VersionDraft): string | null {
   return Object.keys(recordValue(draft.persona.files))[0] ?? null;
 }
@@ -976,6 +1044,18 @@ function providerSupportsCapability(providerType: string, kind: ProfileCapabilit
   if (providerType === "elevenlabs") return kind === "speech";
   if (providerType === "local-whisper") return kind === "transcription";
   return false;
+}
+
+function providerConnectionSupportsCapability(
+  provider: ProjectProvider,
+  kind: ProfileCapabilityKind,
+): boolean {
+  const declared = Array.isArray(provider.config.capabilities)
+    ? provider.config.capabilities.filter((value): value is string => typeof value === "string")
+    : [];
+  return declared.length > 0
+    ? declared.includes(kind)
+    : providerSupportsCapability(provider.providerType, kind);
 }
 
 function capabilityProviderType(providerType: string): string {

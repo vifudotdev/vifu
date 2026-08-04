@@ -142,7 +142,7 @@ function ProjectProviderCard({
         </span>
       </button>
       <footer>
-        <span>{capabilitySummary(adapter?.capabilities ?? [])}</span>
+        <span>{capabilitySummary(providerCapabilities(provider, adapter?.capabilities ?? []))}</span>
         <button className="icon-button danger" type="button" disabled={pending} onClick={() => setConfirming(true)} title="Remove provider" aria-label={`Remove ${provider.name}`}>
           <Trash2 aria-hidden="true" />
         </button>
@@ -203,11 +203,11 @@ function ProviderDialog({
     event.preventDefault();
     if (!choice) return;
     const form = new FormData(event.currentTarget);
-    const body = providerSettingsRequestBody(provider, choice, form);
     setPending(true);
     setError(null);
     setNotice(null);
     try {
+      const body = providerSettingsRequestBody(provider, choice, form);
       const result = await host.request<{ message?: string; addedAgents?: number }>(
         provider ? `project/${project.slug}/providers/${provider.providerKey}` : `project/${project.slug}/providers`,
         provider ? "PATCH" : "POST",
@@ -265,14 +265,23 @@ function ProviderDialog({
             {!provider && choice.source.kind === "custom" ? (
               <p>This provider is already available from the connected runtime. Adding it only makes it available to this project.</p>
             ) : choice.fields.map((field) => (
-              <label key={field.key}><span>{field.label}</span><input
-                name={field.key}
-                type={field.secret ? "password" : field.kind === "url" ? "url" : "text"}
-                required={field.required && !(field.secret && (provider?.secretKeys.includes(field.key) || choice.secretKeys.includes(field.key)))}
-                defaultValue={field.secret ? "" : field.key === "baseUrl" ? provider?.baseUrl ?? choice.baseUrl : stringValue(provider?.config[field.key] ?? choice.config[field.key])}
-                placeholder={field.secret && (provider?.secretKeys.includes(field.key) || choice.secretKeys.includes(field.key)) ? "Leave blank to keep the configured value" : undefined}
-                autoComplete={field.secret ? "off" : undefined}
-              /></label>
+              <label key={field.key}><span>{field.label}</span>{field.kind === "json" ? (
+                <textarea
+                  name={field.key}
+                  required={field.required}
+                  defaultValue={providerJsonFieldValue(provider?.config[field.key] ?? choice.config[field.key])}
+                  spellCheck={false}
+                />
+              ) : (
+                <input
+                  name={field.key}
+                  type={field.secret ? "password" : field.kind === "url" ? "url" : "text"}
+                  required={field.required && !(field.secret && (provider?.secretKeys.includes(field.key) || choice.secretKeys.includes(field.key)))}
+                  defaultValue={field.secret ? "" : field.key === "baseUrl" ? provider?.baseUrl ?? choice.baseUrl : stringValue(provider?.config[field.key] ?? choice.config[field.key])}
+                  placeholder={field.secret && (provider?.secretKeys.includes(field.key) || choice.secretKeys.includes(field.key)) ? "Leave blank to keep the configured value" : undefined}
+                  autoComplete={field.secret ? "off" : undefined}
+                />
+              )}</label>
             ))}
           </div>
           {error ? <p className="inline-error" role="alert">{error}</p> : null}
@@ -370,11 +379,14 @@ function fallbackAdapter(type: string): ProviderAdapter {
       id: type,
       category: "local",
       name: "Vifu Runtime",
-      description: "Provider reported by a connected Vifu Agent Gateway.",
+      description: "Provider reported by a connected Vifu Agent Gateway. Put maxTokens, temperature, or topP under settings.generation to define its model-call defaults.",
       capabilities: ["chat", "embedding", "transcription"],
       executionModes: ["gateway"],
       supportsDiscovery: false,
-      fields: [],
+      fields: [
+        { key: "settings", label: "Runtime settings (JSON)", kind: "json", required: true, secret: false },
+        { key: "resources", label: "Runtime resources (JSON)", kind: "json", required: true, secret: false },
+      ],
     };
   }
   return {
@@ -424,12 +436,23 @@ function capabilitySummary(capabilities: string[]): string {
   return capabilities.slice(0, 3).map((value) => value === "chat" ? "Conversation" : titleCase(value)).join(" · ");
 }
 
+function providerCapabilities(provider: ProjectProvider, fallback: string[]): string[] {
+  const declared = Array.isArray(provider.config.capabilities)
+    ? provider.config.capabilities.filter((value): value is string => typeof value === "string")
+    : [];
+  return declared.length > 0 ? declared : fallback;
+}
+
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : "The request failed.";
 }
 
 function stringValue(value: unknown): string {
   return typeof value === "string" ? value : "";
+}
+
+function providerJsonFieldValue(value: unknown): string {
+  return JSON.stringify(value && typeof value === "object" && !Array.isArray(value) ? value : {}, null, 2);
 }
 
 function titleCase(value: string): string {
