@@ -18,8 +18,18 @@ func supportsAllApplePlatforms(_ artifactURL: URL) -> Bool {
     else {
         return false
     }
-    let platforms = Set(libraries.compactMap { $0["SupportedPlatform"] as? String })
-    return platforms.isSuperset(of: ["ios", "macos"])
+    func hasSlice(platform: String, variant: String? = nil, architectures: Set<String>) -> Bool {
+        libraries.contains { library in
+            guard library["SupportedPlatform"] as? String == platform else { return false }
+            let actualVariant = library["SupportedPlatformVariant"] as? String
+            guard actualVariant == variant else { return false }
+            let actualArchitectures = Set(library["SupportedArchitectures"] as? [String] ?? [])
+            return actualArchitectures.isSuperset(of: architectures)
+        }
+    }
+    return hasSlice(platform: "ios", architectures: ["arm64"])
+        && hasSlice(platform: "ios", variant: "simulator", architectures: ["arm64", "x86_64"])
+        && hasSlice(platform: "macos", architectures: ["arm64", "x86_64"])
 }
 
 let localArtifact = configuredLocalArtifact

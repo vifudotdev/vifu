@@ -1,8 +1,71 @@
+import CryptoKit
 import XCTest
 @testable import Vifu
 @testable import VifuRuntimeBridge
 
 final class VifuSmokeTests: XCTestCase {
+    func testGatewayPairingAcceptsSystemTrustedHTTPS() throws {
+        let token = "vifu_ge_" + String(repeating: "a", count: 64)
+        let pairing = try VifuGatewayPairingCode(
+            code: "vifu://gateway/enroll?server=https%3A%2F%2Fapi.vifu.ai&token=\(token)"
+        )
+
+        XCTAssertEqual(pairing.serverURL, "https://api.vifu.ai")
+        XCTAssertEqual(pairing.enrollmentToken, token)
+        XCTAssertNil(pairing.serverCertificateDER)
+        XCTAssertNil(pairing.serverCertificateSHA256)
+    }
+
+    func testGatewayServerBindingAllowsSystemTrustWithoutAPin() throws {
+        let binding = VifuGatewayServerBinding(serverURL: "https://api.vifu.ai")
+
+        XCTAssertNil(binding.certificateDER)
+        XCTAssertNil(binding.certificateSHA256)
+        XCTAssertTrue(vifuGatewayServerBindingHasValidTrust(binding))
+    }
+
+    func testGatewayServerBindingRejectsAMismatchedCertificatePin() {
+        let binding = VifuGatewayServerBinding(
+            serverURL: "https://macbook.local:6790",
+            certificateDER: Data("certificate".utf8),
+            certificateSHA256: "sha256:" + String(repeating: "0", count: 64)
+        )
+
+        XCTAssertFalse(vifuGatewayServerBindingHasValidTrust(binding))
+    }
+
+    func testGatewayPairingRejectsANonHexEnrollmentToken() {
+        let token = "vifu_ge_" + String(repeating: "z", count: 64)
+
+        XCTAssertThrowsError(
+            try VifuGatewayPairingCode(
+                code: "vifu://gateway/enroll?server=https%3A%2F%2Fapi.vifu.ai&token=\(token)"
+            )
+        )
+    }
+
+    func testGatewayPairingValidatesALocalCertificatePin() throws {
+        let token = "vifu_ge_" + String(repeating: "b", count: 64)
+        let certificate = Data("local-certificate".utf8)
+        let digest = SHA256.hash(data: certificate)
+        let fingerprint = "sha256:" + digest.map { String(format: "%02x", $0) }.joined()
+        var components = URLComponents()
+        components.scheme = "vifu"
+        components.host = "gateway"
+        components.path = "/enroll"
+        components.queryItems = [
+            URLQueryItem(name: "server", value: "https://macbook.local:6790"),
+            URLQueryItem(name: "token", value: token),
+            URLQueryItem(name: "certificate", value: certificate.base64EncodedString()),
+            URLQueryItem(name: "fingerprint", value: fingerprint),
+        ]
+
+        let pairing = try VifuGatewayPairingCode(code: try XCTUnwrap(components.string))
+
+        XCTAssertEqual(pairing.serverCertificateDER, certificate)
+        XCTAssertEqual(pairing.serverCertificateSHA256, fingerprint)
+    }
+
     func testEmbeddedRuntimeLinksAndExportsState() throws {
         let runtime = try VifuEmbeddedRuntime(projectId: "swift-package-smoke")
         let snapshot = try runtime.exportSnapshot()

@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import Security
 
@@ -22,6 +23,40 @@ public struct VifuGatewayMachineIdentity: Codable, Sendable {
             publicKey: generated.publicKey,
             privateKey: generated.privateKey
         )
+    }
+}
+
+/// The paired server endpoint and its optional local TLS trust anchor.
+///
+/// This is intentionally separate from the installation identity and from the
+/// server-issued authorization so an app can replace either independently.
+public struct VifuGatewayServerBinding: Codable, Sendable {
+    public let serverURL: String
+    public let certificateDER: Data?
+    public let certificateSHA256: String?
+
+    public init(
+        serverURL: String,
+        certificateDER: Data? = nil,
+        certificateSHA256: String? = nil
+    ) {
+        self.serverURL = serverURL
+        self.certificateDER = certificateDER
+        self.certificateSHA256 = certificateSHA256
+    }
+}
+
+func vifuGatewayServerBindingHasValidTrust(_ binding: VifuGatewayServerBinding) -> Bool {
+    switch (binding.certificateDER, binding.certificateSHA256) {
+    case (nil, nil):
+        return true
+    case let (certificate?, fingerprint?):
+        guard !certificate.isEmpty else { return false }
+        let digest = SHA256.hash(data: certificate)
+        let expected = "sha256:" + digest.map { String(format: "%02x", $0) }.joined()
+        return fingerprint == expected
+    default:
+        return false
     }
 }
 
@@ -71,6 +106,7 @@ public enum VifuGatewayIdentityStoreError: LocalizedError {
 /// Stores one Machine identity per app installation and one authorization per server.
 public struct VifuGatewayIdentityStore: Sendable {
     private static let machineAccount = "machine-identity"
+    private static let serverBindingAccount = "server-binding"
     private let service: String
 
     public init(service: String? = nil) {
@@ -90,6 +126,36 @@ public struct VifuGatewayIdentityStore: Sendable {
         let identity = VifuGatewayMachineIdentity(generated: generated)
         try save(identity, account: Self.machineAccount)
         return identity
+    }
+
+    public func saveServerBinding(_ binding: VifuGatewayServerBinding) throws {
+        _ = try authorizationAccount(binding.serverURL)
+        guard vifuGatewayServerBindingHasValidTrust(binding) else {
+            throw VifuGatewayIdentityStoreError.invalidStoredValue
+        }
+        try save(binding, account: Self.serverBindingAccount)
+    }
+
+    public func loadServerBinding() throws -> VifuGatewayServerBinding? {
+        let binding: VifuGatewayServerBinding? = try load(
+            account: Self.serverBindingAccount,
+            as: VifuGatewayServerBinding.self
+        )
+        guard let binding else { return nil }
+        _ = try authorizationAccount(binding.serverURL)
+        guard vifuGatewayServerBindingHasValidTrust(binding) else {
+            throw VifuGatewayIdentityStoreError.invalidStoredValue
+        }
+        return binding
+    }
+
+    public func deleteServerBinding() throws {
+        let status = SecItemDelete(
+            keychainQuery(account: Self.serverBindingAccount) as CFDictionary
+        )
+        guard status == errSecSuccess || status == errSecItemNotFound else {
+            throw VifuGatewayIdentityStoreError.keychain(status)
+        }
     }
 
     public func saveAuthorization(
@@ -190,6 +256,17 @@ public extension VifuEmbeddedGateway {
             machinePrivateKey: identity.privateKey,
             deviceToken: authorization?.deviceToken,
             enrollmentToken: enrollmentToken
+        )
+    }
+}
+
+public extension VifuEmbeddedGatewayConfig {
+    /// Source-compatible initializer for servers using the system trust store.
+    init(serverUrl: String, runtimeDatabasePath: String) {
+        self.init(
+            serverUrl: serverUrl,
+            runtimeDatabasePath: runtimeDatabasePath,
+            serverCertificateDer: nil
         )
     }
 }

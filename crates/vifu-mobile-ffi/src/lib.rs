@@ -666,8 +666,8 @@ impl VifuEmbeddedRuntime {
 #[derive(Debug, Clone, uniffi::Record)]
 pub struct VifuEmbeddedGatewayConfig {
     pub server_url: String,
-    pub dashboard_url: Option<String>,
     pub runtime_database_path: String,
+    pub server_certificate_der: Option<Vec<u8>>,
 }
 
 #[derive(Clone, uniffi::Record)]
@@ -690,7 +690,11 @@ pub fn generate_vifu_gateway_identity() -> Result<VifuGeneratedGatewayIdentity, 
 #[derive(Debug, Clone, uniffi::Enum)]
 pub enum VifuEmbeddedGatewayState {
     Stopped,
-    Running,
+    Connecting,
+    Connected,
+    Reconnecting,
+    AuthorizationRequired,
+    Degraded,
     Failed,
 }
 
@@ -740,8 +744,8 @@ impl VifuEmbeddedGateway {
     ) -> Result<Arc<Self>, VifuRuntimeError> {
         let mut gateway_config =
             EmbeddedRuntimeGatewayConfig::new(config.server_url, config.runtime_database_path);
-        if let Some(dashboard_url) = config.dashboard_url {
-            gateway_config = gateway_config.with_dashboard_url(dashboard_url);
+        if let Some(certificate_der) = config.server_certificate_der {
+            gateway_config = gateway_config.with_server_certificate_der(certificate_der);
         }
         let gateway = EmbeddedRuntimeGateway::new(runtime.runtime.clone(), gateway_config)
             .map_err(|message| VifuRuntimeError::InvalidConfig { message })?;
@@ -797,7 +801,11 @@ impl From<EmbeddedRuntimeGatewayState> for VifuEmbeddedGatewayState {
     fn from(state: EmbeddedRuntimeGatewayState) -> Self {
         match state {
             EmbeddedRuntimeGatewayState::Stopped => Self::Stopped,
-            EmbeddedRuntimeGatewayState::Running => Self::Running,
+            EmbeddedRuntimeGatewayState::Connecting => Self::Connecting,
+            EmbeddedRuntimeGatewayState::Connected => Self::Connected,
+            EmbeddedRuntimeGatewayState::Reconnecting => Self::Reconnecting,
+            EmbeddedRuntimeGatewayState::AuthorizationRequired => Self::AuthorizationRequired,
+            EmbeddedRuntimeGatewayState::Degraded => Self::Degraded,
             EmbeddedRuntimeGatewayState::Failed => Self::Failed,
         }
     }

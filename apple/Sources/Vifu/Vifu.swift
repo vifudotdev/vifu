@@ -1043,15 +1043,15 @@ public func FfiConverterTypeVifuEmbeddedRuntime_lower(_ value: VifuEmbeddedRunti
 
 public struct VifuEmbeddedGatewayConfig: Equatable, Hashable {
     public var serverUrl: String
-    public var dashboardUrl: String?
     public var runtimeDatabasePath: String
+    public var serverCertificateDer: Data?
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(serverUrl: String, dashboardUrl: String?, runtimeDatabasePath: String) {
+    public init(serverUrl: String, runtimeDatabasePath: String, serverCertificateDer: Data?) {
         self.serverUrl = serverUrl
-        self.dashboardUrl = dashboardUrl
         self.runtimeDatabasePath = runtimeDatabasePath
+        self.serverCertificateDer = serverCertificateDer
     }
 
 
@@ -1069,15 +1069,15 @@ public struct FfiConverterTypeVifuEmbeddedGatewayConfig: FfiConverterRustBuffer 
         return
             try VifuEmbeddedGatewayConfig(
                 serverUrl: FfiConverterString.read(from: &buf),
-                dashboardUrl: FfiConverterOptionString.read(from: &buf),
-                runtimeDatabasePath: FfiConverterString.read(from: &buf)
+                runtimeDatabasePath: FfiConverterString.read(from: &buf),
+                serverCertificateDer: FfiConverterOptionData.read(from: &buf)
         )
     }
 
     public static func write(_ value: VifuEmbeddedGatewayConfig, into buf: inout [UInt8]) {
         FfiConverterString.write(value.serverUrl, into: &buf)
-        FfiConverterOptionString.write(value.dashboardUrl, into: &buf)
         FfiConverterString.write(value.runtimeDatabasePath, into: &buf)
+        FfiConverterOptionData.write(value.serverCertificateDer, into: &buf)
     }
 }
 
@@ -1962,7 +1962,11 @@ public func FfiConverterTypeVifuRuntimeConfig_lower(_ value: VifuRuntimeConfig) 
 public enum VifuEmbeddedGatewayState: Equatable, Hashable {
 
     case stopped
-    case running
+    case connecting
+    case connected
+    case reconnecting
+    case authorizationRequired
+    case degraded
     case failed
 
 
@@ -1985,9 +1989,17 @@ public struct FfiConverterTypeVifuEmbeddedGatewayState: FfiConverterRustBuffer {
 
         case 1: return .stopped
 
-        case 2: return .running
+        case 2: return .connecting
 
-        case 3: return .failed
+        case 3: return .connected
+
+        case 4: return .reconnecting
+
+        case 5: return .authorizationRequired
+
+        case 6: return .degraded
+
+        case 7: return .failed
 
         default: throw UniffiInternalError.unexpectedEnumCase
         }
@@ -2001,12 +2013,28 @@ public struct FfiConverterTypeVifuEmbeddedGatewayState: FfiConverterRustBuffer {
             writeInt(&buf, Int32(1))
 
 
-        case .running:
+        case .connecting:
             writeInt(&buf, Int32(2))
 
 
-        case .failed:
+        case .connected:
             writeInt(&buf, Int32(3))
+
+
+        case .reconnecting:
+            writeInt(&buf, Int32(4))
+
+
+        case .authorizationRequired:
+            writeInt(&buf, Int32(5))
+
+
+        case .degraded:
+            writeInt(&buf, Int32(6))
+
+
+        case .failed:
+            writeInt(&buf, Int32(7))
 
         }
     }
@@ -2591,6 +2619,30 @@ fileprivate struct FfiConverterOptionString: FfiConverterRustBuffer {
         switch try readInt(&buf) as Int8 {
         case 0: return nil
         case 1: return try FfiConverterString.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionData: FfiConverterRustBuffer {
+    typealias SwiftType = Data?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterData.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterData.read(from: &buf)
         default: throw UniffiInternalError.unexpectedOptionalTag
         }
     }

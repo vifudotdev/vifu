@@ -240,6 +240,28 @@ cat > "$xcframework/Info.plist" <<'PLIST'
 PLIST
 fi
 
+# Fail before packaging if any advertised Apple platform slice is incomplete.
+verify_architectures() {
+    local library="$1"
+    shift
+    local actual
+    actual="$(lipo -archs "$library")"
+    for expected in "$@"; do
+        if [[ " $actual " != *" $expected "* ]]; then
+            echo "Missing $expected architecture in $library (found: $actual)" >&2
+            exit 1
+        fi
+    done
+}
+
+if [[ "$MACOS_ONLY" == "true" ]]; then
+    verify_architectures "$macos_dir/libVifuMobileFFI.a" arm64
+else
+    verify_architectures "$device_dir/libVifuMobileFFI.a" arm64
+    verify_architectures "$simulator_dir/libVifuMobileFFI.a" arm64 x86_64
+    verify_architectures "$macos_dir/libVifuMobileFFI.a" arm64 x86_64
+fi
+
 # Stable metadata keeps the SwiftPM checksum reproducible for the same inputs.
 find "$xcframework" -exec touch -t 2001010000 {} +
 (
