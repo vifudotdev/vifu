@@ -17,7 +17,8 @@ use crate::models::{
     ApiKeyPermissions, ApiKeyRecord, AvailableAgent, EndpointRoute, EndpointTrace,
     ProfileCapabilityDraft, ProfileRoute, Project, ProjectRuntimeChannel, ProjectRuntimeExtension,
     ProjectRuntimeRelease, ProjectWithBindings, ProviderConnection, ProviderConnectionSecret,
-    PublicAgent, RealtimeSession, RuntimeDeployment, TraceScore, TraceSpan,
+    PublicAgent, RealtimeSession, RuntimeDeployment, RuntimeDeploymentApplyState, TraceScore,
+    TraceSpan,
 };
 use crate::trace_redaction::{redact_trace_text, redact_trace_value};
 
@@ -443,6 +444,46 @@ pub async fn list_runtime_deployment_gateway_ids(
     .map_err(ApiError::Database)
 }
 
+pub async fn list_runtime_deployment_apply_states(
+    pool: &SqlitePool,
+    deployment_id: Uuid,
+) -> Result<Vec<RuntimeDeploymentApplyState>, ApiError> {
+    sqlx::query_as::<_, RuntimeDeploymentApplyState>(
+        "SELECT deployment_id, gateway_id, release_version, content_hash, applied_at
+         FROM runtime_deployment_apply_states
+         WHERE deployment_id = $1 ORDER BY gateway_id ASC",
+    )
+    .bind(deployment_id)
+    .fetch_all(pool)
+    .await
+    .map_err(Into::into)
+}
+
+pub async fn record_runtime_deployment_apply_state(
+    pool: &SqlitePool,
+    deployment_id: Uuid,
+    gateway_id: &str,
+    release_version: i64,
+    content_hash: &str,
+) -> Result<(), ApiError> {
+    sqlx::query(
+        "INSERT INTO runtime_deployment_apply_states(
+             deployment_id, gateway_id, release_version, content_hash, applied_at
+         ) VALUES ($1, $2, $3, $4, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+         ON CONFLICT (deployment_id, gateway_id) DO UPDATE SET
+             release_version = excluded.release_version,
+             content_hash = excluded.content_hash,
+             applied_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')",
+    )
+    .bind(deployment_id)
+    .bind(gateway_id)
+    .bind(release_version)
+    .bind(content_hash)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 pub async fn assign_runtime_deployment_gateway(
     pool: &SqlitePool,
     project_id: Uuid,
@@ -654,6 +695,110 @@ pub async fn activate_runtime_deployment_release(
     .fetch_optional(pool)
     .await?
     .ok_or(ApiError::NotFound)
+}
+
+pub async fn activate_runtime_configuration_release(
+    pool: &SqlitePool,
+    deployment_id: Uuid,
+    release: NewProjectRuntimeRelease<'_>,
+) -> Result<(), ApiError> {
+    let mut transaction = pool.begin().await?;
+    sqlx::query(
+        "INSERT INTO project_runtime_releases(
+            id, project_id, version, content_hash, manifest, created_by
+         ) VALUES ($1, $2, $3, $4, $5, $6)",
+    )
+    .bind(release.id)
+    .bind(release.project_id)
+    .bind(release.version)
+    .bind(release.content_hash)
+    .bind(release.manifest)
+    .bind(release.created_by)
+    .execute(&mut *transaction)
+    .await
+    .map_err(map_database_error)?;
+    let deployment_updated = sqlx::query(
+        "UPDATE runtime_deployments
+         SET active_release_version = $2,
+             updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+         WHERE id = $1 AND project_id = $3 AND is_primary AND config_sync_enabled",
+    )
+    .bind(deployment_id)
+    .bind(release.version)
+    .bind(release.project_id)
+    .execute(&mut *transaction)
+    .await?;
+    if deployment_updated.rows_affected() != 1 {
+        return Err(ApiError::Conflict(
+            "primary deployment must enable runtime configuration sync".to_string(),
+        ));
+    }
+    transaction.commit().await?;
+    Ok(())
+}
+
+pub async fn activate_profile_runtime_release(
+    pool: &SqlitePool,
+    profile_id: Uuid,
+    profile_version_id: Uuid,
+    deployment_id: Uuid,
+    release: NewProjectRuntimeRelease<'_>,
+) -> Result<(), ApiError> {
+    let mut transaction = pool.begin().await?;
+    sqlx::query(
+        "INSERT INTO project_runtime_releases(
+            id, project_id, version, content_hash, manifest, created_by
+         ) VALUES ($1, $2, $3, $4, $5, $6)",
+    )
+    .bind(release.id)
+    .bind(release.project_id)
+    .bind(release.version)
+    .bind(release.content_hash)
+    .bind(release.manifest)
+    .bind(release.created_by)
+    .execute(&mut *transaction)
+    .await
+    .map_err(map_database_error)?;
+    sqlx::query("DELETE FROM agent_profile_rollouts WHERE profile_id = $1")
+        .bind(profile_id)
+        .execute(&mut *transaction)
+        .await?;
+    sqlx::query(
+        "INSERT INTO agent_profile_rollouts(profile_id, profile_version_id, weight_bps)
+         VALUES ($1, $2, 10000)",
+    )
+    .bind(profile_id)
+    .bind(profile_version_id)
+    .execute(&mut *transaction)
+    .await?;
+    let profile_updated = sqlx::query(
+        "UPDATE agent_profiles
+         SET active_version_id = $2,
+             updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+         WHERE id = $1 AND archived_at IS NULL",
+    )
+    .bind(profile_id)
+    .bind(profile_version_id)
+    .execute(&mut *transaction)
+    .await?;
+    let deployment_updated = sqlx::query(
+        "UPDATE runtime_deployments
+         SET active_release_version = $2,
+             updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+         WHERE id = $1 AND project_id = $3 AND is_primary",
+    )
+    .bind(deployment_id)
+    .bind(release.version)
+    .bind(release.project_id)
+    .execute(&mut *transaction)
+    .await?;
+    if profile_updated.rows_affected() != 1 || deployment_updated.rows_affected() != 1 {
+        return Err(ApiError::Conflict(
+            "profile and primary deployment could not be activated together".to_string(),
+        ));
+    }
+    transaction.commit().await?;
+    Ok(())
 }
 
 pub async fn create_guest_project(
@@ -3967,7 +4112,8 @@ pub async fn create_uploaded_runtime_trace(
         "INSERT INTO endpoint_traces
             (id, request_id, project_id, operation, provider_key, capability_kind,
              status, latency_ms, request, created_at, completed_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $10)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
+                 CASE WHEN $7 = 'pending' THEN NULL ELSE $10 END)
          ON CONFLICT (request_id) DO NOTHING",
     )
     .bind(trace.id)
@@ -4609,9 +4755,118 @@ fn delete_statement(table: &str) -> Result<&'static str, ApiError> {
 
 #[cfg(test)]
 mod tests {
+    use std::fmt::Write;
+
     use serde_json::json;
+    use sha2::{Digest, Sha384};
+    use sqlx::sqlite::SqlitePoolOptions;
+    use uuid::Uuid;
 
     use super::{delete_statement, profile_version_content_hash, NewProfileVersion};
+
+    #[test]
+    fn runtime_apply_state_migration_keeps_its_published_checksum() {
+        let checksum = Sha384::digest(include_bytes!(
+            "../../migrations-sqlite/0039_runtime_deployment_apply_states.sql"
+        ));
+        let mut checksum_hex = String::with_capacity(checksum.len() * 2);
+        for byte in checksum {
+            write!(&mut checksum_hex, "{byte:02x}").expect("writing to a String cannot fail");
+        }
+
+        assert_eq!(
+            checksum_hex,
+            "efaed8cc37b730c00afa4a91eeba2c53b43a16bd24b5f5e1fe1eab39a5c5739a67c87df094c372a6da03d057ac3e12ae"
+        );
+    }
+
+    #[tokio::test]
+    async fn runtime_apply_state_uuid_migration_preserves_existing_rows() {
+        let path = std::env::temp_dir().join(format!(
+            "vifu-runtime-apply-state-migration-{}.sqlite",
+            Uuid::new_v4()
+        ));
+        std::fs::File::create(&path).expect("SQLite migration fixture should be created");
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect(&format!("sqlite://{}", path.display()))
+            .await
+            .expect("SQLite migration fixture should connect");
+        sqlx::raw_sql(
+            r#"CREATE TABLE runtime_deployments (id BLOB PRIMARY KEY);
+               CREATE TABLE runtime_deployment_apply_states (
+                   deployment_id TEXT NOT NULL REFERENCES runtime_deployments(id) ON DELETE CASCADE,
+                   gateway_id TEXT NOT NULL,
+                   release_version INTEGER NOT NULL CHECK (release_version > 0),
+                   content_hash TEXT NOT NULL,
+                   applied_at TEXT NOT NULL,
+                   PRIMARY KEY (deployment_id, gateway_id)
+               );
+               CREATE INDEX runtime_deployment_apply_states_gateway_idx
+                   ON runtime_deployment_apply_states(gateway_id, applied_at DESC);"#,
+        )
+        .execute(&pool)
+        .await
+        .expect("published apply-state schema should be created");
+        let deployment_id = Uuid::new_v4();
+        sqlx::query("INSERT INTO runtime_deployments(id) VALUES ($1)")
+            .bind(deployment_id)
+            .execute(&pool)
+            .await
+            .expect("runtime deployment fixture should be inserted");
+        sqlx::query(
+            "INSERT INTO runtime_deployment_apply_states(
+                 deployment_id, gateway_id, release_version, content_hash, applied_at
+             ) VALUES ($1, $2, $3, $4, $5)",
+        )
+        .bind(deployment_id)
+        .bind("gateway-ios")
+        .bind(7_i64)
+        .bind("content-hash")
+        .bind("2026-08-05T00:00:00.000Z")
+        .execute(&pool)
+        .await
+        .expect("apply-state fixture should be inserted");
+
+        sqlx::raw_sql(include_str!(
+            "../../migrations-sqlite/0040_runtime_deployment_apply_state_uuid.sql"
+        ))
+        .execute(&pool)
+        .await
+        .expect("apply-state UUID migration should run");
+
+        let column_type: String = sqlx::query_scalar(
+            "SELECT type FROM pragma_table_info('runtime_deployment_apply_states')
+             WHERE name = 'deployment_id'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("deployment_id column should exist");
+        let migrated_row: (Uuid, String, i64, String, String) = sqlx::query_as(
+            "SELECT deployment_id, gateway_id, release_version, content_hash, applied_at
+             FROM runtime_deployment_apply_states",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("apply state should survive migration");
+
+        assert_eq!(
+            (column_type.as_str(), migrated_row),
+            (
+                "BLOB",
+                (
+                    deployment_id,
+                    "gateway-ios".to_string(),
+                    7,
+                    "content-hash".to_string(),
+                    "2026-08-05T00:00:00.000Z".to_string(),
+                )
+            )
+        );
+
+        pool.close().await;
+        std::fs::remove_file(path).expect("SQLite migration fixture should be removable");
+    }
 
     #[test]
     fn project_resources_use_the_scoped_delete_statement() {

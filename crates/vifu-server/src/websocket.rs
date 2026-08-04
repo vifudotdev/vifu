@@ -4,6 +4,7 @@ use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::State;
 use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Response};
+use chrono::Utc;
 use futures_util::{SinkExt, StreamExt};
 use serde_json::json;
 use tokio::time::{Instant, MissedTickBehavior};
@@ -12,10 +13,14 @@ use uuid::Uuid;
 use vifu_gateway::gateway_frame;
 use vifu_gateway::protocol::{self, AgentGatewayCommand};
 
-use crate::auth::{hash_agent_gateway_credential, hash_agent_gateway_enrollment, is_secret_match};
+use crate::auth::{
+    encrypt_secret_json, hash_agent_gateway_credential, hash_agent_gateway_enrollment,
+    is_secret_match,
+};
 use crate::db;
 use crate::error::ApiError;
 use crate::models::AgentGatewayAuthorization;
+use crate::monitor::ServerMonitorEvent;
 use crate::AppState;
 
 const DEVICE_TOKEN_LIFETIME_DAYS: i64 = 180;
@@ -120,7 +125,7 @@ async fn run_socket(
                 socket,
                 &AgentGatewayCommand::PairingRequired {
                     request_id,
-                    auth_url: format!("/pair?request={request_id}"),
+                    auth_url: gateway_pairing_url(state.config.server_url.as_deref(), request_id),
                     retryable: true,
                     recommended_next_step: "approve-in-dashboard".to_string(),
                     retry_after_ms: 2_000,
@@ -133,6 +138,8 @@ async fn run_socket(
     let gateway_id = authorization.gateway_id.as_str();
     let application_feedback_supported =
         gateway_supports_feature(&metadata, protocol::APPLICATION_FEEDBACK_FEATURE);
+    let embedded_monitoring_supported =
+        gateway_supports_feature(&metadata, protocol::EMBEDDED_LIVE_MONITOR_FEATURE);
 
     let agents_json = serde_json::to_value(&agents).map_err(|error| error.to_string())?;
     let (session_id, resumed) = db::open_agent_gateway_session(
@@ -178,6 +185,13 @@ async fn run_socket(
         }),
     };
     send_command(socket, &welcome).await?;
+    state.monitor.publish(ServerMonitorEvent::GatewayConnected {
+        gateway_id: gateway_id.to_string(),
+        agents: agents.clone(),
+    });
+    if embedded_monitoring_supported {
+        send_command(socket, &AgentGatewayCommand::RuntimeMonitoringReady).await?;
+    }
     info!(%gateway_id, %connection_id, %session_id, resumed, "agent gateway connected");
 
     let mut heartbeat = tokio::time::interval_at(
@@ -236,6 +250,20 @@ async fn run_socket(
                         }
                     }
                     AgentGatewayCommand::Error { request_id: None, .. } => {}
+                    AgentGatewayCommand::RuntimeTelemetry { batch }
+                        if embedded_monitoring_supported => {
+                        match persist_runtime_telemetry(state, gateway_id, &batch).await {
+                            Ok(true) => state.monitor.publish(ServerMonitorEvent::RuntimeTelemetry {
+                                gateway_id: gateway_id.to_string(),
+                                batch,
+                            }),
+                            Ok(false) => {}
+                            Err(RuntimeTelemetryPersistError::Invalid(message)) => break Err(message),
+                            Err(RuntimeTelemetryPersistError::Storage(message)) => {
+                                warn!(error = %message, %gateway_id, "could not persist embedded runtime telemetry");
+                            }
+                        }
+                    }
                     _ => break Err("agent gateway sent an unexpected message".to_string()),
                 }
             }
@@ -255,9 +283,167 @@ async fn run_socket(
         if let Err(error) = db::close_agent_gateway_session(&state.pool, session_id).await {
             warn!(error = %error, %session_id, "could not persist agent gateway disconnect");
         }
+        state
+            .monitor
+            .publish(ServerMonitorEvent::GatewayDisconnected {
+                gateway_id: gateway_id.to_string(),
+            });
     }
     info!(%gateway_id, %connection_id, %session_id, "agent gateway disconnected");
     result
+}
+
+enum RuntimeTelemetryPersistError {
+    Invalid(String),
+    Storage(String),
+}
+
+async fn persist_runtime_telemetry(
+    state: &AppState,
+    gateway_id: &str,
+    batch: &protocol::RuntimeTelemetryBatch,
+) -> Result<bool, RuntimeTelemetryPersistError> {
+    let deployment = db::list_runtime_deployments_for_gateway(&state.pool, gateway_id)
+        .await
+        .map_err(|error| RuntimeTelemetryPersistError::Storage(error.to_string()))?
+        .into_iter()
+        .find(|deployment| deployment.id == batch.deployment_id)
+        .ok_or_else(|| {
+            RuntimeTelemetryPersistError::Invalid(
+                "runtime telemetry deployment is not assigned to this Gateway".to_string(),
+            )
+        })?;
+    if deployment.trace_mode == "off" {
+        return Ok(false);
+    }
+    let project = db::get_project(&state.pool, deployment.project_id)
+        .await
+        .map_err(|error| RuntimeTelemetryPersistError::Storage(error.to_string()))?;
+    if project.project.slug != batch.project_id {
+        return Err(RuntimeTelemetryPersistError::Invalid(
+            "runtime telemetry project does not match its deployment".to_string(),
+        ));
+    }
+
+    let created_at_ms = i64::try_from(batch.started_at_ms).map_err(|_| {
+        RuntimeTelemetryPersistError::Invalid("runtime telemetry timestamp is invalid".to_string())
+    })?;
+    let created_at =
+        chrono::DateTime::<Utc>::from_timestamp_millis(created_at_ms).ok_or_else(|| {
+            RuntimeTelemetryPersistError::Invalid(
+                "runtime telemetry timestamp is invalid".to_string(),
+            )
+        })?;
+    let (provider_key, capability_kind) = batch
+        .events
+        .iter()
+        .find_map(|event| match event {
+            protocol::TraceTelemetry::InvocationStarted {
+                provider_key,
+                capability,
+                ..
+            } => Some((provider_key.as_str(), capability.as_str())),
+            _ => None,
+        })
+        .map_or((None, None), |(provider, capability)| {
+            (Some(provider), Some(capability))
+        });
+    let request = json!({
+        "source": "embedded-runtime-live",
+        "gatewayId": gateway_id,
+        "deploymentId": batch.deployment_id,
+        "traceId": batch.trace_id,
+        "invocationId": batch.invocation_id,
+        "endpoint": batch.endpoint,
+        "agent": batch.agent_id,
+    });
+    let request_id = crate::api::runtime_trace_uuid("request", gateway_id, &batch.trace_id);
+    let trace_id = crate::api::runtime_trace_uuid("trace", gateway_id, &batch.trace_id);
+    let inserted = db::create_uploaded_runtime_trace(
+        &state.pool,
+        db::NewUploadedRuntimeTrace {
+            id: trace_id,
+            request_id,
+            project_id: project.project.id,
+            operation: "runtime.invoke",
+            provider_key,
+            capability_kind,
+            status: "pending",
+            latency_ms: 0,
+            request: &request,
+            created_at,
+        },
+    )
+    .await
+    .map_err(|error| RuntimeTelemetryPersistError::Storage(error.to_string()))?;
+    if inserted {
+        db::create_trace_span_with_id(
+            &state.pool,
+            request_id,
+            db::NewTraceSpan {
+                trace_id,
+                parent_span_id: None,
+                name: "runtime.invoke",
+                kind: "embedded_runtime",
+                observation_type: "generation",
+                provider_key,
+                capability_kind,
+                model: None,
+                model_parameters: None,
+                input_summary: Some(&request),
+                attributes: &json!({ "deploymentId": deployment.id, "live": true }),
+            },
+        )
+        .await
+        .map_err(|error| RuntimeTelemetryPersistError::Storage(error.to_string()))?;
+    }
+    if !batch.events.is_empty() {
+        crate::telemetry::persist_batch(
+            &state.pool,
+            request_id,
+            protocol::TraceTelemetryBatch {
+                events: batch.events.clone(),
+                dropped_events: batch.dropped_events,
+                root_input_summary: None,
+                root_output_summary: None,
+            },
+        )
+        .await
+        .map_err(|error| RuntimeTelemetryPersistError::Storage(error.to_string()))?;
+    }
+    if let Some(terminal) = &batch.terminal {
+        let status = match terminal.status {
+            protocol::RuntimeTelemetryTerminalStatus::Completed => "completed",
+            protocol::RuntimeTelemetryTerminalStatus::Cancelled => "cancelled",
+            protocol::RuntimeTelemetryTerminalStatus::Error => "error",
+        };
+        let duration_ms = i64::try_from(terminal.duration_ms).map_err(|_| {
+            RuntimeTelemetryPersistError::Invalid(
+                "runtime telemetry duration is invalid".to_string(),
+            )
+        })?;
+        db::complete_trace_span(
+            &state.pool,
+            request_id,
+            status,
+            duration_ms,
+            None,
+            terminal.error.as_deref(),
+        )
+        .await
+        .map_err(|error| RuntimeTelemetryPersistError::Storage(error.to_string()))?;
+        db::complete_trace(
+            &state.pool,
+            request_id,
+            status,
+            duration_ms,
+            None,
+            terminal.error.as_deref(),
+        )
+        .await
+        .map_err(|error| RuntimeTelemetryPersistError::Storage(error.to_string()))?;
+    }
+    Ok(true)
 }
 
 fn gateway_supports_feature(metadata: &serde_json::Value, feature: &str) -> bool {
@@ -497,16 +683,56 @@ async fn reconcile_project_agents(
         else {
             continue;
         };
-        let provider_type = agent
+        if vifu_gateway::protocol::validate_identifier("provider key", provider_key).is_err() {
+            continue;
+        }
+        let reported_provider_type = agent
             .metadata
             .get("providerType")
             .and_then(serde_json::Value::as_str)
             .unwrap_or("openclaw");
+        let provider_type =
+            if vifu_gateway::protocol::validate_identifier("provider type", reported_provider_type)
+                .is_ok()
+            {
+                reported_provider_type
+            } else {
+                "gateway"
+            };
         let mut projects = gateway_projects.clone();
         projects.extend(db::list_projects_for_provider_key(&state.pool, provider_key).await?);
         projects.sort_unstable_by_key(|(project_id, _)| *project_id);
         projects.dedup_by_key(|(project_id, _)| *project_id);
-        for (project_id, _) in projects {
+        for (project_id, project_slug) in projects {
+            if !db::project_provider_is_assigned(&state.pool, project_id, provider_key).await? {
+                let provider_name = agent
+                    .metadata
+                    .get("providerName")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or(provider_key);
+                let provider_config =
+                    discovered_provider_config(agent, gateway_id, provider_key, provider_type);
+                let encrypted_secret_json =
+                    encrypt_secret_json("{}", &state.config.provider_secret_key)?;
+                db::upsert_provider_connection(
+                    &state.pool,
+                    &project_slug,
+                    db::NewProviderConnection {
+                        provider_key,
+                        source_kind: "custom",
+                        source_key: provider_key,
+                        name: provider_name,
+                        provider_type,
+                        base_url: "",
+                        config: &provider_config,
+                        encrypted_secret_json: &encrypted_secret_json,
+                        secret_keys: &[],
+                        display_secret: None,
+                        status: "online",
+                    },
+                )
+                .await?;
+            }
             match db::find_project_profile_by_provider_resource(
                 &state.pool,
                 project_id,
@@ -540,6 +766,82 @@ async fn reconcile_project_agents(
         }
     }
     Ok(())
+}
+
+fn discovered_provider_config(
+    agent: &vifu_gateway::protocol::AgentDescriptor,
+    gateway_id: &str,
+    provider_key: &str,
+    provider_type: &str,
+) -> serde_json::Value {
+    let runtime_provider_type = agent
+        .metadata
+        .get("localProviderType")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| vifu_gateway::protocol::validate_identifier("provider type", value).is_ok())
+        .unwrap_or(provider_type);
+    let settings = agent
+        .metadata
+        .get("providerSettings")
+        .cloned()
+        .filter(serde_json::Value::is_object)
+        .unwrap_or_else(|| json!({}));
+    let resources = agent
+        .metadata
+        .get("providerResources")
+        .cloned()
+        .and_then(|value| {
+            serde_json::from_value::<std::collections::BTreeMap<String, String>>(value).ok()
+        })
+        .unwrap_or_default();
+    let mut capabilities = agent
+        .metadata
+        .get("providerCapabilities")
+        .or_else(|| agent.metadata.get("capabilities"))
+        .cloned()
+        .and_then(|value| serde_json::from_value::<Vec<String>>(value).ok())
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|capability| {
+            vifu_gateway::protocol::validate_identifier("provider capability", capability).is_ok()
+        })
+        .collect::<Vec<_>>();
+    capabilities.sort();
+    capabilities.dedup();
+    if capabilities.is_empty() {
+        capabilities.push("chat".to_string());
+    }
+    let mut validation = vifu_runtime::RuntimeManifest::new("provider-discovery");
+    validation
+        .providers
+        .push(vifu_runtime::ProviderRequirement {
+            id: provider_key.to_string(),
+            provider_type: runtime_provider_type.to_string(),
+            capabilities: capabilities.clone(),
+            settings: settings.clone(),
+            resources: resources.clone(),
+        });
+    let (settings, resources) = if validation.validate().is_ok() {
+        (settings, json!(resources))
+    } else {
+        (json!({}), json!({}))
+    };
+    json!({
+        "gatewayId": gateway_id,
+        "source": "agent-gateway",
+        "runtimeProviderType": runtime_provider_type,
+        "capabilities": capabilities,
+        "settings": settings,
+        "resources": resources,
+    })
+}
+
+fn gateway_pairing_url(server_url: Option<&str>, request_id: Uuid) -> String {
+    let path = format!("/pair?request={request_id}");
+    server_url
+        .and_then(|base| reqwest::Url::parse(base).ok())
+        .and_then(|base| base.join(&path).ok())
+        .map_or(path, |url| url.to_string())
 }
 
 async fn receive_command(socket: &mut WebSocket) -> Result<AgentGatewayCommand, String> {
@@ -624,8 +926,8 @@ mod tests {
     };
 
     use super::{
-        authorize_gateway_machine, decode_command, encode_command, reconcile_project_agents,
-        GatewayAuthorizationOutcome,
+        authorize_gateway_machine, decode_command, discovered_provider_config, encode_command,
+        gateway_pairing_url, reconcile_project_agents, GatewayAuthorizationOutcome,
     };
     use crate::auth::hash_api_key;
     use crate::config::Config;
@@ -636,6 +938,25 @@ mod tests {
         ResourcePermission,
     };
     use crate::{app, state_with_storage};
+
+    #[test]
+    fn discovered_runtime_provider_keeps_its_declared_capabilities() {
+        let config = discovered_provider_config(
+            &AgentDescriptor {
+                id: "local-agent".to_string(),
+                name: "Local agent".to_string(),
+                metadata: json!({
+                    "localProviderType": "llama",
+                    "providerCapabilities": ["embedding", "chat", "chat"],
+                }),
+            },
+            "gateway-test",
+            "local-llama",
+            "vifu-runtime",
+        );
+
+        assert_eq!(config["capabilities"], json!(["chat", "embedding"]));
+    }
 
     #[test]
     fn server_transport_codec_round_trips_gateway_frames() {
@@ -656,6 +977,20 @@ mod tests {
         assert_eq!(response.id, AGENT_GATEWAY_HELLO_REQUEST_ID);
         assert!(response.ok);
         assert_eq!(decode_command(&encoded).unwrap(), command);
+    }
+
+    #[test]
+    fn pairing_uses_the_servers_single_public_origin() {
+        let request_id = Uuid::nil();
+
+        assert_eq!(
+            gateway_pairing_url(Some("https://api.vifu.example"), request_id),
+            format!("https://api.vifu.example/pair?request={request_id}")
+        );
+        assert_eq!(
+            gateway_pairing_url(None, request_id),
+            format!("/pair?request={request_id}")
+        );
     }
 
     #[test]
@@ -759,10 +1094,15 @@ mod tests {
         assert_eq!(profiles.len(), 1);
         assert_eq!(profiles[0].name, "Guide");
         assert!(
-            !db::project_provider_is_assigned(&state.pool, project_id, "openclaw-local")
+            db::project_provider_is_assigned(&state.pool, project_id, "openclaw-local")
                 .await
                 .unwrap()
         );
+        let providers = db::list_provider_connections(&state.pool, &project_slug)
+            .await
+            .unwrap();
+        assert_eq!(providers.len(), 1);
+        assert_eq!(providers[0].provider_key, "openclaw-local");
     }
 
     #[tokio::test]

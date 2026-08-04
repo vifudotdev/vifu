@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use serde::Serialize;
+use sha2::Digest;
 use vifu_gateway::runtime_extension::RuntimeExtensionDefinition;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -33,6 +34,16 @@ pub struct Config {
     pub guest_bootstrap_enabled: bool,
     pub guest_project_ttl: Duration,
     pub guest_project_limit: u32,
+    pub server_url: Option<String>,
+    pub dashboard_addr: Option<String>,
+    pub tls: Option<ServerTlsConfig>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ServerTlsConfig {
+    pub certificate_path: PathBuf,
+    pub private_key_path: PathBuf,
+    pub certificate_der_path: PathBuf,
 }
 
 #[derive(Debug, Clone)]
@@ -121,6 +132,80 @@ impl Config {
         Ok(())
     }
 
+    pub fn apply_server_url(&mut self, server_url: impl Into<String>) -> Result<(), String> {
+        let server_url = server_url.into();
+        let url = reqwest::Url::parse(server_url.trim())
+            .map_err(|error| format!("server URL is invalid: {error}"))?;
+        let Some(host) = url.host_str() else {
+            return Err("server API address must include a host".to_string());
+        };
+        let is_loopback = host.eq_ignore_ascii_case("localhost")
+            || host
+                .parse::<std::net::IpAddr>()
+                .is_ok_and(|address| address.is_loopback());
+        if url.scheme() != "https" && !(url.scheme() == "http" && is_loopback) {
+            return Err(
+                "server API address must use HTTPS except on loopback and include a host"
+                    .to_string(),
+            );
+        }
+        if !url.username().is_empty()
+            || url.password().is_some()
+            || url.query().is_some()
+            || url.fragment().is_some()
+            || url.path() != "/"
+        {
+            return Err(
+                "server API address must be an origin without credentials, a path, query, or fragment"
+                    .to_string(),
+            );
+        }
+        self.server_url = Some(server_url.trim_end_matches('/').to_string());
+        Ok(())
+    }
+
+    pub fn apply_dashboard_addr(&mut self, address: impl Into<String>) -> Result<(), String> {
+        let address = address.into();
+        let address = address.trim();
+        let url = reqwest::Url::parse(&format!("http://{address}"))
+            .map_err(|error| format!("dashboard address is invalid: {error}"))?;
+        if url.host_str().is_none()
+            || url.port().is_none()
+            || !url.username().is_empty()
+            || url.password().is_some()
+            || url.path() != "/"
+            || url.query().is_some()
+            || url.fragment().is_some()
+        {
+            return Err("dashboard address must be a host and port".to_string());
+        }
+        self.dashboard_addr = Some(address.to_string());
+        Ok(())
+    }
+
+    pub fn apply_generated_tls(&mut self) -> Result<(), String> {
+        let server_url = self
+            .server_url
+            .as_deref()
+            .ok_or_else(|| "generated server TLS requires server.address".to_string())?;
+        let certificate_id = sha2::Sha256::digest(server_url.as_bytes())[..8]
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        self.tls = Some(ServerTlsConfig {
+            certificate_path: self
+                .provider_home_dir
+                .join(format!("server-{certificate_id}-cert.pem")),
+            private_key_path: self
+                .provider_home_dir
+                .join(format!("server-{certificate_id}-key.pem")),
+            certificate_der_path: self
+                .provider_home_dir
+                .join(format!("server-{certificate_id}-cert.der.b64")),
+        });
+        Ok(())
+    }
+
     fn from_lookup<F>(mut lookup: F) -> Result<Self, String>
     where
         F: FnMut(&str) -> Option<String>,
@@ -205,6 +290,9 @@ impl Config {
             guest_bootstrap_enabled: false,
             guest_project_ttl: Duration::from_secs(7 * 24 * 60 * 60),
             guest_project_limit: 10_000,
+            server_url: None,
+            dashboard_addr: None,
+            tls: None,
         })
     }
 }
@@ -440,6 +528,49 @@ mod tests {
     }
 
     #[test]
+    fn server_endpoint_reuses_the_primary_listener() {
+        let mut config = Config::from_lookup(|_| None).unwrap();
+        config
+            .apply_server_url("https://macbook.local:6790")
+            .unwrap();
+        config.apply_generated_tls().unwrap();
+
+        assert_eq!(config.addr.to_string(), "127.0.0.1:6790");
+        assert_eq!(
+            config.server_url.as_deref(),
+            Some("https://macbook.local:6790")
+        );
+        assert!(config
+            .tls
+            .unwrap()
+            .certificate_der_path
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .ends_with(".der.b64"));
+    }
+
+    #[test]
+    fn server_endpoint_must_be_an_https_origin() {
+        let mut config = Config::from_lookup(|_| None).unwrap();
+        assert!(config
+            .apply_server_url("https://macbook.local:6790/not-an-origin")
+            .is_err());
+        assert!(config
+            .apply_server_url("http://macbook.local:6790")
+            .is_err());
+    }
+
+    #[test]
+    fn server_endpoint_allows_plaintext_only_on_loopback() {
+        let mut config = Config::from_lookup(|_| None).unwrap();
+
+        config.apply_server_url("http://127.0.0.1:6790").unwrap();
+
+        assert_eq!(config.server_url.as_deref(), Some("http://127.0.0.1:6790"));
+    }
+
+    #[test]
     fn requires_explicit_secrets_for_self_hosted_mode() {
         let error = Config::from_lookup(|key| {
             (key == "VIFU_DEPLOYMENT_MODE").then(|| "self-hosted".to_string())
@@ -558,5 +689,18 @@ mod tests {
         assert_eq!(config.deployment_mode, DeploymentMode::SelfHosted);
         assert_eq!(config.admin_key, "self-host-admin-key-from-file");
         fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn dashboard_proxy_uses_an_internal_host_and_port_address() {
+        let mut config = Config::from_lookup(|_| None).unwrap();
+
+        config.apply_dashboard_addr("dashboard:6791").unwrap();
+
+        assert_eq!(config.dashboard_addr.as_deref(), Some("dashboard:6791"));
+        assert!(config
+            .apply_dashboard_addr("https://dashboard:6791/path")
+            .is_err());
+        assert!(config.apply_dashboard_addr("dashboard").is_err());
     }
 }

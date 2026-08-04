@@ -6,6 +6,7 @@ pub mod console;
 pub mod db;
 pub mod error;
 pub mod models;
+pub mod monitor;
 mod openclaw_device;
 pub mod relay;
 pub mod runtime_extensions;
@@ -15,15 +16,18 @@ pub mod websocket;
 
 use std::future::Future;
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::extract::DefaultBodyLimit;
 use axum::http::header::{AUTHORIZATION, CONTENT_TYPE};
 use axum::http::{HeaderName, Method};
 use axum::routing::{get, patch, post, put};
 use axum::Router;
+use base64::Engine;
 use config::Config;
 use error::ApiError;
 use relay::RelayHub;
+use sha2::Digest;
 use sqlx::PgPool;
 use tokio::net::TcpListener;
 use tower_http::catch_panic::CatchPanicLayer;
@@ -39,6 +43,15 @@ pub struct AppState {
     pub auth: auth::ApplicationAuth,
     pub pool: db::Storage,
     pub relay: RelayHub,
+    pub monitor: monitor::ServerMonitorHub,
+    pub server_endpoint: Option<Arc<ServerEndpointIdentity>>,
+}
+
+#[derive(Clone, Debug)]
+pub struct ServerEndpointIdentity {
+    pub server_url: String,
+    pub certificate_der_base64: Option<String>,
+    pub certificate_sha256: Option<String>,
 }
 
 pub async fn connect(config: Config) -> Result<AppState, ApiError> {
@@ -52,7 +65,9 @@ pub async fn connect(config: Config) -> Result<AppState, ApiError> {
     db::mark_agent_gateway_sessions_disconnected(&pool)
         .await
         .map_err(|error| diagnose_startup_error("mark gateway sessions disconnected", error))?;
-    Ok(state_with_storage(config, pool))
+    let mut state = state_with_storage(config, pool);
+    state.server_endpoint = load_server_endpoint_identity(&state.config)?.map(Arc::new);
+    Ok(state)
 }
 
 fn diagnose_startup_error(stage: &str, error: ApiError) -> ApiError {
@@ -66,16 +81,47 @@ pub async fn serve<F>(config: Config, shutdown: F) -> Result<(), String>
 where
     F: Future<Output = ()> + Send + 'static,
 {
-    let addr = config.addr;
     let state = connect(config).await.map_err(|error| error.to_string())?;
-    let listener = TcpListener::bind(addr)
-        .await
-        .map_err(|error| format!("could not bind {addr}: {error}"))?;
-    info!(%addr, "vifu server listening");
-    axum::serve(listener, app(state))
-        .with_graceful_shutdown(shutdown)
-        .await
-        .map_err(|error| format!("http server failed: {error}"))
+    serve_state(state, shutdown).await
+}
+
+pub async fn serve_state<F>(state: AppState, shutdown: F) -> Result<(), String>
+where
+    F: Future<Output = ()> + Send + 'static,
+{
+    let addr = state.config.addr;
+    let Some(server_tls) = state.config.tls.clone() else {
+        let listener = TcpListener::bind(addr)
+            .await
+            .map_err(|error| format!("could not bind {addr}: {error}"))?;
+        info!(%addr, "vifu server listening");
+        return axum::serve(listener, app(state))
+            .with_graceful_shutdown(shutdown)
+            .await
+            .map_err(|error| format!("http server failed: {error}"));
+    };
+    let tls = axum_server::tls_rustls::RustlsConfig::from_pem_file(
+        &server_tls.certificate_path,
+        &server_tls.private_key_path,
+    )
+    .await
+    .map_err(|error| format!("server TLS certificate could not be loaded: {error}"))?;
+    let handle = axum_server::Handle::new();
+    let mut server = Box::pin(
+        axum_server::bind_rustls(addr, tls)
+            .handle(handle.clone())
+            .serve(app(state).into_make_service()),
+    );
+    info!(%addr, "vifu server listening with TLS");
+    tokio::select! {
+        result = &mut server => result.map_err(|error| format!("HTTPS server failed: {error}")),
+        () = shutdown => {
+            handle.graceful_shutdown(Some(Duration::from_secs(5)));
+            server
+                .await
+                .map_err(|error| format!("HTTPS server failed during shutdown: {error}"))
+        }
+    }
 }
 
 pub fn state(config: Config, pool: PgPool) -> AppState {
@@ -93,12 +139,94 @@ pub fn state_with_storage_and_auth(
     auth: auth::ApplicationAuth,
 ) -> AppState {
     let queue_capacity = config.queue_capacity;
+    let server_endpoint = config.server_url.as_ref().map(|server_url| {
+        Arc::new(ServerEndpointIdentity {
+            server_url: server_url.clone(),
+            certificate_der_base64: None,
+            certificate_sha256: None,
+        })
+    });
     AppState {
         config: Arc::new(config),
         auth,
         pool,
         relay: RelayHub::new(queue_capacity),
+        monitor: monitor::ServerMonitorHub::new(queue_capacity),
+        server_endpoint,
     }
+}
+
+fn load_server_endpoint_identity(
+    config: &Config,
+) -> Result<Option<ServerEndpointIdentity>, ApiError> {
+    let Some(server_url) = config.server_url.as_ref() else {
+        return Ok(None);
+    };
+    let Some(server_tls) = config.tls.as_ref() else {
+        return Ok(Some(ServerEndpointIdentity {
+            server_url: server_url.clone(),
+            certificate_der_base64: None,
+            certificate_sha256: None,
+        }));
+    };
+    let der = if server_tls.certificate_path.is_file() && server_tls.private_key_path.is_file() {
+        use rustls_pki_types::pem::PemObject;
+
+        let certificate =
+            rustls_pki_types::CertificateDer::from_pem_file(&server_tls.certificate_path).map_err(
+                |error| ApiError::Invalid(format!("server certificate could not be read: {error}")),
+            )?;
+        let der = certificate.as_ref().to_vec();
+        let encoded = base64::engine::general_purpose::STANDARD.encode(&der);
+        let sidecar_matches = std::fs::read_to_string(&server_tls.certificate_der_path)
+            .is_ok_and(|stored| stored.trim() == encoded);
+        if !sidecar_matches {
+            vifu_gateway::config::write_private_file(&server_tls.certificate_der_path, &encoded)
+                .map_err(ApiError::Invalid)?;
+        }
+        der
+    } else {
+        let url = reqwest::Url::parse(server_url)
+            .map_err(|error| ApiError::Invalid(format!("server URL is invalid: {error}")))?;
+        let host = url
+            .host_str()
+            .ok_or_else(|| ApiError::Invalid("server URL needs a host".to_string()))?;
+        let rcgen::CertifiedKey { cert, signing_key } =
+            rcgen::generate_simple_self_signed(vec![host.to_string()]).map_err(|error| {
+                ApiError::Invalid(format!(
+                    "server certificate could not be generated: {error}"
+                ))
+            })?;
+        vifu_gateway::config::write_private_file(&server_tls.certificate_path, &cert.pem())
+            .map_err(ApiError::Invalid)?;
+        vifu_gateway::config::write_private_file(
+            &server_tls.private_key_path,
+            &signing_key.serialize_pem(),
+        )
+        .map_err(ApiError::Invalid)?;
+        let der = cert.der().to_vec();
+        vifu_gateway::config::write_private_file(
+            &server_tls.certificate_der_path,
+            &base64::engine::general_purpose::STANDARD.encode(&der),
+        )
+        .map_err(ApiError::Invalid)?;
+        der
+    };
+    let digest = sha2::Sha256::digest(&der);
+    Ok(Some(ServerEndpointIdentity {
+        server_url: server_url.clone(),
+        certificate_der_base64: Some(base64::engine::general_purpose::STANDARD.encode(&der)),
+        certificate_sha256: Some(format!("sha256:{}", hex_digest(&digest))),
+    }))
+}
+
+fn hex_digest(bytes: &[u8]) -> String {
+    use std::fmt::Write;
+    let mut output = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        let _ = write!(&mut output, "{byte:02x}");
+    }
+    output
 }
 
 pub fn app(state: AppState) -> Router {
@@ -469,9 +597,14 @@ pub fn app(state: AppState) -> Router {
                 vifu_gateway::optimization::MAX_COMPARISON_UPLOAD_BYTES,
             )),
         )
+        .route("/v1/runtime-monitor/connect", get(monitor::upgrade))
         .route(
             "/v1/agent-gateway/runtime-releases/bootstrap",
             post(api::bootstrap_agent_gateway_runtime_release),
+        )
+        .route(
+            "/v1/agent-gateway/runtime-releases/applied",
+            post(api::report_agent_gateway_runtime_release_applied),
         )
         .route(
             "/v1/project/{slug}/agent-gateway-enrollments",
@@ -485,7 +618,7 @@ pub fn app(state: AppState) -> Router {
         .route("/v1/traces/{id}/spans", get(api::list_trace_spans))
         .route("/v1/traces/{id}/scores", get(api::list_trace_scores))
         .route("/v1/agent-gateway/connect", get(websocket::upgrade))
-        .fallback(api::fallback)
+        .fallback(console::proxy_dashboard_request)
         .layer(PropagateRequestIdLayer::new(request_id_header.clone()))
         .layer(TraceLayer::new_for_http())
         .layer(SetRequestIdLayer::new(request_id_header, MakeRequestUuid))
@@ -510,7 +643,10 @@ mod tests {
     use tokio::task::JoinHandle;
     use tower::ServiceExt;
 
-    use super::{app, state, state_with_storage, state_with_storage_and_auth, AppState};
+    use super::{
+        app, load_server_endpoint_identity, state, state_with_storage, state_with_storage_and_auth,
+        AppState,
+    };
     use crate::auth::{
         AccessTokenAuth, AccessTokenAuthFuture, ApplicationAuth, Identity, Operation,
     };
@@ -547,6 +683,32 @@ mod tests {
         close_temp_storage(storage, path).await;
 
         assert_eq!(payload["version"], "0.1.7");
+    }
+
+    #[test]
+    fn generated_tls_pairing_identity_is_rebuilt_from_the_served_certificate() {
+        let directory =
+            std::env::temp_dir().join(format!("vifu-server-tls-{}", uuid::Uuid::new_v4().simple()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let mut config = Config::from_env().unwrap();
+        config.provider_home_dir.clone_from(&directory);
+        config
+            .apply_server_url("https://macbook.local:6790")
+            .unwrap();
+        config.apply_generated_tls().unwrap();
+
+        let first = load_server_endpoint_identity(&config).unwrap().unwrap();
+        let sidecar = config.tls.as_ref().unwrap().certificate_der_path.clone();
+        std::fs::remove_file(&sidecar).unwrap();
+        let restored = load_server_endpoint_identity(&config).unwrap().unwrap();
+
+        assert_eq!(
+            restored.certificate_der_base64,
+            first.certificate_der_base64
+        );
+        assert_eq!(restored.certificate_sha256, first.certificate_sha256);
+        assert!(sidecar.is_file());
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[tokio::test]
@@ -2050,6 +2212,122 @@ mod tests {
         assert_eq!(stored.config, json!({}));
         assert!(stored.secret_keys.is_empty());
         assert_eq!(custom_provider_row_count(&storage).await, 0);
+
+        close_temp_storage(storage, path).await;
+    }
+
+    #[tokio::test]
+    async fn runtime_provider_settings_activate_a_new_primary_release() {
+        let (storage, path) = temp_sqlite_storage("provider-runtime-sync").await;
+        let config = Config::from_env().unwrap();
+        let admin = admin_authorization(&config);
+        create_test_project(&storage, "provider-runtime-sync", "gateway-runtime-sync").await;
+        open_provider_gateway_session(&storage, "gateway-runtime-sync").await;
+        let runtime_app = app(state_with_storage(config, storage.clone()));
+
+        let assigned = runtime_app
+            .clone()
+            .oneshot(
+                Request::post("/v1/project/provider-runtime-sync/providers")
+                    .header("authorization", admin.clone())
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"source":{"kind":"custom","key":"local-llama"}}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(assigned.status(), StatusCode::CREATED);
+
+        let published = runtime_app
+            .clone()
+            .oneshot(
+                Request::post("/v1/project/provider-runtime-sync/runtime-releases")
+                    .header("authorization", admin.clone())
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{
+                            "settings": {
+                                "schemaVersion": 1,
+                                "projectId": "provider-runtime-sync",
+                                "providers": [{
+                                    "id": "local-llama",
+                                    "providerType": "llama",
+                                    "capabilities": ["chat"]
+                                }],
+                                "agents": [{
+                                    "id": "guide",
+                                    "name": "Guide",
+                                    "provider": "local-llama",
+                                    "capabilities": ["chat"]
+                                }],
+                                "endpoints": [{
+                                    "name": "guide",
+                                    "agent": "guide",
+                                    "capability": "chat",
+                                    "timeoutMs": 30000
+                                }],
+                                "metadata": {}
+                            }
+                        }"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(published.status(), StatusCode::CREATED);
+        let activated = runtime_app
+            .clone()
+            .oneshot(
+                Request::post(
+                    "/v1/project/provider-runtime-sync/deployments/development/runtime-releases/1/activate",
+                )
+                .header("authorization", admin.clone())
+                .body(Body::empty())
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(activated.status(), StatusCode::OK);
+
+        let updated = runtime_app
+            .oneshot(
+                Request::patch("/v1/project/provider-runtime-sync/providers/local-llama")
+                    .header("authorization", admin)
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{
+                        "config": {
+                            "settings": {
+                                "generation": {"maxTokens": 96, "temperature": 0.3}
+                            },
+                            "resources": {}
+                        }
+                    }"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let updated_status = updated.status();
+        let payload = response_json(updated).await;
+        assert_eq!(updated_status, StatusCode::OK, "{payload}");
+        assert_eq!(payload["runtimeSync"]["runtimeRelease"]["version"], 2);
+        assert_eq!(
+            payload["runtimeSync"]["deployment"]["activeReleaseVersion"],
+            2
+        );
+        assert_eq!(
+            payload["runtimeSync"]["runtimeRelease"]["manifest"]["providers"][0]["settings"]
+                ["generation"]["maxTokens"],
+            96
+        );
+        assert_eq!(
+            payload["runtimeSync"]["runtimeRelease"]["manifest"]["agents"][0]["metadata"]
+                ["generation"]["temperature"],
+            0.3
+        );
 
         close_temp_storage(storage, path).await;
     }

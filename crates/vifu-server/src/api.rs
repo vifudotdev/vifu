@@ -20,8 +20,8 @@ use uuid::Uuid;
 use vifu_gateway::protocol::{validate_identifier, MAX_INVOCATION_BODY_BYTES};
 use vifu_runtime::{
     AgentDefinition, AgentProvider, EndpointDefinition, HttpCapabilityProvider,
-    HttpCapabilityRoute, InvocationData, InvocationInput, ProjectSettings, RuntimeError,
-    RuntimeRelease, RuntimeTraceRecord, VifuRuntime,
+    HttpCapabilityRoute, InvocationData, InvocationInput, ProjectSettings, ProviderRequirement,
+    RuntimeError, RuntimeRelease, RuntimeTraceRecord, VifuRuntime,
 };
 
 use crate::auth::{
@@ -41,9 +41,10 @@ use crate::models::{
     CreatedApiKey, CustomProvider, EndpointRoute, EndpointTrace, ImportProjectAgent,
     ImportProjectProfile, ImportProjectProvider, ImportProjectSettings, ProfileCapabilityDraft,
     ProjectOwnership, ProviderAdapter, ProviderAdapterField, ProviderConnection,
-    ProviderConnectionSecret, RegisterAgentGateway, RuntimeDeployment, RuntimeDeploymentView,
-    SetProfileRollout, SyncProfileSource, TestProfile, UpdateApiKey, UpdateBinding, UpdateEndpoint,
-    UpdateProfile, UpdateProject, UpdateProjectProvider, UpdateRuntimeDeployment,
+    ProviderConnectionSecret, RegisterAgentGateway, ReportRuntimeReleaseApplied, RuntimeDeployment,
+    RuntimeDeploymentView, SetProfileRollout, SyncProfileSource, TestProfile, UpdateApiKey,
+    UpdateBinding, UpdateEndpoint, UpdateProfile, UpdateProject, UpdateProjectProvider,
+    UpdateRuntimeDeployment,
 };
 use crate::openclaw_device;
 use crate::relay::RelayAgentProvider;
@@ -687,9 +688,11 @@ async fn runtime_deployment_view(
     deployment: RuntimeDeployment,
 ) -> Result<RuntimeDeploymentView, ApiError> {
     let gateway_ids = db::list_runtime_deployment_gateway_ids(&state.pool, deployment.id).await?;
+    let apply_states = db::list_runtime_deployment_apply_states(&state.pool, deployment.id).await?;
     Ok(RuntimeDeploymentView {
         deployment,
         gateway_ids,
+        apply_states,
     })
 }
 
@@ -1179,13 +1182,376 @@ pub async fn activate_project_profile_version(
 ) -> Result<Json<Value>, ApiError> {
     let project =
         authorized_project_by_slug(&state, &headers, &project_slug, ProjectAccess::Write).await?;
-    db::get_project_profile(&state.pool, project.project.id, profile_id).await?;
+    let profile = db::get_project_profile(&state.pool, project.project.id, profile_id).await?;
     sync_managed_profile_version(&state, &project_slug, profile_id, version_id).await?;
-    let rollout = db::set_profile_rollout(&state.pool, profile_id, &[(version_id, 10_000)]).await?;
+    let profile_version = db::get_profile_version(&state.pool, profile_id, version_id).await?;
+    if profile_version.archived_at.is_some() {
+        return Err(ApiError::Conflict(
+            "an archived profile version cannot be made live".to_string(),
+        ));
+    }
+    let capabilities = db::list_profile_capabilities(&state.pool, version_id).await?;
+    let deployments = db::list_runtime_deployments(&state.pool, project.project.id).await?;
+    let primary = deployments
+        .into_iter()
+        .find(|deployment| deployment.is_primary)
+        .ok_or_else(|| {
+            ApiError::Conflict("project does not have a primary deployment".to_string())
+        })?;
+    if !primary.config_sync_enabled {
+        return Err(ApiError::Conflict(
+            "primary deployment must enable runtime configuration sync".to_string(),
+        ));
+    }
+    let active_release_version = primary.active_release_version.ok_or_else(|| {
+        ApiError::Conflict(
+            "primary deployment needs an active runtime release before a profile can be made live"
+                .to_string(),
+        )
+    })?;
+    let active_release =
+        db::get_project_runtime_release(&state.pool, project.project.id, active_release_version)
+            .await?;
+    let manifest =
+        serde_json::from_value::<ProjectSettings>(active_release.manifest).map_err(|error| {
+            ApiError::Invalid(format!("active runtime release is invalid: {error}"))
+        })?;
+    let provider_connections = db::list_provider_connections(&state.pool, &project_slug).await?;
+    let manifest = compile_profile_runtime_manifest(
+        manifest,
+        &profile,
+        &profile_version,
+        &capabilities,
+        &provider_connections,
+    )?;
+    let releases = db::list_project_runtime_releases(&state.pool, project.project.id).await?;
+    let next_version = releases
+        .first()
+        .map_or(1, |release| release.version.saturating_add(1));
+    let runtime_release = RuntimeRelease::new(
+        u64::try_from(next_version).map_err(|_| ApiError::Internal)?,
+        manifest,
+    )
+    .map_err(|error| ApiError::Invalid(error.to_string()))?;
+    let manifest =
+        serde_json::to_value(&runtime_release.manifest).map_err(|_| ApiError::Internal)?;
+    let release_id = Uuid::new_v4();
+    db::activate_profile_runtime_release(
+        &state.pool,
+        profile_id,
+        version_id,
+        primary.id,
+        db::NewProjectRuntimeRelease {
+            id: release_id,
+            project_id: project.project.id,
+            version: next_version,
+            content_hash: &runtime_release.content_hash,
+            manifest: &manifest,
+            created_by: None,
+        },
+    )
+    .await?;
+    let deployment =
+        db::get_runtime_deployment(&state.pool, project.project.id, &primary.name).await?;
+    notify_runtime_deployments(&state, std::slice::from_ref(&deployment)).await?;
+    let rollout = db::list_profile_rollout(&state.pool, profile_id).await?;
     Ok(Json(json!({
         "profile": db::get_profile(&state.pool, profile_id).await?,
         "rollout": rollout,
+        "runtimeRelease": db::get_project_runtime_release(&state.pool, project.project.id, next_version).await?,
+        "deployment": runtime_deployment_view(&state, deployment).await?,
     })))
+}
+
+fn compile_profile_runtime_manifest(
+    mut manifest: ProjectSettings,
+    profile: &crate::models::AgentProfile,
+    version: &crate::models::AgentProfileVersion,
+    capabilities: &[crate::models::AgentProfileCapability],
+    provider_connections: &[ProviderConnection],
+) -> Result<ProjectSettings, ApiError> {
+    let mut provider_generation = None;
+    let resource_id = version
+        .source
+        .get("resourceId")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(&profile.slug);
+    let agent = manifest
+        .agents
+        .iter_mut()
+        .find(|agent| agent.id == resource_id)
+        .ok_or_else(|| {
+            ApiError::Conflict(format!(
+                "profile source agent {resource_id} is not present in the active runtime release"
+            ))
+        })?;
+    if let Some(chat) = capabilities
+        .iter()
+        .find(|capability| capability.kind == "chat")
+    {
+        let provider = manifest
+            .providers
+            .iter_mut()
+            .find(|provider| provider.id == chat.provider_key)
+            .ok_or_else(|| {
+                ApiError::Conflict(format!(
+                    "provider {} is not installed in the active runtime release",
+                    chat.provider_key
+                ))
+            })?;
+        if let Some(connection) = provider_connections
+            .iter()
+            .find(|connection| connection.provider_key == chat.provider_key)
+            .filter(|connection| connection.provider_type == "vifu-runtime")
+        {
+            apply_runtime_provider_configuration(provider, &connection.config)?;
+        }
+        provider_generation = runtime_provider_generation(&provider.settings)?;
+        agent.provider.clone_from(&chat.provider_key);
+    }
+    let metadata = runtime_agent_metadata(agent);
+    metadata.insert("persona".to_string(), version.persona.clone());
+    if let Some(generation) = version.runtime.get("generation") {
+        validate_safe_generation_settings(generation)?;
+        metadata.insert("generation".to_string(), generation.clone());
+    } else if let Some(generation) = provider_generation {
+        metadata.insert("generation".to_string(), generation);
+    } else {
+        metadata.remove("generation");
+    }
+    metadata.insert(
+        "agentProfile".to_string(),
+        json!({
+            "id": profile.id,
+            "versionId": version.id,
+            "versionNumber": version.version_number,
+            "contentHash": version.content_hash,
+        }),
+    );
+    manifest
+        .validate()
+        .map_err(|error| ApiError::Invalid(error.to_string()))?;
+    Ok(manifest)
+}
+
+fn runtime_provider_generation(settings: &Value) -> Result<Option<Value>, ApiError> {
+    let Some(generation) = settings.get("generation") else {
+        return Ok(None);
+    };
+    validate_safe_generation_settings(generation)?;
+    Ok(Some(generation.clone()))
+}
+
+fn apply_runtime_provider_configuration(
+    provider: &mut ProviderRequirement,
+    config: &Value,
+) -> Result<(), ApiError> {
+    let config = config.as_object().ok_or_else(|| {
+        ApiError::Invalid("runtime provider config must be an object".to_string())
+    })?;
+    if let Some(provider_type) = config.get("runtimeProviderType").and_then(Value::as_str) {
+        if provider_type != provider.provider_type {
+            return Err(ApiError::Conflict(format!(
+                "provider {} is installed as {}, not {provider_type}",
+                provider.id, provider.provider_type
+            )));
+        }
+    }
+    if let Some(settings) = config.get("settings") {
+        if !settings.is_object() {
+            return Err(ApiError::Invalid(
+                "runtime provider settings must be an object".to_string(),
+            ));
+        }
+        provider.settings = settings.clone();
+    }
+    if let Some(resources) = config.get("resources") {
+        provider.resources = serde_json::from_value::<BTreeMap<String, String>>(resources.clone())
+            .map_err(|_| {
+                ApiError::Invalid(
+                    "runtime provider resources must map names to portable references".to_string(),
+                )
+            })?;
+    }
+    let mut validation = ProjectSettings::new("runtime-provider-validation");
+    validation.providers.push(provider.clone());
+    validation
+        .validate()
+        .map_err(|error| ApiError::Invalid(error.to_string()))
+}
+
+async fn sync_runtime_provider_configuration(
+    state: &AppState,
+    project_id: Uuid,
+    project_slug: &str,
+    provider_key: &str,
+    config: &Value,
+) -> Result<Option<Value>, ApiError> {
+    let Some(primary) = db::list_runtime_deployments(&state.pool, project_id)
+        .await?
+        .into_iter()
+        .find(|deployment| deployment.is_primary)
+    else {
+        return Ok(None);
+    };
+    if !primary.config_sync_enabled {
+        return Ok(None);
+    }
+    let Some(active_version) = primary.active_release_version else {
+        return Ok(None);
+    };
+    let active_release =
+        db::get_project_runtime_release(&state.pool, project_id, active_version).await?;
+    let mut manifest =
+        serde_json::from_value::<ProjectSettings>(active_release.manifest).map_err(|error| {
+            ApiError::Invalid(format!("active runtime release is invalid: {error}"))
+        })?;
+    let Some(provider) = manifest
+        .providers
+        .iter_mut()
+        .find(|provider| provider.id == provider_key)
+    else {
+        return Ok(None);
+    };
+    apply_runtime_provider_configuration(provider, config)?;
+    let provider_generation = runtime_provider_generation(&provider.settings)?;
+    for agent in manifest
+        .agents
+        .iter_mut()
+        .filter(|agent| agent.provider == provider_key)
+    {
+        let metadata = runtime_agent_metadata(agent);
+        if let Some(generation) = &provider_generation {
+            metadata.insert("generation".to_string(), generation.clone());
+        } else {
+            metadata.remove("generation");
+        }
+    }
+
+    let provider_connections = db::list_provider_connections(&state.pool, project_slug).await?;
+    for profile in db::list_project_profiles(&state.pool, project_id).await? {
+        let Some(version_id) = profile.active_version_id else {
+            continue;
+        };
+        let version = db::get_profile_version(&state.pool, profile.id, version_id).await?;
+        let capabilities = db::list_profile_capabilities(&state.pool, version_id).await?;
+        let resource_id = version
+            .source
+            .get("resourceId")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or(&profile.slug);
+        if !manifest.agents.iter().any(|agent| agent.id == resource_id) {
+            continue;
+        }
+        if capabilities
+            .iter()
+            .any(|capability| capability.kind == "chat" && capability.provider_key == provider_key)
+        {
+            manifest = compile_profile_runtime_manifest(
+                manifest,
+                &profile,
+                &version,
+                &capabilities,
+                &provider_connections,
+            )?;
+        }
+    }
+
+    let releases = db::list_project_runtime_releases(&state.pool, project_id).await?;
+    let content_hash = manifest
+        .content_hash()
+        .map_err(|error| ApiError::Invalid(error.to_string()))?;
+    if content_hash == active_release.content_hash {
+        return Ok(None);
+    }
+    let next_version = releases
+        .first()
+        .map_or(1, |release| release.version.saturating_add(1));
+    let runtime_release = RuntimeRelease::new(
+        u64::try_from(next_version).map_err(|_| ApiError::Internal)?,
+        manifest,
+    )
+    .map_err(|error| ApiError::Invalid(error.to_string()))?;
+    let manifest =
+        serde_json::to_value(&runtime_release.manifest).map_err(|_| ApiError::Internal)?;
+    db::activate_runtime_configuration_release(
+        &state.pool,
+        primary.id,
+        db::NewProjectRuntimeRelease {
+            id: Uuid::new_v4(),
+            project_id,
+            version: next_version,
+            content_hash: &runtime_release.content_hash,
+            manifest: &manifest,
+            created_by: None,
+        },
+    )
+    .await?;
+    let release = db::get_project_runtime_release(&state.pool, project_id, next_version).await?;
+    let deployment = db::get_runtime_deployment(&state.pool, project_id, &primary.name).await?;
+    notify_runtime_deployments(state, std::slice::from_ref(&deployment)).await?;
+    Ok(Some(json!({
+        "runtimeRelease": release,
+        "deployment": runtime_deployment_view(state, deployment).await?,
+    })))
+}
+
+fn runtime_agent_metadata(
+    agent: &mut vifu_runtime::AgentDefinition,
+) -> &mut serde_json::Map<String, Value> {
+    if !agent.metadata.is_object() {
+        agent.metadata = json!({});
+    }
+    agent
+        .metadata
+        .as_object_mut()
+        .expect("runtime agent metadata was initialized as an object")
+}
+
+fn validate_safe_generation_settings(value: &Value) -> Result<(), ApiError> {
+    let settings = value
+        .as_object()
+        .ok_or_else(|| ApiError::Invalid("runtime.generation must be an object".to_string()))?;
+    if settings
+        .keys()
+        .any(|key| !matches!(key.as_str(), "maxTokens" | "temperature" | "topP"))
+    {
+        return Err(ApiError::Invalid(
+            "runtime.generation supports maxTokens, temperature, and topP".to_string(),
+        ));
+    }
+    if let Some(max_tokens) = settings.get("maxTokens") {
+        let max_tokens = max_tokens.as_u64().ok_or_else(|| {
+            ApiError::Invalid("runtime.generation.maxTokens must be an integer".to_string())
+        })?;
+        if !(1..=32_768).contains(&max_tokens) {
+            return Err(ApiError::Invalid(
+                "runtime.generation.maxTokens must be between 1 and 32768".to_string(),
+            ));
+        }
+    }
+    for key in ["temperature", "topP"] {
+        if let Some(value) = settings.get(key) {
+            let value = value.as_f64().ok_or_else(|| {
+                ApiError::Invalid(format!("runtime.generation.{key} must be a number"))
+            })?;
+            let valid = match key {
+                "temperature" => (0.0..=2.0).contains(&value),
+                "topP" => (0.0..=1.0).contains(&value) && value > 0.0,
+                _ => false,
+            };
+            if !valid {
+                return Err(ApiError::Invalid(format!(
+                    "runtime.generation.{key} is out of range"
+                )));
+            }
+        }
+    }
+    Ok(())
 }
 
 pub async fn set_project_profile_rollout(
@@ -1904,6 +2270,41 @@ pub async fn get_agent_gateway_runtime_config(
     })))
 }
 
+pub async fn report_agent_gateway_runtime_release_applied(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<ReportRuntimeReleaseApplied>,
+) -> Result<Json<Value>, ApiError> {
+    let gateway_id = authenticated_agent_gateway(&state, &headers).await?;
+    let deployment = db::list_runtime_deployments_for_gateway(&state.pool, &gateway_id)
+        .await?
+        .into_iter()
+        .find(|deployment| deployment.id == input.deployment_id)
+        .ok_or(ApiError::Forbidden)?;
+    if deployment.active_release_version != Some(input.release_version) {
+        return Err(ApiError::Conflict(
+            "the deployment release changed before this apply acknowledgement".to_string(),
+        ));
+    }
+    let release =
+        db::get_project_runtime_release(&state.pool, deployment.project_id, input.release_version)
+            .await?;
+    if release.content_hash != input.content_hash {
+        return Err(ApiError::Conflict(
+            "the applied release content hash does not match Vifu Server".to_string(),
+        ));
+    }
+    db::record_runtime_deployment_apply_state(
+        &state.pool,
+        deployment.id,
+        &gateway_id,
+        input.release_version,
+        &input.content_hash,
+    )
+    .await?;
+    Ok(Json(json!({ "applied": true })))
+}
+
 pub async fn list_agent_gateway_runtime_agents(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -2021,9 +2422,26 @@ pub async fn upload_agent_gateway_runtime_traces(
                 },
             )
             .await?;
-            db::complete_trace_span(&state.pool, span_id, &trace.status, latency_ms, None, None)
-                .await?;
+            debug_assert_eq!(span_id, request_id);
         }
+        db::complete_trace_span(
+            &state.pool,
+            request_id,
+            &trace.status,
+            latency_ms,
+            None,
+            None,
+        )
+        .await?;
+        db::complete_trace(
+            &state.pool,
+            request_id,
+            &trace.status,
+            latency_ms,
+            None,
+            None,
+        )
+        .await?;
         accepted.push(trace.id);
     }
     Ok(Json(json!({
@@ -2322,14 +2740,53 @@ async fn create_agent_gateway_enrollment_for_deployment(
         },
     )
     .await?;
+    let pairing = state
+        .server_endpoint
+        .as_ref()
+        .map(|endpoint| agent_gateway_pairing(endpoint, &token));
     Ok((
         StatusCode::CREATED,
         Json(json!({
             "enrollmentToken": token,
             "expiresAt": expires_at,
             "deployment": deployment.name,
+            "pairing": pairing,
         })),
     ))
+}
+
+fn agent_gateway_pairing(endpoint: &crate::ServerEndpointIdentity, token: &str) -> Value {
+    let mut pairing = reqwest::Url::parse("vifu://gateway/enroll")
+        .expect("static Vifu pairing URL must be valid");
+    {
+        let mut query = pairing.query_pairs_mut();
+        query
+            .append_pair("server", &endpoint.server_url)
+            .append_pair("token", token);
+        if let (Some(certificate), Some(fingerprint)) = (
+            endpoint.certificate_der_base64.as_deref(),
+            endpoint.certificate_sha256.as_deref(),
+        ) {
+            query
+                .append_pair("certificate", certificate)
+                .append_pair("fingerprint", fingerprint);
+        }
+    }
+    let pairing_uri = pairing.to_string();
+    let qr_svg = qrcode::QrCode::new(pairing_uri.as_bytes())
+        .map(|code| {
+            code.render::<qrcode::render::svg::Color<'_>>()
+                .min_dimensions(256, 256)
+                .build()
+        })
+        .ok();
+    json!({
+        "serverUrl": endpoint.server_url,
+        "certificateDer": endpoint.certificate_der_base64,
+        "certificateSha256": endpoint.certificate_sha256,
+        "pairingUri": pairing_uri,
+        "pairingQrSvg": qr_svg,
+    })
 }
 
 pub async fn revoke_agent_gateway(
@@ -2601,21 +3058,53 @@ pub async fn update_project_provider(
     let provider_key = required_identifier("provider key", &provider_key)?;
     let current =
         db::get_provider_connection_secret_by_key(&state.pool, &slug, provider_key).await?;
-    let source = resolve_project_provider_source(
-        &state,
-        &current.source_kind,
-        &current.source_key,
-        Some(&project.project.gateway_id),
-    )
-    .await?;
+    let source = if current.source_kind == "custom" && current.provider_type == "vifu-runtime" {
+        None
+    } else {
+        Some(
+            resolve_project_provider_source(
+                &state,
+                &current.source_kind,
+                &current.source_key,
+                Some(&project.project.gateway_id),
+            )
+            .await?,
+        )
+    };
     let prepared = if current.source_kind == "custom" {
-        prepare_project_provider_assignment(
+        let provider_type = source
+            .as_ref()
+            .map_or(current.provider_type.as_str(), |source| {
+                source.provider_type.as_str()
+            });
+        let mut prepared = prepare_project_provider_assignment(
             &state,
             provider_key,
             input.name.as_deref().unwrap_or(&current.name),
-            &source.provider_type,
-        )?
+            provider_type,
+        )?;
+        if provider_type == "vifu-runtime" {
+            let config = match input.config {
+                Some(config) => merge_json_objects(&current.config, &config)?,
+                None => current.config.clone(),
+            };
+            let provider_type = config
+                .get("runtimeProviderType")
+                .and_then(Value::as_str)
+                .unwrap_or("vifu-runtime");
+            let mut requirement = ProviderRequirement {
+                id: provider_key.to_string(),
+                provider_type: provider_type.to_string(),
+                capabilities: vec!["chat".to_string()],
+                settings: json!({}),
+                resources: BTreeMap::new(),
+            };
+            apply_runtime_provider_configuration(&mut requirement, &config)?;
+            prepared.config = config;
+        }
+        prepared
     } else {
+        let source = source.as_ref().ok_or(ApiError::Internal)?;
         let current_secrets = decrypted_provider_secrets(&state, &current)?;
         let secrets = match input.secrets {
             Some(secrets) if !is_json_object_empty(&secrets) => {
@@ -2631,7 +3120,7 @@ pub async fn update_project_provider(
             &state,
             provider_key,
             input.name.as_deref().unwrap_or(&current.name),
-            &source,
+            source,
             input.base_url.as_deref().or(Some(&current.base_url)),
             config,
             secrets,
@@ -2645,11 +3134,27 @@ pub async fn update_project_provider(
         prepared,
     )
     .await?;
+    let runtime_sync = if current.source_kind == "custom" && current.provider_type == "vifu-runtime"
+    {
+        sync_runtime_provider_configuration(
+            &state,
+            project.project.id,
+            &slug,
+            provider_key,
+            &connection.config,
+        )
+        .await?
+    } else {
+        None
+    };
     let (provider, message, added_agents) =
         refresh_project_provider(&state, &slug, connection).await?;
-    Ok(Json(
-        json!({ "provider": provider, "message": message, "addedAgents": added_agents }),
-    ))
+    Ok(Json(json!({
+        "provider": provider,
+        "message": message,
+        "addedAgents": added_agents,
+        "runtimeSync": runtime_sync,
+    })))
 }
 
 pub async fn delete_project_provider(
@@ -7603,7 +8108,7 @@ async fn authenticated_agent_gateway(
     db::authenticate_agent_gateway_device_token(&state.pool, &credential_hash).await
 }
 
-fn runtime_trace_uuid(kind: &str, gateway_id: &str, trace_id: &str) -> Uuid {
+pub(crate) fn runtime_trace_uuid(kind: &str, gateway_id: &str, trace_id: &str) -> Uuid {
     let mut hasher = Sha256::new();
     hasher.update(b"vifu-runtime-trace-v1\0");
     hasher.update(kind.as_bytes());
@@ -7785,6 +8290,9 @@ fn validate_profile_version_input(
     validate_json_object("runtime", runtime, 128 * 1024)?;
     validate_json_object("presentation", presentation, 256 * 1024)?;
     validate_json_object("source", source, 128 * 1024)?;
+    if let Some(generation) = runtime.get("generation") {
+        validate_safe_generation_settings(generation)?;
+    }
     if capabilities.len() > 64 {
         return Err(ApiError::Invalid(
             "a profile version supports at most 64 capabilities".to_string(),
@@ -7939,21 +8447,96 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        api_error_trace_status, chat_request_summary, chat_trace_request,
-        embedding_request_summary, embedding_response, feedback_endpoint_permission_allowed,
-        gateway_binding_config, invocation_json_response, merge_json_objects,
-        optional_feedback_message, optional_feedback_path, optional_feedback_text, patch_text,
-        prepare_project_provider_assignment_with_secret_key, profile_slug, project_slug,
-        trace_model_parameters, validate_chat_completion_request, validate_embedding_request,
-        validate_profile_version_input, validate_timeout, validated_provider_base_url,
-        AppFeedbackInput, TraceQuery,
+        agent_gateway_pairing, api_error_trace_status, apply_runtime_provider_configuration,
+        chat_request_summary, chat_trace_request, embedding_request_summary, embedding_response,
+        feedback_endpoint_permission_allowed, gateway_binding_config, invocation_json_response,
+        merge_json_objects, optional_feedback_message, optional_feedback_path,
+        optional_feedback_text, patch_text, prepare_project_provider_assignment_with_secret_key,
+        profile_slug, project_slug, runtime_provider_generation, trace_model_parameters,
+        validate_chat_completion_request, validate_embedding_request,
+        validate_profile_version_input, validate_safe_generation_settings, validate_timeout,
+        validated_provider_base_url, AppFeedbackInput, TraceQuery,
     };
     use crate::error::ApiError;
     use crate::models::{ApiKeyPermissions, EndpointPermission, ProfileCapabilityDraft};
+    use crate::ServerEndpointIdentity;
+
+    #[test]
+    fn runtime_provider_edits_compile_only_portable_settings_and_resources() {
+        let mut provider = vifu_runtime::ProviderRequirement {
+            id: "local-qwen".to_string(),
+            provider_type: "llama".to_string(),
+            capabilities: vec!["chat".to_string()],
+            settings: json!({}),
+            resources: std::collections::BTreeMap::new(),
+        };
+
+        apply_runtime_provider_configuration(
+            &mut provider,
+            &json!({
+                "runtimeProviderType": "llama",
+                "settings": {
+                    "contextSize": 4096,
+                    "generation": { "maxTokens": 384, "temperature": 0.4 }
+                },
+                "resources": { "model": "model:qwen-demo" }
+            }),
+        )
+        .unwrap();
+
+        assert_eq!(provider.settings["contextSize"], 4096);
+        assert_eq!(
+            runtime_provider_generation(&provider.settings).unwrap(),
+            Some(json!({ "maxTokens": 384, "temperature": 0.4 }))
+        );
+        assert_eq!(provider.resources["model"], "model:qwen-demo");
+        assert!(apply_runtime_provider_configuration(
+            &mut provider,
+            &json!({ "settings": { "apiKey": "not-portable" } }),
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn pairing_uses_one_system_trusted_server_url_without_a_certificate_pin() {
+        let pairing = agent_gateway_pairing(
+            &ServerEndpointIdentity {
+                server_url: "https://api.vifu.ai".to_string(),
+                certificate_der_base64: None,
+                certificate_sha256: None,
+            },
+            "vifu_ge_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        );
+        let uri = reqwest::Url::parse(pairing["pairingUri"].as_str().unwrap()).unwrap();
+        let query = uri
+            .query_pairs()
+            .collect::<std::collections::HashMap<_, _>>();
+
+        assert_eq!(
+            query.get("server").map(|value| value.as_ref()),
+            Some("https://api.vifu.ai")
+        );
+        assert!(!query.contains_key("certificate"));
+        assert!(pairing["certificateDer"].is_null());
+    }
 
     #[test]
     fn derives_profile_slugs() {
         assert_eq!(profile_slug(None, "Town Guide").unwrap(), "town-guide");
+    }
+
+    #[test]
+    fn accepts_only_bounded_runtime_generation_settings() {
+        assert!(validate_safe_generation_settings(&json!({
+            "maxTokens": 220,
+            "temperature": 0.72,
+            "topP": 0.9
+        }))
+        .is_ok());
+        assert!(validate_safe_generation_settings(&json!({ "maxTokens": 0 })).is_err());
+        assert!(validate_safe_generation_settings(&json!({ "temperature": 2.1 })).is_err());
+        assert!(validate_safe_generation_settings(&json!({ "topP": 0.0 })).is_err());
+        assert!(validate_safe_generation_settings(&json!({ "apiKey": "secret" })).is_err());
     }
 
     #[test]

@@ -17,7 +17,8 @@ use crate::models::{
     ApiKeyPermissions, ApiKeyRecord, AvailableAgent, EndpointRoute, EndpointTrace,
     ProfileCapabilityDraft, ProfileRoute, Project, ProjectRuntimeChannel, ProjectRuntimeExtension,
     ProjectRuntimeRelease, ProjectWithBindings, ProviderConnection, ProviderConnectionSecret,
-    PublicAgent, RealtimeSession, RuntimeDeployment, TraceScore, TraceSpan,
+    PublicAgent, RealtimeSession, RuntimeDeployment, RuntimeDeploymentApplyState, TraceScore,
+    TraceSpan,
 };
 use crate::trace_redaction::{redact_trace_text, redact_trace_value};
 
@@ -330,6 +331,46 @@ pub async fn list_runtime_deployment_gateway_ids(
     .map_err(ApiError::Database)
 }
 
+pub async fn list_runtime_deployment_apply_states(
+    pool: &PgPool,
+    deployment_id: Uuid,
+) -> Result<Vec<RuntimeDeploymentApplyState>, ApiError> {
+    sqlx::query_as::<_, RuntimeDeploymentApplyState>(
+        "SELECT deployment_id, gateway_id, release_version, content_hash, applied_at
+         FROM runtime_deployment_apply_states
+         WHERE deployment_id = $1 ORDER BY gateway_id ASC",
+    )
+    .bind(deployment_id)
+    .fetch_all(pool)
+    .await
+    .map_err(Into::into)
+}
+
+pub async fn record_runtime_deployment_apply_state(
+    pool: &PgPool,
+    deployment_id: Uuid,
+    gateway_id: &str,
+    release_version: i64,
+    content_hash: &str,
+) -> Result<(), ApiError> {
+    sqlx::query(
+        "INSERT INTO runtime_deployment_apply_states(
+             deployment_id, gateway_id, release_version, content_hash, applied_at
+         ) VALUES ($1, $2, $3, $4, NOW())
+         ON CONFLICT (deployment_id, gateway_id) DO UPDATE SET
+             release_version = EXCLUDED.release_version,
+             content_hash = EXCLUDED.content_hash,
+             applied_at = NOW()",
+    )
+    .bind(deployment_id)
+    .bind(gateway_id)
+    .bind(release_version)
+    .bind(content_hash)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 pub async fn assign_runtime_deployment_gateway(
     pool: &PgPool,
     project_id: Uuid,
@@ -534,6 +575,104 @@ pub async fn activate_runtime_deployment_release(
     .fetch_optional(pool)
     .await?
     .ok_or(ApiError::NotFound)
+}
+
+pub async fn activate_runtime_configuration_release(
+    pool: &PgPool,
+    deployment_id: Uuid,
+    release: NewProjectRuntimeRelease<'_>,
+) -> Result<(), ApiError> {
+    let mut transaction = pool.begin().await?;
+    sqlx::query(
+        "INSERT INTO project_runtime_releases(
+            id, project_id, version, content_hash, manifest, created_by
+         ) VALUES ($1, $2, $3, $4, $5, $6)",
+    )
+    .bind(release.id)
+    .bind(release.project_id)
+    .bind(release.version)
+    .bind(release.content_hash)
+    .bind(release.manifest)
+    .bind(release.created_by)
+    .execute(&mut *transaction)
+    .await
+    .map_err(map_database_error)?;
+    let deployment_updated = sqlx::query(
+        "UPDATE runtime_deployments SET active_release_version = $2, updated_at = NOW()
+         WHERE id = $1 AND project_id = $3 AND is_primary AND config_sync_enabled",
+    )
+    .bind(deployment_id)
+    .bind(release.version)
+    .bind(release.project_id)
+    .execute(&mut *transaction)
+    .await?;
+    if deployment_updated.rows_affected() != 1 {
+        return Err(ApiError::Conflict(
+            "primary deployment must enable runtime configuration sync".to_string(),
+        ));
+    }
+    transaction.commit().await?;
+    Ok(())
+}
+
+pub async fn activate_profile_runtime_release(
+    pool: &PgPool,
+    profile_id: Uuid,
+    profile_version_id: Uuid,
+    deployment_id: Uuid,
+    release: NewProjectRuntimeRelease<'_>,
+) -> Result<(), ApiError> {
+    let mut transaction = pool.begin().await?;
+    sqlx::query(
+        "INSERT INTO project_runtime_releases(
+            id, project_id, version, content_hash, manifest, created_by
+         ) VALUES ($1, $2, $3, $4, $5, $6)",
+    )
+    .bind(release.id)
+    .bind(release.project_id)
+    .bind(release.version)
+    .bind(release.content_hash)
+    .bind(release.manifest)
+    .bind(release.created_by)
+    .execute(&mut *transaction)
+    .await
+    .map_err(map_database_error)?;
+    sqlx::query("DELETE FROM agent_profile_rollouts WHERE profile_id = $1")
+        .bind(profile_id)
+        .execute(&mut *transaction)
+        .await?;
+    sqlx::query(
+        "INSERT INTO agent_profile_rollouts(profile_id, profile_version_id, weight_bps)
+         VALUES ($1, $2, 10000)",
+    )
+    .bind(profile_id)
+    .bind(profile_version_id)
+    .execute(&mut *transaction)
+    .await?;
+    let profile_updated = sqlx::query(
+        "UPDATE agent_profiles SET active_version_id = $2, updated_at = NOW()
+         WHERE id = $1 AND archived_at IS NULL",
+    )
+    .bind(profile_id)
+    .bind(profile_version_id)
+    .execute(&mut *transaction)
+    .await?;
+    let deployment_updated = sqlx::query(
+        "UPDATE runtime_deployments SET active_release_version = $2, updated_at = NOW()
+         WHERE id = $1 AND project_id = $3 AND is_primary",
+    )
+    .bind(deployment_id)
+    .bind(release.version)
+    .bind(release.project_id)
+    .execute(&mut *transaction)
+    .await?;
+    if profile_updated.rows_affected() != 1 || deployment_updated.rows_affected() != 1 {
+        return Err(ApiError::Conflict(
+            "profile and primary deployment could not be activated together".to_string(),
+        ));
+    }
+    transaction.commit().await?;
+    Ok(())
 }
 
 pub async fn create_guest_project(
@@ -3781,7 +3920,8 @@ pub async fn create_uploaded_runtime_trace(
         "INSERT INTO endpoint_traces
             (id, request_id, project_id, operation, provider_key, capability_kind,
              status, latency_ms, request, created_at, completed_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $10)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
+                 CASE WHEN $7 = 'pending' THEN NULL ELSE $10 END)
          ON CONFLICT (request_id) DO NOTHING",
     )
     .bind(trace.id)

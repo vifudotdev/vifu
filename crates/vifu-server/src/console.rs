@@ -1,6 +1,9 @@
 use axum::body::{Body, Bytes};
 use axum::extract::State;
-use axum::http::header::{ACCEPT, CACHE_CONTROL, CONTENT_TYPE, HOST, ORIGIN};
+use axum::http::header::{
+    ACCEPT, ACCEPT_LANGUAGE, CACHE_CONTROL, CONTENT_TYPE, COOKIE, HOST, ORIGIN, REFERER,
+    SET_COOKIE, USER_AGENT,
+};
 use axum::http::{HeaderMap, Method, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
 use serde_json::json;
@@ -11,9 +14,13 @@ use crate::AppState;
 
 include!(concat!(env!("OUT_DIR"), "/console_assets.rs"));
 
-pub async fn serve_console_asset(State(state): State<AppState>, uri: Uri) -> Response {
+pub async fn serve_console_asset(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    uri: Uri,
+) -> Response {
     if !local_console_enabled(&state) {
-        return StatusCode::NOT_FOUND.into_response();
+        return proxy_dashboard(state, Method::GET, headers, uri, Bytes::new()).await;
     }
     let Some(asset_path) = asset_path_for_uri(&uri) else {
         return StatusCode::NOT_FOUND.into_response();
@@ -22,6 +29,127 @@ pub async fn serve_console_asset(State(state): State<AppState>, uri: Uri) -> Res
         return StatusCode::NOT_FOUND.into_response();
     };
     asset_response(asset)
+}
+
+pub async fn proxy_dashboard_request(
+    State(state): State<AppState>,
+    method: Method,
+    headers: HeaderMap,
+    uri: Uri,
+    body: Bytes,
+) -> Response {
+    proxy_dashboard(state, method, headers, uri, body).await
+}
+
+async fn proxy_dashboard(
+    state: AppState,
+    method: Method,
+    headers: HeaderMap,
+    uri: Uri,
+    body: Bytes,
+) -> Response {
+    let Some(address) = state.config.dashboard_addr.as_deref() else {
+        return json_error(StatusCode::NOT_FOUND, "resource not found");
+    };
+    if uri.path() == "/v1" || uri.path().starts_with("/v1/") {
+        return json_error(StatusCode::NOT_FOUND, "resource not found");
+    }
+    let target = dashboard_target(address, &uri);
+    let request_method =
+        reqwest::Method::from_bytes(method.as_str().as_bytes()).unwrap_or(reqwest::Method::GET);
+    let client = reqwest::Client::new();
+    let mut request = client
+        .request(request_method, target)
+        .timeout(Duration::from_secs(30));
+    for name in [
+        ACCEPT,
+        ACCEPT_LANGUAGE,
+        CONTENT_TYPE,
+        COOKIE,
+        HOST,
+        ORIGIN,
+        REFERER,
+        USER_AGENT,
+    ] {
+        if let Some(value) = headers.get(&name) {
+            request = request.header(name.as_str(), value.as_bytes());
+        }
+    }
+    if let Some(host) = headers.get(HOST) {
+        request = request.header("x-forwarded-host", host.as_bytes());
+    }
+    let forwarded_proto = state
+        .config
+        .server_url
+        .as_deref()
+        .and_then(|url| reqwest::Url::parse(url).ok())
+        .map_or("http", |url| {
+            if url.scheme() == "https" {
+                "https"
+            } else {
+                "http"
+            }
+        });
+    request = request.header("x-forwarded-proto", forwarded_proto);
+    if !body.is_empty() {
+        request = request.body(body.to_vec());
+    }
+    match request.send().await {
+        Ok(response) => dashboard_response(response).await,
+        Err(error) => json_error(
+            if error.is_timeout() {
+                StatusCode::GATEWAY_TIMEOUT
+            } else {
+                StatusCode::BAD_GATEWAY
+            },
+            "dashboard is temporarily unavailable",
+        ),
+    }
+}
+
+fn dashboard_target(address: &str, uri: &Uri) -> String {
+    format!(
+        "http://{address}{}",
+        uri.path_and_query().map_or("/", |value| value.as_str())
+    )
+}
+
+async fn dashboard_response(response: reqwest::Response) -> Response {
+    const MAX_DASHBOARD_RESPONSE_BYTES: u64 = 32 * 1024 * 1024;
+    let status =
+        StatusCode::from_u16(response.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+    if response
+        .content_length()
+        .is_some_and(|length| length > MAX_DASHBOARD_RESPONSE_BYTES)
+    {
+        return json_error(StatusCode::BAD_GATEWAY, "dashboard response is too large");
+    }
+    let mut builder = Response::builder().status(status);
+    for name in [
+        CONTENT_TYPE,
+        CACHE_CONTROL,
+        SET_COOKIE,
+        axum::http::header::LOCATION,
+        axum::http::header::ETAG,
+        axum::http::header::VARY,
+    ] {
+        for value in response.headers().get_all(name.as_str()) {
+            builder = builder.header(name.clone(), value.as_bytes());
+        }
+    }
+    let bytes = match response.bytes().await {
+        Ok(bytes) if bytes.len() as u64 <= MAX_DASHBOARD_RESPONSE_BYTES => bytes,
+        Ok(_) => return json_error(StatusCode::BAD_GATEWAY, "dashboard response is too large"),
+        Err(_) => {
+            return json_error(
+                StatusCode::BAD_GATEWAY,
+                "dashboard response could not be read",
+            )
+        }
+    };
+    builder
+        .body(Body::from(bytes))
+        .expect("dashboard proxy response should be buildable")
 }
 
 pub async fn proxy_runtime_request(
@@ -227,7 +355,17 @@ mod tests {
 
     use axum::http::{HeaderMap, HeaderValue, Uri};
 
-    use super::{asset_path_for_uri, same_origin_request, valid_runtime_path};
+    use super::{asset_path_for_uri, dashboard_target, same_origin_request, valid_runtime_path};
+
+    #[test]
+    fn dashboard_proxy_keeps_the_single_server_path_and_query() {
+        let uri: Uri = "/pair?request=pairing-id".parse().unwrap();
+
+        assert_eq!(
+            dashboard_target("dashboard:6791", &uri),
+            "http://dashboard:6791/pair?request=pairing-id"
+        );
+    }
 
     #[test]
     fn console_history_routes_serve_index() {

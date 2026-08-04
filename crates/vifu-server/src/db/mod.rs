@@ -165,6 +165,8 @@ dispatch! {
     pub async fn promote_runtime_deployment(storage: &Storage, project_id: Uuid, name: &str) -> Result<RuntimeDeployment, ApiError>;
     pub async fn delete_runtime_deployment(storage: &Storage, project_id: Uuid, name: &str) -> Result<(), ApiError>;
     pub async fn list_runtime_deployment_gateway_ids(storage: &Storage, deployment_id: Uuid) -> Result<Vec<String>, ApiError>;
+    pub async fn list_runtime_deployment_apply_states(storage: &Storage, deployment_id: Uuid) -> Result<Vec<RuntimeDeploymentApplyState>, ApiError>;
+    pub async fn record_runtime_deployment_apply_state(storage: &Storage, deployment_id: Uuid, gateway_id: &str, release_version: i64, content_hash: &str) -> Result<(), ApiError>;
     pub async fn assign_runtime_deployment_gateway(storage: &Storage, project_id: Uuid, deployment_id: Uuid, gateway_id: &str) -> Result<(), ApiError>;
     pub async fn unassign_runtime_deployment_gateway(storage: &Storage, project_id: Uuid, deployment_id: Uuid, gateway_id: &str) -> Result<(), ApiError>;
     pub async fn list_runtime_deployments_for_gateway(storage: &Storage, gateway_id: &str) -> Result<Vec<RuntimeDeployment>, ApiError>;
@@ -173,6 +175,8 @@ dispatch! {
     pub async fn list_project_runtime_releases(storage: &Storage, project_id: Uuid) -> Result<Vec<ProjectRuntimeRelease>, ApiError>;
     pub async fn get_project_runtime_release(storage: &Storage, project_id: Uuid, version: i64) -> Result<ProjectRuntimeRelease, ApiError>;
     pub async fn activate_runtime_deployment_release(storage: &Storage, project_id: Uuid, deployment_name: &str, version: i64) -> Result<RuntimeDeployment, ApiError>;
+    pub async fn activate_runtime_configuration_release(storage: &Storage, deployment_id: Uuid, release: NewProjectRuntimeRelease<'_>) -> Result<(), ApiError>;
+    pub async fn activate_profile_runtime_release(storage: &Storage, profile_id: Uuid, profile_version_id: Uuid, deployment_id: Uuid, release: NewProjectRuntimeRelease<'_>) -> Result<(), ApiError>;
     pub async fn create_guest_project(storage: &Storage, input: NewGuestProject<'_>) -> Result<(), ApiError>;
     pub async fn get_active_guest_project_for_gateway(storage: &Storage, gateway_id: &str) -> Result<Option<(ProjectWithBindings, DateTime<Utc>)>, ApiError>;
     pub async fn count_active_guest_projects(storage: &Storage) -> Result<i64, ApiError>;

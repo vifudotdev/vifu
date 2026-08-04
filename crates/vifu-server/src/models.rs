@@ -112,6 +112,25 @@ pub struct RuntimeDeploymentView {
     #[serde(flatten)]
     pub deployment: RuntimeDeployment,
     pub gateway_ids: Vec<String>,
+    pub apply_states: Vec<RuntimeDeploymentApplyState>,
+}
+
+#[derive(Debug, Clone, Serialize, FromRow)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeDeploymentApplyState {
+    pub deployment_id: Uuid,
+    pub gateway_id: String,
+    pub release_version: i64,
+    pub content_hash: String,
+    pub applied_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ReportRuntimeReleaseApplied {
+    pub deployment_id: Uuid,
+    pub release_version: i64,
+    pub content_hash: String,
 }
 
 #[derive(Debug, Deserialize)]
