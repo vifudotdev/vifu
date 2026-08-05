@@ -41,10 +41,25 @@ if git ls-remote --exit-code --tags "$RELEASE_URL" "refs/tags/$RELEASE_TAG" >/de
     exit 65
 fi
 
-split_commit="$(git -C "$VIFU_ROOT" subtree split --prefix "$PACKAGE_PREFIX" HEAD)"
+package_tree="$(git -C "$VIFU_ROOT" rev-parse "HEAD:$PACKAGE_PREFIX")"
+remote_head="$(
+    git ls-remote --heads "$RELEASE_URL" "refs/heads/main" \
+        | awk 'NR == 1 { print $1 }'
+)"
+parent_args=()
+if [ -n "$remote_head" ]; then
+    git -C "$VIFU_ROOT" fetch --no-tags "$RELEASE_URL" "refs/heads/main"
+    parent_args=(-p "$remote_head")
+fi
+
+release_commit="$(
+    printf 'release: VifuGodot %s from Vifu %s\n' "$RELEASE_TAG" "$local_head" \
+        | git -C "$VIFU_ROOT" commit-tree -S "$package_tree" "${parent_args[@]}"
+)"
+git -C "$VIFU_ROOT" verify-commit "$release_commit"
 git -C "$VIFU_ROOT" push --atomic "$RELEASE_URL" \
-    "$split_commit:refs/heads/main" \
-    "$split_commit:refs/tags/$RELEASE_TAG"
+    "$release_commit:refs/heads/main" \
+    "$release_commit:refs/tags/$RELEASE_TAG"
 
 gh release create "$RELEASE_TAG" \
     --repo "$RELEASE_REPOSITORY" \
@@ -55,4 +70,4 @@ gh release create "$RELEASE_TAG" \
 printf 'Published VifuGodot %s from Vifu %s (%s)\n' \
     "$RELEASE_TAG" \
     "$local_head" \
-    "$split_commit"
+    "$release_commit"
