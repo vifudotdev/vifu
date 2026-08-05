@@ -173,8 +173,10 @@ Godot hosts consume the separate `VifuGodot` package at
 Godot-free `Vifu` and `VifuMobileFFI` dependency graph. Its compatibility and
 verification instructions are documented in
 [`integrations/godot/apple/README.md`](integrations/godot/apple/README.md).
-The package resolves Vifu's maintained SwiftGodot forks through Git; sibling
-paths are explicit development overrides for testing unpublished commits.
+The VifuGodot product includes the complete Vifu Agent Runtime, Vifu's
+maintained SwiftGodot forks, and the platform-appropriate prebuilt libgodot
+binary. Sibling paths are explicit development overrides for testing
+unpublished commits and release assets.
 
 The large libgodot runtime uses a low-frequency maintainer release. Build it
 once on a known Apple development machine from an exact public

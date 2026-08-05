@@ -1,14 +1,15 @@
 # VifuGodot for Apple Hosts
 
-`VifuGodot` is the optional Swift package that connects a host-owned
-`GodotInstance` to Vifu's transport-neutral Runtime Bridge. It moves complete
-encoded frames between Godot's `GlobalState` node and
-`VifuInProcessBridgeTransport`; Runtime routing and application message
-handling remain outside this module.
+`VifuGodot` is the complete Apple package for building an Agent-aware Godot
+host. One product supplies the Vifu Agent Runtime, the in-process Godot bridge,
+the maintained SwiftGodot host SDK, and the compatible prebuilt libgodot
+binary. It moves complete encoded frames between Godot's `GlobalState` node
+and `VifuInProcessBridgeTransport`; the host keeps ownership of the Godot
+instance lifecycle.
 
 The package is separate from the root `Vifu` package so applications that do
-not embed Godot never resolve or link SwiftGodot. `VifuMobileFFI.xcframework`
-also remains independent of Godot.
+not embed Godot never resolve, download, or link Godot dependencies. Choose
+`Vifu` for the Godot-free Runtime and `VifuGodot` for the complete Godot host.
 
 ## Dependencies
 
@@ -16,36 +17,51 @@ The package manifest resolves the maintained Git dependencies by default:
 
 | Package | Requirement |
 | --- | --- |
-| Vifu | `vifudotdev/vifu`, `main` while this integration is under development |
+| Vifu Agent Runtime | `vifudotdev/vifu`, `main` while this integration is under development |
 | SwiftGodotKit | `vifudotdev/SwiftGodotKit`, revision `f72ec6f0...` |
 | SwiftGodot | `vifudotdev/SwiftGodot`, revision `6644df67...` |
+| libgodot | Vifu release `libgodot-4.5.1-vifu.1`, selected for iOS or macOS by SwiftPM |
 
-These are the Vifu-compatible forks, including the restart-safe `dlopen` /
-`dlclose` behavior used by the iOS hosts. They are not replaced by the upstream
-SwiftGodot packages.
+These are the Vifu-compatible forks and binary, including the tested instance
+lifecycle used by the iOS hosts. They are not replaced by the upstream
+SwiftGodot packages. Adding the `VifuGodot` product is sufficient; applications
+do not add Vifu, SwiftGodot, SwiftGodotKit, or libgodot separately.
 
 For development across unpublished commits, the manifest accepts explicit
-local overrides:
+local overrides. Extract the locally prepared release assets into this
+package's ignored `.build` directory first:
+
+```bash
+mkdir -p integrations/godot/apple/.build/libgodot
+unzip -q ../libgodot-release-source/build/vifu-release/libgodot-4.5.1-vifu.1/ios_libgodot.xcframework.zip \
+  -d integrations/godot/apple/.build/libgodot
+unzip -q ../libgodot-release-source/build/vifu-release/libgodot-4.5.1-vifu.1/mac_libgodot.xcframework.zip \
+  -d integrations/godot/apple/.build/libgodot
+```
+
+Then resolve every unpublished source and binary from the local workspace:
 
 ```bash
 VIFU_GODOT_VIFU_PATH="$PWD" \
 VIFU_GODOT_SWIFTGODOT_PATH="$PWD/../libgodot/SwiftGodot" \
 VIFU_GODOT_SWIFTGODOTKIT_PATH="$PWD/../libgodot/SwiftGodotKit" \
 SWIFTGODOTKIT_SWIFTGODOT_PATH="$PWD/../libgodot/SwiftGodot" \
+VIFU_GODOT_IOS_LIBGODOT_PATH=".build/libgodot/ios_libgodot.xcframework" \
+VIFU_GODOT_MACOS_LIBGODOT_PATH=".build/libgodot/mac_libgodot.xcframework" \
   swift test --package-path integrations/godot/apple
 ```
 
-The current Xcode examples use those sibling source checkouts so a Vifu change
-and its integration can be tested before either repository is pushed:
+This layout lets maintainers test a Vifu change and its integration before the
+source commits or binary release are published:
 
 ```text
 workspace/
   vifu/
     integrations/godot/apple/    # VifuGodot package
+      .build/libgodot/            # ignored extracted release assets
   libgodot/
     SwiftGodot/
     SwiftGodotKit/
-    build/libgodot.xcframework
 ```
 
 Add `vifu/integrations/godot/apple` as a local package dependency in Xcode and
@@ -76,10 +92,9 @@ This checkout is validated with:
 | SwiftGodot and SwiftGodotKit | compatible `libgodot_damon_45` checkouts |
 
 SwiftGodot, SwiftGodotKit, and libgodot must describe the same Godot API. Treat
-them as one compatibility set when updating. SwiftGodotKit remains code-only
-because it loads and unloads `libgodot.xcframework` at runtime. Local workspaces
-can supply that framework directly; the public VifuGodot distribution owns its
-prebuilt release artifact.
+them as one compatibility set when updating. Local workspaces can override the
+two binary targets with extracted XCFramework paths; the public VifuGodot
+distribution resolves the immutable binaries automatically.
 
 ### Prebuilt libgodot releases
 
@@ -100,12 +115,10 @@ Vifu libgodot binaries** workflow verifies that draft and optionally publishes
 it. CI does not perform a cold Godot build, and neither path overwrites an
 existing artifact tag.
 
-After the first release exists, its immutable URLs and checksums belong in this
-package as platform-conditional `binaryTarget` entries. Selecting the bundled
-VifuGodot product then downloads the matching runtime instead of compiling
-Godot in the consuming application. Do not commit placeholder checksums: first
-produce the release assets, then pin the exact values reported by the workflow.
-The initial sequence is therefore:
+The immutable URLs and checksums are pinned in `Package.swift` as
+platform-conditional binary targets. Selecting VifuGodot downloads the matching
+runtime instead of compiling Godot in the consuming application. The release
+sequence is:
 
 1. build and package the exact libgodot commit locally with
    `scripts/prepare-libgodot-apple-release.sh`;
@@ -113,8 +126,8 @@ The initial sequence is therefore:
    `scripts/create-libgodot-apple-draft.sh`;
 3. dispatch the release workflow with the same commit and tag, using
    `publish=true` only after the draft is ready;
-4. copy the verified checksums into `Package.swift` and verify a clean remote
-   SwiftPM resolution;
+4. verify that the checksums pinned in `Package.swift` match the published
+   assets and run a clean remote SwiftPM resolution;
 5. publish the VifuGodot source package tag.
 
 SwiftPM does not support selecting a nested package by subdirectory from a Git
@@ -130,6 +143,8 @@ VIFU_GODOT_VIFU_PATH="$PWD" \
 VIFU_GODOT_SWIFTGODOT_PATH="$PWD/../libgodot/SwiftGodot" \
 VIFU_GODOT_SWIFTGODOTKIT_PATH="$PWD/../libgodot/SwiftGodotKit" \
 SWIFTGODOTKIT_SWIFTGODOT_PATH="$PWD/../libgodot/SwiftGodot" \
+VIFU_GODOT_IOS_LIBGODOT_PATH=".build/libgodot/ios_libgodot.xcframework" \
+VIFU_GODOT_MACOS_LIBGODOT_PATH=".build/libgodot/mac_libgodot.xcframework" \
   swift test --package-path integrations/godot/apple
 ```
 

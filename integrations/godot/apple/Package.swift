@@ -29,6 +29,29 @@ let swiftGodotDependency: Package.Dependency = if let path = environment["VIFU_G
     )
 }
 
+let libgodotReleaseTag = "libgodot-4.5.1-vifu.1"
+let libgodotReleaseBaseURL = "https://github.com/vifudotdev/vifu/releases/download/\(libgodotReleaseTag)"
+
+let iosLibgodotTarget: Target = if let path = environment["VIFU_GODOT_IOS_LIBGODOT_PATH"] {
+    .binaryTarget(name: "VifuLibgodotIOS", path: path)
+} else {
+    .binaryTarget(
+        name: "VifuLibgodotIOS",
+        url: "\(libgodotReleaseBaseURL)/ios_libgodot.xcframework.zip",
+        checksum: "52eb883a52d93f5b0605e4a0b816f1e13397678562963afc1ac21db6be5186e6"
+    )
+}
+
+let macLibgodotTarget: Target = if let path = environment["VIFU_GODOT_MACOS_LIBGODOT_PATH"] {
+    .binaryTarget(name: "VifuLibgodotMacOS", path: path)
+} else {
+    .binaryTarget(
+        name: "VifuLibgodotMacOS",
+        url: "\(libgodotReleaseBaseURL)/mac_libgodot.xcframework.zip",
+        checksum: "7717f474a2ce5bde1e922d211e6d071d8b05c0ce57899da25dd8dfc56606c8cd"
+    )
+}
+
 let package = Package(
     name: "VifuGodot",
     platforms: [
@@ -47,9 +70,12 @@ let package = Package(
         .target(
             name: "VifuGodot",
             dependencies: [
+                .product(name: "Vifu", package: "Vifu"),
                 .product(name: "VifuRuntimeBridge", package: "Vifu"),
                 .product(name: "SwiftGodotKit", package: "SwiftGodotKit"),
                 .product(name: "SwiftGodot", package: "SwiftGodot"),
+                .target(name: "VifuLibgodotIOS", condition: .when(platforms: [.iOS])),
+                .target(name: "VifuLibgodotMacOS", condition: .when(platforms: [.macOS])),
             ]
         ),
         .testTarget(
@@ -59,5 +85,7 @@ let package = Package(
                 .product(name: "VifuRuntimeBridge", package: "Vifu"),
             ]
         ),
+        iosLibgodotTarget,
+        macLibgodotTarget,
     ]
 )
