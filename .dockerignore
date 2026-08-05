@@ -10,7 +10,9 @@ node_modules
 **/.next-e2e
 examples
 integrations
-npm-packages
+npm-packages/*
+!npm-packages/dashboard/
+!npm-packages/dashboard/**
 Frameworks
 test-results
 **/test-results
