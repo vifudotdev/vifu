@@ -8,7 +8,7 @@ The directory boundary is intentional:
 
 ```text
 integrations/godot/apple/
-  optional VifuGodot Swift package for a host-owned libgodot instance
+  complete VifuGodot Swift package for an Agent-aware libgodot host
 
 examples/godot-ios-embedding/
   iOS host, Godot stage, local model setup, and run instructions
@@ -24,23 +24,11 @@ not compile integration source files directly.
 
 - all requirements from [`ios-embedding`](../ios-embedding/README.md)
 - Godot 4 with iOS export support
-- a compatible `libgodot` checkout beside this repository
-- a built `libgodot.xcframework`
 
-`VifuGodot` resolves the maintained SwiftGodot and SwiftGodotKit forks from Git
-by default. This example keeps sibling checkouts as Xcode development overrides
-so it can test unpublished changes in all three repositories together.
-
-Keep the repositories in this layout:
-
-```text
-workspace/
-  libgodot/
-    SwiftGodot/
-    SwiftGodotKit/
-    build/libgodot.xcframework
-  vifu/
-```
+The Xcode target depends only on the `VifuGodot` product. SwiftPM resolves the
+Vifu Agent Runtime, the maintained SwiftGodot and SwiftGodotKit forks, and the
+platform-compatible prebuilt libgodot binary. No sibling libgodot checkout or
+local Godot compilation is required to build the application.
 
 The checked-in stage runs with a procedural placeholder. A local
 `Godot/character.glb` or `Godot/character.vrm` can replace it. VRM import
@@ -48,13 +36,6 @@ requires a compatible VRM addon. Character files, third-party addons, imported
 Godot data, generated packs, and model weights are intentionally not committed.
 
 ## Build
-
-Build the Vifu Apple artifact from the repository root:
-
-```bash
-VIFU_APPLE_DIST_DIR="$PWD/Frameworks" \
-  scripts/build-apple-package.sh
-```
 
 Export the checked-in stage:
 
