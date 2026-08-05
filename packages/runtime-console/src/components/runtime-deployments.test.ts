@@ -5,6 +5,7 @@ import {
   runtimeApplyPollDelay,
   runtimeApplyTarget,
 } from "./runtime-deployments";
+import type { RuntimeDeployment } from "../types";
 
 describe("runtime deployment apply polling", () => {
   test("uses bounded exponential backoff", () => {
@@ -13,13 +14,13 @@ describe("runtime deployment apply polling", () => {
   });
 
   test("changes its target when a gateway reports progress", () => {
-    const deployment = {
+    const deployment: RuntimeDeployment = {
       id: "deployment-1",
       projectId: "project-1",
       name: "primary",
       isPrimary: true,
       configSyncEnabled: true,
-      traceMode: "live",
+      traceMode: "full",
       remoteInvocationEnabled: true,
       activeReleaseVersion: 2,
       gatewayIds: ["iphone-1"],

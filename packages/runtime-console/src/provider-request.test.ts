@@ -19,6 +19,10 @@ describe("provider settings requests", () => {
       ],
     }, form);
 
+    expect("config" in body).toBe(true);
+    if (!("config" in body)) {
+      throw new Error("Expected registry provider settings to include config.");
+    }
     expect(body.config).toEqual({
       settings: { contextSize: 4096 },
       resources: { model: "model:qwen-demo" },
