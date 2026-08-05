@@ -2,6 +2,16 @@
 
 All notable changes to Vifu are documented here.
 
+## 0.1.8 - 2026-08-05
+
+- Added paired Apple Runtime Gateway connectivity so embedded iOS runtimes can
+  keep running independently while Vifu Server monitors and configures them.
+- Added the separate VifuGodot Apple distribution with the complete Vifu
+  Runtime, in-process bridge, maintained SwiftGodot SDK, and pinned prebuilt
+  libgodot binaries for iOS and macOS.
+- Added a focused Godot iOS embedding example and aligned the released
+  VifuMobileFFI binary with the current enrollment API.
+
 ## 0.1.7 - 2026-08-03
 
 - Added the live ARM optimization TUI with hundreds-of-agent monitoring,
