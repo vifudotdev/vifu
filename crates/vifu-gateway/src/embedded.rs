@@ -8,20 +8,22 @@ use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::Value;
-use vifu_runtime::{InvocationData, InvocationInput, RuntimeManifest, VifuRuntime};
+use vifu_runtime::{
+    CancellationToken, InvocationData, InvocationInput, RuntimeError, RuntimeManifest, VifuRuntime,
+};
 
 use crate::identity::MachineIdentity;
 use crate::protocol::AgentDescriptor;
 use crate::relay::{self, AgentGatewayRuntime};
 use crate::relay::{
     AgentGatewayProvider, GatewayConnectionState, GatewayProviderError, GatewayRuntimeEvent,
+    ProviderEventSink,
 };
 use crate::session::SessionSummary;
 #[cfg(feature = "sqlite")]
 use crate::session_store::{gateway_session_state_key, GatewaySecretStorage, GatewaySessionStore};
 
 const EMBEDDED_MONITOR_QUEUE_CAPACITY: usize = 256;
-
 /// Exposes one logical provider in an embedded [`VifuRuntime`] to Vifu Server.
 ///
 /// The runtime remains fully usable without this adapter. Adding the adapter
@@ -81,6 +83,39 @@ impl EmbeddedRuntimeGatewayProvider {
             ),
         }
     }
+
+    fn invocation_input(
+        &self,
+        agent_id: &str,
+        binding: &Value,
+        input: &Value,
+    ) -> Result<InvocationInput, GatewayProviderError> {
+        let agent = self
+            .runtime
+            .agent_definitions()
+            .map_err(|error| GatewayProviderError::failed(error.public_message()))?
+            .into_iter()
+            .find(|agent| agent.id == agent_id)
+            .ok_or_else(|| GatewayProviderError::failed("the embedded agent is not registered"))?;
+        if agent.provider != self.provider_id {
+            return Err(GatewayProviderError::failed(
+                "the embedded agent belongs to another provider",
+            ));
+        }
+        Ok(InvocationInput {
+            endpoint: self
+                .endpoint_for(agent_id, binding)
+                .map_err(GatewayProviderError::failed)?,
+            session_id: binding
+                .get("sessionId")
+                .and_then(Value::as_str)
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or("gateway-session")
+                .to_string(),
+            data: InvocationData::Json(input.clone()),
+            metadata: serde_json::json!({ "source": "agent-gateway" }),
+        })
+    }
 }
 
 impl AgentGatewayProvider for EmbeddedRuntimeGatewayProvider {
@@ -100,47 +135,55 @@ impl AgentGatewayProvider for EmbeddedRuntimeGatewayProvider {
         timeout: Duration,
     ) -> Pin<Box<dyn Future<Output = Result<Value, GatewayProviderError>> + Send + 'a>> {
         Box::pin(async move {
-            let agent = self
+            let invocation = self
                 .runtime
-                .agent_definitions()
-                .map_err(|error| GatewayProviderError::failed(error.public_message()))?
-                .into_iter()
-                .find(|agent| agent.id == agent_id)
-                .ok_or_else(|| {
-                    GatewayProviderError::failed("the embedded agent is not registered")
-                })?;
-            if agent.provider != self.provider_id {
-                return Err(GatewayProviderError::failed(
-                    "the embedded agent belongs to another provider",
-                ));
-            }
-            let endpoint = self
-                .endpoint_for(agent_id, binding)
-                .map_err(GatewayProviderError::failed)?;
-            let session_id = binding
-                .get("sessionId")
-                .and_then(Value::as_str)
-                .filter(|value| !value.trim().is_empty())
-                .unwrap_or("gateway-session")
-                .to_string();
-            let invocation = self.runtime.invoke(InvocationInput {
-                endpoint,
-                session_id,
-                data: InvocationData::Json(input.clone()),
-                metadata: serde_json::json!({ "source": "agent-gateway" }),
-            });
+                .invoke(self.invocation_input(agent_id, binding, input)?);
             let output = tokio::time::timeout(timeout, invocation)
                 .await
                 .map_err(|_| GatewayProviderError::timed_out("embedded runtime request timed out"))?
-                .map_err(|error| GatewayProviderError::failed(error.public_message()))?;
-            match output.data {
-                InvocationData::Json(value) => Ok(value),
-                InvocationData::Binary(bytes) => Ok(serde_json::json!({
-                    "format": "binary",
-                    "bytes": bytes,
-                })),
-            }
+                .map_err(embedded_runtime_error)?;
+            Ok(embedded_runtime_output(output.data))
         })
+    }
+
+    fn invoke_with_events_and_cancellation<'a>(
+        &'a self,
+        agent_id: &'a str,
+        binding: &'a Value,
+        input: &'a Value,
+        _timeout: Duration,
+        cancellation: CancellationToken,
+        events: ProviderEventSink,
+    ) -> Pin<Box<dyn Future<Output = Result<Value, GatewayProviderError>> + Send + 'a>> {
+        Box::pin(async move {
+            let output = self
+                .runtime
+                .invoke_with_events_and_cancellation(
+                    self.invocation_input(agent_id, binding, input)?,
+                    cancellation,
+                    events,
+                )
+                .await
+                .map_err(embedded_runtime_error)?;
+            Ok(embedded_runtime_output(output.data))
+        })
+    }
+}
+
+fn embedded_runtime_output(output: InvocationData) -> Value {
+    match output {
+        InvocationData::Json(value) => value,
+        InvocationData::Binary(bytes) => serde_json::json!({
+            "format": "binary",
+            "bytes": bytes,
+        }),
+    }
+}
+
+fn embedded_runtime_error(error: RuntimeError) -> GatewayProviderError {
+    match error {
+        RuntimeError::Timeout(_) => GatewayProviderError::timed_out(error.public_message()),
+        _ => GatewayProviderError::failed(error.public_message()),
     }
 }
 
@@ -680,9 +723,41 @@ mod tests {
         fn invoke<'a>(
             &'a self,
             request: ProviderRequest,
-            _cancellation: CancellationToken,
+            cancellation: CancellationToken,
         ) -> ProviderFuture<'a> {
+            self.invoke_with_events(request, cancellation, ProviderEventSink::discard())
+        }
+
+        fn invoke_with_events<'a>(
+            &'a self,
+            request: ProviderRequest,
+            _cancellation: CancellationToken,
+            events: ProviderEventSink,
+        ) -> ProviderFuture<'a> {
+            events.activity();
             Box::pin(async move { Ok(ProviderResponse::json(request.data_json()?)) })
+        }
+    }
+
+    struct CancellationProbeProvider {
+        seen: Arc<Mutex<Option<CancellationToken>>>,
+    }
+
+    impl AgentProvider for CancellationProbeProvider {
+        fn supports(&self, capability: &str) -> bool {
+            capability == "chat"
+        }
+
+        fn invoke<'a>(
+            &'a self,
+            _request: ProviderRequest,
+            cancellation: CancellationToken,
+        ) -> ProviderFuture<'a> {
+            *self.seen.lock().unwrap() = Some(cancellation.clone());
+            Box::pin(async move {
+                cancellation.cancelled().await;
+                Err(RuntimeError::Cancelled)
+            })
         }
     }
 
@@ -739,6 +814,90 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(output, json!({ "message": "hello" }));
+    }
+
+    #[tokio::test]
+    async fn forwards_real_embedded_provider_activity_to_the_gateway() {
+        let provider = EmbeddedRuntimeGatewayProvider::new("local-llama", runtime());
+        let forwarded_activity = Arc::new(AtomicUsize::new(0));
+        let observed_activity = Arc::clone(&forwarded_activity);
+        let output = provider
+            .invoke_with_events_and_cancellation(
+                "mizuki",
+                &json!({}),
+                &json!({ "message": "hello" }),
+                Duration::from_secs(1),
+                CancellationToken::default(),
+                ProviderEventSink::from_fn(move |_event| {
+                    observed_activity.fetch_add(1, Ordering::Relaxed);
+                }),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(output, json!({ "message": "hello" }));
+        assert_eq!(forwarded_activity.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn propagates_gateway_cancellation_into_the_embedded_provider() {
+        let seen = Arc::new(Mutex::new(None));
+        let forwarded_activity = Arc::new(AtomicUsize::new(0));
+        let runtime = VifuRuntime::new("moon-train").unwrap();
+        runtime
+            .register_provider(
+                "local-llama",
+                Arc::new(CancellationProbeProvider {
+                    seen: Arc::clone(&seen),
+                }),
+            )
+            .unwrap();
+        runtime
+            .register_agent(AgentDefinition {
+                id: "mizuki".to_string(),
+                name: "Mizuki".to_string(),
+                provider: "local-llama".to_string(),
+                capabilities: vec!["chat".to_string()],
+                metadata: json!({}),
+            })
+            .unwrap();
+        runtime
+            .register_endpoint(EndpointDefinition {
+                name: "mizuki-chat".to_string(),
+                agent: "mizuki".to_string(),
+                capability: "chat".to_string(),
+                timeout_ms: 1_000,
+            })
+            .unwrap();
+        let provider = EmbeddedRuntimeGatewayProvider::new("local-llama", runtime);
+        let cancellation = CancellationToken::default();
+        let binding = json!({});
+        let input = json!({ "message": "hello" });
+        let observed_activity = Arc::clone(&forwarded_activity);
+        let invocation = provider.invoke_with_events_and_cancellation(
+            "mizuki",
+            &binding,
+            &input,
+            Duration::from_secs(1),
+            cancellation.clone(),
+            crate::relay::ProviderEventSink::from_fn(move |_event| {
+                observed_activity.fetch_add(1, Ordering::Relaxed);
+            }),
+        );
+        tokio::pin!(invocation);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(300), &mut invocation)
+                .await
+                .is_err()
+        );
+        assert_eq!(forwarded_activity.load(Ordering::Relaxed), 0);
+        cancellation.cancel();
+        assert!(invocation.await.is_err());
+        assert!(seen
+            .lock()
+            .unwrap()
+            .as_ref()
+            .is_some_and(CancellationToken::is_cancelled));
     }
 
     #[tokio::test]

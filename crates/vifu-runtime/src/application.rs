@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use tokio::sync::{mpsc, Notify};
+use tokio::sync::{mpsc, watch, Notify};
 
 use crate::{
     EffectRequest, EffectResult, LocalProviderBinding, ProjectSettings, RuntimeManifest,
@@ -129,6 +129,7 @@ pub struct EndpointDefinition {
     pub name: String,
     pub agent: String,
     pub capability: String,
+    /// Maximum time without a provider event before the invocation is cancelled.
     #[serde(default = "default_timeout_ms")]
     pub timeout_ms: u64,
 }
@@ -263,6 +264,9 @@ pub enum ProviderStage {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum ProviderEvent {
+    /// Payload-free liveness signal for a provider that is still making
+    /// progress inside a long-running stage.
+    Activity,
     OutputDelta {
         data: InvocationData,
     },
@@ -400,6 +404,10 @@ impl ProviderEventSink {
 
     pub fn output_delta(&self, data: InvocationData) {
         (self.emit)(ProviderEvent::OutputDelta { data });
+    }
+
+    pub fn activity(&self) {
+        (self.emit)(ProviderEvent::Activity);
     }
 
     pub fn stage_started(&self, stage: ProviderStage, metadata: Value) {
@@ -920,10 +928,7 @@ impl fmt::Display for RuntimeError {
                 "provider {provider} does not support capability {capability}"
             ),
             Self::Timeout(timeout_ms) => {
-                write!(
-                    formatter,
-                    "agent invocation timed out after {timeout_ms} ms"
-                )
+                write!(formatter, "agent invocation was idle for {timeout_ms} ms")
             }
             Self::Cancelled => formatter.write_str("agent invocation was cancelled"),
             Self::Unavailable(message) => {
@@ -1078,6 +1083,7 @@ impl InvocationRegistry {
             return;
         }
         match event {
+            ProviderEvent::Activity => {}
             ProviderEvent::OutputDelta { data } => {
                 entry.push_event(InvocationEventKind::OutputDelta, Some(data), None);
             }
@@ -1148,6 +1154,7 @@ impl RuntimeCore {
         invocation_id: String,
         input: InvocationInput,
         cancellation: CancellationToken,
+        forwarded_events: ProviderEventSink,
     ) -> Result<InvocationOutput, RuntimeError> {
         let endpoint = input.endpoint.clone();
         let created_at_ms = crate::unix_time_ms();
@@ -1160,6 +1167,7 @@ impl RuntimeCore {
                 invocation_id.clone(),
                 input,
                 cancellation,
+                forwarded_events,
             )
             .await;
         let elapsed_ms = duration_ms(started.elapsed());
@@ -1219,6 +1227,7 @@ impl RuntimeCore {
         invocation_id: String,
         input: InvocationInput,
         cancellation: CancellationToken,
+        forwarded_events: ProviderEventSink,
     ) -> Result<InvocationOutput, RuntimeError> {
         validate_identifier("endpoint", &input.endpoint)?;
         validate_identifier("session", &input.session_id)?;
@@ -1291,13 +1300,36 @@ impl RuntimeCore {
             snapshot: snapshot.clone(),
         };
         let started = Instant::now();
-        let events =
-            self.provider_event_sink(&InvocationHandle(invocation_id.clone()), trace_id, started);
+        let (activity_sender, mut activity_receiver) = watch::channel(0_u64);
+        let events = self.provider_event_sink(
+            &InvocationHandle(invocation_id.clone()),
+            trace_id,
+            started,
+            activity_sender,
+            forwarded_events,
+        );
         let provider_call = provider.invoke_with_events(request, cancellation.clone(), events);
-        let response = tokio::select! {
-            _ = cancellation.cancelled() => return Err(RuntimeError::Cancelled),
-            response = tokio::time::timeout(Duration::from_millis(endpoint.timeout_ms), provider_call) => {
-                response.map_err(|_| RuntimeError::Timeout(endpoint.timeout_ms))??
+        tokio::pin!(provider_call);
+        let idle_timeout = Duration::from_millis(endpoint.timeout_ms);
+        let idle_deadline = tokio::time::sleep(idle_timeout);
+        tokio::pin!(idle_deadline);
+        let mut activity_open = true;
+        let response = loop {
+            tokio::select! {
+                biased;
+                _ = cancellation.cancelled() => return Err(RuntimeError::Cancelled),
+                response = &mut provider_call => break response?,
+                changed = activity_receiver.changed(), if activity_open => {
+                    if changed.is_err() {
+                        activity_open = false;
+                    } else {
+                        idle_deadline.as_mut().reset(tokio::time::Instant::now() + idle_timeout);
+                    }
+                }
+                _ = &mut idle_deadline => {
+                    cancellation.cancel();
+                    return Err(RuntimeError::Timeout(endpoint.timeout_ms));
+                }
             }
         };
         if cancellation.is_cancelled() {
@@ -1379,14 +1411,19 @@ impl RuntimeCore {
         handle: &InvocationHandle,
         trace_id: String,
         request_started: Instant,
+        activity: watch::Sender<u64>,
+        forwarded_events: ProviderEventSink,
     ) -> ProviderEventSink {
         let core = Arc::clone(self);
         let handle = handle.clone();
         ProviderEventSink::new(move |event| {
+            activity.send_modify(|sequence| *sequence = sequence.saturating_add(1));
+            (forwarded_events.emit)(event.clone());
             if let Ok(mut invocations) = core.invocations.lock() {
                 invocations.push_provider_event(&handle, event.clone());
             }
             let (stage, status, elapsed_ms, error) = match event {
+                ProviderEvent::Activity => return,
                 ProviderEvent::OutputDelta { .. } => return,
                 ProviderEvent::StageStarted { stage, .. } => {
                     (stage, RuntimeMonitorStageStatus::Started, None, None)
@@ -1500,7 +1537,12 @@ impl RuntimeWorker {
                                         None,
                                     );
                                     let result = invocation_core
-                                        .invoke(handle.0.clone(), input, cancellation)
+                                        .invoke(
+                                            handle.0.clone(),
+                                            input,
+                                            cancellation,
+                                            ProviderEventSink::discard(),
+                                        )
                                         .await;
                                     match result {
                                         Ok(output) => invocation_core.update_poll(
@@ -1894,9 +1936,32 @@ impl VifuRuntime {
     }
 
     pub async fn invoke(&self, input: InvocationInput) -> Result<InvocationOutput, RuntimeError> {
+        self.invoke_with_cancellation(input, CancellationToken::default())
+            .await
+    }
+
+    /// Invokes an endpoint while honoring a cancellation signal owned by the
+    /// embedding host.
+    pub async fn invoke_with_cancellation(
+        &self,
+        input: InvocationInput,
+        cancellation: CancellationToken,
+    ) -> Result<InvocationOutput, RuntimeError> {
+        self.invoke_with_events_and_cancellation(input, cancellation, ProviderEventSink::discard())
+            .await
+    }
+
+    /// Invokes an endpoint while forwarding real provider progress to an
+    /// embedding host and honoring the host's cancellation signal.
+    pub async fn invoke_with_events_and_cancellation(
+        &self,
+        input: InvocationInput,
+        cancellation: CancellationToken,
+        events: ProviderEventSink,
+    ) -> Result<InvocationOutput, RuntimeError> {
         let invocation_id = self.core.next_invocation_id();
         self.core
-            .invoke(invocation_id, input, CancellationToken::default())
+            .invoke(invocation_id, input, cancellation, events)
             .await
     }
 
@@ -2236,6 +2301,39 @@ mod tests {
         }
     }
 
+    struct ActiveSlowProvider;
+
+    impl AgentProvider for ActiveSlowProvider {
+        fn supports(&self, capability: &str) -> bool {
+            capability == "chat"
+        }
+
+        fn invoke<'a>(
+            &'a self,
+            request: ProviderRequest,
+            cancellation: CancellationToken,
+        ) -> ProviderFuture<'a> {
+            self.invoke_with_events(request, cancellation, ProviderEventSink::discard())
+        }
+
+        fn invoke_with_events<'a>(
+            &'a self,
+            _request: ProviderRequest,
+            cancellation: CancellationToken,
+            events: ProviderEventSink,
+        ) -> ProviderFuture<'a> {
+            Box::pin(async move {
+                for _ in 0..4 {
+                    tokio::select! {
+                        _ = tokio::time::sleep(Duration::from_millis(8)) => events.activity(),
+                        _ = cancellation.cancelled() => return Err(RuntimeError::Cancelled),
+                    }
+                }
+                Ok(ProviderResponse::json(json!({ "ok": true })))
+            })
+        }
+    }
+
     fn configured_runtime(provider: Arc<dyn AgentProvider>) -> VifuRuntime {
         let runtime = VifuRuntime::new("test-project").expect("runtime should start");
         runtime
@@ -2385,6 +2483,37 @@ mod tests {
             .await
             .expect_err("slow invocation should time out");
         assert!(matches!(error, RuntimeError::Timeout(10)));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn provider_activity_resets_the_runtime_idle_timeout() {
+        let runtime = VifuRuntime::new("active-project").expect("runtime should start");
+        runtime
+            .register_provider("active", Arc::new(ActiveSlowProvider))
+            .expect("provider should register");
+        runtime
+            .register_agent(AgentDefinition {
+                id: "active-agent".to_string(),
+                name: "Active agent".to_string(),
+                provider: "active".to_string(),
+                capabilities: vec!["chat".to_string()],
+                metadata: json!({}),
+            })
+            .expect("agent should register");
+        runtime
+            .register_endpoint(EndpointDefinition {
+                name: "active-chat".to_string(),
+                agent: "active-agent".to_string(),
+                capability: "chat".to_string(),
+                timeout_ms: 10,
+            })
+            .expect("endpoint should register");
+
+        let output = runtime
+            .invoke(InvocationInput::json("active-chat", json!({})))
+            .await
+            .expect("ongoing provider activity should renew the idle timeout");
+        assert_eq!(output.data, InvocationData::Json(json!({ "ok": true })));
     }
 
     #[test]

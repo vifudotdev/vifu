@@ -10,6 +10,10 @@ export const VIFU_AGENT_GATEWAY_PROTOCOL_VERSION = "vifu.agent-gateway/1" as con
 
 export const AGENT_GATEWAY_HELLO_REQUEST_ID = "gateway.hello" as const;
 
+export const VIFU_AGENT_GATEWAY_FEATURES = {
+  INVOCATION_ACTIVITY: "agent.invocation-activity.v1",
+} as const;
+
 export const VIFU_AGENT_GATEWAY_METHODS = {
   HELLO: "gateway.hello",
   INVOKE: "agent.invoke",
@@ -19,6 +23,8 @@ export const VIFU_AGENT_GATEWAY_EVENTS = {
   CHALLENGE: "gateway.challenge",
   PAIRING_REQUIRED: "gateway.pairingRequired",
   CANCEL: "agent.cancel",
+  INVOCATION_ACTIVITY_READY: "agent.invocationActivity.ready",
+  INVOCATION_ACTIVITY: "agent.invocationActivity",
   HEARTBEAT: "gateway.heartbeat",
   HEARTBEAT_ACK: "gateway.heartbeatAck",
   ERROR: "gateway.error",
@@ -111,6 +117,13 @@ export interface AgentGatewayCancelPayload {
   channelId: number;
 }
 
+export type AgentGatewayInvocationActivityReadyPayload = Record<string, never>;
+
+export interface AgentGatewayInvocationActivityPayload {
+  requestId: string;
+  channelId: number;
+}
+
 export interface AgentGatewayHeartbeatPayload {
   sessionId: string;
 }
@@ -152,6 +165,16 @@ export type AgentGatewayInvokeResultResponseFrame = ResponseFrame<
 export type AgentGatewayCancelEventFrame = EventFrame<
   typeof VIFU_AGENT_GATEWAY_EVENTS.CANCEL,
   AgentGatewayCancelPayload
+>;
+
+export type AgentGatewayInvocationActivityReadyEventFrame = EventFrame<
+  typeof VIFU_AGENT_GATEWAY_EVENTS.INVOCATION_ACTIVITY_READY,
+  AgentGatewayInvocationActivityReadyPayload
+>;
+
+export type AgentGatewayInvocationActivityEventFrame = EventFrame<
+  typeof VIFU_AGENT_GATEWAY_EVENTS.INVOCATION_ACTIVITY,
+  AgentGatewayInvocationActivityPayload
 >;
 
 export type AgentGatewayHeartbeatEventFrame = EventFrame<
@@ -317,6 +340,22 @@ export const AgentGatewayInvokeErrorDetailsSchema = {
 } as const satisfies JsonSchema;
 
 export const AgentGatewayCancelPayloadSchema = {
+  type: "object",
+  required: ["requestId", "channelId"],
+  additionalProperties: false,
+  properties: {
+    requestId: UuidStringSchema,
+    channelId: { type: "integer", minimum: 1 },
+  },
+} as const satisfies JsonSchema;
+
+export const AgentGatewayInvocationActivityReadyPayloadSchema = {
+  type: "object",
+  additionalProperties: false,
+  properties: {},
+} as const satisfies JsonSchema;
+
+export const AgentGatewayInvocationActivityPayloadSchema = {
   type: "object",
   required: ["requestId", "channelId"],
   additionalProperties: false,

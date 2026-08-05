@@ -19,11 +19,13 @@ pub const MAX_TRACE_DURATION_MS: u64 = 24 * 60 * 60 * 1_000;
 pub const MAX_TRACE_TOKEN_COUNT: u64 = 1_000_000_000;
 pub const MAX_TRACE_TELEMETRY_EVENTS: usize = 32;
 pub const MAX_TRACE_DROPPED_EVENTS: u32 = 10_000;
-pub const MAX_TRACE_IO_SUMMARY_BYTES: usize = 8 * 1024;
+// Keep ordinary debugging conversations intact while bounding the two root I/O
+// summaries well below the gateway frame limit.
+pub const MAX_TRACE_IO_SUMMARY_BYTES: usize = 128 * 1024;
 
 const MAX_TRACE_IO_DEPTH: usize = 5;
-const MAX_TRACE_IO_ITEMS: usize = 16;
-const MAX_TRACE_IO_STRING_CHARS: usize = 512;
+const MAX_TRACE_IO_ITEMS: usize = 128;
+const MAX_TRACE_IO_STRING_CHARS: usize = 96 * 1024;
 
 pub const AGENT_GATEWAY_HELLO_METHOD: &str = "gateway.hello";
 pub const AGENT_GATEWAY_HELLO_REQUEST_ID: &str = "gateway.hello";
@@ -31,6 +33,9 @@ pub const AGENT_GATEWAY_CHALLENGE_EVENT: &str = "gateway.challenge";
 pub const AGENT_GATEWAY_PAIRING_REQUIRED_EVENT: &str = "gateway.pairingRequired";
 pub const AGENT_GATEWAY_INVOKE_METHOD: &str = "agent.invoke";
 pub const AGENT_GATEWAY_CANCEL_EVENT: &str = "agent.cancel";
+pub const INVOCATION_ACTIVITY_FEATURE: &str = "agent.invocation-activity.v1";
+pub const INVOCATION_ACTIVITY_READY_EVENT: &str = "agent.invocationActivity.ready";
+pub const INVOCATION_ACTIVITY_EVENT: &str = "agent.invocationActivity";
 pub const AGENT_GATEWAY_HEARTBEAT_EVENT: &str = "gateway.heartbeat";
 pub const AGENT_GATEWAY_HEARTBEAT_ACK_EVENT: &str = "gateway.heartbeatAck";
 pub const AGENT_GATEWAY_ERROR_EVENT: &str = "gateway.error";
@@ -301,6 +306,11 @@ pub enum AgentGatewayCommand {
         request_id: Uuid,
         channel_id: u64,
     },
+    InvocationActivityReady,
+    InvocationActivity {
+        request_id: Uuid,
+        channel_id: u64,
+    },
     Heartbeat {
         session_id: Uuid,
     },
@@ -398,6 +408,17 @@ struct ResponseErrorDetails {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct CancelPayload {
+    request_id: Uuid,
+    channel_id: u64,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct InvocationActivityReadyPayload {}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct InvocationActivityPayload {
     request_id: Uuid,
     channel_id: u64,
 }
@@ -583,6 +604,20 @@ pub fn to_gateway_frame(command: &AgentGatewayCommand) -> Result<GatewayFrame, S
                 channel_id: *channel_id,
             },
         ),
+        AgentGatewayCommand::InvocationActivityReady => event_frame(
+            INVOCATION_ACTIVITY_READY_EVENT,
+            &InvocationActivityReadyPayload {},
+        ),
+        AgentGatewayCommand::InvocationActivity {
+            request_id,
+            channel_id,
+        } => event_frame(
+            INVOCATION_ACTIVITY_EVENT,
+            &InvocationActivityPayload {
+                request_id: *request_id,
+                channel_id: *channel_id,
+            },
+        ),
         AgentGatewayCommand::Heartbeat { session_id } => event_frame(
             AGENT_GATEWAY_HEARTBEAT_EVENT,
             &HeartbeatPayload {
@@ -748,6 +783,23 @@ fn from_event_frame(event: EventFrame) -> Result<AgentGatewayCommand, String> {
         AGENT_GATEWAY_CANCEL_EVENT => {
             let payload = decode_required::<CancelPayload>(event.payload, "agent.cancel payload")?;
             Ok(AgentGatewayCommand::Cancel {
+                request_id: payload.request_id,
+                channel_id: payload.channel_id,
+            })
+        }
+        INVOCATION_ACTIVITY_READY_EVENT => {
+            decode_required::<InvocationActivityReadyPayload>(
+                event.payload,
+                "agent.invocationActivity.ready payload",
+            )?;
+            Ok(AgentGatewayCommand::InvocationActivityReady)
+        }
+        INVOCATION_ACTIVITY_EVENT => {
+            let payload = decode_required::<InvocationActivityPayload>(
+                event.payload,
+                "agent.invocationActivity payload",
+            )?;
+            Ok(AgentGatewayCommand::InvocationActivity {
                 request_id: payload.request_id,
                 channel_id: payload.channel_id,
             })
@@ -985,7 +1037,11 @@ pub fn validate_command(command: &AgentGatewayCommand) -> Result<(), String> {
             validate_code(code)?;
             validate_text("error message", message, 1, 2048)
         }
-        AgentGatewayCommand::Cancel { channel_id, .. } => validate_channel(*channel_id),
+        AgentGatewayCommand::Cancel { channel_id, .. }
+        | AgentGatewayCommand::InvocationActivity { channel_id, .. } => {
+            validate_channel(*channel_id)
+        }
+        AgentGatewayCommand::InvocationActivityReady => Ok(()),
         AgentGatewayCommand::Heartbeat { .. } | AgentGatewayCommand::HeartbeatAck { .. } => Ok(()),
         AgentGatewayCommand::RuntimeConfigChanged { deployment_ids } => {
             if deployment_ids.is_empty() || deployment_ids.len() > 256 {
@@ -1650,6 +1706,19 @@ mod tests {
         assert_eq!(value["event"], "agent.cancel");
         assert_eq!(value["payload"]["requestId"], request_id.to_string());
 
+        let ready =
+            round_trip_command_over_gateway_frame(&AgentGatewayCommand::InvocationActivityReady);
+        assert_eq!(ready["type"], "event");
+        assert_eq!(ready["event"], "agent.invocationActivity.ready");
+
+        let activity = AgentGatewayCommand::InvocationActivity {
+            request_id,
+            channel_id: 7,
+        };
+        let value = round_trip_command_over_gateway_frame(&activity);
+        assert_eq!(value["event"], "agent.invocationActivity");
+        assert_eq!(value["payload"]["channelId"], 7);
+
         let heartbeat = AgentGatewayCommand::Heartbeat { session_id };
         let value = round_trip_command_over_gateway_frame(&heartbeat);
         assert_eq!(value["type"], "event");
@@ -1835,6 +1904,24 @@ mod tests {
         assert!(summary.value.to_string().contains("direction"));
         assert!(!summary.value.to_string().contains("private-value"));
         assert!(serde_json::to_vec(&summary.value).unwrap().len() <= MAX_TRACE_IO_SUMMARY_BYTES);
+    }
+
+    #[test]
+    fn canonical_trace_io_preserves_typical_debug_messages_without_string_truncation() {
+        let long_content = "inspect the whole request ".repeat(600);
+        let summary = canonical_trace_io_summary(&json!({
+            "messages": [{
+                "role": "system",
+                "content": long_content,
+            }]
+        }));
+
+        assert!(!summary.truncated);
+        assert_eq!(
+            summary.value["messages"][0]["content"].as_str(),
+            Some(long_content.as_str())
+        );
+        assert!(!summary.value.to_string().contains(" chars total>"));
     }
 
     #[test]

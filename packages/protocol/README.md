@@ -19,6 +19,12 @@ Runtime Bridge frames can cross an in-process FFI boundary or a WebSocket
 without changing application behavior. Product-facing Server endpoints remain
 HTTP contracts and are intentionally kept outside this package.
 
+Gateways that advertise `agent.invocation-activity.v1` receive an
+`agent.invocationActivity.ready` event from a compatible server. While an
+invocation is making progress they may then send throttled
+`agent.invocationActivity` events. In that negotiated mode, `timeoutMs` is the
+maximum idle interval rather than a hard cap on total model execution time.
+
 ## Contract Testing
 
 The JSON files in `fixtures/gateway-frame/` and `fixtures/runtime-bridge/` are

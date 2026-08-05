@@ -103,6 +103,10 @@ A provider may expose several capabilities. Agents reference a provider by its
 runtime name, and endpoints give the application a stable name even when the
 provider or agent changes.
 
+`timeout_ms` limits provider inactivity rather than total generation time.
+Providers should emit activity while a long-running load or prefill stage is
+still working, and should stop promptly when their cancellation token fires.
+
 ## Invoke Asynchronously
 
 ```rust

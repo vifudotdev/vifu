@@ -71,6 +71,8 @@ async function proxyRuntimeRequest(
     const response = await authority.deployment.rawRequest(
       `${runtimePath}${query}`,
       { method, body, headers },
+      false,
+      runtimeRequestUsesServerDeadline(path, method) ? null : undefined,
     );
     return forwardRuntimeResponse(response);
   } catch (error) {
@@ -83,6 +85,22 @@ async function proxyRuntimeRequest(
       error instanceof Error ? error.message : "Runtime request failed.",
     );
   }
+}
+
+export function runtimeRequestUsesServerDeadline(
+  path: string[],
+  method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE",
+): boolean {
+  if (method !== "POST") return false;
+  if (path.length === 2) return path[0] === "chat" && path[1] === "completions";
+  if (path[1] !== "v1") return false;
+  if (path.length === 3) {
+    return ["embeddings", "rpc", "agents"].includes(path[2] ?? "");
+  }
+  if (path.length !== 4) return false;
+  return (path[2] === "chat" && path[3] === "completions")
+    || (path[2] === "audio" && ["speech", "transcriptions"].includes(path[3] ?? ""))
+    || (path[2] === "realtime" && path[3] === "sessions");
 }
 
 async function readBody(request: Request): Promise<ArrayBuffer | undefined> {

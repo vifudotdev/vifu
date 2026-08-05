@@ -676,10 +676,14 @@ fn render_trace(frame: &mut Frame<'_>, app: &App, area: Rect, now: Instant, no_c
         frame,
         trace,
         body[1],
-        *tab,
-        *selected_observation,
-        now,
-        &app.search,
+        TraceDetailContext {
+            tab: *tab,
+            selected_observation: *selected_observation,
+            now,
+            search: &app.search,
+            scroll: app.trace_detail_scroll,
+            no_color,
+        },
     );
     render_footer(
         frame,
@@ -687,9 +691,9 @@ fn render_trace(frame: &mut Frame<'_>, app: &App, area: Rect, now: Instant, no_c
         if app.search_active {
             "Search Trace: type · Enter Keep · Esc Cancel"
         } else if area.width < 70 {
-            "↑↓ Preview  Tab Detail  ← Back"
+            "↑↓ Preview  Wheel/JK Scroll  Tab Detail  ← Back"
         } else {
-            "↑↓ Preview  Tab Detail  T Tree/Timeline  / Search  E Editor  B Dashboard  ← Back"
+            "↑↓ Preview  Wheel/JK Scroll  Tab Detail  T Tree/Timeline  / Search  E Editor  B Dashboard  ← Back"
         },
         app.notice.as_deref(),
     );
@@ -837,19 +841,33 @@ fn observation_depth(trace: &TraceRecord, observation: &TraceObservation) -> usi
     depth
 }
 
+struct TraceDetailContext<'a> {
+    tab: TraceTab,
+    selected_observation: Option<Uuid>,
+    now: Instant,
+    search: &'a str,
+    scroll: u16,
+    no_color: bool,
+}
+
 fn render_trace_detail(
     frame: &mut Frame<'_>,
     trace: &TraceRecord,
     area: Rect,
-    tab: TraceTab,
-    selected_observation: Option<Uuid>,
-    now: Instant,
-    search: &str,
+    context: TraceDetailContext<'_>,
 ) {
-    if let Some(observation_id) = selected_observation {
-        render_observation_detail(frame, trace, area, tab, observation_id, search);
+    if let Some(observation_id) = context.selected_observation {
+        render_observation_detail(frame, trace, area, observation_id, &context);
         return;
     }
+    let TraceDetailContext {
+        tab,
+        now,
+        search,
+        scroll,
+        no_color,
+        ..
+    } = context;
     let search_match = trace.matches_search(search);
     let lines = match tab {
         TraceTab::Summary => {
@@ -894,7 +912,7 @@ fn render_trace_detail(
             let first_problem = first_failure.map_or_else(
                 || {
                     if trace.outcome == LaneOutcome::Timeout {
-                        "request timeout".to_string()
+                        "request idle timeout".to_string()
                     } else {
                         "none observed".to_string()
                     }
@@ -911,7 +929,7 @@ fn render_trace_detail(
             );
             let runtime_result = trace_result_summary(trace);
             let mut lines = vec![Line::raw(runtime_result)];
-            lines.extend(trace_summary_io_lines(trace));
+            lines.extend(trace_summary_io_lines(trace, no_color));
             lines.extend([
                 Line::raw(format!("Total: {}", format_duration(trace.elapsed(now)))),
                 Line::raw(format!(
@@ -941,7 +959,7 @@ fn render_trace_detail(
             ]);
             lines
         }
-        TraceTab::Io => render_io_lines(trace, search, search_match),
+        TraceTab::Io => render_io_lines(trace, search, search_match, no_color),
         TraceTab::Metadata => vec![
             Line::raw(format!("Trace / root observation ID: {}", trace.id)),
             Line::raw(format!("Type: {}", ObservationType::Generation.label())),
@@ -1008,7 +1026,8 @@ fn render_trace_detail(
                     .borders(Borders::ALL)
                     .title(format!(" {} · Trace ", tab.label())),
             )
-            .wrap(Wrap { trim: false }),
+            .wrap(Wrap { trim: false })
+            .scroll((scroll, 0)),
         area,
     );
 }
@@ -1056,15 +1075,21 @@ fn render_observation_detail(
     frame: &mut Frame<'_>,
     trace: &TraceRecord,
     area: Rect,
-    tab: TraceTab,
     observation_id: Uuid,
-    search: &str,
+    context: &TraceDetailContext<'_>,
 ) {
+    let TraceDetailContext {
+        tab,
+        search,
+        scroll,
+        no_color,
+        ..
+    } = context;
     let observation = trace.observation(observation_id);
     let search = search.trim();
     let search_match = observation
         .is_some_and(|observation| trace.observation_matches_search(observation, search));
-    let lines = match (tab, observation) {
+    let lines = match (*tab, observation) {
         (_, None) => vec![
             Line::raw(format!(
                 "Observation {observation_id} is no longer in this Trace"
@@ -1091,8 +1116,8 @@ fn render_observation_detail(
         ],
         (TraceTab::Io, Some(observation)) => {
             let mut lines = Vec::new();
-            append_io_lines(&mut lines, "INPUT", observation.input.as_ref());
-            append_io_lines(&mut lines, "OUTPUT", observation.output.as_ref());
+            append_io_lines(&mut lines, "INPUT", observation.input.as_ref(), *no_color);
+            append_io_lines(&mut lines, "OUTPUT", observation.output.as_ref(), *no_color);
             lines.push(search_status_line(search, search_match));
             lines
         }
@@ -1199,7 +1224,8 @@ fn render_observation_detail(
                     .map(|item| item.name.as_str())
                     .unwrap_or("Observation")
             )))
-            .wrap(Wrap { trim: false }),
+            .wrap(Wrap { trim: false })
+            .scroll((*scroll, 0)),
         area,
     );
 }
@@ -1218,7 +1244,12 @@ fn search_status_line(search: &str, matched: bool) -> Line<'static> {
     }
 }
 
-fn render_io_lines(trace: &TraceRecord, search: &str, matched: bool) -> Vec<Line<'static>> {
+fn render_io_lines(
+    trace: &TraceRecord,
+    search: &str,
+    matched: bool,
+    no_color: bool,
+) -> Vec<Line<'static>> {
     let mut lines = vec![Line::raw(format!(
         "Capture: {}",
         if trace.io_dropped {
@@ -1229,35 +1260,51 @@ fn render_io_lines(trace: &TraceRecord, search: &str, matched: bool) -> Vec<Line
             "REDACTED + BOUNDED"
         }
     ))];
-    append_io_lines(&mut lines, "INPUT", trace.input.as_ref());
-    append_io_lines(&mut lines, "OUTPUT", trace.output.as_ref());
+    append_io_lines(&mut lines, "INPUT", trace.input.as_ref(), no_color);
+    append_io_lines(&mut lines, "OUTPUT", trace.output.as_ref(), no_color);
     lines.push(search_status_line(search, matched));
     lines
 }
 
-fn trace_summary_io_lines(trace: &TraceRecord) -> Vec<Line<'static>> {
-    let input_message = trace
+fn trace_summary_io_lines(trace: &TraceRecord, no_color: bool) -> Vec<Line<'static>> {
+    let input_messages = trace.input.as_ref().map_or_else(Vec::new, chat_messages);
+    let output_messages = trace.output.as_ref().map_or_else(Vec::new, chat_messages);
+    let top_level_system = trace
         .input
         .as_ref()
-        .and_then(|value| chat_messages(value).into_iter().last());
-    let output_message = trace
-        .output
-        .as_ref()
-        .and_then(|value| chat_messages(value).into_iter().next());
-    if input_message.is_none() && output_message.is_none() {
+        .and_then(|value| value.get("system"))
+        .filter(|_| !chat_messages_include_role(&input_messages, "system"));
+    if top_level_system.is_none() && input_messages.is_empty() && output_messages.is_empty() {
         return Vec::new();
     }
     let mut lines = vec![section_heading("CONVERSATION".to_string())];
-    if let Some(message) = input_message {
-        append_chat_message(&mut lines, message);
+    if let Some(system) = top_level_system {
+        append_role_content(
+            &mut lines,
+            "SYSTEM",
+            message_content(Some(system)),
+            no_color,
+        );
     }
-    if let Some(message) = output_message {
-        append_chat_message(&mut lines, message);
+    for (index, message) in input_messages
+        .into_iter()
+        .chain(output_messages)
+        .enumerate()
+    {
+        if index > 0 || top_level_system.is_some() {
+            lines.push(Line::raw(""));
+        }
+        append_chat_message(&mut lines, message, no_color);
     }
     lines
 }
 
-fn append_io_lines(lines: &mut Vec<Line<'static>>, label: &str, value: Option<&serde_json::Value>) {
+fn append_io_lines(
+    lines: &mut Vec<Line<'static>>,
+    label: &str,
+    value: Option<&serde_json::Value>,
+    no_color: bool,
+) {
     let Some(value) = value else {
         lines.push(section_heading(format!("{label} · NOT CAPTURED")));
         return;
@@ -1268,8 +1315,17 @@ fn append_io_lines(lines: &mut Vec<Line<'static>>, label: &str, value: Option<&s
         if let Some(model) = value.get("model").and_then(serde_json::Value::as_str) {
             lines.push(Line::raw(format!("MODEL  {model}")));
         }
-        for message in messages {
-            append_chat_message(lines, message);
+        let top_level_system = value
+            .get("system")
+            .filter(|_| !chat_messages_include_role(&messages, "system"));
+        if let Some(system) = top_level_system {
+            append_role_content(lines, "SYSTEM", message_content(Some(system)), no_color);
+        }
+        for (index, message) in messages.into_iter().enumerate() {
+            if index > 0 || top_level_system.is_some() {
+                lines.push(Line::raw(""));
+            }
+            append_chat_message(lines, message, no_color);
         }
         return;
     }
@@ -1297,44 +1353,143 @@ fn chat_messages(value: &serde_json::Value) -> Vec<&serde_json::Value> {
             return messages;
         }
     }
+    if let Some(input) = value.get("input").and_then(serde_json::Value::as_array) {
+        let messages = input
+            .iter()
+            .filter(|item| is_chat_or_tool_item(item))
+            .collect::<Vec<_>>();
+        if !messages.is_empty() {
+            return messages;
+        }
+    }
+    if let Some(output) = value.get("output").and_then(serde_json::Value::as_array) {
+        let messages = output
+            .iter()
+            .filter(|item| is_chat_or_tool_item(item))
+            .collect::<Vec<_>>();
+        if !messages.is_empty() {
+            return messages;
+        }
+    }
     if let Some(message) = value
         .get("message")
         .filter(|message| message.get("role").is_some())
     {
         return vec![message];
     }
-    value
-        .as_array()
-        .filter(|values| values.iter().any(|item| item.get("role").is_some()))
-        .map_or_else(Vec::new, |values| values.iter().collect())
+    if value.get("role").is_some() {
+        return vec![value];
+    }
+    value.as_array().map_or_else(Vec::new, |values| {
+        values
+            .iter()
+            .filter(|item| is_chat_or_tool_item(item))
+            .collect()
+    })
 }
 
-fn append_chat_message(lines: &mut Vec<Line<'static>>, message: &serde_json::Value) {
+fn is_chat_or_tool_item(value: &serde_json::Value) -> bool {
+    value.get("role").is_some()
+        || value
+            .get("type")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|kind| {
+                matches!(kind, "message" | "function_call" | "tool_call" | "tool_use")
+            })
+}
+
+fn chat_messages_include_role(messages: &[&serde_json::Value], role: &str) -> bool {
+    messages.iter().any(|message| {
+        message
+            .get("role")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|message_role| message_role.eq_ignore_ascii_case(role))
+    })
+}
+
+fn is_tool_call_item(value: &serde_json::Value) -> bool {
+    value
+        .get("type")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|kind| matches!(kind, "function_call" | "tool_call" | "tool_use"))
+}
+
+fn append_chat_message(
+    lines: &mut Vec<Line<'static>>,
+    message: &serde_json::Value,
+    no_color: bool,
+) {
+    if message.get("role").is_none() && is_tool_call_item(message) {
+        append_tool_call(lines, message, no_color);
+        return;
+    }
     let role = message
         .get("role")
         .and_then(serde_json::Value::as_str)
         .unwrap_or("message")
         .to_ascii_uppercase();
-    let content = message_content(message.get("content"));
-    if content.is_empty() {
-        lines.push(Line::raw(role));
-    } else {
-        for (index, text) in content.into_iter().enumerate() {
-            lines.push(Line::raw(if index == 0 {
-                format!("{role}  {text}")
-            } else {
-                format!("{}  {text}", " ".repeat(role.chars().count()))
-            }));
-        }
-    }
+    let content = message_content(
+        message
+            .get("content")
+            .filter(|content| !content.is_null())
+            .or_else(|| message.get("refusal")),
+    );
+    append_role_content(lines, &role, content, no_color);
     if let Some(tool_calls) = message
         .get("tool_calls")
         .or_else(|| message.get("toolCalls"))
         .and_then(serde_json::Value::as_array)
     {
         for tool_call in tool_calls {
-            append_tool_call(lines, tool_call);
+            append_tool_call(lines, tool_call, no_color);
         }
+    }
+    if let Some(function_call) = message
+        .get("function_call")
+        .or_else(|| message.get("functionCall"))
+    {
+        append_tool_call(lines, function_call, no_color);
+    }
+    if let Some(parts) = message.get("content").and_then(serde_json::Value::as_array) {
+        for part in parts.iter().filter(|part| is_tool_call_item(part)) {
+            append_tool_call(lines, part, no_color);
+        }
+    }
+}
+
+fn append_role_content(
+    lines: &mut Vec<Line<'static>>,
+    role: &str,
+    content: Vec<String>,
+    no_color: bool,
+) {
+    lines.push(Line::styled(
+        role.to_string(),
+        chat_role_style(role, no_color, true),
+    ));
+    for text in content {
+        lines.push(Line::styled(
+            format!("  {text}"),
+            chat_role_style(role, no_color, false),
+        ));
+    }
+}
+
+fn chat_role_style(role: &str, no_color: bool, bold: bool) -> Style {
+    let mut style = Style::default();
+    if !no_color {
+        style = style.fg(match role.to_ascii_lowercase().as_str() {
+            "system" | "developer" => Color::Magenta,
+            "user" => Color::Cyan,
+            "assistant" => Color::Green,
+            "tool" | "function" => Color::Yellow,
+            _ => Color::White,
+        });
+    }
+    if bold {
+        style.add_modifier(Modifier::BOLD)
+    } else {
+        style
     }
 }
 
@@ -1350,6 +1505,7 @@ fn message_content(value: Option<&serde_json::Value>) -> Vec<String> {
                     .get("text")
                     .or_else(|| object.get("input_text"))
                     .or_else(|| object.get("output_text"))
+                    .or_else(|| object.get("refusal"))
                     .and_then(serde_json::Value::as_str)
                     .map(str::to_string)
                     .or_else(|| {
@@ -1366,7 +1522,7 @@ fn message_content(value: Option<&serde_json::Value>) -> Vec<String> {
     }
 }
 
-fn append_tool_call(lines: &mut Vec<Line<'static>>, tool_call: &serde_json::Value) {
+fn append_tool_call(lines: &mut Vec<Line<'static>>, tool_call: &serde_json::Value, no_color: bool) {
     let function = tool_call.get("function").unwrap_or(tool_call);
     let name = function
         .get("name")
@@ -1375,7 +1531,7 @@ fn append_tool_call(lines: &mut Vec<Line<'static>>, tool_call: &serde_json::Valu
         .unwrap_or("unnamed tool");
     lines.push(Line::styled(
         format!("TOOL  {name}"),
-        Style::default().add_modifier(Modifier::BOLD),
+        chat_role_style("tool", no_color, true),
     ));
     let Some(arguments) = function
         .get("arguments")
@@ -2222,7 +2378,10 @@ mod tests {
         RuntimeStage, RuntimeTerminal, StageStatus,
     };
 
-    use super::{elapsed_rail, render, short_uuid};
+    use super::{
+        append_chat_message, append_io_lines, chat_messages, chat_role_style, elapsed_rail, render,
+        short_uuid,
+    };
     use crate::tui::model::{
         App, ComparisonRow, LaneFilter, LaneOutcome, OptimizationSummary, TraceTab, View,
     };
@@ -2698,12 +2857,68 @@ mod tests {
         let content = rendered_content(&mut app, now, 180, 36);
 
         assert!(content.contains("INPUT · CHAT"));
-        assert!(content.contains("SYSTEM  Keep actions grounded."));
-        assert!(content.contains("USER  Cut the grass."));
+        assert!(content.contains("SYSTEM"));
+        assert!(content.contains("Keep actions grounded."));
+        assert!(content.contains("USER"));
+        assert!(content.contains("Cut the grass."));
         assert!(content.contains("OUTPUT · CHAT"));
-        assert!(content.contains("ASSISTANT  I will move east."));
+        assert!(content.contains("ASSISTANT"));
+        assert!(content.contains("I will move east."));
         assert!(content.contains("TOOL  move"));
         assert!(content.contains("direction: east"));
+    }
+
+    #[test]
+    fn chat_roles_use_distinct_semantic_colors() {
+        assert_eq!(
+            chat_role_style("SYSTEM", false, false).fg,
+            Some(Color::Magenta)
+        );
+        assert_eq!(chat_role_style("USER", false, false).fg, Some(Color::Cyan));
+        assert_eq!(
+            chat_role_style("ASSISTANT", false, false).fg,
+            Some(Color::Green)
+        );
+        assert_ne!(
+            chat_role_style("SYSTEM", false, false).fg,
+            chat_role_style("USER", false, false).fg
+        );
+        assert_eq!(chat_role_style("SYSTEM", true, false).fg, None);
+    }
+
+    #[test]
+    fn anthropic_chat_system_and_tool_use_share_the_generic_conversation_view() {
+        let request = json!({
+            "system": "Stay within the farm.",
+            "messages": [{"role": "user", "content": "Cut one weed."}]
+        });
+        let response = json!({
+            "role": "assistant",
+            "content": [
+                {"type": "text", "text": "I will cut left."},
+                {"type": "tool_use", "name": "use", "input": {"direction": "left"}}
+            ]
+        });
+        let mut lines = Vec::new();
+        append_io_lines(&mut lines, "INPUT", Some(&request), false);
+        for message in chat_messages(&response) {
+            append_chat_message(&mut lines, message, false);
+        }
+        let content = lines
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .map(|span| span.content.as_ref())
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(content.contains("SYSTEM"));
+        assert!(content.contains("Stay within the farm."));
+        assert!(content.contains("USER"));
+        assert!(content.contains("Cut one weed."));
+        assert!(content.contains("ASSISTANT"));
+        assert!(content.contains("I will cut left."));
+        assert!(content.contains("TOOL  use"));
+        assert!(content.contains("direction: left"));
     }
 
     #[test]
@@ -2754,9 +2969,70 @@ mod tests {
 
         assert!(content.contains("Stardew Valley farming/0 · chat"));
         assert!(content.contains("CONVERSATION"));
-        assert!(content.contains("USER  Cut the next patch of grass."));
-        assert!(content.contains("ASSISTANT  Moving east."));
-        assert!(!content.contains("SYSTEM  Long instructions"));
+        assert!(content.contains("SYSTEM"));
+        assert!(content.contains("Long instructions"));
+        assert!(content.contains("USER"));
+        assert!(content.contains("Cut the next patch of grass."));
+        assert!(content.contains("ASSISTANT"));
+        assert!(content.contains("Moving east."));
+    }
+
+    #[test]
+    fn trace_io_renders_responses_api_function_calls() {
+        let mut app = App::default();
+        let now = Instant::now();
+        let trace_id = Uuid::new_v4();
+        app.apply(
+            RuntimeEvent::InvocationStarted {
+                invocation_id: trace_id,
+                agent_id: "planner".to_string(),
+                agent_name: "Planner".to_string(),
+                source_agent_id: "remote".to_string(),
+                capability: "chat".to_string(),
+                provider: "openai-compatible".to_string(),
+                model: "gpt-test".to_string(),
+                started_unix_ms: 1,
+            },
+            now,
+        );
+        app.apply(
+            RuntimeEvent::IoCaptured {
+                invocation_id: trace_id,
+                input: None,
+                output: Some(json!({
+                    "output": [
+                        {
+                            "type": "message",
+                            "role": "assistant",
+                            "content": [{"type": "output_text", "text": "Moving now."}]
+                        },
+                        {
+                            "type": "function_call",
+                            "name": "move",
+                            "arguments": "{\"x\":1,\"y\":0}"
+                        }
+                    ]
+                })),
+                truncated: false,
+            },
+            now,
+        );
+        app.view = View::Trace {
+            agent_key: "planner\0".to_string(),
+            trace_id,
+            tab: TraceTab::Io,
+            timeline: false,
+            observation_cursor: None,
+            selected_observation: None,
+        };
+
+        let content = rendered_content(&mut app, now, 180, 36);
+
+        assert!(content.contains("ASSISTANT"));
+        assert!(content.contains("Moving now."));
+        assert!(content.contains("TOOL  move"));
+        assert!(content.contains("x: 1"));
+        assert!(content.contains("y: 0"));
     }
 
     #[test]

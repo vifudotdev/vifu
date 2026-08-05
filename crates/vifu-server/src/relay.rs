@@ -4,12 +4,12 @@ use std::time::Duration;
 
 use base64::Engine;
 use serde_json::Value;
-use tokio::sync::{mpsc, oneshot, Mutex};
+use tokio::sync::{mpsc, oneshot, watch, Mutex};
 use uuid::Uuid;
 use vifu_gateway::protocol::{AgentGatewayCommand, MAX_INVOCATION_BODY_BYTES};
 use vifu_runtime::{
-    AgentProvider, CancellationToken, InvocationData, ProviderFuture, ProviderRequest,
-    ProviderResponse, RuntimeError,
+    AgentProvider, CancellationToken, InvocationData, ProviderEventSink, ProviderFuture,
+    ProviderRequest, ProviderResponse, RuntimeError,
 };
 
 use crate::models::EndpointRoute;
@@ -32,12 +32,14 @@ struct AgentGatewayConnection {
     session_id: Uuid,
     sender: mpsc::Sender<AgentGatewayCommand>,
     application_feedback_supported: bool,
+    invocation_activity_supported: bool,
 }
 
 struct PendingCall {
     connection_id: Uuid,
     channel_id: u64,
     sender: oneshot::Sender<Result<Value, RelayCallError>>,
+    activity: watch::Sender<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -57,6 +59,25 @@ struct PendingInvocation {
     armed: bool,
 }
 
+fn queue_invocation_cancel(
+    sender: mpsc::Sender<AgentGatewayCommand>,
+    request_id: Uuid,
+    channel_id: u64,
+) {
+    let command = AgentGatewayCommand::Cancel {
+        request_id,
+        channel_id,
+    };
+    match sender.try_send(command) {
+        Ok(()) | Err(mpsc::error::TrySendError::Closed(_)) => {}
+        Err(mpsc::error::TrySendError::Full(command)) => {
+            tokio::spawn(async move {
+                let _ = sender.send(command).await;
+            });
+        }
+    }
+}
+
 impl PendingInvocation {
     async fn abort(&mut self) {
         if !self.armed {
@@ -64,10 +85,7 @@ impl PendingInvocation {
         }
         self.armed = false;
         self.hub.remove_pending(self.request_id).await;
-        let _ = self.sender.try_send(AgentGatewayCommand::Cancel {
-            request_id: self.request_id,
-            channel_id: self.channel_id,
-        });
+        queue_invocation_cancel(self.sender.clone(), self.request_id, self.channel_id);
     }
 
     fn disarm(&mut self) {
@@ -86,10 +104,7 @@ impl Drop for PendingInvocation {
         let sender = self.sender.clone();
         tokio::spawn(async move {
             hub.remove_pending(request_id).await;
-            let _ = sender.try_send(AgentGatewayCommand::Cancel {
-                request_id,
-                channel_id,
-            });
+            queue_invocation_cancel(sender, request_id, channel_id);
         });
     }
 }
@@ -133,6 +148,15 @@ impl AgentProvider for RelayAgentProvider {
         request: ProviderRequest,
         cancellation: CancellationToken,
     ) -> ProviderFuture<'a> {
+        self.invoke_with_events(request, cancellation, ProviderEventSink::discard())
+    }
+
+    fn invoke_with_events<'a>(
+        &'a self,
+        request: ProviderRequest,
+        cancellation: CancellationToken,
+        events: ProviderEventSink,
+    ) -> ProviderFuture<'a> {
         Box::pin(async move {
             let input = match request.data {
                 InvocationData::Json(input) => input,
@@ -154,12 +178,13 @@ impl AgentProvider for RelayAgentProvider {
             };
             let output = self
                 .hub
-                .invoke_with_cancellation(
+                .invoke_with_provider_events(
                     &self.route,
                     self.request_id,
                     input,
                     self.timeout,
                     cancellation,
+                    Some(events),
                 )
                 .await
                 .map_err(|error| match error {
@@ -206,6 +231,7 @@ impl RelayHub {
         session_id: Uuid,
         sender: mpsc::Sender<AgentGatewayCommand>,
         application_feedback_supported: bool,
+        invocation_activity_supported: bool,
     ) {
         let replaced = {
             let mut state = self.inner.lock().await;
@@ -216,6 +242,7 @@ impl RelayHub {
                     session_id,
                     sender,
                     application_feedback_supported,
+                    invocation_activity_supported,
                 },
             )
         };
@@ -366,8 +393,22 @@ impl RelayHub {
         timeout: Duration,
         cancellation: CancellationToken,
     ) -> Result<Value, RelayCallError> {
+        self.invoke_with_provider_events(route, request_id, input, timeout, cancellation, None)
+            .await
+    }
+
+    async fn invoke_with_provider_events(
+        &self,
+        route: &EndpointRoute,
+        request_id: Uuid,
+        input: Value,
+        timeout: Duration,
+        cancellation: CancellationToken,
+        events: Option<ProviderEventSink>,
+    ) -> Result<Value, RelayCallError> {
         let (response_sender, response_receiver) = oneshot::channel();
-        let (connection, channel_id) = {
+        let (activity_sender, mut activity_receiver) = watch::channel(0_u64);
+        let (connection, channel_id, invocation_activity_supported) = {
             let mut state = self.inner.lock().await;
             let connection = state
                 .connections
@@ -381,9 +422,11 @@ impl RelayHub {
                     connection_id: connection.connection_id,
                     channel_id,
                     sender: response_sender,
+                    activity: activity_sender,
                 },
             );
-            (connection, channel_id)
+            let invocation_activity_supported = connection.invocation_activity_supported;
+            (connection, channel_id, invocation_activity_supported)
         };
 
         let message = AgentGatewayCommand::Invoke {
@@ -415,28 +458,58 @@ impl RelayHub {
             sender: connection.sender,
             armed: true,
         };
-        tokio::select! {
-            response = tokio::time::timeout(timeout, response_receiver) => {
-                match response {
-                    Ok(Ok(result)) => {
-                        pending.disarm();
-                        result
-                    }
-                    Ok(Err(_)) => {
-                        pending.disarm();
-                        Err(RelayCallError::AgentGatewayUnavailable)
-                    }
-                    Err(_) => {
+        tokio::pin!(response_receiver);
+        let idle_deadline = tokio::time::sleep(timeout);
+        tokio::pin!(idle_deadline);
+        loop {
+            tokio::select! {
+                biased;
+                response = &mut response_receiver => {
+                    pending.disarm();
+                    return match response {
+                        Ok(result) => result,
+                        Err(_) => Err(RelayCallError::AgentGatewayUnavailable),
+                    };
+                }
+                changed = activity_receiver.changed(), if invocation_activity_supported => {
+                    if changed.is_err() {
                         pending.abort().await;
-                        Err(RelayCallError::Timeout)
+                        return Err(RelayCallError::AgentGatewayUnavailable);
                     }
+                    if let Some(events) = events.as_ref() {
+                        events.activity();
+                    }
+                    idle_deadline.as_mut().reset(tokio::time::Instant::now() + timeout);
+                }
+                _ = cancellation.cancelled() => {
+                    pending.abort().await;
+                    return Err(RelayCallError::Cancelled);
+                }
+                _ = &mut idle_deadline => {
+                    pending.abort().await;
+                    return Err(RelayCallError::Timeout);
                 }
             }
-            _ = cancellation.cancelled() => {
-                pending.abort().await;
-                Err(RelayCallError::Cancelled)
-            }
         }
+    }
+
+    pub async fn record_invocation_activity(
+        &self,
+        connection_id: Uuid,
+        request_id: Uuid,
+        channel_id: u64,
+    ) -> bool {
+        let state = self.inner.lock().await;
+        let Some(pending) = state.pending.get(&request_id) else {
+            return false;
+        };
+        if pending.connection_id != connection_id || pending.channel_id != channel_id {
+            return false;
+        }
+        pending
+            .activity
+            .send_modify(|sequence| *sequence = sequence.saturating_add(1));
+        true
     }
 
     pub async fn complete_result(
@@ -524,6 +597,7 @@ mod tests {
             Uuid::new_v4(),
             sender,
             false,
+            false,
         )
         .await;
         let route = route();
@@ -576,6 +650,7 @@ mod tests {
             Uuid::new_v4(),
             sender,
             false,
+            false,
         )
         .await;
 
@@ -615,6 +690,7 @@ mod tests {
             supported_session_id,
             supported_sender,
             true,
+            false,
         )
         .await;
         let unsupported_session_id = Uuid::new_v4();
@@ -624,6 +700,7 @@ mod tests {
             Uuid::new_v4(),
             unsupported_session_id,
             unsupported_sender,
+            false,
             false,
         )
         .await;
@@ -698,6 +775,7 @@ mod tests {
             Uuid::new_v4(),
             sender,
             false,
+            false,
         )
         .await;
         let request_id = Uuid::new_v4();
@@ -734,6 +812,138 @@ mod tests {
             !hub.complete_result(connection_id, request_id, channel_id, json!({}))
                 .await
         );
+    }
+
+    #[tokio::test]
+    async fn negotiated_invocation_activity_resets_the_idle_timeout() {
+        let hub = RelayHub::new(4);
+        let (sender, mut receiver) = hub.channel();
+        let connection_id = Uuid::new_v4();
+        hub.register(
+            "openclaw-local".to_string(),
+            connection_id,
+            Uuid::new_v4(),
+            sender,
+            false,
+            true,
+        )
+        .await;
+        let request_id = Uuid::new_v4();
+        let call = {
+            let hub = hub.clone();
+            tokio::spawn(async move {
+                hub.invoke(&route(), request_id, json!({}), Duration::from_millis(40))
+                    .await
+            })
+        };
+        let AgentGatewayCommand::Invoke { channel_id, .. } =
+            receiver.recv().await.expect("invoke should be queued")
+        else {
+            panic!("expected invoke");
+        };
+
+        tokio::time::sleep(Duration::from_millis(25)).await;
+        assert!(
+            hub.record_invocation_activity(connection_id, request_id, channel_id)
+                .await
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+        assert!(
+            hub.complete_result(connection_id, request_id, channel_id, json!({ "ok": true }))
+                .await
+        );
+
+        assert_eq!(call.await.unwrap(), Ok(json!({ "ok": true })));
+    }
+
+    #[tokio::test]
+    async fn unnegotiated_gateway_keeps_the_total_timeout_contract() {
+        let hub = RelayHub::new(4);
+        let (sender, mut receiver) = hub.channel();
+        let connection_id = Uuid::new_v4();
+        hub.register(
+            "openclaw-local".to_string(),
+            connection_id,
+            Uuid::new_v4(),
+            sender,
+            false,
+            false,
+        )
+        .await;
+        let request_id = Uuid::new_v4();
+        let call = {
+            let hub = hub.clone();
+            tokio::spawn(async move {
+                hub.invoke(&route(), request_id, json!({}), Duration::from_millis(20))
+                    .await
+            })
+        };
+        let AgentGatewayCommand::Invoke { channel_id, .. } =
+            receiver.recv().await.expect("invoke should be queued")
+        else {
+            panic!("expected invoke");
+        };
+
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        assert!(
+            hub.record_invocation_activity(connection_id, request_id, channel_id)
+                .await
+        );
+        assert_eq!(call.await.unwrap(), Err(RelayCallError::Timeout));
+        assert!(matches!(
+            receiver.recv().await,
+            Some(AgentGatewayCommand::Cancel {
+                request_id: cancelled,
+                channel_id: cancelled_channel,
+            }) if cancelled == request_id && cancelled_channel == channel_id
+        ));
+    }
+
+    #[tokio::test]
+    async fn timeout_queues_cancellation_when_the_gateway_channel_is_full() {
+        let hub = RelayHub::new(1);
+        let (sender, mut receiver) = hub.channel();
+        let connection_id = Uuid::new_v4();
+        hub.register(
+            "openclaw-local".to_string(),
+            connection_id,
+            Uuid::new_v4(),
+            sender.clone(),
+            false,
+            true,
+        )
+        .await;
+        let request_id = Uuid::new_v4();
+        let call = {
+            let hub = hub.clone();
+            tokio::spawn(async move {
+                hub.invoke(&route(), request_id, json!({}), Duration::from_millis(20))
+                    .await
+            })
+        };
+        let AgentGatewayCommand::Invoke { channel_id, .. } =
+            receiver.recv().await.expect("invoke should be queued")
+        else {
+            panic!("expected invoke");
+        };
+        sender
+            .try_send(AgentGatewayCommand::Heartbeat {
+                session_id: Uuid::new_v4(),
+            })
+            .expect("gateway channel should accept the filler message");
+
+        assert_eq!(call.await.unwrap(), Err(RelayCallError::Timeout));
+        assert!(matches!(
+            receiver.recv().await,
+            Some(AgentGatewayCommand::Heartbeat { .. })
+        ));
+        assert!(matches!(
+            receiver.recv().await,
+            Some(AgentGatewayCommand::Cancel {
+                request_id: cancelled,
+                channel_id: cancelled_channel,
+            }) if cancelled == request_id && cancelled_channel == channel_id
+        ));
     }
 
     fn route() -> EndpointRoute {

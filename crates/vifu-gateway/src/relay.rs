@@ -33,11 +33,10 @@ use crate::session::{self, GuestProjectSummary, PairingSummary, SessionSummary};
 use crate::session_store::GatewaySessionPersistence;
 
 use vifu_runtime::{
-    AgentDefinition, AgentProvider, CancellationToken, InvocationData, ProviderRequest,
-    RuntimeMonitorEvent, RuntimeMonitorStageStatus, RuntimeMonitorStatus, RuntimeSnapshot,
-    VifuRuntime,
+    AgentDefinition, AgentProvider, InvocationData, ProviderRequest, RuntimeMonitorEvent,
+    RuntimeMonitorStageStatus, RuntimeMonitorStatus, RuntimeSnapshot, VifuRuntime,
 };
-pub use vifu_runtime::{ProviderEvent, ProviderEventSink, ProviderStage};
+pub use vifu_runtime::{CancellationToken, ProviderEvent, ProviderEventSink, ProviderStage};
 #[cfg(feature = "sqlite")]
 use vifu_runtime::{RuntimeStore, SqliteRuntimeStore};
 
@@ -50,6 +49,7 @@ const MAX_CONCURRENT_REJECTION_DELIVERIES: usize = 64;
 const TELEMETRY_RETRY_INITIAL_DELAY: Duration = Duration::from_millis(250);
 const TELEMETRY_RETRY_MAX_DELAY: Duration = Duration::from_secs(5);
 const EMBEDDED_TRACE_RETENTION: Duration = Duration::from_secs(150);
+const PROVIDER_CANCELLATION_GRACE: Duration = Duration::from_secs(1);
 
 /// Bounded bridge between an embedded runtime callback and the Gateway socket.
 #[derive(Clone)]
@@ -96,6 +96,11 @@ impl EmbeddedRuntimeMonitor {
 struct OutboundCommand {
     command: AgentGatewayCommand,
     delivery: Option<oneshot::Sender<bool>>,
+}
+
+struct ActiveCall {
+    handle: JoinHandle<()>,
+    cancellation: Option<CancellationToken>,
 }
 
 impl OutboundCommand {
@@ -570,6 +575,26 @@ pub trait AgentGatewayProvider: Send + Sync {
     {
         self.invoke(agent_id, binding, input, timeout)
     }
+
+    fn invoke_with_events_and_cancellation<'a>(
+        &'a self,
+        agent_id: &'a str,
+        binding: &'a serde_json::Value,
+        input: &'a serde_json::Value,
+        timeout: Duration,
+        cancellation: CancellationToken,
+        events: ProviderEventSink,
+    ) -> Pin<Box<dyn Future<Output = Result<serde_json::Value, GatewayProviderError>> + Send + 'a>>
+    {
+        Box::pin(async move {
+            tokio::select! {
+                _ = cancellation.cancelled() => {
+                    Err(GatewayProviderError::failed("provider invocation cancelled"))
+                }
+                result = self.invoke_with_events(agent_id, binding, input, timeout, events) => result,
+            }
+        })
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -678,6 +703,38 @@ impl AgentGatewayProvider for InProcessGatewayProvider {
         events: ProviderEventSink,
     ) -> Pin<Box<dyn Future<Output = Result<serde_json::Value, GatewayProviderError>> + Send + 'a>>
     {
+        let cancellation = CancellationToken::default();
+        let invocation = self.invoke_with_events_and_cancellation(
+            agent_id,
+            binding,
+            input,
+            timeout,
+            cancellation.clone(),
+            events,
+        );
+        Box::pin(async move {
+            match tokio::time::timeout(timeout, invocation).await {
+                Ok(response) => response,
+                Err(_) => {
+                    cancellation.cancel();
+                    Err(GatewayProviderError::timed_out(
+                        "in-process provider request timed out",
+                    ))
+                }
+            }
+        })
+    }
+
+    fn invoke_with_events_and_cancellation<'a>(
+        &'a self,
+        agent_id: &'a str,
+        binding: &'a serde_json::Value,
+        input: &'a serde_json::Value,
+        _timeout: Duration,
+        cancellation: CancellationToken,
+        events: ProviderEventSink,
+    ) -> Pin<Box<dyn Future<Output = Result<serde_json::Value, GatewayProviderError>> + Send + 'a>>
+    {
         Box::pin(async move {
             let capability = binding_text(binding, "capability").unwrap_or("chat");
             if !self.provider.supports(capability) {
@@ -685,7 +742,6 @@ impl AgentGatewayProvider for InProcessGatewayProvider {
                     "in-process provider does not support capability {capability}"
                 )));
             }
-            let cancellation = CancellationToken::default();
             let request = ProviderRequest {
                 project_id: binding_text(binding, "projectId")
                     .unwrap_or("gateway")
@@ -717,23 +773,16 @@ impl AgentGatewayProvider for InProcessGatewayProvider {
                 }),
                 snapshot: RuntimeSnapshot::default(),
             };
-            let invocation =
-                self.provider
-                    .invoke_with_events(request, cancellation.clone(), events);
-            let response = match tokio::time::timeout(timeout, invocation).await {
-                Ok(response) => response.map_err(|error| match error {
+            let response = self
+                .provider
+                .invoke_with_events(request, cancellation, events)
+                .await
+                .map_err(|error| match error {
                     vifu_runtime::RuntimeError::Timeout(_) => {
                         GatewayProviderError::timed_out(error.public_message())
                     }
                     _ => GatewayProviderError::failed(error.public_message()),
-                })?,
-                Err(_) => {
-                    cancellation.cancel();
-                    return Err(GatewayProviderError::timed_out(
-                        "in-process provider request timed out",
-                    ));
-                }
-            };
+                })?;
             match response.data {
                 InvocationData::Json(value) => Ok(value),
                 InvocationData::Binary(_) => Err(GatewayProviderError::failed(
@@ -1139,6 +1188,7 @@ fn safe_trace_telemetry(
         return None;
     }
     let (stage, status, elapsed_ms, metadata, error) = match event {
+        ProviderEvent::Activity => return None,
         ProviderEvent::OutputDelta { .. } => return None,
         ProviderEvent::StageStarted { stage, metadata } => {
             (stage, TraceStageStatus::Started, None, metadata, None)
@@ -1522,6 +1572,61 @@ impl InvocationDelivery {
             self.observer.as_ref(),
         );
     }
+
+    async fn finish_cancelled(self) {
+        let terminal_events = {
+            let mut telemetry = self
+                .telemetry
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            telemetry.fail_active(
+                duration_millis(self.invocation_started.elapsed()),
+                Some("Invocation cancelled"),
+            )
+        };
+        for telemetry in &terminal_events {
+            observe_trace_telemetry(self.observer.as_ref(), self.request_id, telemetry);
+        }
+        let batch = self
+            .telemetry
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .finish();
+        let pending = PendingTelemetryBatch {
+            request_id: self.request_id,
+            batch,
+        };
+        drop(self.invocation_permit);
+        let Ok(telemetry_permit) = self.telemetry_uploads.clone().try_acquire_owned() else {
+            enqueue_telemetry_batch(&self.telemetry_backlog, pending);
+            trigger_telemetry_flush(
+                &self.telemetry_client,
+                &self.telemetry_backlog,
+                &self.telemetry_uploads,
+                self.observer.as_ref(),
+            );
+            return;
+        };
+        match send_telemetry_batch(&self.telemetry_client, &pending).await {
+            Ok(()) => {}
+            Err(error) if error.is_retryable() => {
+                enqueue_telemetry_batch(&self.telemetry_backlog, pending);
+            }
+            Err(error) => record_permanent_telemetry_drop(
+                &self.telemetry_backlog,
+                self.observer.as_ref(),
+                pending.request_id,
+                &error,
+            ),
+        }
+        drop(telemetry_permit);
+        trigger_telemetry_flush(
+            &self.telemetry_client,
+            &self.telemetry_backlog,
+            &self.telemetry_uploads,
+            self.observer.as_ref(),
+        );
+    }
 }
 
 fn dispatch_preflight_failure(
@@ -1723,6 +1828,7 @@ async fn run_connection(
         "trace-upload-v1",
         "embedded-runtime-v1",
         protocol::APPLICATION_FEEDBACK_FEATURE,
+        protocol::INVOCATION_ACTIVITY_FEATURE,
     ];
     if runtime.embedded_monitor.is_some() {
         features.push(protocol::EMBEDDED_LIVE_MONITOR_FEATURE);
@@ -1879,10 +1985,11 @@ async fn run_connection(
         mpsc::channel::<OutboundCommand>(OUTBOUND_QUEUE_CAPACITY);
     let semaphore = std::sync::Arc::new(Semaphore::new(MAX_CONCURRENT_CALLS));
     let rejection_delivery_slots = Arc::new(Semaphore::new(MAX_CONCURRENT_REJECTION_DELIVERIES));
-    let mut calls = HashMap::<Uuid, JoinHandle<()>>::new();
+    let mut calls = HashMap::<Uuid, ActiveCall>::new();
     let mut configuration_sync = tokio::time::interval(Duration::from_secs(30));
     configuration_sync.tick().await;
     let mut embedded_monitoring_ready = false;
+    let mut invocation_activity_ready = false;
     let mut embedded_traces = HashMap::<String, EmbeddedMonitorTrace>::new();
 
     let outcome = loop {
@@ -2083,7 +2190,13 @@ async fn run_connection(
                                     error.to_string(),
                                     &rejection_delivery_slots,
                                 ) {
-                                    calls.insert(request_id, handle);
+                                    calls.insert(
+                                        request_id,
+                                        ActiveCall {
+                                            handle,
+                                            cancellation: None,
+                                        },
+                                    );
                                 }
                                 continue;
                             }
@@ -2121,7 +2234,13 @@ async fn run_connection(
                                     )
                                     .await;
                             });
-                            calls.insert(request_id, handle);
+                            calls.insert(
+                                request_id,
+                                ActiveCall {
+                                    handle,
+                                    cancellation: None,
+                                },
+                            );
                             continue;
                         };
                         let sender = outbound_sender.clone();
@@ -2135,10 +2254,48 @@ async fn run_connection(
                         let delivery_telemetry_backlog = Arc::clone(telemetry_backlog);
                         let delivery_telemetry_client = telemetry_client.clone();
                         let delivery_telemetry_uploads = Arc::clone(telemetry_uploads);
+                        let cancellation = CancellationToken::default();
+                        let task_cancellation = cancellation.clone();
+                        let activity_enabled = invocation_activity_ready;
+                        let activity_min_interval = Duration::from_millis(
+                            timeout_ms.saturating_div(3).clamp(100, 1_000),
+                        );
                         let handle = tokio::spawn(async move {
                             let provider_observer = observer.clone();
+                            let activity_sender = sender.clone();
+                            let event_cancellation = task_cancellation.clone();
+                            let last_activity =
+                                Arc::new(Mutex::new(Instant::now() - activity_min_interval));
                             let events = ProviderEventSink::from_fn(move |event| {
-                                if matches!(&event, ProviderEvent::OutputDelta { .. }) {
+                                if event_cancellation.is_cancelled() {
+                                    return;
+                                }
+                                if activity_enabled {
+                                    let force = !matches!(
+                                        &event,
+                                        ProviderEvent::Activity | ProviderEvent::OutputDelta { .. }
+                                    );
+                                    let mut last_activity = last_activity
+                                        .lock()
+                                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                                    if force || last_activity.elapsed() >= activity_min_interval {
+                                        let queued = activity_sender
+                                            .try_send(OutboundCommand::best_effort(
+                                                AgentGatewayCommand::InvocationActivity {
+                                                    request_id,
+                                                    channel_id,
+                                                },
+                                            ))
+                                            .is_ok();
+                                        if queued {
+                                            *last_activity = Instant::now();
+                                        }
+                                    }
+                                }
+                                if matches!(
+                                    &event,
+                                    ProviderEvent::Activity | ProviderEvent::OutputDelta { .. }
+                                ) {
                                     return;
                                 }
                                 let request_elapsed_ms =
@@ -2159,23 +2316,48 @@ async fn run_connection(
                                 }
                             });
                             let provider_timeout = Duration::from_millis(timeout_ms.max(1));
-                            let result = tokio::time::timeout(
-                                provider_timeout,
-                                provider.invoke_with_events(
+                            let delivery = InvocationDelivery {
+                                sender,
+                                observer,
+                                capture_sender,
+                                config_epoch,
+                                request_id,
+                                binding_id,
+                                capability: capture_capability,
+                                provider_key: capture_provider_key,
+                                invocation_started,
+                                telemetry: delivery_telemetry,
+                                telemetry_backlog: delivery_telemetry_backlog,
+                                telemetry_client: delivery_telemetry_client,
+                                telemetry_uploads: delivery_telemetry_uploads,
+                                invocation_permit: Some(permit),
+                            };
+                            let provider_call = provider.invoke_with_events_and_cancellation(
                                     &agent_id,
                                     &binding,
                                     &input,
                                     provider_timeout,
+                                    task_cancellation.clone(),
                                     events,
-                                ),
-                            )
-                            .await
-                            .unwrap_or_else(|_| {
-                                Err(GatewayProviderError::timed_out(format!(
-                                    "provider timed out after {}ms",
-                                    provider_timeout.as_millis()
-                                )))
-                            });
+                                );
+                            tokio::pin!(provider_call);
+                            let result = tokio::select! {
+                                biased;
+                                _ = task_cancellation.cancelled() => {
+                                    let _ = tokio::time::timeout(
+                                        PROVIDER_CANCELLATION_GRACE,
+                                        &mut provider_call,
+                                    )
+                                    .await;
+                                    None
+                                }
+                                result = &mut provider_call => Some(result),
+                            };
+                            if task_cancellation.is_cancelled() {
+                                delivery.finish_cancelled().await;
+                                return;
+                            }
+                            let result = result.expect("an uncancelled provider call has a result");
                             let (message, provider_terminal, error, output) = match result {
                                 Ok(output) => {
                                     let output = Arc::new(output);
@@ -2213,30 +2395,39 @@ async fn run_connection(
                                     )
                                 }
                             };
-                            InvocationDelivery {
-                                sender,
-                                observer,
-                                capture_sender,
-                                config_epoch,
-                                request_id,
-                                binding_id,
-                                capability: capture_capability,
-                                provider_key: capture_provider_key,
-                                invocation_started,
-                                telemetry: delivery_telemetry,
-                                telemetry_backlog: delivery_telemetry_backlog,
-                                telemetry_client: delivery_telemetry_client,
-                                telemetry_uploads: delivery_telemetry_uploads,
-                                invocation_permit: Some(permit),
-                            }
-                            .finish(message, provider_terminal, error, output)
-                            .await;
+                            delivery
+                                .finish(message, provider_terminal, error, output)
+                                .await;
                         });
-                        calls.insert(request_id, handle);
+                        calls.insert(
+                            request_id,
+                            ActiveCall {
+                                handle,
+                                cancellation: Some(cancellation),
+                            },
+                        );
                     }
                     AgentGatewayCommand::Cancel { request_id, .. } => {
-                        if let Some(call) = calls.remove(&request_id) {
-                            call.abort();
+                        let mut remove_aborted = false;
+                        let newly_cancelled = calls.get(&request_id).is_some_and(|call| {
+                            if let Some(cancellation) = call.cancellation.as_ref() {
+                                if cancellation.is_cancelled() {
+                                    false
+                                } else {
+                                    cancellation.cancel();
+                                    true
+                                }
+                            } else {
+                                remove_aborted = true;
+                                true
+                            }
+                        });
+                        if remove_aborted {
+                            if let Some(call) = calls.remove(&request_id) {
+                                call.handle.abort();
+                            }
+                        }
+                        if newly_cancelled {
                             let _ = try_capture(
                                 runtime.capture_sender.as_ref(),
                                 GatewayCaptureEvent::InvocationCancelled {
@@ -2303,6 +2494,9 @@ async fn run_connection(
                     AgentGatewayCommand::RuntimeMonitoringReady => {
                         embedded_monitoring_ready = runtime.embedded_monitor.is_some();
                     }
+                    AgentGatewayCommand::InvocationActivityReady => {
+                        invocation_activity_ready = true;
+                    }
                     AgentGatewayCommand::Error {
                         request_id: None,
                         code,
@@ -2351,8 +2545,21 @@ async fn run_connection(
         }
     };
 
+    let mut cooperative_shutdown = Vec::new();
     for (_, call) in calls {
-        call.abort();
+        if let Some(cancellation) = call.cancellation {
+            cancellation.cancel();
+            cooperative_shutdown.push(call.handle);
+        } else {
+            call.handle.abort();
+        }
+    }
+    let shutdown_deadline = tokio::time::Instant::now() + Duration::from_secs(1);
+    for mut handle in cooperative_shutdown {
+        let remaining = shutdown_deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() || tokio::time::timeout(remaining, &mut handle).await.is_err() {
+            handle.abort();
+        }
     }
     let _ = socket.close(None).await;
     Ok(outcome)
@@ -2913,8 +3120,8 @@ fn agent_gateway_error(
     }
 }
 
-fn reap_finished(calls: &mut HashMap<Uuid, JoinHandle<()>>) {
-    calls.retain(|_, call| !call.is_finished());
+fn reap_finished(calls: &mut HashMap<Uuid, ActiveCall>) {
+    calls.retain(|_, call| !call.handle.is_finished());
 }
 
 fn sanitize_error(value: &str) -> String {
@@ -2941,7 +3148,7 @@ mod tests {
     use base64::Engine;
     use serde_json::json;
     use std::collections::HashMap;
-    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
     use std::sync::Arc;
     use std::time::{Duration, Instant};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -2970,8 +3177,8 @@ mod tests {
         AGENT_GATEWAY_HELLO_REQUEST_ID, VERSION,
     };
     use vifu_runtime::{
-        AgentProvider, CancellationToken, InvocationData, ProviderEvent, ProviderFuture,
-        ProviderRequest, ProviderResponse, ProviderStage, RuntimeMonitorEvent,
+        AgentProvider, CancellationToken, InvocationData, ProviderEvent, ProviderEventSink,
+        ProviderFuture, ProviderRequest, ProviderResponse, ProviderStage, RuntimeMonitorEvent,
         RuntimeMonitorStageStatus,
     };
 
@@ -3033,6 +3240,28 @@ mod tests {
     }
 
     struct PersonaProvider;
+
+    struct CancellationAwareProvider {
+        cancelled: Arc<AtomicBool>,
+    }
+
+    impl AgentProvider for CancellationAwareProvider {
+        fn supports(&self, capability: &str) -> bool {
+            capability == "chat"
+        }
+
+        fn invoke<'a>(
+            &'a self,
+            _request: ProviderRequest,
+            cancellation: CancellationToken,
+        ) -> ProviderFuture<'a> {
+            Box::pin(async move {
+                cancellation.cancelled().await;
+                self.cancelled.store(true, Ordering::Release);
+                Err(vifu_runtime::RuntimeError::Cancelled)
+            })
+        }
+    }
 
     #[test]
     fn runtime_profile_name_should_prefer_the_server_profile_over_the_physical_agent() {
@@ -3298,6 +3527,54 @@ mod tests {
 
         assert_eq!(invocation_slots.available_permits(), 1);
         assert_eq!(backlog.lock().unwrap().pending.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn cancellation_releases_the_invocation_slot_and_seals_telemetry() {
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(1);
+        let backlog = Arc::new(std::sync::Mutex::new(TelemetryBacklogState::default()));
+        let invocation_slots = Arc::new(tokio::sync::Semaphore::new(1));
+        let invocation_permit = invocation_slots
+            .clone()
+            .try_acquire_owned()
+            .expect("invocation slot should be available");
+        let request_id = Uuid::new_v4();
+        let telemetry = Arc::new(std::sync::Mutex::new(InvocationTelemetry::new(
+            "local-provider".to_string(),
+            "chat".to_string(),
+            Some("local-model".to_string()),
+        )));
+        safe_trace_telemetry(
+            ProviderEvent::StageStarted {
+                stage: ProviderStage::Prefill,
+                metadata: json!({ "inputTokens": 128 }),
+            },
+            1,
+            &mut telemetry.lock().unwrap(),
+        );
+        let delivery = InvocationDelivery {
+            sender,
+            observer: None,
+            capture_sender: None,
+            config_epoch: 1,
+            request_id,
+            binding_id: Uuid::new_v4(),
+            capability: "chat".to_string(),
+            provider_key: "local-provider".to_string(),
+            invocation_started: std::time::Instant::now(),
+            telemetry,
+            telemetry_backlog: Arc::clone(&backlog),
+            telemetry_client: RuntimeControlClient::new("http://127.0.0.1:1", "test-device-token")
+                .unwrap(),
+            telemetry_uploads: Arc::new(tokio::sync::Semaphore::new(0)),
+            invocation_permit: Some(invocation_permit),
+        };
+
+        delivery.finish_cancelled().await;
+
+        assert_eq!(invocation_slots.available_permits(), 1);
+        assert_eq!(backlog.lock().unwrap().pending.len(), 1);
+        assert!(receiver.try_recv().is_err());
     }
 
     #[tokio::test]
@@ -3773,6 +4050,38 @@ mod tests {
             .unwrap();
 
         assert_eq!(output["instructions"], "Choose one safe action.");
+    }
+
+    #[tokio::test]
+    async fn in_process_provider_receives_gateway_cancellation() {
+        let observed = Arc::new(AtomicBool::new(false));
+        let provider = InProcessGatewayProvider::new(
+            "local-qwen",
+            Arc::new(CancellationAwareProvider {
+                cancelled: Arc::clone(&observed),
+            }),
+        )
+        .unwrap();
+        let cancellation = CancellationToken::default();
+        let cancel = cancellation.clone();
+        let binding = json!({ "capability": "chat" });
+        let input = json!({ "messages": [] });
+        let invocation = provider.invoke_with_events_and_cancellation(
+            "local-qwen",
+            &binding,
+            &input,
+            Duration::from_secs(1),
+            cancellation,
+            ProviderEventSink::discard(),
+        );
+
+        let (result, ()) = tokio::join!(invocation, async move {
+            tokio::task::yield_now().await;
+            cancel.cancel();
+        });
+
+        assert!(result.is_err());
+        assert!(observed.load(Ordering::Acquire));
     }
 
     #[tokio::test]

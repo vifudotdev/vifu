@@ -9,7 +9,10 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use crossterm::cursor::{Hide, Show};
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::event::{
+    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
+    KeyModifiers, MouseEvent, MouseEventKind,
+};
 use crossterm::execute;
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
@@ -73,6 +76,7 @@ pub(crate) async fn run(
                                 break;
                             }
                         }
+                        Event::Mouse(mouse) => handle_mouse(&mut app, mouse),
                         Event::Resize(_, _) => {}
                         _ => {}
                     }
@@ -292,6 +296,8 @@ fn handle_key(app: &mut App, key: KeyEvent, now: Instant) -> UiAction {
             KeyCode::PageDown => app.move_observation_cursor(8),
             KeyCode::Right | KeyCode::Enter => app.inspect_observation_cursor(),
             KeyCode::Tab => app.cycle_trace_tab(),
+            KeyCode::Char('k' | 'K') => app.scroll_trace_detail(-3),
+            KeyCode::Char('j' | 'J') => app.scroll_trace_detail(3),
             KeyCode::Char('t' | 'T') => app.toggle_timeline(),
             KeyCode::Char('/') => app.search_active = true,
             KeyCode::Char('e' | 'E') => return UiAction::ExternalEditor,
@@ -318,6 +324,14 @@ fn handle_key(app: &mut App, key: KeyEvent, now: Instant) -> UiAction {
         },
     }
     UiAction::Continue
+}
+
+fn handle_mouse(app: &mut App, mouse: MouseEvent) {
+    match mouse.kind {
+        MouseEventKind::ScrollUp => app.scroll_trace_detail(-3),
+        MouseEventKind::ScrollDown => app.scroll_trace_detail(3),
+        _ => {}
+    }
 }
 
 fn request_quit(app: &mut App) -> UiAction {
@@ -906,12 +920,28 @@ impl TerminalSession {
             let _ = disable_raw_mode();
             format!("could not initialize Vifu terminal: {error}")
         })?;
-        if let Err(error) = execute!(terminal.backend_mut(), EnterAlternateScreen, Hide) {
+        if let Err(error) = execute!(
+            terminal.backend_mut(),
+            EnterAlternateScreen,
+            EnableMouseCapture,
+            Hide
+        ) {
+            let _ = execute!(
+                terminal.backend_mut(),
+                Show,
+                DisableMouseCapture,
+                LeaveAlternateScreen
+            );
             let _ = disable_raw_mode();
             return Err(format!("could not enter Vifu terminal screen: {error}"));
         }
         if let Err(error) = terminal.clear() {
-            let _ = execute!(terminal.backend_mut(), Show, LeaveAlternateScreen);
+            let _ = execute!(
+                terminal.backend_mut(),
+                Show,
+                DisableMouseCapture,
+                LeaveAlternateScreen
+            );
             let _ = disable_raw_mode();
             return Err(format!("could not clear Vifu terminal: {error}"));
         }
@@ -927,16 +957,26 @@ impl TerminalSession {
         self.terminal
             .show_cursor()
             .map_err(|error| format!("could not show terminal cursor: {error}"))?;
-        execute!(self.terminal.backend_mut(), Show, LeaveAlternateScreen)
-            .map_err(|error| format!("could not suspend Vifu TUI: {error}"))?;
+        execute!(
+            self.terminal.backend_mut(),
+            Show,
+            DisableMouseCapture,
+            LeaveAlternateScreen
+        )
+        .map_err(|error| format!("could not suspend Vifu TUI: {error}"))?;
         disable_raw_mode().map_err(|error| format!("could not restore terminal mode: {error}"))
     }
 
     fn resume(&mut self) -> Result<(), String> {
         enable_raw_mode()
             .map_err(|error| format!("could not resume terminal raw mode: {error}"))?;
-        execute!(self.terminal.backend_mut(), EnterAlternateScreen, Hide)
-            .map_err(|error| format!("could not resume Vifu TUI: {error}"))?;
+        execute!(
+            self.terminal.backend_mut(),
+            EnterAlternateScreen,
+            EnableMouseCapture,
+            Hide
+        )
+        .map_err(|error| format!("could not resume Vifu TUI: {error}"))?;
         self.terminal
             .clear()
             .map_err(|error| format!("could not redraw Vifu TUI: {error}"))
@@ -946,7 +986,12 @@ impl TerminalSession {
 impl Drop for TerminalSession {
     fn drop(&mut self) {
         let _ = self.terminal.show_cursor();
-        let _ = execute!(self.terminal.backend_mut(), Show, LeaveAlternateScreen);
+        let _ = execute!(
+            self.terminal.backend_mut(),
+            Show,
+            DisableMouseCapture,
+            LeaveAlternateScreen
+        );
         let _ = disable_raw_mode();
         #[cfg(unix)]
         {
@@ -1065,7 +1110,7 @@ mod tests {
     use std::fs;
     use std::time::{Duration, Instant};
 
-    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
     use serde_json::json;
     use uuid::Uuid;
     use vifu_gateway::optimization::{
@@ -1074,7 +1119,7 @@ mod tests {
     };
 
     use super::{
-        apply_optimization_report, dashboard_target_url, handle_key, request_quit,
+        apply_optimization_report, dashboard_target_url, handle_key, handle_mouse, request_quit,
         trace_export_value, write_secure_trace_export, UiAction,
     };
     use crate::benchmark::{
@@ -1082,6 +1127,33 @@ mod tests {
     };
     use crate::monitor::{RegisteredAgent, RuntimeEvent, RuntimeStage, StageStatus};
     use crate::tui::model::{App, TraceTab, View};
+
+    #[test]
+    fn mouse_wheel_scrolls_trace_detail_without_changing_other_views() {
+        let mut app = App::default();
+        let mouse = |kind| MouseEvent {
+            kind,
+            column: 0,
+            row: 0,
+            modifiers: KeyModifiers::NONE,
+        };
+
+        handle_mouse(&mut app, mouse(MouseEventKind::ScrollDown));
+        assert_eq!(app.trace_detail_scroll, 0);
+
+        app.view = View::Trace {
+            agent_key: "planner\0".to_string(),
+            trace_id: Uuid::new_v4(),
+            tab: TraceTab::Summary,
+            timeline: false,
+            observation_cursor: None,
+            selected_observation: None,
+        };
+        handle_mouse(&mut app, mouse(MouseEventKind::ScrollDown));
+        assert_eq!(app.trace_detail_scroll, 3);
+        handle_mouse(&mut app, mouse(MouseEventKind::ScrollUp));
+        assert_eq!(app.trace_detail_scroll, 0);
+    }
 
     #[cfg(unix)]
     #[test]

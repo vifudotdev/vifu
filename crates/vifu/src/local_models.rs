@@ -9,7 +9,8 @@ use std::time::Duration;
 use serde_json::Value;
 use tokio::sync::{oneshot, watch, Mutex};
 use vifu_gateway::relay::{
-    AgentGatewayProvider, GatewayProviderError, InProcessGatewayProvider, ProviderEventSink,
+    AgentGatewayProvider, CancellationToken, GatewayProviderError, InProcessGatewayProvider,
+    ProviderEventSink,
 };
 use vifu_provider_llama::LlamaProvider;
 
@@ -465,26 +466,65 @@ impl AgentGatewayProvider for LazyLlamaGatewayProvider {
         timeout: Duration,
         events: ProviderEventSink,
     ) -> Pin<Box<dyn Future<Output = Result<Value, GatewayProviderError>> + Send + 'a>> {
+        let cancellation = CancellationToken::default();
+        let invocation = self.invoke_with_events_and_cancellation(
+            agent_id,
+            binding,
+            input,
+            timeout,
+            cancellation.clone(),
+            events,
+        );
+        Box::pin(async move {
+            match tokio::time::timeout(timeout, invocation).await {
+                Ok(response) => response,
+                Err(_) => {
+                    cancellation.cancel();
+                    Err(GatewayProviderError::timed_out(
+                        "local llama request timed out",
+                    ))
+                }
+            }
+        })
+    }
+
+    fn invoke_with_events_and_cancellation<'a>(
+        &'a self,
+        agent_id: &'a str,
+        binding: &'a Value,
+        input: &'a Value,
+        timeout: Duration,
+        cancellation: CancellationToken,
+        events: ProviderEventSink,
+    ) -> Pin<Box<dyn Future<Output = Result<Value, GatewayProviderError>> + Send + 'a>> {
         Box::pin(async move {
             let load_started = std::time::Instant::now();
             events.stage_started(vifu_gateway::relay::ProviderStage::Load, Value::Null);
-            let (provider, was_resident) =
-                match self.pool.get_or_load(&self.config, &self.base_dir).await {
-                    Ok(result) => result,
-                    Err(error) => {
-                        events.stage_failed(
-                            vifu_gateway::relay::ProviderStage::Load,
-                            load_started
-                                .elapsed()
-                                .as_millis()
-                                .try_into()
-                                .unwrap_or(u64::MAX),
-                            error.clone(),
-                            Value::Null,
-                        );
-                        return Err(GatewayProviderError::failed(error));
-                    }
-                };
+            let load = self.pool.get_or_load(&self.config, &self.base_dir);
+            tokio::pin!(load);
+            let loaded = tokio::select! {
+                biased;
+                _ = cancellation.cancelled() => {
+                    return Err(GatewayProviderError::failed("local llama request cancelled"));
+                }
+                result = &mut load => result,
+            };
+            let (provider, was_resident) = match loaded {
+                Ok(result) => result,
+                Err(error) => {
+                    events.stage_failed(
+                        vifu_gateway::relay::ProviderStage::Load,
+                        load_started
+                            .elapsed()
+                            .as_millis()
+                            .try_into()
+                            .unwrap_or(u64::MAX),
+                        error.clone(),
+                        Value::Null,
+                    );
+                    return Err(GatewayProviderError::failed(error));
+                }
+            };
             events.stage_completed(
                 vifu_gateway::relay::ProviderStage::Load,
                 load_started
@@ -497,7 +537,14 @@ impl AgentGatewayProvider for LazyLlamaGatewayProvider {
             let gateway = InProcessGatewayProvider::new(self.id.clone(), provider)
                 .map_err(GatewayProviderError::failed)?;
             gateway
-                .invoke_with_events(agent_id, binding, input, timeout, events)
+                .invoke_with_events_and_cancellation(
+                    agent_id,
+                    binding,
+                    input,
+                    timeout,
+                    cancellation,
+                    events,
+                )
                 .await
         })
     }

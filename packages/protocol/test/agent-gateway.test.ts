@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   AGENT_GATEWAY_HELLO_REQUEST_ID,
   VIFU_AGENT_GATEWAY_EVENTS,
+  VIFU_AGENT_GATEWAY_FEATURES,
   VIFU_AGENT_GATEWAY_METHODS,
   VIFU_AGENT_GATEWAY_PROTOCOL_VERSION,
   createEventFrame,
@@ -174,7 +175,7 @@ describe("@vifu/protocol agent gateway frames", () => {
     });
   });
 
-  it("uses events for cancellation and heartbeats", () => {
+  it("uses events for cancellation, invocation activity, and heartbeats", () => {
     expect(
       createEventFrame(VIFU_AGENT_GATEWAY_EVENTS.CANCEL, {
         requestId: "4fc4ef6c-f7f9-4d2d-b02c-226402d864aa",
@@ -188,6 +189,32 @@ describe("@vifu/protocol agent gateway frames", () => {
         channelId: 7,
       },
     });
+
+    expect(
+      createEventFrame(VIFU_AGENT_GATEWAY_EVENTS.INVOCATION_ACTIVITY_READY, {}),
+    ).toEqual({
+      type: "event",
+      event: "agent.invocationActivity.ready",
+      payload: {},
+    });
+
+    expect(
+      createEventFrame(VIFU_AGENT_GATEWAY_EVENTS.INVOCATION_ACTIVITY, {
+        requestId: "4fc4ef6c-f7f9-4d2d-b02c-226402d864aa",
+        channelId: 7,
+      }),
+    ).toEqual({
+      type: "event",
+      event: "agent.invocationActivity",
+      payload: {
+        requestId: "4fc4ef6c-f7f9-4d2d-b02c-226402d864aa",
+        channelId: 7,
+      },
+    });
+
+    expect(VIFU_AGENT_GATEWAY_FEATURES.INVOCATION_ACTIVITY).toBe(
+      "agent.invocation-activity.v1",
+    );
 
     expect(
       createEventFrame(VIFU_AGENT_GATEWAY_EVENTS.HEARTBEAT, {

@@ -138,7 +138,12 @@ export class DeploymentClient {
     return (payload ?? {}) as T;
   }
 
-  async rawRequest(path: string, init: RequestInit = {}, publicRequest = false): Promise<Response> {
+  async rawRequest(
+    path: string,
+    init: RequestInit = {},
+    publicRequest = false,
+    timeoutMs: number | null = DEPLOYMENT_REQUEST_TIMEOUT_MS,
+  ): Promise<Response> {
     const headers = new Headers(init.headers);
     headers.set("accept", headers.get("accept") ?? "application/json");
     if (init.body && !headers.has("content-type")) headers.set("content-type", "application/json");
@@ -149,10 +154,10 @@ export class DeploymentClient {
     const abortFromParent = () => controller.abort();
     if (parentSignal?.aborted) controller.abort();
     else parentSignal?.addEventListener("abort", abortFromParent, { once: true });
-    const timeout = setTimeout(() => {
+    const timeout = timeoutMs === null ? null : setTimeout(() => {
       timedOut = true;
       controller.abort();
-    }, DEPLOYMENT_REQUEST_TIMEOUT_MS);
+    }, timeoutMs);
     try {
       return await this.fetcher(appendApiPath(this.apiBaseUrl, path), {
         ...init,
@@ -164,7 +169,7 @@ export class DeploymentClient {
       if (timedOut) throw new VifuHttpError(504, "Vifu API request timed out.", null);
       throw error;
     } finally {
-      clearTimeout(timeout);
+      if (timeout !== null) clearTimeout(timeout);
       parentSignal?.removeEventListener("abort", abortFromParent);
     }
   }

@@ -66,7 +66,7 @@ export const runtimeBrowserRequest: RuntimeBrowserRequest = async <T = unknown>(
     headers: body === undefined ? undefined : { "content-type": "application/json" },
     body: body === undefined ? undefined : JSON.stringify(body),
     signal,
-  }, RUNTIME_BROWSER_REQUEST_TIMEOUT_MS);
+  }, runtimeRequestUsesServerDeadline(path, method) ? null : RUNTIME_BROWSER_REQUEST_TIMEOUT_MS);
   if (response.status === 204) return undefined as T;
   const payload = await response.json().catch(() => null) as T | { error?: unknown } | null;
   if (!response.ok) {
@@ -105,7 +105,7 @@ export const runtimeBrowserUpload: RuntimeBrowserUpload = async <T = unknown>(
 async function fetchWithTimeout(
   input: RequestInfo | URL,
   init: RequestInit,
-  timeoutMs: number,
+  timeoutMs: number | null,
 ): Promise<Response> {
   const controller = new AbortController();
   const parentSignal = init.signal;
@@ -113,7 +113,7 @@ async function fetchWithTimeout(
   const abortFromParent = () => controller.abort();
   if (parentSignal?.aborted) controller.abort();
   else parentSignal?.addEventListener("abort", abortFromParent, { once: true });
-  const timeout = setTimeout(() => {
+  const timeout = timeoutMs === null ? null : setTimeout(() => {
     timedOut = true;
     controller.abort();
   }, timeoutMs);
@@ -125,9 +125,28 @@ async function fetchWithTimeout(
     }
     throw error;
   } finally {
-    clearTimeout(timeout);
+    if (timeout !== null) clearTimeout(timeout);
     parentSignal?.removeEventListener("abort", abortFromParent);
   }
+}
+
+export function runtimeRequestUsesServerDeadline(
+  path: string,
+  method: RuntimeRequestMethod,
+): boolean {
+  if (method !== "POST") return false;
+  const segments = path.split("?")[0]?.split("/").filter(Boolean) ?? [];
+  if (segments.length === 2) {
+    return segments[0] === "chat" && segments[1] === "completions";
+  }
+  if (segments[1] !== "v1") return false;
+  if (segments.length === 3) {
+    return ["embeddings", "rpc", "agents"].includes(segments[2] ?? "");
+  }
+  if (segments.length !== 4) return false;
+  return (segments[2] === "chat" && segments[3] === "completions")
+    || (segments[2] === "audio" && ["speech", "transcriptions"].includes(segments[3] ?? ""))
+    || (segments[2] === "realtime" && segments[3] === "sessions");
 }
 
 function runtimeBrowserErrorMessage(payload: unknown): string {

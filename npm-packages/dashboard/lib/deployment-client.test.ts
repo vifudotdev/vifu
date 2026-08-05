@@ -22,6 +22,29 @@ describe("DeploymentClient request timeout", () => {
     await vi.advanceTimersByTimeAsync(8_000);
     await rejection;
   });
+
+  it("can delegate a long request deadline to the runtime", async () => {
+    vi.useFakeTimers();
+    const fetcher = abortablePendingFetch();
+    const client = new DeploymentClient({
+      apiBaseUrl: "http://runtime.example",
+      fetcher,
+    });
+    const controller = new AbortController();
+
+    const request = client
+      .rawRequest(
+        "/v1/chat/completions",
+        { method: "POST", signal: controller.signal },
+        false,
+        null,
+      )
+      .catch((error: unknown) => error);
+    await vi.advanceTimersByTimeAsync(8_000);
+    expect((fetcher.mock.calls[0]?.[1]?.signal as AbortSignal).aborted).toBe(false);
+    controller.abort();
+    await expect(request).resolves.toMatchObject({ message: "request aborted" });
+  });
 });
 
 function abortablePendingFetch() {

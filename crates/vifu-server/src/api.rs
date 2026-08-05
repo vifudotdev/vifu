@@ -5633,8 +5633,7 @@ async fn create_chat_completion_for_project(
 
     let timeout = Duration::from_millis(
         u64::try_from(route.request_timeout_ms)
-            .unwrap_or(30_000)
-            .min(state.config.request_timeout.as_millis() as u64),
+            .unwrap_or_else(|_| state.config.request_timeout.as_millis() as u64),
     );
     let started_at = Instant::now();
     match invoke_endpoint_chat(&state, &route, request_id, request, timeout).await {
@@ -6362,12 +6361,11 @@ fn profile_gateway_id(route: &crate::models::ProfileRoute) -> Option<String> {
 }
 
 fn profile_timeout(runtime: &Value, server_timeout: Duration) -> Duration {
-    let configured = runtime
+    runtime
         .get("requestTimeoutMs")
         .and_then(Value::as_u64)
-        .unwrap_or(30_000)
-        .clamp(500, 120_000);
-    Duration::from_millis(configured.min(server_timeout.as_millis() as u64))
+        .map(|configured| Duration::from_millis(configured.clamp(500, 120_000)))
+        .unwrap_or(server_timeout)
 }
 
 fn completion_start_ms(metadata: &Value) -> Option<i64> {
@@ -8444,6 +8442,8 @@ pub async fn fallback() -> impl IntoResponse {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use serde_json::json;
 
     use super::{
@@ -8452,8 +8452,8 @@ mod tests {
         feedback_endpoint_permission_allowed, gateway_binding_config, invocation_json_response,
         merge_json_objects, optional_feedback_message, optional_feedback_path,
         optional_feedback_text, patch_text, prepare_project_provider_assignment_with_secret_key,
-        profile_slug, project_slug, runtime_provider_generation, trace_model_parameters,
-        validate_chat_completion_request, validate_embedding_request,
+        profile_slug, profile_timeout, project_slug, runtime_provider_generation,
+        trace_model_parameters, validate_chat_completion_request, validate_embedding_request,
         validate_profile_version_input, validate_safe_generation_settings, validate_timeout,
         validated_provider_base_url, AppFeedbackInput, TraceQuery,
     };
@@ -8707,6 +8707,21 @@ mod tests {
     fn validates_endpoint_timeouts() {
         assert!(validate_timeout(30_000).is_ok());
         assert!(validate_timeout(100).is_err());
+    }
+
+    #[test]
+    fn profile_idle_timeout_is_not_capped_by_the_server_default() {
+        assert_eq!(
+            profile_timeout(
+                &json!({ "requestTimeoutMs": 120_000 }),
+                Duration::from_secs(30),
+            ),
+            Duration::from_secs(120),
+        );
+        assert_eq!(
+            profile_timeout(&json!({}), Duration::from_secs(30)),
+            Duration::from_secs(30),
+        );
     }
 
     #[test]

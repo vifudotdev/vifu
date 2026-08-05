@@ -17,5 +17,10 @@ Install `vifu` to run the standard application. This lower-level crate is
 available for custom Agent Gateway integrations that need to compose the
 implementation directly.
 
+The gateway negotiates invocation-activity reporting with compatible servers.
+Provider activity, output, and stage events renew the server-owned idle timeout,
+so long local inference is not terminated by a fixed total-duration deadline.
+Cancellation is still propagated into the provider.
+
 [Repository](https://github.com/vifudotdev/vifu) |
 [Documentation](https://docs.rs/vifu-gateway)

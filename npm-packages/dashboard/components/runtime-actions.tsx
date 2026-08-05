@@ -210,7 +210,7 @@ export function EndpointCreateForm({ profiles, bindings }: { profiles: AgentProf
           {bindings.map((binding) => <option key={binding.id} value={binding.id}>{binding.gatewayId} / {binding.agentId}</option>)}
         </select>
       </Field>
-      <Field label="Timeout (ms)"><input name="requestTimeoutMs" type="number" min={500} max={120000} step={500} defaultValue={30000} /></Field>
+      <Field label="Idle timeout (ms)"><input name="requestTimeoutMs" type="number" min={500} max={120000} step={500} defaultValue={30000} title="Cancel only after the provider stops reporting activity for this long." /></Field>
     </RuntimeForm>
   );
 }
@@ -233,7 +233,7 @@ export function EndpointEditForm({ endpoint }: { endpoint: AgentEndpoint }) {
     >
       <Field label="Name"><input name="name" required defaultValue={endpoint.name} maxLength={128} /></Field>
       <Field label="Slug"><input name="slug" required defaultValue={endpoint.slug} maxLength={64} /></Field>
-      <Field label="Timeout (ms)"><input name="requestTimeoutMs" type="number" min={500} max={120000} step={500} defaultValue={endpoint.requestTimeoutMs} /></Field>
+      <Field label="Idle timeout (ms)"><input name="requestTimeoutMs" type="number" min={500} max={120000} step={500} defaultValue={endpoint.requestTimeoutMs} title="Cancel only after the provider stops reporting activity for this long." /></Field>
       <label className="check-field"><input name="enabled" type="checkbox" defaultChecked={endpoint.enabled} />Enabled</label>
     </RuntimeForm>
   );

@@ -612,6 +612,7 @@ pub(crate) struct App {
     pub(crate) selected_trace: Option<Uuid>,
     live_agent_keys: HashSet<String>,
     pub(crate) scroll_offset: usize,
+    pub(crate) trace_detail_scroll: u16,
     pub(crate) lanes: HashMap<String, AgentLane>,
     configured_sources: HashSet<String>,
     project_configured_sources: HashSet<String>,
@@ -651,6 +652,7 @@ impl Default for App {
             selected_trace: None,
             live_agent_keys: HashSet::new(),
             scroll_offset: 0,
+            trace_detail_scroll: 0,
             lanes: HashMap::new(),
             configured_sources: HashSet::new(),
             project_configured_sources: HashSet::new(),
@@ -1490,6 +1492,7 @@ impl App {
             self.notice = Some("This Agent has no invocations yet".to_string());
             return;
         };
+        self.trace_detail_scroll = 0;
         self.view = View::Trace {
             agent_key: agent_key.clone(),
             trace_id,
@@ -1502,6 +1505,7 @@ impl App {
 
     pub(crate) fn go_back(&mut self) {
         self.notice = None;
+        self.trace_detail_scroll = 0;
         self.view = match &self.view {
             View::Main => View::Main,
             View::Agent { .. } | View::Optimize => View::Main,
@@ -1514,7 +1518,20 @@ impl App {
     pub(crate) fn cycle_trace_tab(&mut self) {
         if let View::Trace { tab, .. } = &mut self.view {
             *tab = tab.next();
+            self.trace_detail_scroll = 0;
         }
+    }
+
+    pub(crate) fn scroll_trace_detail(&mut self, amount: isize) {
+        if !matches!(self.view, View::Trace { .. }) {
+            return;
+        }
+        let magnitude = u16::try_from(amount.unsigned_abs()).unwrap_or(u16::MAX);
+        self.trace_detail_scroll = if amount.is_negative() {
+            self.trace_detail_scroll.saturating_sub(magnitude)
+        } else {
+            self.trace_detail_scroll.saturating_add(magnitude)
+        };
     }
 
     pub(crate) fn toggle_timeline(&mut self) {
@@ -1561,6 +1578,7 @@ impl App {
             *observation_cursor = choices[next];
             *selected_observation = choices[next];
         }
+        self.trace_detail_scroll = 0;
     }
 
     pub(crate) fn inspect_observation_cursor(&mut self) {
@@ -1585,6 +1603,7 @@ impl App {
             return;
         };
         *selected_observation = *observation_cursor;
+        self.trace_detail_scroll = 0;
         self.notice = Some(observation_cursor.map_or_else(
             || "Inspecting the complete Trace".to_string(),
             |_| {

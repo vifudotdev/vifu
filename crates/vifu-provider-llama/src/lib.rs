@@ -444,7 +444,9 @@ impl AgentProvider for LlamaProvider {
                     return Err(error);
                 }
             };
-            let task = tokio::task::spawn_blocking(move || {
+            let blocking_cancellation = cancellation.clone();
+            let blocking_events = events.clone();
+            let mut task = tokio::task::spawn_blocking(move || {
                 let _permit = permit;
                 match request.capability.as_str() {
                     "chat" => generate_chat(
@@ -456,24 +458,29 @@ impl AgentProvider for LlamaProvider {
                             multimodal: multimodal.as_deref(),
                         },
                         request,
-                        &cancellation,
-                        &events,
+                        &blocking_cancellation,
+                        &blocking_events,
                     ),
                     "embedding" => generate_embeddings(
                         &backend,
                         &model,
                         context_size,
                         request,
-                        &cancellation,
-                        &events,
+                        &blocking_cancellation,
+                        &blocking_events,
                     ),
                     capability => Err(provider_error(&format!(
                         "capability {capability} is not supported"
                     ))),
                 }
             });
-            task.await
-                .map_err(|_error| RuntimeError::provider("llama", "local model task stopped"))?
+            tokio::select! {
+                biased;
+                _ = cancellation.cancelled() => Err(RuntimeError::Cancelled),
+                result = &mut task => result.map_err(|_error| {
+                    RuntimeError::provider("llama", "local model task stopped")
+                })?,
+            }
         })
     }
 }
@@ -697,6 +704,7 @@ fn generate_chat(
             context_size,
             max_tokens,
             &prompt,
+            cancellation,
             events,
         )?
     } else {
@@ -788,6 +796,7 @@ fn generate_chat(
             context
                 .decode(&mut batch)
                 .map_err(|_error| provider_error("model output inference failed"))?;
+            events.activity();
             position += 1;
             generated_tokens += 1;
         }
@@ -923,6 +932,7 @@ fn evaluate_text_prompt(
     context_size: NonZeroU32,
     max_tokens: u32,
     prompt: &str,
+    cancellation: &CancellationToken,
     events: &ProviderEventSink,
 ) -> Result<(i32, i32), RuntimeError> {
     let tokenize_started = Instant::now();
@@ -968,6 +978,9 @@ fn evaluate_text_prompt(
         let prompt_batch_size = prompt_ranges.first().map_or(1, |range| range.len()).max(1);
         let mut batch = LlamaBatch::new(prompt_batch_size, 1);
         for range in prompt_ranges {
+            if cancellation.is_cancelled() {
+                return Err(RuntimeError::Cancelled);
+            }
             batch.clear();
             for (offset, token) in tokens[range.clone()].iter().copied().enumerate() {
                 let absolute_position = range.start + offset;
@@ -980,6 +993,7 @@ fn evaluate_text_prompt(
             context
                 .decode(&mut batch)
                 .map_err(|_error| provider_error("chat prompt inference failed"))?;
+            events.activity();
         }
         let input_tokens = i32::try_from(tokens.len())
             .map_err(|_error| provider_error("chat prompt is too long"))?;
@@ -1090,6 +1104,7 @@ fn evaluate_multimodal_prompt(
         let next_position = chunks
             .eval_chunks(&mtmd, context, 0, 0, n_batch, true)
             .map_err(|_error| provider_error("multimodal prompt inference failed"))?;
+        events.activity();
         if cancellation.is_cancelled() {
             return Err(RuntimeError::Cancelled);
         }
@@ -1243,6 +1258,7 @@ fn generate_embeddings(
                     .decode(&mut batch)
                     .map_err(|_error| provider_error("embedding inference failed"))?;
             }
+            events.activity();
             let embedding = normalize_embedding(
                 context
                     .embeddings_seq_ith(0)

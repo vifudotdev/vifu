@@ -140,6 +140,8 @@ async fn run_socket(
         gateway_supports_feature(&metadata, protocol::APPLICATION_FEEDBACK_FEATURE);
     let embedded_monitoring_supported =
         gateway_supports_feature(&metadata, protocol::EMBEDDED_LIVE_MONITOR_FEATURE);
+    let invocation_activity_supported =
+        gateway_supports_feature(&metadata, protocol::INVOCATION_ACTIVITY_FEATURE);
 
     let agents_json = serde_json::to_value(&agents).map_err(|error| error.to_string())?;
     let (session_id, resumed) = db::open_agent_gateway_session(
@@ -164,6 +166,7 @@ async fn run_socket(
             session_id,
             sender,
             application_feedback_supported,
+            invocation_activity_supported,
         )
         .await;
 
@@ -191,6 +194,9 @@ async fn run_socket(
     });
     if embedded_monitoring_supported {
         send_command(socket, &AgentGatewayCommand::RuntimeMonitoringReady).await?;
+    }
+    if invocation_activity_supported {
+        send_command(socket, &AgentGatewayCommand::InvocationActivityReady).await?;
     }
     info!(%gateway_id, %connection_id, %session_id, resumed, "agent gateway connected");
 
@@ -228,6 +234,13 @@ async fn run_socket(
                 match incoming {
                     AgentGatewayCommand::Result { request_id, channel_id, output } => {
                         state.relay.complete_result(connection_id, request_id, channel_id, output).await;
+                    }
+                    AgentGatewayCommand::InvocationActivity { request_id, channel_id }
+                        if invocation_activity_supported => {
+                        state
+                            .relay
+                            .record_invocation_activity(connection_id, request_id, channel_id)
+                            .await;
                     }
                     AgentGatewayCommand::Error {
                         request_id: Some(request_id),
@@ -905,6 +918,13 @@ fn public_error(error: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::future::Future;
+    use std::path::{Path, PathBuf};
+    use std::pin::Pin;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
     use axum::body::{to_bytes, Body};
     use axum::http::header::{AUTHORIZATION, CONTENT_TYPE};
     use axum::http::{Request, StatusCode};
@@ -924,6 +944,11 @@ mod tests {
         self, AgentDescriptor, AgentGatewayCommand, AGENT_GATEWAY_HELLO_METHOD,
         AGENT_GATEWAY_HELLO_REQUEST_ID, AGENT_GATEWAY_INVOKE_METHOD, VERSION,
     };
+    use vifu_gateway::relay::{
+        run_agent_gateway, AgentGatewayProvider, AgentGatewayRuntime, GatewayConnectionState,
+        GatewayOutputPolicy, GatewayProviderError, GatewayRuntimeEvent, ProviderEventSink,
+    };
+    use vifu_gateway::session::SessionSummary;
 
     use super::{
         authorize_gateway_machine, decode_command, discovered_provider_config, encode_command,
@@ -938,6 +963,97 @@ mod tests {
         ResourcePermission,
     };
     use crate::{app, state_with_storage};
+
+    struct ActiveWireProvider {
+        activity_enabled: Arc<AtomicBool>,
+    }
+
+    struct RuntimeDatabaseFixture {
+        path: PathBuf,
+    }
+
+    impl RuntimeDatabaseFixture {
+        fn new() -> Self {
+            Self {
+                path: std::env::temp_dir().join(format!(
+                    "vifu-agent-activity-wire-test-{}.sqlite",
+                    Uuid::new_v4()
+                )),
+            }
+        }
+
+        fn path(&self) -> &Path {
+            &self.path
+        }
+    }
+
+    impl Drop for RuntimeDatabaseFixture {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.path);
+            let path = self.path.to_string_lossy();
+            let _ = std::fs::remove_file(format!("{path}-shm"));
+            let _ = std::fs::remove_file(format!("{path}-wal"));
+        }
+    }
+
+    impl AgentGatewayProvider for ActiveWireProvider {
+        fn id(&self) -> &str {
+            "openclaw"
+        }
+
+        fn provider_type(&self) -> &str {
+            "test"
+        }
+
+        fn invoke<'a>(
+            &'a self,
+            agent_id: &'a str,
+            binding: &'a Value,
+            input: &'a Value,
+            timeout: Duration,
+        ) -> Pin<Box<dyn Future<Output = Result<Value, GatewayProviderError>> + Send + 'a>>
+        {
+            self.invoke_with_events(
+                agent_id,
+                binding,
+                input,
+                timeout,
+                ProviderEventSink::discard(),
+            )
+        }
+
+        fn invoke_with_events<'a>(
+            &'a self,
+            _agent_id: &'a str,
+            _binding: &'a Value,
+            _input: &'a Value,
+            _timeout: Duration,
+            events: ProviderEventSink,
+        ) -> Pin<Box<dyn Future<Output = Result<Value, GatewayProviderError>> + Send + 'a>>
+        {
+            Box::pin(async move {
+                for _ in 0..8 {
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    if self.activity_enabled.load(Ordering::Acquire) {
+                        events.activity();
+                    }
+                }
+                Ok(json!({
+                    "id": "synthetic-active-chatcmpl",
+                    "object": "chat.completion",
+                    "model": "openclaw/guide-agent",
+                    "choices": [{
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": "Activity crossed the wire"
+                        },
+                        "finish_reason": "stop"
+                    }]
+                }))
+            })
+        }
+    }
 
     #[test]
     fn discovered_runtime_provider_keeps_its_declared_capabilities() {
@@ -1203,13 +1319,169 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn agent_gateway_activity_renews_server_idle_deadline_over_websocket() {
+        let Some(pool) = maybe_test_pool().await else {
+            return;
+        };
+        let raw_api_key = "synthetic-activity-project-api-key";
+        let gateway_id = format!("activity-gateway-{}", Uuid::new_v4().simple());
+        let seeded = seed_endpoint(&pool, raw_api_key, &gateway_id, 500).await;
+        let mut config = Config::from_env().unwrap();
+        config.heartbeat_interval = Duration::from_secs(30);
+        let gateway_credential =
+            "vifu_gw_cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+        let state = state_with_storage(config, pool);
+        let machine = MachineIdentity::generate().unwrap();
+        db::upsert_agent_gateway_machine(&state.pool, &machine.machine_id, &machine.public_key)
+            .await
+            .unwrap();
+        let token_hash = crate::auth::hash_agent_gateway_credential(
+            gateway_credential,
+            &state.config.api_key_pepper,
+        );
+        db::create_agent_gateway_authorization(
+            &state.pool,
+            db::NewAgentGatewayAuthorization {
+                gateway_id: &gateway_id,
+                machine_id: &machine.machine_id,
+                owner_user_id: None,
+                token_prefix: &gateway_credential.chars().take(20).collect::<String>(),
+                token_hash: &token_hash,
+                token_expires_at: chrono::Utc::now() + chrono::Duration::days(180),
+            },
+        )
+        .await
+        .unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server_state = state.clone();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app(server_state)).await.unwrap();
+        });
+
+        let connected = Arc::new(tokio::sync::Notify::new());
+        let observer_connected = Arc::clone(&connected);
+        let runtime_observer = Arc::new(move |event| {
+            if matches!(
+                event,
+                GatewayRuntimeEvent::ConnectionStatus {
+                    state: GatewayConnectionState::Connected | GatewayConnectionState::Degraded,
+                    ..
+                }
+            ) {
+                observer_connected.notify_one();
+            }
+        });
+        let runtime_database = RuntimeDatabaseFixture::new();
+        let gateway_runtime_database = runtime_database.path().to_path_buf();
+        let gateway_server_url = format!("http://{addr}");
+        let gateway_id_for_session = gateway_id.clone();
+        let activity_enabled = Arc::new(AtomicBool::new(false));
+        let provider_activity_enabled = Arc::clone(&activity_enabled);
+        let gateway = tokio::spawn(async move {
+            let providers: Vec<Arc<dyn AgentGatewayProvider>> =
+                vec![Arc::new(ActiveWireProvider {
+                    activity_enabled: provider_activity_enabled,
+                })];
+            let agents = vec![AgentDescriptor {
+                id: "guide-agent".to_string(),
+                name: "Guide".to_string(),
+                metadata: json!({
+                    "providerKey": "openclaw",
+                    "providerType": "test"
+                }),
+            }];
+            let mut session = SessionSummary::new(
+                machine,
+                super::unix_time_ms().unwrap().saturating_div(1_000),
+            )
+            .unwrap();
+            session.gateway_id = Some(gateway_id_for_session);
+            session.device_token = Some(gateway_credential.to_string());
+            session.token_generation = Some(1);
+            let runtime = AgentGatewayRuntime {
+                server_url: &gateway_server_url,
+                server_certificate_der: None,
+                agent_gateway_bootstrap_token: None,
+                enrollment_token: None,
+                allow_guest_bootstrap: false,
+                providers: &providers,
+                agents: &agents,
+                route_overrides: None,
+                runtime_observer: Some(runtime_observer),
+                capture_sender: None,
+                config_epoch: 1,
+                provider_models: None,
+                session_path: None,
+                runtime_database_path: &gateway_runtime_database,
+                embedded_runtime: None,
+                embedded_monitor: None,
+                output_policy: GatewayOutputPolicy::Observer,
+            };
+            run_agent_gateway(runtime, &mut session).await
+        });
+        tokio::time::timeout(Duration::from_secs(5), connected.notified())
+            .await
+            .expect("agent gateway should connect before the wire invocation");
+
+        let inactive_request = chat_completion_request(
+            &seeded.project_slug,
+            Some(&seeded.endpoint_slug),
+            raw_api_key,
+        );
+        let inactive_started = Instant::now();
+        let inactive_response = tokio::time::timeout(
+            Duration::from_secs(5),
+            app(state.clone()).oneshot(inactive_request),
+        )
+        .await
+        .expect("inactive wire invocation should reach its idle deadline")
+        .unwrap();
+        assert!(inactive_started.elapsed() >= Duration::from_millis(500));
+        assert_eq!(inactive_response.status(), StatusCode::GATEWAY_TIMEOUT);
+
+        activity_enabled.store(true, Ordering::Release);
+
+        let request = chat_completion_request(
+            &seeded.project_slug,
+            Some(&seeded.endpoint_slug),
+            raw_api_key,
+        );
+        let started = Instant::now();
+        let response =
+            tokio::time::timeout(Duration::from_secs(5), app(state.clone()).oneshot(request))
+                .await
+                .expect("active wire invocation should complete")
+                .unwrap();
+        let elapsed = started.elapsed();
+
+        gateway.abort();
+        let _ = gateway.await;
+        server.abort();
+        let _ = server.await;
+
+        let status = response.status();
+        let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+        let payload: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(status, StatusCode::OK, "unexpected response: {payload}");
+        assert!(
+            elapsed > Duration::from_millis(500),
+            "provider should run longer than the configured idle timeout: {elapsed:?}"
+        );
+        assert_eq!(
+            payload["choices"][0]["message"]["content"],
+            "Activity crossed the wire"
+        );
+    }
+
+    #[tokio::test]
     async fn agent_gateway_websocket_uses_frame_transport_for_invocations() {
         let Some(pool) = maybe_test_pool().await else {
             return;
         };
         let raw_api_key = "synthetic-project-api-key";
         let gateway_id = format!("wire-gateway-{}", Uuid::new_v4().simple());
-        let seeded = seed_endpoint(&pool, raw_api_key, &gateway_id).await;
+        let seeded = seed_endpoint(&pool, raw_api_key, &gateway_id, 30_000).await;
         let mut config = Config::from_env().unwrap();
         config.heartbeat_interval = std::time::Duration::from_secs(30);
         let admin_key = config.admin_key.clone();
@@ -1633,6 +1905,7 @@ mod tests {
         pool: &db::Storage,
         raw_api_key: &str,
         gateway_id: &str,
+        request_timeout_ms: i32,
     ) -> SeededProject {
         let config = Config::from_env().unwrap();
         let profile_id = Uuid::new_v4();
@@ -1688,7 +1961,7 @@ mod tests {
                 profile_id,
                 binding_id,
                 enabled: true,
-                request_timeout_ms: 30_000,
+                request_timeout_ms,
             },
         )
         .await
@@ -1728,7 +2001,7 @@ mod tests {
             profile_id,
             db::NewProfileVersion {
                 persona: &json!({ "files": {} }),
-                runtime: &json!({}),
+                runtime: &json!({ "requestTimeoutMs": request_timeout_ms }),
                 presentation: &json!({}),
                 source: &json!({
                     "type": "openclaw",

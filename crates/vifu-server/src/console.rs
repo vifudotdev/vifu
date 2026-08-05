@@ -197,12 +197,14 @@ pub async fn proxy_runtime_request(
         reqwest::Method::from_bytes(method.as_str().as_bytes()).unwrap_or(reqwest::Method::GET);
     let mut request = client
         .request(request_method, target)
-        .timeout(Duration::from_secs(8))
         .header(ACCEPT.as_str(), "application/json")
         .header(
             AUTHORIZATION_HEADER,
             format!("Vifu {}", state.config.admin_key),
         );
+    if let Some(timeout) = runtime_proxy_timeout(&method, runtime_path, Duration::from_secs(8)) {
+        request = request.timeout(timeout);
+    }
     if let Some(content_type) = headers
         .get(CONTENT_TYPE)
         .and_then(|value| value.to_str().ok())
@@ -224,6 +226,15 @@ pub async fn proxy_runtime_request(
             &format!("embedded console proxy failed: {error}"),
         ),
     }
+}
+
+fn runtime_proxy_timeout(
+    method: &Method,
+    runtime_path: &str,
+    timeout: Duration,
+) -> Option<Duration> {
+    let server_owns_deadline = *method == Method::POST && runtime_path == "chat/completions";
+    (!server_owns_deadline).then_some(timeout)
 }
 
 fn local_console_enabled(state: &AppState) -> bool {
@@ -363,16 +374,33 @@ const AUTHORIZATION_HEADER: &str = "authorization";
 #[cfg(test)]
 mod tests {
     use std::net::SocketAddr;
+    use std::time::Duration;
 
-    use axum::http::{HeaderMap, HeaderValue, StatusCode, Uri};
+    use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, Uri};
     use axum::routing::get;
     use axum::Router;
     use tokio::net::TcpListener;
 
     use super::{
-        asset_path_for_uri, dashboard_client, dashboard_target, same_origin_request,
-        valid_runtime_path,
+        asset_path_for_uri, dashboard_client, dashboard_target, runtime_proxy_timeout,
+        same_origin_request, valid_runtime_path,
     };
+
+    #[test]
+    fn console_proxy_only_leaves_invocation_deadlines_to_the_runtime() {
+        assert_eq!(
+            runtime_proxy_timeout(&Method::GET, "status", Duration::from_secs(8)),
+            Some(Duration::from_secs(8)),
+        );
+        assert_eq!(
+            runtime_proxy_timeout(&Method::POST, "projects", Duration::from_secs(8)),
+            Some(Duration::from_secs(8)),
+        );
+        assert_eq!(
+            runtime_proxy_timeout(&Method::POST, "chat/completions", Duration::from_secs(8),),
+            None,
+        );
+    }
 
     #[tokio::test]
     async fn dashboard_proxy_client_leaves_redirects_for_the_browser() {

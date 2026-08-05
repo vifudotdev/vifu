@@ -67,6 +67,9 @@ transport without changing Cargo features. `MemoryRuntimeStore` is the default.
 Pass a host `RuntimeStore` to `VifuRuntime::with_store` for durable sessions, or
 use project snapshot export and restore.
 
+`timeout_ms` is an inactivity timeout. Output, stage, and provider activity
+events renew it; cancellation is propagated to the provider when it expires.
+
 `start_invoke`, `poll_invocation`, and `cancel_invocation` provide the same
 result contract to synchronous game loops. The lower-level `HeadlessRuntime`
 remains available for Bevy plugins, command/event processing, and custom
