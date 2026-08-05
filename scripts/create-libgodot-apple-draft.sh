@@ -3,10 +3,10 @@
 set -euo pipefail
 
 usage() {
-    echo "Usage: $0 <asset-directory> <release-tag>" >&2
+    echo "Usage: $0 <asset-directory> <release-tag> [published-vifu-commit]" >&2
 }
 
-if [ "$#" -ne 2 ]; then
+if [ "$#" -lt 2 ] || [ "$#" -gt 3 ]; then
     usage
     exit 64
 fi
@@ -15,6 +15,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd -P)"
 VIFU_ROOT="$(cd "$SCRIPT_DIR/.." && pwd -P)"
 ASSET_DIR="$(cd "$1" && pwd -P)"
 RELEASE_TAG="$2"
+PUBLISHED_VIFU_COMMIT="${3:-}"
 RELEASE_REPOSITORY="${VIFU_RELEASE_REPOSITORY:-vifudotdev/vifu}"
 MANIFEST="$ASSET_DIR/libgodot-source.json"
 
@@ -25,7 +26,11 @@ if gh release view "$RELEASE_TAG" --repo "$RELEASE_REPOSITORY" >/dev/null 2>&1; 
     exit 65
 fi
 
-VIFU_COMMIT="$(git -C "$VIFU_ROOT" rev-parse HEAD)"
+VIFU_COMMIT="${PUBLISHED_VIFU_COMMIT:-$(git -C "$VIFU_ROOT" rev-parse HEAD)}"
+if [[ ! "$VIFU_COMMIT" =~ ^[0-9a-f]{40}$ ]]; then
+    echo "Published Vifu commit must be a full lowercase Git SHA." >&2
+    exit 64
+fi
 LIBGODOT_COMMIT="$(plutil -extract libgodot.commit raw -o - "$MANIFEST")"
 GODOT_COMMIT="$(plutil -extract godot.commit raw -o - "$MANIFEST")"
 

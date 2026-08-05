@@ -212,6 +212,11 @@ scripts/create-libgodot-apple-draft.sh \
   libgodot-4.5.1-vifu.1
 ```
 
+When the VifuGodot manifest is intentionally held back until after the binary
+is public, pass the full already-pushed release-tool commit as the third
+argument. The draft tag then targets that published commit instead of the
+newer local HEAD.
+
 Finally run `.github/workflows/release-libgodot.yml` with the exact libgodot
 commit and draft tag. The GitHub macOS job does not compile Godot. It verifies
 the complete asset set, public source commits, manifest, checksums, framework
