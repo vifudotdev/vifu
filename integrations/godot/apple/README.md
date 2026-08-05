@@ -140,7 +140,8 @@ sequence is:
    `publish=true` only after the draft is ready;
 4. verify that the checksums pinned in `Package.swift` match the published
    assets and run a clean remote SwiftPM resolution;
-5. publish the VifuGodot source package tag.
+5. tag the matching Vifu release; its release workflow publishes the exact
+   VifuGodot subtree and matching semantic tag through the release GitHub App.
 
 SwiftPM does not select a nested package by subdirectory from a Git URL. This
 directory remains the implementation source inside Vifu and is published as a

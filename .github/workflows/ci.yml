@@ -73,6 +73,8 @@ jobs:
         run: node scripts/check-public-repo.mjs
         env:
           VIFU_PRIVATE_TERMS: ${{ secrets.PUBLIC_REPOSITORY_PRIVATE_TERMS }}
+      - name: VifuGodot release tooling
+        run: scripts/test-publish-vifugodot.sh
 
   rust-packages:
     name: Rust package artifacts

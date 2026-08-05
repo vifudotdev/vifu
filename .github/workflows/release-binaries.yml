@@ -13,6 +13,7 @@ on:
 
 env:
   RELEASE_TAG: ${{ inputs.release_tag || github.ref_name }}
+  VIFUGODOT_RELEASE_REPOSITORY: ${{ vars.VIFUGODOT_RELEASE_REPOSITORY || 'vifudotdev/VifuGodot' }}
 
 permissions:
   contents: read
@@ -204,3 +205,62 @@ jobs:
           --repo "$GITHUB_REPOSITORY"
           --verify-tag
           --generate-notes
+
+  publish-vifugodot:
+    name: Publish VifuGodot source package
+    if: startsWith(github.ref, 'refs/tags/') || inputs.release_tag != ''
+    needs:
+      - publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    concurrency:
+      group: publish-vifugodot
+      cancel-in-progress: false
+    steps:
+      - name: Resolve release GitHub App ID
+        id: app-config
+        env:
+          APP_ID_VARIABLE: ${{ vars.VIFU_RELEASE_APP_ID }}
+          APP_ID_SECRET: ${{ secrets.VIFU_RELEASE_APP_ID }}
+        run: |
+          APP_ID="${APP_ID_VARIABLE:-$APP_ID_SECRET}"
+          if [ -z "$APP_ID" ]; then
+            echo "::error::Missing VIFU_RELEASE_APP_ID repository variable or secret. Use the numeric GitHub App ID, not the Client ID."
+            exit 1
+          fi
+          echo "app-id=$APP_ID" >> "$GITHUB_OUTPUT"
+
+      - name: Resolve VifuGodot repository
+        id: vifugodot-repo
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$VIFUGODOT_RELEASE_REPOSITORY" != */* ]]; then
+            echo "::error::VIFUGODOT_RELEASE_REPOSITORY must be owner/name, got: $VIFUGODOT_RELEASE_REPOSITORY"
+            exit 1
+          fi
+          echo "owner=${VIFUGODOT_RELEASE_REPOSITORY%%/*}" >> "$GITHUB_OUTPUT"
+          echo "name=${VIFUGODOT_RELEASE_REPOSITORY#*/}" >> "$GITHUB_OUTPUT"
+
+      - name: Create VifuGodot release token
+        id: vifugodot-token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ steps.app-config.outputs.app-id }}
+          private-key: ${{ secrets.VIFU_RELEASE_APP_PRIVATE_KEY }}
+          owner: ${{ steps.vifugodot-repo.outputs.owner }}
+          repositories: ${{ steps.vifugodot-repo.outputs.name }}
+          permission-contents: write
+
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+          ref: ${{ inputs.release_tag || github.ref }}
+
+      - name: Publish matching VifuGodot package
+        env:
+          GH_TOKEN: ${{ steps.vifugodot-token.outputs.token }}
+        run: scripts/publish-vifugodot.sh "$RELEASE_TAG"

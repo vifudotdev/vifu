@@ -224,18 +224,22 @@ slices, exact architectures, and release markers; with `publish=true`, it makes
 the verified draft public. Normal Vifu releases and consuming applications
 reuse that pinned artifact rather than recompiling Godot.
 
-The installable VifuGodot package is published from its committed integration
-subtree after the compatible Vifu, SwiftGodot, SwiftGodotKit, and libgodot
-versions are public:
+The **Release Vifu binaries** workflow publishes the installable VifuGodot
+package after the matching Vifu release assets succeed. It exports the exact
+`integrations/godot/apple` tree from the Vifu tag, advances
+`vifudotdev/VifuGodot` `main`, creates the same semantic tag, and creates the
+matching GitHub Release. A rerun verifies and reuses an already-published
+snapshot instead of overwriting it.
 
-```bash
-scripts/publish-vifugodot.sh v0.1.9
-```
-
-The command requires Vifu `HEAD` to match `origin/main`, refuses to overwrite
-an existing VifuGodot tag, creates the public subtree `main` and semantic tag
-atomically, and then creates the matching GitHub Release. Unrelated dirty files
-outside `integrations/godot/apple` do not enter the exported package.
+The workflow uses the release GitHub App credentials configured as
+`VIFU_RELEASE_APP_ID` (repository variable or secret) and
+`VIFU_RELEASE_APP_PRIVATE_KEY` (repository secret). The App installation must
+grant Contents write access to `vifudotdev/VifuGodot`; the workflow scopes its
+installation token to that repository. `VIFUGODOT_RELEASE_REPOSITORY` is an
+optional repository variable for an intentional distribution-repository move.
+The release script rejects personal tokens and asks GitHub to create the
+snapshot commit as the App, so the published commit receives GitHub's verified
+bot signature without storing a separate commit-signing key.
 
 ## Dashboard
 
