@@ -16,7 +16,7 @@ let swiftGodotKitDependency: Package.Dependency = if let path = environment["VIF
 } else {
     .package(
         url: "https://github.com/vifudotdev/SwiftGodotKit.git",
-        revision: "f72ec6f03e22f0209819716a84c54d5b56064cf0"
+        revision: "b512ec624d7195bdf6b519ae76832db68acfe44b"
     )
 }
 
@@ -25,7 +25,7 @@ let swiftGodotDependency: Package.Dependency = if let path = environment["VIFU_G
 } else {
     .package(
         url: "https://github.com/vifudotdev/SwiftGodot.git",
-        revision: "6644df67f538a5de8f750762f632b4dda56c982e"
+        revision: "971a8c0cad7f0d79728e73cedc20af39a2d9e69e"
     )
 }
 

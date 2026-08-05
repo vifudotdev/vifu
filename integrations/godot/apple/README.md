@@ -18,8 +18,8 @@ The package manifest resolves the maintained Git dependencies by default:
 | Package | Requirement |
 | --- | --- |
 | Vifu Agent Runtime | `vifudotdev/vifu`, `main` while this integration is under development |
-| SwiftGodotKit | `vifudotdev/SwiftGodotKit`, revision `f72ec6f0...` |
-| SwiftGodot | `vifudotdev/SwiftGodot`, revision `6644df67...` |
+| SwiftGodotKit | `vifudotdev/SwiftGodotKit`, revision `b512ec68...` |
+| SwiftGodot | `vifudotdev/SwiftGodot`, revision `971a8c0c...` |
 | libgodot | Vifu release `libgodot-4.5.1-vifu.1`, selected for iOS or macOS by SwiftPM |
 
 These are the Vifu-compatible forks and binary, including the tested instance
