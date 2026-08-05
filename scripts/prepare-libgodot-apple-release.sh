@@ -68,27 +68,22 @@ echo "Building Apple libgodot from $LIBGODOT_COMMIT"
 (
     cd "$LIBGODOT_DIR"
     ./build_libgodot.sh \
-        --no-target \
-        --host-rebuild \
-        --host-release \
-        --update-api
-    ./build_libgodot.sh \
         --target ios \
         --target-arch arm64 \
         --release \
-        --host-release
+        --skip-host
     ./build_libgodot.sh \
         --target ios \
         --simulator \
         --target-arch arm64 \
         --release \
-        --host-release
+        --skip-host
     ./build_libgodot.sh \
         --target macos \
         --library-type static_library \
         --target-arch arm64 \
         --release \
-        --host-release
+        --skip-host
     ./build_libgodot_xcframework.sh --target template_release
 )
 

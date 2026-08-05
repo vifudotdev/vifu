@@ -183,7 +183,7 @@ once on a known Apple development machine from an exact public
 ```bash
 git clone --branch vifu-4.5 \
   https://github.com/vifudotdev/libgodot.git ../libgodot-release-source
-git -C ../libgodot-release-source checkout b33669b8e091468a65a7abf55b4a92afe1a12430
+git -C ../libgodot-release-source checkout 502dcd1832c6d97e2a579934ca17f30f195b6c23
 git -C ../libgodot-release-source submodule update --init --depth 1 godot
 scripts/prepare-libgodot-apple-release.sh \
   ../libgodot-release-source \
@@ -191,13 +191,15 @@ scripts/prepare-libgodot-apple-release.sh \
   ../libgodot-release-source/build/vifu-release/libgodot-4.5.1-vifu.1
 ```
 
-The command builds release-only iOS device, iOS Simulator, and macOS slices,
-then creates separate deterministic archives, SwiftPM checksums, source
-metadata, and Godot notices. It writes build output under the libgodot checkout
-and the explicit output directory; temporary verification directories are
-removed automatically. SCons uses the machine's logical CPU count by default;
-set `LIBGODOT_BUILD_JOBS` to a positive integer when the build machine needs a
-lower concurrency limit.
+The command builds only the release iOS device, iOS Simulator, and macOS
+slices. It does not compile the Godot Editor because this binary release does
+not regenerate the separately versioned SwiftGodot API. It then creates
+separate deterministic archives, SwiftPM checksums, source metadata, and Godot
+notices. Build output stays under the libgodot checkout and the explicit output
+directory; temporary verification directories are removed automatically.
+SCons uses the machine's logical CPU count by default; set
+`LIBGODOT_BUILD_JOBS` to a positive integer when the build machine needs a lower
+concurrency limit.
 
 After inspecting those files, create a draft—not a public release—from the Vifu
 commit containing the matching verification workflow:

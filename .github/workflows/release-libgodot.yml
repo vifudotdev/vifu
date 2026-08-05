@@ -6,7 +6,7 @@ on:
       libgodot_ref:
         description: Exact vifudotdev/libgodot commit used by the local build
         required: true
-        default: b33669b8e091468a65a7abf55b4a92afe1a12430
+        default: 502dcd1832c6d97e2a579934ca17f30f195b6c23
         type: string
       release_tag:
         description: Existing draft tag (for example libgodot-4.5.1-vifu.1)
