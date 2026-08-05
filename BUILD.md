@@ -178,7 +178,8 @@ paths are explicit development overrides for testing unpublished commits.
 
 The large libgodot runtime has its own low-frequency manual release workflow,
 `.github/workflows/release-libgodot.yml`. It builds release-only iOS device,
-iOS Simulator, and macOS artifacts from `chenyanming/libgodot`, splits them with
+iOS Simulator, and macOS artifacts from the public `vifudotdev/libgodot` build
+source, splits them with
 `scripts/package-libgodot-apple.sh`, records SwiftPM checksums, and optionally
 publishes an immutable `libgodot-<godot-version>-vifu.<revision>` release in this
 repository. Normal Vifu releases reuse that pinned artifact rather than

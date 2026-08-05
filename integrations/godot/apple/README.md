@@ -94,8 +94,8 @@ release tag such as `libgodot-4.5.1-vifu.1`:
 The tag is independent from normal Vifu Runtime versions because this binary
 changes much less frequently. The manual **Release Vifu libgodot binaries**
 workflow builds `template_release` device, simulator, and macOS slices from the
-maintained `chenyanming/libgodot` fork. It never overwrites an existing artifact
-tag.
+audited `vifudotdev/libgodot` branch and its pinned `vifudotdev/godot` source.
+It never overwrites an existing artifact tag.
 
 After the first release exists, its immutable URLs and checksums belong in this
 package as platform-conditional `binaryTarget` entries. Selecting the bundled

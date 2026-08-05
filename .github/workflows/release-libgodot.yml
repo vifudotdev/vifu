@@ -4,9 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       libgodot_ref:
-        description: Commit or branch in chenyanming/libgodot
+        description: Commit or branch in vifudotdev/libgodot
         required: true
-        default: fe6de54333369c6e281e634974fab42447550d24
+        default: 358c35d7a9c2d5c619b9c0e23de14da91966144c
         type: string
       release_tag:
         description: Immutable Vifu asset tag (for example libgodot-4.5.1-vifu.1)
@@ -33,7 +33,7 @@ jobs:
           persist-credentials: false
       - uses: actions/checkout@v7
         with:
-          repository: chenyanming/libgodot
+          repository: vifudotdev/libgodot
           ref: ${{ inputs.libgodot_ref }}
           path: libgodot-source
           persist-credentials: false
@@ -43,13 +43,9 @@ jobs:
           LIBGODOT_RELEASE_TAG: ${{ inputs.release_tag }}
         run: |
           [[ "$LIBGODOT_RELEASE_TAG" =~ ^libgodot-[0-9]+\.[0-9]+\.[0-9]+-vifu\.[0-9]+$ ]]
-      - name: Check out Vifu's Godot fork
+      - name: Check out pinned Godot source
         shell: bash
-        run: |
-          git -C libgodot-source config \
-            submodule.godot.url \
-            https://github.com/chenyanming/godot.git
-          git -C libgodot-source submodule update --init --depth 1 godot
+        run: git -C libgodot-source submodule update --init --depth 1 godot
       - name: Install SCons
         run: pipx install scons
       - name: Build release libgodot
@@ -147,4 +143,4 @@ jobs:
             --repo "$GITHUB_REPOSITORY" \
             --target "$GITHUB_SHA" \
             --title "Vifu $LIBGODOT_RELEASE_TAG" \
-            --notes "Prebuilt Apple libgodot runtime from chenyanming/libgodot ref $LIBGODOT_REF."
+            --notes "Prebuilt Apple libgodot runtime from vifudotdev/libgodot ref $LIBGODOT_REF."
