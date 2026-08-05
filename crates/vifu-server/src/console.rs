@@ -57,7 +57,12 @@ async fn proxy_dashboard(
     let target = dashboard_target(address, &uri);
     let request_method =
         reqwest::Method::from_bytes(method.as_str().as_bytes()).unwrap_or(reqwest::Method::GET);
-    let client = reqwest::Client::new();
+    let Ok(client) = dashboard_client() else {
+        return json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "dashboard proxy could not be initialized",
+        );
+    };
     let mut request = client
         .request(request_method, target)
         .timeout(Duration::from_secs(30));
@@ -105,6 +110,12 @@ async fn proxy_dashboard(
             "dashboard is temporarily unavailable",
         ),
     }
+}
+
+fn dashboard_client() -> Result<reqwest::Client, reqwest::Error> {
+    reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
 }
 
 fn dashboard_target(address: &str, uri: &Uri) -> String {
@@ -353,9 +364,58 @@ const AUTHORIZATION_HEADER: &str = "authorization";
 mod tests {
     use std::net::SocketAddr;
 
-    use axum::http::{HeaderMap, HeaderValue, Uri};
+    use axum::http::{HeaderMap, HeaderValue, StatusCode, Uri};
+    use axum::routing::get;
+    use axum::Router;
+    use tokio::net::TcpListener;
 
-    use super::{asset_path_for_uri, dashboard_target, same_origin_request, valid_runtime_path};
+    use super::{
+        asset_path_for_uri, dashboard_client, dashboard_target, same_origin_request,
+        valid_runtime_path,
+    };
+
+    #[tokio::test]
+    async fn dashboard_proxy_client_leaves_redirects_for_the_browser() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                Router::new().route(
+                    "/login",
+                    get(|| async {
+                        (
+                            StatusCode::SEE_OTHER,
+                            [("location", "/login?auth_error=invalid")],
+                        )
+                    }),
+                ),
+            )
+            .await
+            .unwrap();
+        });
+
+        let response = dashboard_client()
+            .unwrap()
+            .get(format!("http://{address}/login"))
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(
+            (
+                response.status(),
+                response
+                    .headers()
+                    .get("location")
+                    .unwrap()
+                    .to_str()
+                    .unwrap(),
+            ),
+            (StatusCode::SEE_OTHER, "/login?auth_error=invalid")
+        );
+        server.abort();
+    }
 
     #[test]
     fn dashboard_proxy_keeps_the_single_server_path_and_query() {
