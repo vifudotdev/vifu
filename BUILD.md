@@ -224,6 +224,19 @@ slices, exact architectures, and release markers; with `publish=true`, it makes
 the verified draft public. Normal Vifu releases and consuming applications
 reuse that pinned artifact rather than recompiling Godot.
 
+The installable VifuGodot package is published from its committed integration
+subtree after the compatible Vifu, SwiftGodot, SwiftGodotKit, and libgodot
+versions are public:
+
+```bash
+scripts/publish-vifugodot.sh v0.1.8
+```
+
+The command requires Vifu `HEAD` to match `origin/main`, refuses to overwrite
+an existing VifuGodot tag, creates the public subtree `main` and semantic tag
+atomically, and then creates the matching GitHub Release. Unrelated dirty files
+outside `integrations/godot/apple` do not enter the exported package.
+
 ## Dashboard
 
 ```bash
