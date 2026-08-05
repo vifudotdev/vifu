@@ -229,7 +229,7 @@ subtree after the compatible Vifu, SwiftGodot, SwiftGodotKit, and libgodot
 versions are public:
 
 ```bash
-scripts/publish-vifugodot.sh v0.1.8
+scripts/publish-vifugodot.sh v0.1.9
 ```
 
 The command requires Vifu `HEAD` to match `origin/main`, refuses to overwrite
