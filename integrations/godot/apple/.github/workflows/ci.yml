@@ -1,0 +1,22 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - "v*"
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  apple:
+    name: Apple package
+    runs-on: macos-14
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test package
+        run: swift test

@@ -11,15 +11,27 @@ The package is separate from the root `Vifu` package so applications that do
 not embed Godot never resolve, download, or link Godot dependencies. Choose
 `Vifu` for the Godot-free Runtime and `VifuGodot` for the complete Godot host.
 
+## Install
+
+In Xcode, use **File > Add Package Dependencies** and enter:
+
+```text
+https://github.com/vifudotdev/VifuGodot
+```
+
+Select version `0.1.8` or newer and add the `VifuGodot` product to the app
+target. SwiftPM resolves the matching Vifu Runtime, maintained SwiftGodot SDK,
+and platform libgodot binary from that single package dependency.
+
 ## Dependencies
 
 The package manifest resolves the maintained Git dependencies by default:
 
 | Package | Requirement |
 | --- | --- |
-| Vifu Agent Runtime | `vifudotdev/vifu`, `main` while this integration is under development |
-| SwiftGodotKit | `vifudotdev/SwiftGodotKit`, revision `b512ec68...` |
-| SwiftGodot | `vifudotdev/SwiftGodot`, revision `971a8c0c...` |
+| Vifu Agent Runtime | `vifudotdev/vifu`, version `0.1.8` |
+| SwiftGodotKit | `vifudotdev/SwiftGodotKit`, version `4.5.1-vifu.1` |
+| SwiftGodot | `vifudotdev/SwiftGodot`, version `4.5.1-vifu.1` |
 | libgodot | Vifu release `libgodot-4.5.1-vifu.1`, selected for iOS or macOS by SwiftPM |
 
 These are the Vifu-compatible forks and binary, including the tested instance
@@ -89,7 +101,7 @@ This checkout is validated with:
 | Swift tools | 5.9 or newer |
 | Apple deployment | iOS 17+, macOS 14+ |
 | Godot/libgodot | 4.5.x; current workspace uses 4.5.1 |
-| SwiftGodot and SwiftGodotKit | compatible `libgodot_damon_45` checkouts |
+| SwiftGodot and SwiftGodotKit | Vifu compatibility release `4.5.1-vifu.1` |
 
 SwiftGodot, SwiftGodotKit, and libgodot must describe the same Godot API. Treat
 them as one compatibility set when updating. Local workspaces can override the
@@ -130,9 +142,10 @@ sequence is:
    assets and run a clean remote SwiftPM resolution;
 5. publish the VifuGodot source package tag.
 
-SwiftPM does not support selecting a nested package by subdirectory from a Git
-URL. The dependencies above are remote, but installing `VifuGodot` itself with
-one Git URL requires publishing this directory as its own repository and tag.
+SwiftPM does not select a nested package by subdirectory from a Git URL. This
+directory remains the implementation source inside Vifu and is published as a
+subtree to `vifudotdev/VifuGodot`, where matching semantic tags provide the
+single-URL installation surface.
 
 ## Verify
 

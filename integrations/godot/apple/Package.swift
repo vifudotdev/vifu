@@ -8,7 +8,7 @@ let environment = ProcessInfo.processInfo.environment
 let vifuDependency: Package.Dependency = if let path = environment["VIFU_GODOT_VIFU_PATH"] {
     .package(name: "Vifu", path: path)
 } else {
-    .package(url: "https://github.com/vifudotdev/vifu.git", branch: "main")
+    .package(url: "https://github.com/vifudotdev/vifu.git", exact: "0.1.8")
 }
 
 let swiftGodotKitDependency: Package.Dependency = if let path = environment["VIFU_GODOT_SWIFTGODOTKIT_PATH"] {
@@ -16,7 +16,7 @@ let swiftGodotKitDependency: Package.Dependency = if let path = environment["VIF
 } else {
     .package(
         url: "https://github.com/vifudotdev/SwiftGodotKit.git",
-        revision: "b512ec624d7195bdf6b519ae76832db68acfe44b"
+        exact: "4.5.1-vifu.1"
     )
 }
 
@@ -25,7 +25,7 @@ let swiftGodotDependency: Package.Dependency = if let path = environment["VIFU_G
 } else {
     .package(
         url: "https://github.com/vifudotdev/SwiftGodot.git",
-        revision: "971a8c0cad7f0d79728e73cedc20af39a2d9e69e"
+        exact: "4.5.1-vifu.1"
     )
 }
 
