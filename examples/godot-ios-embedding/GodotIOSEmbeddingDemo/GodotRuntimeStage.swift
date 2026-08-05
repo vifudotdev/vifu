@@ -1,6 +1,7 @@
 import Foundation
 import SwiftUI
 import Vifu
+import VifuGodot
 
 struct GodotRuntimeStage: View {
     let activity: GodotEmbeddingViewModel.Activity

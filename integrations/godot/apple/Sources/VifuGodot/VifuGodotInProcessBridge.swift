@@ -11,9 +11,8 @@ import VifuRuntimeBridge
 @MainActor
 public final class VifuGodotInProcessBridge {
     private let transport: VifuInProcessBridgeTransport
-    private var signalProxy: SignalProxy?
-    private var signalCallable: Callable?
-    private weak var globalState: Node?
+    private var host: (any VifuGodotBridgeHost)?
+    private var senderID: UUID?
 
     public init(transport: VifuInProcessBridgeTransport) {
         self.transport = transport
@@ -24,7 +23,83 @@ public final class VifuGodotInProcessBridge {
     /// The host remains responsible for creating, starting, iterating,
     /// restarting, and destroying the instance.
     public func connect(to instance: GodotInstance) async throws {
-        disconnectSignal()
+        try await connect(to: SwiftGodotBridgeHost(instance: instance))
+    }
+
+    /// Disconnects the Godot signal immediately and removes the transport
+    /// sender asynchronously.
+    public func disconnect() {
+        disconnectHost()
+        guard let senderID else { return }
+        self.senderID = nil
+        let transport = self.transport
+        Task {
+            await transport.removeSender(senderID)
+        }
+    }
+
+    func connect(to host: any VifuGodotBridgeHost) async throws {
+        disconnectHost()
+        if let senderID {
+            await transport.removeSender(senderID)
+            self.senderID = nil
+        }
+
+        do {
+            let transport = self.transport
+            try host.installReceiver { encodedFrame in
+                Task {
+                    await transport.receive(encodedFrame)
+                }
+            }
+        } catch {
+            host.disconnect()
+            throw error
+        }
+
+        self.host = host
+        senderID = await transport.installSender { [weak self] encodedFrame in
+            guard let self else {
+                throw VifuGodotBridgeError.runtimeNotReady
+            }
+            try await self.sendToGodot(encodedFrame)
+        }
+    }
+
+    func disconnectAndWait() async {
+        disconnectHost()
+        guard let senderID else { return }
+        self.senderID = nil
+        await transport.removeSender(senderID)
+    }
+
+    private func sendToGodot(_ encodedFrame: String) throws {
+        guard let host else {
+            throw VifuGodotBridgeError.runtimeNotReady
+        }
+        try host.send(encodedFrame)
+    }
+
+    private func disconnectHost() {
+        host?.disconnect()
+        host = nil
+    }
+}
+
+@MainActor
+protocol VifuGodotBridgeHost: AnyObject {
+    func installReceiver(_ receiver: @escaping @Sendable (String) -> Void) throws
+    func send(_ encodedFrame: String) throws
+    func disconnect()
+}
+
+@MainActor
+private final class SwiftGodotBridgeHost: VifuGodotBridgeHost {
+    private var signalProxy: SignalProxy?
+    private var signalCallable: Callable?
+    private weak var globalState: Node?
+
+    init(instance: GodotInstance) throws {
         guard instance.isStarted() else {
             throw VifuGodotBridgeError.runtimeNotReady
         }
@@ -40,50 +115,47 @@ public final class VifuGodotInProcessBridge {
         ) else {
             throw VifuGodotBridgeError.globalStateUnavailable
         }
+        self.globalState = globalState
+    }
+
+    func installReceiver(
+        _ receiver: @escaping @Sendable (String) -> Void
+    ) throws {
+        guard let globalState else {
+            throw VifuGodotBridgeError.runtimeNotReady
+        }
 
         let proxy = SignalProxy()
-        let transport = self.transport
         proxy.proxy = { arguments in
-            guard let first = arguments.first, let encodedFrame = String(first) else { return }
-            Task {
-                await transport.receive(encodedFrame)
+            guard let first = arguments.first,
+                  let encodedFrame = String(first)
+            else {
+                return
             }
+            receiver(encodedFrame)
         }
         let callable = Callable(object: proxy, method: StringName("proxy"))
         guard globalState.connect(
             signal: "godot_message_to_swift",
             callable: callable
         ) == .ok else {
+            proxy.proxy = nil
+            _ = proxy.callDeferred(method: "free")
             throw VifuGodotBridgeError.signalConnectionFailed
         }
 
-        self.globalState = globalState
         signalProxy = proxy
         signalCallable = callable
-        await transport.installSender { [weak self] encodedFrame in
-            guard let self else {
-                throw VifuGodotBridgeError.runtimeNotReady
-            }
-            try await self.sendToGodot(encodedFrame)
-        }
     }
 
-    public func disconnect() {
-        disconnectSignal()
-        let transport = self.transport
-        Task {
-            await transport.removeSender()
-        }
-    }
-
-    private func sendToGodot(_ encodedFrame: String) throws {
+    func send(_ encodedFrame: String) throws {
         guard let globalState else {
             throw VifuGodotBridgeError.runtimeNotReady
         }
         _ = globalState.call(method: "handle_swift_message", Variant(encodedFrame))
     }
 
-    private func disconnectSignal() {
+    func disconnect() {
         if let globalState, let signalCallable {
             globalState.disconnect(
                 signal: "godot_message_to_swift",

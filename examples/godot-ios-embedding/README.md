@@ -8,7 +8,7 @@ The directory boundary is intentional:
 
 ```text
 integrations/godot/apple/
-  reusable Swift bridge for a host-owned libgodot instance
+  optional VifuGodot Swift package for a host-owned libgodot instance
 
 examples/godot-ios-embedding/
   iOS host, Godot stage, local model setup, and run instructions
@@ -17,19 +17,26 @@ examples/godot-ios-embedding/
 The application owns Godot's lifecycle. Vifu does not create or destroy the
 engine. `VifuRuntimeBridgeSession` carries the same Runtime Bridge frames used
 by remote transports through `VifuInProcessBridgeTransport`.
+The Xcode target imports the package product with `import VifuGodot`; it does
+not compile integration source files directly.
 
 ## Requirements
 
 - all requirements from [`ios-embedding`](../ios-embedding/README.md)
 - Godot 4 with iOS export support
 - a compatible `libgodot` checkout beside this repository
-- `SwiftGodotKit` and a built `libgodot.xcframework`
+- a built `libgodot.xcframework`
+
+`VifuGodot` resolves the maintained SwiftGodot and SwiftGodotKit forks from Git
+by default. This example keeps sibling checkouts as Xcode development overrides
+so it can test unpublished changes in all three repositories together.
 
 Keep the repositories in this layout:
 
 ```text
 workspace/
   libgodot/
+    SwiftGodot/
     SwiftGodotKit/
     build/libgodot.xcframework
   vifu/
@@ -61,6 +68,12 @@ mkdir -p examples/godot-ios-embedding/GodotIOSEmbeddingDemo/Resources
 
 Open `examples/godot-ios-embedding/GodotIOSEmbeddingDemo.xcodeproj`, select the
 `GodotIOSEmbeddingDemo` scheme, and run it on a physical iOS device.
+
+Run the bridge contract tests independently with:
+
+```bash
+swift test --package-path integrations/godot/apple
+```
 
 For an unsigned build check:
 

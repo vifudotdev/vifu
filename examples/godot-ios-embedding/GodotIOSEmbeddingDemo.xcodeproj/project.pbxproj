@@ -12,6 +12,7 @@
 		A20000000000000000000002 /* SwiftGodot in Frameworks */ = {isa = PBXBuildFile; productRef = A2000000000000000000000F /* SwiftGodot */; };
 		A20000000000000000000003 /* SwiftGodot in Embed Frameworks */ = {isa = PBXBuildFile; productRef = A2000000000000000000000F /* SwiftGodot */; settings = {ATTRIBUTES = (CodeSignOnCopy, ); }; };
 		A20000000000000000000004 /* libgodot.xcframework in Embed Frameworks */ = {isa = PBXBuildFile; fileRef = A20000000000000000000005 /* libgodot.xcframework */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
+		A30000000000000000000001 /* VifuGodot in Frameworks */ = {isa = PBXBuildFile; productRef = A3000000000000000000000D /* VifuGodot */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXCopyFilesBuildPhase section */
@@ -40,12 +41,6 @@
 			path = GodotIOSEmbeddingDemo;
 			sourceTree = "<group>";
 		};
-		A20000000000000000000007 /* Vifu Godot Integration */ = {
-			isa = PBXFileSystemSynchronizedRootGroup;
-			name = "Vifu Godot Integration";
-			path = ../../integrations/godot/apple;
-			sourceTree = "<group>";
-		};
 /* End PBXFileSystemSynchronizedRootGroup section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -54,6 +49,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				A10000000000000000000001 /* Vifu in Frameworks */,
+				A30000000000000000000001 /* VifuGodot in Frameworks */,
 				A20000000000000000000001 /* SwiftGodotKit in Frameworks */,
 				A20000000000000000000002 /* SwiftGodot in Frameworks */,
 			);
@@ -66,7 +62,6 @@
 			isa = PBXGroup;
 			children = (
 				A10000000000000000000003 /* GodotIOSEmbeddingDemo */,
-				A20000000000000000000007 /* Vifu Godot Integration */,
 				A20000000000000000000005 /* libgodot.xcframework */,
 				A10000000000000000000006 /* Products */,
 			);
@@ -98,11 +93,11 @@
 			);
 			fileSystemSynchronizedGroups = (
 				A10000000000000000000003 /* GodotIOSEmbeddingDemo */,
-				A20000000000000000000007 /* Vifu Godot Integration */,
 			);
 			name = GodotIOSEmbeddingDemo;
 			packageProductDependencies = (
 				A1000000000000000000000D /* Vifu */,
+				A3000000000000000000000D /* VifuGodot */,
 				A2000000000000000000000D /* SwiftGodotKit */,
 				A2000000000000000000000F /* SwiftGodot */,
 			);
@@ -136,6 +131,7 @@
 			minimizedProjectReferenceProxies = 1;
 			packageReferences = (
 				A1000000000000000000000E /* XCLocalSwiftPackageReference "../.." */,
+				A3000000000000000000000E /* XCLocalSwiftPackageReference "../../integrations/godot/apple" */,
 				A2000000000000000000000E /* XCLocalSwiftPackageReference "../../../libgodot/SwiftGodotKit" */,
 			);
 			preferredProjectObjectVersion = 77;
@@ -340,6 +336,10 @@
 			isa = XCLocalSwiftPackageReference;
 			relativePath = ../../../libgodot/SwiftGodotKit;
 		};
+		A3000000000000000000000E /* XCLocalSwiftPackageReference "../../integrations/godot/apple" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = ../../integrations/godot/apple;
+		};
 /* End XCLocalSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
@@ -356,6 +356,11 @@
 		A2000000000000000000000F /* SwiftGodot */ = {
 			isa = XCSwiftPackageProductDependency;
 			productName = SwiftGodot;
+		};
+		A3000000000000000000000D /* VifuGodot */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = A3000000000000000000000E /* XCLocalSwiftPackageReference "../../integrations/godot/apple" */;
+			productName = VifuGodot;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

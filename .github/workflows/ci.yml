@@ -136,6 +136,36 @@ jobs:
               CODE_SIGNING_ALLOWED=NO \
               build
 
+  godot-bridge-apple:
+    name: Godot bridge (Apple)
+    runs-on: macos-14
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          path: vifu-godot-workspace/vifu
+          persist-credentials: false
+      - uses: actions/checkout@v7
+        with:
+          repository: chenyanming/SwiftGodot
+          ref: 6644df67f538a5de8f750762f632b4dda56c982e
+          path: vifu-godot-workspace/libgodot/SwiftGodot
+          persist-credentials: false
+      - uses: actions/checkout@v7
+        with:
+          repository: chenyanming/SwiftGodotKit
+          ref: ba518a257c415a6773ed44be4985912aa4949984
+          path: vifu-godot-workspace/libgodot/SwiftGodotKit
+          persist-credentials: false
+      - name: Test VifuGodot package
+        working-directory: vifu-godot-workspace/vifu
+        env:
+          VIFU_GODOT_VIFU_PATH: ${{ github.workspace }}/vifu-godot-workspace/vifu
+          VIFU_GODOT_SWIFTGODOTKIT_PATH: ${{ github.workspace }}/vifu-godot-workspace/libgodot/SwiftGodotKit
+          VIFU_GODOT_SWIFTGODOT_PATH: ${{ github.workspace }}/vifu-godot-workspace/libgodot/SwiftGodot
+          SWIFTGODOTKIT_SWIFTGODOT_PATH: ${{ github.workspace }}/vifu-godot-workspace/libgodot/SwiftGodot
+        run: swift test --package-path integrations/godot/apple
+
   mobile-ffi-android:
     name: Mobile FFI (Android)
     runs-on: ubuntu-latest

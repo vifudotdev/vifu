@@ -1,0 +1,150 @@
+name: Release Vifu libgodot binaries
+
+on:
+  workflow_dispatch:
+    inputs:
+      libgodot_ref:
+        description: Commit or branch in chenyanming/libgodot
+        required: true
+        default: fe6de54333369c6e281e634974fab42447550d24
+        type: string
+      release_tag:
+        description: Immutable Vifu asset tag (for example libgodot-4.5.1-vifu.1)
+        required: true
+        default: libgodot-4.5.1-vifu.1
+        type: string
+      publish:
+        description: Create the GitHub release after building
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build Apple libgodot
+    runs-on: macos-14
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@v7
+        with:
+          repository: chenyanming/libgodot
+          ref: ${{ inputs.libgodot_ref }}
+          path: libgodot-source
+          persist-credentials: false
+      - name: Validate immutable release tag
+        shell: bash
+        env:
+          LIBGODOT_RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          [[ "$LIBGODOT_RELEASE_TAG" =~ ^libgodot-[0-9]+\.[0-9]+\.[0-9]+-vifu\.[0-9]+$ ]]
+      - name: Check out Vifu's Godot fork
+        shell: bash
+        run: |
+          git -C libgodot-source config \
+            submodule.godot.url \
+            https://github.com/chenyanming/godot.git
+          git -C libgodot-source submodule update --init --depth 1 godot
+      - name: Install SCons
+        run: pipx install scons
+      - name: Build release libgodot
+        working-directory: libgodot-source
+        run: |
+          ./build_libgodot.sh \
+            --no-target \
+            --host-rebuild \
+            --host-release \
+            --update-api
+          ./build_libgodot.sh \
+            --target ios \
+            --target-arch arm64 \
+            --release \
+            --host-release
+          ./build_libgodot.sh \
+            --target ios \
+            --simulator \
+            --target-arch arm64 \
+            --release \
+            --host-release
+          ./build_libgodot.sh \
+            --target macos \
+            --library-type static_library \
+            --target-arch arm64 \
+            --release \
+            --host-release
+          ./build_libgodot_xcframework.sh --target template_release
+      - name: Package platform XCFrameworks
+        run: |
+          scripts/package-libgodot-apple.sh \
+            libgodot-source/build/libgodot/release/libgodot.xcframework \
+            "$RUNNER_TEMP/libgodot-dist"
+          cp libgodot-source/godot/LICENSE.txt \
+            "$RUNNER_TEMP/libgodot-dist/Godot-LICENSE.txt"
+          cp libgodot-source/godot/COPYRIGHT.txt \
+            "$RUNNER_TEMP/libgodot-dist/Godot-COPYRIGHT.txt"
+      - name: Record source and SwiftPM checksums
+        shell: bash
+        env:
+          LIBGODOT_REF: ${{ inputs.libgodot_ref }}
+          LIBGODOT_RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          {
+            echo "### Vifu libgodot release"
+            echo
+            echo "- Release tag: \`$LIBGODOT_RELEASE_TAG\`"
+            echo "- libgodot ref: \`$LIBGODOT_REF\`"
+            echo "- libgodot commit: \`$(git -C libgodot-source rev-parse HEAD)\`"
+            echo "- Godot commit: \`$(git -C libgodot-source/godot rev-parse HEAD)\`"
+            echo
+            echo '```text'
+            cat "$RUNNER_TEMP"/libgodot-dist/*.sha256
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: vifu-libgodot-${{ inputs.release_tag }}
+          path: |
+            ${{ runner.temp }}/libgodot-dist/*.xcframework.zip
+            ${{ runner.temp }}/libgodot-dist/*.xcframework.zip.sha256
+            ${{ runner.temp }}/libgodot-dist/Godot-LICENSE.txt
+            ${{ runner.temp }}/libgodot-dist/Godot-COPYRIGHT.txt
+          if-no-files-found: error
+          retention-days: 14
+
+  publish:
+    name: Publish Vifu libgodot release
+    if: ${{ inputs.publish }}
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: vifu-libgodot-${{ inputs.release_tag }}
+          path: dist
+      - name: Create immutable GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          LIBGODOT_REF: ${{ inputs.libgodot_ref }}
+          LIBGODOT_RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          if gh release view "$LIBGODOT_RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release already exists and will not be overwritten: $LIBGODOT_RELEASE_TAG" >&2
+            exit 1
+          fi
+          gh release create "$LIBGODOT_RELEASE_TAG" \
+            dist/*.xcframework.zip \
+            dist/*.xcframework.zip.sha256 \
+            dist/Godot-LICENSE.txt \
+            dist/Godot-COPYRIGHT.txt \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "Vifu $LIBGODOT_RELEASE_TAG" \
+            --notes "Prebuilt Apple libgodot runtime from chenyanming/libgodot ref $LIBGODOT_REF."

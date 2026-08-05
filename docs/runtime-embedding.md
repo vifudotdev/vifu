@@ -288,13 +288,16 @@ application. A WebSocket transport can implement the same
 processes or devices. Both shapes preserve the same frame contract, so moving
 execution does not require rewriting game logic.
 
-The experimental Godot frame adapter is in `integrations/godot/apple/`. It only
-connects `GlobalState` signals to `VifuInProcessBridgeTransport` and attaches
-to an already-started `GodotInstance`; the host application retains Godot's
-creation, rendering, frame-loop, restart, and destruction lifecycle. Runtime
-routing belongs to `VifuRuntimeBridgeSession`, while application-specific
-message decoding stays in the host. Generic Godot and managed-language engine
-adapters are future integration work, not current support.
+The optional Apple adapter is the `VifuGodot` Swift package in
+`integrations/godot/apple/`. It connects `GlobalState` signals to
+`VifuInProcessBridgeTransport` and attaches to an already-started
+`GodotInstance`; the host application retains Godot's creation, rendering,
+frame-loop, restart, and destruction lifecycle. Runtime routing belongs to
+`VifuRuntimeBridgeSession`, while application-specific message decoding stays
+in the host. The package stays outside `VifuMobileFFI.xcframework`, so native
+Apple hosts do not acquire a Godot dependency. See the package
+[`README`](../integrations/godot/apple/README.md) for the supported workspace
+layout, remote dependency pins, and compatibility set.
 
 The optional `vifu-provider-llama` crate implements this contract for local
 GGUF models through llama.cpp. Apple applications receive the same provider in

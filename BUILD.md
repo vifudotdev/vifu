@@ -168,6 +168,22 @@ from its job summary in `Package.swift`. The tag run rebuilds the artifact on
 the same release environment, verifies its URL and checksum, links the Swift
 smoke test, and uploads it with the other release files.
 
+Godot hosts consume the separate `VifuGodot` package at
+`integrations/godot/apple`. Keeping it outside the root package preserves the
+Godot-free `Vifu` and `VifuMobileFFI` dependency graph. Its compatibility and
+verification instructions are documented in
+[`integrations/godot/apple/README.md`](integrations/godot/apple/README.md).
+The package resolves Vifu's maintained SwiftGodot forks through Git; sibling
+paths are explicit development overrides for testing unpublished commits.
+
+The large libgodot runtime has its own low-frequency manual release workflow,
+`.github/workflows/release-libgodot.yml`. It builds release-only iOS device,
+iOS Simulator, and macOS artifacts from `chenyanming/libgodot`, splits them with
+`scripts/package-libgodot-apple.sh`, records SwiftPM checksums, and optionally
+publishes an immutable `libgodot-<godot-version>-vifu.<revision>` release in this
+repository. Normal Vifu releases reuse that pinned artifact rather than
+recompiling Godot.
+
 ## Dashboard
 
 ```bash

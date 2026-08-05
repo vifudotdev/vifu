@@ -32,7 +32,7 @@ public actor VifuInProcessBridgeTransport: VifuRuntimeBridgeTransport {
     public nonisolated let incoming: AsyncStream<String>
 
     private let continuation: AsyncStream<String>.Continuation
-    private var sender: Sender?
+    private var sender: (id: UUID, send: Sender)?
 
     public init() {
         let pair = AsyncStream<String>.makeStream(
@@ -48,18 +48,30 @@ public actor VifuInProcessBridgeTransport: VifuRuntimeBridgeTransport {
         guard let sender else {
             throw VifuRuntimeBridgeTransportError.notConnected
         }
-        try await sender(encodedFrame)
+        try await sender.send(encodedFrame)
     }
 
     public func disconnect() async {
         sender = nil
     }
 
-    public func installSender(_ sender: @escaping Sender) {
-        self.sender = sender
+    @discardableResult
+    public func installSender(_ sender: @escaping Sender) -> UUID {
+        let id = UUID()
+        self.sender = (id, sender)
+        return id
     }
 
     public func removeSender() {
+        sender = nil
+    }
+
+    /// Removes the sender only when it is still the installed connection.
+    ///
+    /// Engine adapters use this during synchronous host teardown so a delayed
+    /// cleanup task cannot remove a newer connection established by a restart.
+    public func removeSender(_ id: UUID) {
+        guard sender?.id == id else { return }
         sender = nil
     }
 
