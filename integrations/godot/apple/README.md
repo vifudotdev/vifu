@@ -17,8 +17,8 @@ The package manifest resolves the maintained Git dependencies by default:
 | Package | Requirement |
 | --- | --- |
 | Vifu | `vifudotdev/vifu`, `main` while this integration is under development |
-| SwiftGodotKit | `chenyanming/SwiftGodotKit`, revision `ba518a25...` |
-| SwiftGodot | `chenyanming/SwiftGodot`, revision `6644df67...` |
+| SwiftGodotKit | `vifudotdev/SwiftGodotKit`, revision `f72ec6f0...` |
+| SwiftGodot | `vifudotdev/SwiftGodot`, revision `6644df67...` |
 
 These are the Vifu-compatible forks, including the restart-safe `dlopen` /
 `dlclose` behavior used by the iOS hosts. They are not replaced by the upstream

@@ -147,14 +147,14 @@ jobs:
           persist-credentials: false
       - uses: actions/checkout@v7
         with:
-          repository: chenyanming/SwiftGodot
+          repository: vifudotdev/SwiftGodot
           ref: 6644df67f538a5de8f750762f632b4dda56c982e
           path: vifu-godot-workspace/libgodot/SwiftGodot
           persist-credentials: false
       - uses: actions/checkout@v7
         with:
-          repository: chenyanming/SwiftGodotKit
-          ref: ba518a257c415a6773ed44be4985912aa4949984
+          repository: vifudotdev/SwiftGodotKit
+          ref: f72ec6f03e22f0209819716a84c54d5b56064cf0
           path: vifu-godot-workspace/libgodot/SwiftGodotKit
           persist-credentials: false
       - name: Test VifuGodot package
