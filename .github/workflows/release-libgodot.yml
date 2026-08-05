@@ -4,17 +4,17 @@ on:
   workflow_dispatch:
     inputs:
       libgodot_ref:
-        description: Commit or branch in vifudotdev/libgodot
+        description: Exact vifudotdev/libgodot commit used by the local build
         required: true
-        default: 358c35d7a9c2d5c619b9c0e23de14da91966144c
+        default: b33669b8e091468a65a7abf55b4a92afe1a12430
         type: string
       release_tag:
-        description: Immutable Vifu asset tag (for example libgodot-4.5.1-vifu.1)
+        description: Existing draft tag (for example libgodot-4.5.1-vifu.1)
         required: true
         default: libgodot-4.5.1-vifu.1
         type: string
       publish:
-        description: Create the GitHub release after building
+        description: Publish the draft after every verification passes
         required: true
         default: false
         type: boolean
@@ -23,124 +23,104 @@ permissions:
   contents: read
 
 jobs:
-  build:
-    name: Build Apple libgodot
+  verify:
+    name: Verify Apple libgodot draft
     runs-on: macos-14
-    timeout-minutes: 240
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          persist-credentials: false
-      - uses: actions/checkout@v7
-        with:
-          repository: vifudotdev/libgodot
-          ref: ${{ inputs.libgodot_ref }}
-          path: libgodot-source
-          persist-credentials: false
-      - name: Validate immutable release tag
-        shell: bash
-        env:
-          LIBGODOT_RELEASE_TAG: ${{ inputs.release_tag }}
-        run: |
-          [[ "$LIBGODOT_RELEASE_TAG" =~ ^libgodot-[0-9]+\.[0-9]+\.[0-9]+-vifu\.[0-9]+$ ]]
-      - name: Check out pinned Godot source
-        shell: bash
-        run: git -C libgodot-source submodule update --init --depth 1 godot
-      - name: Install SCons
-        run: pipx install scons
-      - name: Build release libgodot
-        working-directory: libgodot-source
-        run: |
-          ./build_libgodot.sh \
-            --no-target \
-            --host-rebuild \
-            --host-release \
-            --update-api
-          ./build_libgodot.sh \
-            --target ios \
-            --target-arch arm64 \
-            --release \
-            --host-release
-          ./build_libgodot.sh \
-            --target ios \
-            --simulator \
-            --target-arch arm64 \
-            --release \
-            --host-release
-          ./build_libgodot.sh \
-            --target macos \
-            --library-type static_library \
-            --target-arch arm64 \
-            --release \
-            --host-release
-          ./build_libgodot_xcframework.sh --target template_release
-      - name: Package platform XCFrameworks
-        run: |
-          scripts/package-libgodot-apple.sh \
-            libgodot-source/build/libgodot/release/libgodot.xcframework \
-            "$RUNNER_TEMP/libgodot-dist"
-          cp libgodot-source/godot/LICENSE.txt \
-            "$RUNNER_TEMP/libgodot-dist/Godot-LICENSE.txt"
-          cp libgodot-source/godot/COPYRIGHT.txt \
-            "$RUNNER_TEMP/libgodot-dist/Godot-COPYRIGHT.txt"
-      - name: Record source and SwiftPM checksums
-        shell: bash
-        env:
-          LIBGODOT_REF: ${{ inputs.libgodot_ref }}
-          LIBGODOT_RELEASE_TAG: ${{ inputs.release_tag }}
-        run: |
-          {
-            echo "### Vifu libgodot release"
-            echo
-            echo "- Release tag: \`$LIBGODOT_RELEASE_TAG\`"
-            echo "- libgodot ref: \`$LIBGODOT_REF\`"
-            echo "- libgodot commit: \`$(git -C libgodot-source rev-parse HEAD)\`"
-            echo "- Godot commit: \`$(git -C libgodot-source/godot rev-parse HEAD)\`"
-            echo
-            echo '```text'
-            cat "$RUNNER_TEMP"/libgodot-dist/*.sha256
-            echo '```'
-          } >> "$GITHUB_STEP_SUMMARY"
-      - uses: actions/upload-artifact@v7
-        with:
-          name: vifu-libgodot-${{ inputs.release_tag }}
-          path: |
-            ${{ runner.temp }}/libgodot-dist/*.xcframework.zip
-            ${{ runner.temp }}/libgodot-dist/*.xcframework.zip.sha256
-            ${{ runner.temp }}/libgodot-dist/Godot-LICENSE.txt
-            ${{ runner.temp }}/libgodot-dist/Godot-COPYRIGHT.txt
-          if-no-files-found: error
-          retention-days: 14
-
-  publish:
-    name: Publish Vifu libgodot release
-    if: ${{ inputs.publish }}
-    needs: build
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v8
+      - uses: actions/checkout@v7
         with:
-          name: vifu-libgodot-${{ inputs.release_tag }}
-          path: dist
-      - name: Create immutable GitHub release
+          persist-credentials: false
+      - name: Validate inputs and draft state
+        shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
           LIBGODOT_REF: ${{ inputs.libgodot_ref }}
           LIBGODOT_RELEASE_TAG: ${{ inputs.release_tag }}
+          PUBLISH_RELEASE: ${{ inputs.publish }}
         run: |
-          if gh release view "$LIBGODOT_RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            echo "Release already exists and will not be overwritten: $LIBGODOT_RELEASE_TAG" >&2
+          [[ "$LIBGODOT_REF" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$LIBGODOT_RELEASE_TAG" =~ ^libgodot-[0-9]+\.[0-9]+\.[0-9]+-vifu\.[0-9]+$ ]]
+
+          is_draft="$(gh release view "$LIBGODOT_RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --json isDraft \
+            --jq .isDraft)"
+          if [ "$PUBLISH_RELEASE" = "true" ] && [ "$is_draft" != "true" ]; then
+            echo "Publishing requires an existing draft release: $LIBGODOT_RELEASE_TAG" >&2
             exit 1
           fi
-          gh release create "$LIBGODOT_RELEASE_TAG" \
-            dist/*.xcframework.zip \
-            dist/*.xcframework.zip.sha256 \
-            dist/Godot-LICENSE.txt \
-            dist/Godot-COPYRIGHT.txt \
+
+          expected_assets="$(printf '%s\n' \
+            Godot-COPYRIGHT.txt \
+            Godot-LICENSE.txt \
+            ios_libgodot.xcframework.zip \
+            ios_libgodot.xcframework.zip.sha256 \
+            libgodot-source.json \
+            mac_libgodot.xcframework.zip \
+            mac_libgodot.xcframework.zip.sha256)"
+          actual_assets="$(gh release view "$LIBGODOT_RELEASE_TAG" \
             --repo "$GITHUB_REPOSITORY" \
-            --target "$GITHUB_SHA" \
-            --title "Vifu $LIBGODOT_RELEASE_TAG" \
-            --notes "Prebuilt Apple libgodot runtime from vifudotdev/libgodot ref $LIBGODOT_REF."
+            --json assets \
+            --jq '.assets[].name' \
+            | LC_ALL=C sort)"
+          if [ "$actual_assets" != "$expected_assets" ]; then
+            echo "Draft release assets do not match the required set." >&2
+            diff -u <(printf '%s\n' "$expected_assets") <(printf '%s\n' "$actual_assets") || true
+            exit 1
+          fi
+      - name: Download draft assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          LIBGODOT_RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          mkdir dist
+          gh release download "$LIBGODOT_RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --dir dist
+      - name: Verify source commits exist
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          LIBGODOT_REF: ${{ inputs.libgodot_ref }}
+        run: |
+          godot_ref="$(plutil -extract godot.commit raw -o - dist/libgodot-source.json)"
+          gh api "repos/vifudotdev/libgodot/git/commits/$LIBGODOT_REF" >/dev/null
+          gh api "repos/vifudotdev/godot/git/commits/$godot_ref" >/dev/null
+      - name: Verify checksums and XCFrameworks
+        env:
+          LIBGODOT_REF: ${{ inputs.libgodot_ref }}
+          LIBGODOT_RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          scripts/verify-libgodot-apple-release.sh \
+            dist \
+            "$LIBGODOT_RELEASE_TAG" \
+            "$LIBGODOT_REF"
+      - name: Record verified sources and checksums
+        shell: bash
+        env:
+          LIBGODOT_RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          {
+            echo "### Verified Vifu libgodot release"
+            echo
+            echo "- Release tag: \`$LIBGODOT_RELEASE_TAG\`"
+            echo "- libgodot commit: \`$(plutil -extract libgodot.commit raw -o - dist/libgodot-source.json)\`"
+            echo "- Godot commit: \`$(plutil -extract godot.commit raw -o - dist/libgodot-source.json)\`"
+            echo
+            echo '```text'
+            cat dist/*.sha256
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Publish verified draft
+        if: ${{ inputs.publish }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          LIBGODOT_RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          gh release edit "$LIBGODOT_RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --draft=false \
+            --latest=false

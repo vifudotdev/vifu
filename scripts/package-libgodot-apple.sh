@@ -53,13 +53,10 @@ verify_architecture() {
     local expected="$2"
     local architectures
     architectures="$(lipo -archs "$binary")"
-    case " $architectures " in
-        *" $expected "*) ;;
-        *)
-            echo "Missing $expected architecture in $binary: $architectures" >&2
-            exit 65
-            ;;
-    esac
+    if [ "$architectures" != "$expected" ]; then
+        echo "Expected only $expected in $binary, found: $architectures" >&2
+        exit 65
+    fi
 }
 
 IOS_DEVICE_BINARY="$IOS_DEVICE_FRAMEWORK/libgodot"

@@ -92,10 +92,13 @@ release tag such as `libgodot-4.5.1-vifu.1`:
 - Godot's license and copyright notices
 
 The tag is independent from normal Vifu Runtime versions because this binary
-changes much less frequently. The manual **Release Vifu libgodot binaries**
-workflow builds `template_release` device, simulator, and macOS slices from the
-audited `vifudotdev/libgodot` branch and its pinned `vifudotdev/godot` source.
-It never overwrites an existing artifact tag.
+changes much less frequently. A maintainer builds `template_release` device,
+simulator, and macOS slices once on a known Apple development machine from an
+exact `vifudotdev/libgodot` commit and its pinned `vifudotdev/godot` source.
+The build command creates a draft Vifu release asset set; the manual **Release
+Vifu libgodot binaries** workflow verifies that draft and optionally publishes
+it. CI does not perform a cold Godot build, and neither path overwrites an
+existing artifact tag.
 
 After the first release exists, its immutable URLs and checksums belong in this
 package as platform-conditional `binaryTarget` entries. Selecting the bundled
@@ -104,11 +107,15 @@ Godot in the consuming application. Do not commit placeholder checksums: first
 produce the release assets, then pin the exact values reported by the workflow.
 The initial sequence is therefore:
 
-1. push the release workflow and the matching libgodot fork commit;
-2. dispatch it with `publish=true` to build and publish the immutable assets;
-3. copy the reported checksums into `Package.swift` and verify a clean remote
+1. build and package the exact libgodot commit locally with
+   `scripts/prepare-libgodot-apple-release.sh`;
+2. inspect the output and create a draft with
+   `scripts/create-libgodot-apple-draft.sh`;
+3. dispatch the release workflow with the same commit and tag, using
+   `publish=true` only after the draft is ready;
+4. copy the verified checksums into `Package.swift` and verify a clean remote
    SwiftPM resolution;
-4. publish the VifuGodot source package tag.
+5. publish the VifuGodot source package tag.
 
 SwiftPM does not support selecting a nested package by subdirectory from a Git
 URL. The dependencies above are remote, but installing `VifuGodot` itself with
