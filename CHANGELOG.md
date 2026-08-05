@@ -2,6 +2,11 @@
 
 All notable changes to Vifu are documented here.
 
+## 0.1.9 - 2026-08-05
+
+- Rebuilt the Apple Runtime binary with the Xcode 15 toolchain so iOS 17 and
+  macOS 14 package consumers link against the supported Metal SDK surface.
+
 ## 0.1.8 - 2026-08-05
 
 - Added paired Apple Runtime Gateway connectivity so embedded iOS runtimes can

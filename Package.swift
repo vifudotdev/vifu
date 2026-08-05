@@ -47,8 +47,8 @@ if let localArtifact {
 } else {
     ffiTarget = .binaryTarget(
         name: "VifuMobileFFI",
-        url: "https://github.com/vifudotdev/vifu/releases/download/v0.1.8/VifuMobileFFI.xcframework.zip",
-        checksum: "622b423fc96a3459e781f329cdce70759ccd0a7e204ab6023d4a751f92895426"
+        url: "https://github.com/vifudotdev/vifu/releases/download/v0.1.9/VifuMobileFFI.xcframework.zip",
+        checksum: "9ed8b9a6e57fccbc78b74e95e752d28f570a2617457eee13c9e71392f7dfb790"
     )
 }
 
