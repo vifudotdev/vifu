@@ -176,6 +176,29 @@ verify_architecture() {
     fi
 }
 
+verify_build_version() {
+    local binary="$1"
+    local expected_platform="$2"
+    local expected_minos="$3"
+    local build_info
+    local platform
+    local minos
+
+    build_info="$(xcrun vtool -show-build "$binary")"
+    platform="$(awk '$1 == "platform" { print $2; exit }' <<< "$build_info")"
+    minos="$(awk '$1 == "minos" { print $2; exit }' <<< "$build_info")"
+
+    if [ "$platform" != "$expected_platform" ]; then
+        echo "Expected platform $expected_platform in $binary, found: ${platform:-missing}" >&2
+        exit 65
+    fi
+
+    if [ "$minos" != "$expected_minos" ]; then
+        echo "Expected minimum OS $expected_minos in $binary, found: ${minos:-missing}" >&2
+        exit 65
+    fi
+}
+
 verify_checksum ios_libgodot.xcframework.zip ios
 verify_checksum mac_libgodot.xcframework.zip macos
 verify_archive_entries ios_libgodot.xcframework.zip ios_libgodot.xcframework
@@ -210,6 +233,10 @@ for binary in "$IOS_DEVICE_BINARY" "$IOS_SIMULATOR_BINARY" "$MACOS_BINARY"; do
     verify_release_binary "$binary"
     verify_architecture "$binary" arm64
 done
+
+verify_build_version "$IOS_DEVICE_BINARY" IOS 15.0
+verify_build_version "$IOS_SIMULATOR_BINARY" IOSSIMULATOR 15.0
+verify_build_version "$MACOS_BINARY" MACOS 14.0
 
 echo "Verified Vifu Apple libgodot release assets for $RELEASE_TAG"
 echo "libgodot commit: $LIBGODOT_COMMIT"

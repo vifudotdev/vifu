@@ -183,7 +183,7 @@ once on a known Apple development machine from an exact public
 ```bash
 git clone --branch vifu-4.5 \
   https://github.com/vifudotdev/libgodot.git ../libgodot-release-source
-git -C ../libgodot-release-source checkout 502dcd1832c6d97e2a579934ca17f30f195b6c23
+git -C ../libgodot-release-source checkout 235560cb32a5265092f7a35c7b376526cbe12cc5
 git -C ../libgodot-release-source submodule update --init --depth 1 godot
 scripts/prepare-libgodot-apple-release.sh \
   ../libgodot-release-source \

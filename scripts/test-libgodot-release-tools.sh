@@ -46,7 +46,7 @@ SIMULATOR_SDK="$(xcrun --sdk iphonesimulator --show-sdk-path)"
 MACOS_SDK="$(xcrun --sdk macosx --show-sdk-path)"
 
 xcrun clang \
-    -target arm64-apple-ios17.0 \
+    -target arm64-apple-ios15.0 \
     -isysroot "$IPHONEOS_SDK" \
     -dynamiclib \
     -install_name @rpath/libgodot.framework/libgodot \
@@ -55,7 +55,7 @@ xcrun clang \
 write_framework_plist "$DEVICE_FRAMEWORK/Info.plist"
 
 xcrun clang \
-    -target arm64-apple-ios17.0-simulator \
+    -target arm64-apple-ios15.0-simulator \
     -isysroot "$SIMULATOR_SDK" \
     -dynamiclib \
     -install_name @rpath/libgodot.framework/libgodot \
