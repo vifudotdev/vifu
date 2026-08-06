@@ -171,7 +171,7 @@ pub async fn proxy_runtime_request(
     body: Bytes,
 ) -> Response {
     if !local_console_enabled(&state) {
-        return StatusCode::NOT_FOUND.into_response();
+        return proxy_dashboard(state, method, headers, uri, body).await;
     }
     if !same_origin_request(&headers, state.config.addr) {
         return json_error(
@@ -376,15 +376,19 @@ mod tests {
     use std::net::SocketAddr;
     use std::time::Duration;
 
+    use axum::body::Bytes;
+    use axum::extract::State;
     use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, Uri};
-    use axum::routing::get;
+    use axum::routing::{get, post};
     use axum::Router;
+    use sqlx::postgres::PgPoolOptions;
     use tokio::net::TcpListener;
 
     use super::{
-        asset_path_for_uri, dashboard_client, dashboard_target, runtime_proxy_timeout,
-        same_origin_request, valid_runtime_path,
+        asset_path_for_uri, dashboard_client, dashboard_target, proxy_runtime_request,
+        runtime_proxy_timeout, same_origin_request, valid_runtime_path,
     };
+    use crate::config::{Config, DeploymentMode};
 
     #[test]
     fn console_proxy_only_leaves_invocation_deadlines_to_the_runtime() {
@@ -442,6 +446,41 @@ mod tests {
             ),
             (StatusCode::SEE_OTHER, "/login?auth_error=invalid")
         );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn self_hosted_runtime_requests_reach_the_dashboard_proxy() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                Router::new().route(
+                    "/api/runtime/project/demo/api-keys",
+                    post(|| async { (StatusCode::CREATED, "proxied") }),
+                ),
+            )
+            .await
+            .unwrap();
+        });
+
+        let mut config = Config::from_env().unwrap();
+        config.deployment_mode = DeploymentMode::SelfHosted;
+        config.apply_dashboard_addr(address.to_string()).unwrap();
+        let pool = PgPoolOptions::new()
+            .connect_lazy("postgres://vifu@127.0.0.1:1/vifu")
+            .unwrap();
+        let response = proxy_runtime_request(
+            State(crate::state(config, pool)),
+            Method::POST,
+            HeaderMap::new(),
+            "/api/runtime/project/demo/api-keys".parse().unwrap(),
+            Bytes::from_static(b"{}"),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::CREATED);
         server.abort();
     }
 
