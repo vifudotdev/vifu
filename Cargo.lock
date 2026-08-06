@@ -4057,7 +4057,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "vifu"
-version = "0.1.9"
+version = "0.1.10"
 dependencies = [
  "crossterm",
  "libc",
@@ -4076,7 +4076,7 @@ dependencies = [
 
 [[package]]
 name = "vifu-gateway"
-version = "0.1.3"
+version = "0.1.10"
 dependencies = [
  "base64",
  "futures-util",
@@ -4095,7 +4095,7 @@ dependencies = [
 
 [[package]]
 name = "vifu-mobile-ffi"
-version = "0.1.3"
+version = "0.1.10"
 dependencies = [
  "serde",
  "serde_json",
@@ -4109,7 +4109,7 @@ dependencies = [
 
 [[package]]
 name = "vifu-provider-llama"
-version = "0.1.3"
+version = "0.1.10"
 dependencies = [
  "encoding_rs",
  "llama-cpp-2",
@@ -4123,7 +4123,7 @@ dependencies = [
 
 [[package]]
 name = "vifu-runtime"
-version = "0.1.3"
+version = "0.1.10"
 dependencies = [
  "bevy_app",
  "bevy_ecs",
@@ -4139,7 +4139,7 @@ dependencies = [
 
 [[package]]
 name = "vifu-server"
-version = "0.1.3"
+version = "0.1.10"
 dependencies = [
  "axum",
  "axum-server",

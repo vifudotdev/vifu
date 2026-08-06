@@ -2,6 +2,16 @@
 
 All notable changes to Vifu are documented here.
 
+## 0.1.10 - 2026-08-06
+
+- Published a compatible Runtime, local Llama provider, Gateway, Server, and
+  CLI crate set so `cargo install vifu` resolves the same public Runtime API
+  that the CLI is built against.
+- Made long embedded invocations progress-aware throughout the Runtime,
+  Gateway, Server, and CLI monitoring views.
+- Pinned local model downloads to their declared revisions for repeatable
+  installations.
+
 ## 0.1.9 - 2026-08-05
 
 - Rebuilt the Apple Runtime binary with the Xcode 15 toolchain so iOS 17 and
