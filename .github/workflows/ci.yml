@@ -264,6 +264,10 @@ jobs:
           bun run build
           bun run build:console
           test -s target/vifu-console-assets/index.html
+      - name: Install focused browser
+        run: bunx playwright install --with-deps chromium
+      - name: Focused runtime console browser contract
+        run: bunx playwright test --config playwright.console.config.ts
       - name: Inspect public package artifacts
         run: npm pack --dry-run --json ./packages/protocol
 
@@ -282,9 +286,39 @@ jobs:
         run: bun install --frozen-lockfile
       - name: Install browser
         run: bunx playwright install --with-deps chromium
+      - uses: docker/setup-buildx-action@v3
+      - name: Build cached runtime image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          load: true
+          tags: vifu-runtime:local
+          cache-from: type=gha,scope=self-hosted-runtime
+          cache-to: type=gha,mode=max,scope=self-hosted-runtime
+      - name: Build cached dashboard image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: npm-packages/dashboard/Dockerfile
+          load: true
+          tags: vifu-dashboard:local
+          cache-from: type=gha,scope=self-hosted-dashboard
+          cache-to: type=gha,mode=max,scope=self-hosted-dashboard
       - name: Initialize self-hosted environment
         run: cp .env.example .env
       - name: Validate Compose configuration
         run: docker compose config --quiet
       - name: Agent Gateway, concurrency, restart, persistence, and browser E2E
         run: sh scripts/run-self-hosted-e2e.sh
+        env:
+          VIFU_E2E_PREBUILT_IMAGES: "1"
+          VIFU_E2E_RUNTIME_IMAGE: vifu-runtime:local
+      - name: Upload self-hosted browser failure artifacts
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: self-hosted-browser-failure
+          path: test-results
+          if-no-files-found: ignore
+          retention-days: 7

@@ -310,6 +310,7 @@ fi
 
 if [ "$managed_stack" = "1" ]; then
   compose_override="$state_dir/docker-compose.runtime-state.yml"
+  runtime_image="${VIFU_E2E_RUNTIME_IMAGE:-${compose_project}-runtime:local}"
   providers_config="$(sed 's/^/      /' "$gateway_home/providers.json")"
   if [ "$use_existing_openclaw" = "1" ]; then
     cat > "$compose_override" <<EOF
@@ -338,14 +339,14 @@ services:
       - vifu_runtime_state:/gateway-state
     command: ["sh", "-c", "cp /run/vifu/providers.json /server-state/providers.json && cp /run/vifu/providers.json /gateway-state/providers.json && chmod 0644 /server-state/providers.json /gateway-state/providers.json"]
   backend:
-    image: ${compose_project}-runtime:local
+    image: $runtime_image
     depends_on:
       runtime-state:
         condition: service_completed_successfully
     environment:
       VIFU_REQUEST_TIMEOUT_MS: "500"
   agent-gateway:
-    image: ${compose_project}-runtime:local
+    image: $runtime_image
     depends_on:
       openai-compatible-mock:
         condition: service_healthy
@@ -354,7 +355,7 @@ services:
         target: /home/vifu/.vifu/providers.json
         mode: 0444
   pairing-agent-gateway:
-    image: ${compose_project}-runtime:local
+    image: $runtime_image
     pull_policy: never
     depends_on:
       backend:
@@ -425,14 +426,14 @@ services:
       - vifu_runtime_state:/gateway-state
     command: ["sh", "-c", "cp /run/vifu/providers.json /server-state/providers.json && cp /run/vifu/providers.json /gateway-state/providers.json && chmod 0644 /server-state/providers.json /gateway-state/providers.json"]
   backend:
-    image: ${compose_project}-runtime:local
+    image: $runtime_image
     depends_on:
       runtime-state:
         condition: service_completed_successfully
     environment:
       VIFU_REQUEST_TIMEOUT_MS: "500"
   agent-gateway:
-    image: ${compose_project}-runtime:local
+    image: $runtime_image
     depends_on:
       openclaw-mock:
         condition: service_healthy
@@ -443,7 +444,7 @@ services:
         target: /home/vifu/.vifu/providers.json
         mode: 0444
   pairing-agent-gateway:
-    image: ${compose_project}-runtime:local
+    image: $runtime_image
     pull_policy: never
     depends_on:
       backend:
@@ -511,7 +512,11 @@ volumes:
 EOF
   fi
   chmod 0600 "$compose_override"
-  compose up -d --build --wait
+  if [ "${VIFU_E2E_PREBUILT_IMAGES:-0}" = "1" ]; then
+    compose up -d --wait
+  else
+    compose up -d --build --wait
+  fi
   export VIFU_E2E_API_URL="http://$docker_access_host:$VIFU_SERVER_PORT"
   export VIFU_E2E_DASHBOARD_URL="$VIFU_E2E_API_URL"
 else

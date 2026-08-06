@@ -213,6 +213,7 @@ services:
       retries: 20
 
   dashboard:
+    image: vifu-dashboard:local
     build:
       context: .
       dockerfile: npm-packages/dashboard/Dockerfile
