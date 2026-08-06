@@ -45,8 +45,13 @@ test("session remains valid across sidebar navigation on the bind address", asyn
   const projectLinks = projectSwitcher.locator(".project-menu-list a");
   await expect(projectLinks.first()).toBeVisible();
   expect(await projectLinks.count()).toBeGreaterThanOrEqual(2);
+  const targetAgentsHref = await projectLinks.nth(1).getAttribute("href");
+  expect(targetAgentsHref).toMatch(/^\/project\/[^/]+\/agents$/);
+  const targetProjectRoot = targetAgentsHref!.replace(/\/agents$/, "");
   await projectLinks.nth(1).click();
-  await expect(page).toHaveURL(/\/project\/[^/]+\/agents$/);
+  await expect(page).toHaveURL(new URL(targetAgentsHref!, page.url()).toString());
+  await expect(page.getByRole("link", { name: "Overview", exact: true }))
+    .toHaveAttribute("href", `${targetProjectRoot}/overview`);
 
   for (const [label, path, heading] of [
     ["Overview", "overview", "Overview"],
@@ -56,8 +61,13 @@ test("session remains valid across sidebar navigation on the bind address", asyn
     ["Traces", "logs", "Traces"],
     ["Settings", "settings", "Settings"],
   ] as const) {
-    await page.getByRole("link", { name: label, exact: true }).click();
-    await expect(page).toHaveURL(new RegExp(`/project/[^/]+/${path}$`));
+    const link = page.getByRole("link", { name: label, exact: true });
+    const href = `${targetProjectRoot}/${path}`;
+    await expect(link).toHaveAttribute("href", href);
+    await Promise.all([
+      page.waitForURL(new URL(href, page.url()).toString()),
+      link.click(),
+    ]);
     await expect(page.getByRole("heading", { level: 1, name: heading })).toBeVisible();
   }
 
