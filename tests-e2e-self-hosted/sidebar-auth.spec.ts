@@ -105,7 +105,15 @@ test("session remains valid across sidebar navigation on the bind address", asyn
   }
 
   await keyDialog.getByLabel("Name").fill(keyName);
+  const createKeyResponsePromise = page.waitForResponse((response) => (
+    response.request().method() === "POST"
+      && /^\/api\/runtime\/project\/[^/]+\/api-keys$/.test(new URL(response.url()).pathname)
+  ));
   await keyDialog.getByRole("button", { name: "Create key" }).click();
+  const createKeyResponse = await createKeyResponsePromise;
+  expect(createKeyResponse.status()).toBe(201);
+  const createKeyPayload = await createKeyResponse.json() as { apiKey?: { key?: unknown } };
+  expect(typeof createKeyPayload.apiKey?.key).toBe("string");
   await expect(keyDialog.getByRole("heading", { name: "Save your API key" })).toBeVisible();
   await expect(keyDialog.getByText("Shown once")).toBeVisible();
   await keyDialog.getByRole("button", { name: "Done" }).click();
