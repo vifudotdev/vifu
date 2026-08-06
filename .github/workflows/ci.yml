@@ -176,7 +176,7 @@ jobs:
           VIFU_GODOT_SWIFTGODOTKIT_PATH: ${{ github.workspace }}/vifu-godot-workspace/libgodot/SwiftGodotKit
           VIFU_GODOT_SWIFTGODOT_PATH: ${{ github.workspace }}/vifu-godot-workspace/libgodot/SwiftGodot
           SWIFTGODOTKIT_SWIFTGODOT_PATH: ${{ github.workspace }}/vifu-godot-workspace/libgodot/SwiftGodot
-          VIFU_SWIFT_LOCAL_ARTIFACT: ${{ github.workspace }}/vifu-godot-workspace/vifu/target/vifu-apple-ci/VifuMobileFFI.xcframework
+          VIFU_SWIFT_LOCAL_ARTIFACT: target/vifu-apple-ci/VifuMobileFFI.xcframework
         run: swift test --package-path integrations/godot/apple
 
   mobile-ffi-android:
