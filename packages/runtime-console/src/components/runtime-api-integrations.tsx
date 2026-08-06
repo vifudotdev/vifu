@@ -43,11 +43,15 @@ export function ApiIntegrationsView({
   profiles: AgentProfile[];
   browserApiBaseUrl: string;
 }) {
+  const [createdKeys, setCreatedKeys] = useState<ApiKeyRecord[]>([]);
   const agentOptions = profiles
     .filter((profile) => profile.projectId === project.id && !profile.archivedAt)
     .map((profile) => ({ profileId: profile.id, name: profile.name, slug: profile.slug }))
     .sort((left, right) => left.name.localeCompare(right.name));
-  const scopedKeys = keys.filter((key) => key.projectId === project.id);
+  const scopedKeys = [
+    ...createdKeys.filter((createdKey) => !keys.some((key) => key.id === createdKey.id)),
+    ...keys,
+  ].filter((key) => key.projectId === project.id);
   const [selectedProfileId, setSelectedProfileId] = useState(agentOptions[0]?.profileId ?? "");
   const [codeTab, setCodeTab] = useState<CodeTab>("curl");
   const [apiKeyFilter, setApiKeyFilter] = useState<ApiKeyFilter>("active");
@@ -174,6 +178,12 @@ export function ApiIntegrationsView({
                   agentOptions={agentOptions}
                   exampleModel={selectedProfile?.slug ?? agentOptions[0]?.slug ?? "agent-slug-or-id"}
                   projectBaseUrl={projectBaseUrl}
+                  onCreated={(apiKey) => {
+                    setCreatedKeys((current) => [
+                      apiKey,
+                      ...current.filter((currentKey) => currentKey.id !== apiKey.id),
+                    ]);
+                  }}
                 />
               </div>
             )}
@@ -337,11 +347,13 @@ function CreateApiKeyDialog({
   agentOptions,
   exampleModel,
   projectBaseUrl,
+  onCreated,
 }: {
   project: RuntimeProject;
   agentOptions: ApiKeyAgentOption[];
   exampleModel: string;
   projectBaseUrl: string;
+  onCreated: (apiKey: ApiKeyRecord) => void;
 }) {
   const host = useRuntimeConsoleHost();
   const router = useRuntimeConsoleRouter();
@@ -360,15 +372,18 @@ function CreateApiKeyDialog({
     setPending(true);
     setError(null);
     try {
-      const payload = await host.request<{ apiKey?: { key?: string } }>(`project/${project.slug}/api-keys`, "POST", {
+      const payload = await host.request<{ apiKey?: ApiKeyRecord }>(`project/${project.slug}/api-keys`, "POST", {
         projectId: project.id,
         name: name.trim() || readableDefaultKeyName(),
         agentScope: agentScopePayload(scopeMode, selectedProfileIds),
         permissions,
       });
-      const key = payload.apiKey?.key;
-      if (!key) throw new Error("The runtime did not return the new key.");
+      const apiKey = payload.apiKey;
+      const key = apiKey?.key;
+      if (!key || !apiKey) throw new Error("The runtime did not return the new key.");
+      const { key: _secret, ...record } = apiKey;
       setCreatedKey(key);
+      onCreated(record);
     } catch (nextError) {
       setError(nextError instanceof Error ? nextError.message : "Could not create the API key.");
     } finally {
