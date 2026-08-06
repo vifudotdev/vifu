@@ -72,7 +72,7 @@ test("session remains valid across sidebar navigation on the bind address", asyn
       await page.getByRole("button", { name: "Add provider" }).click();
       const providerDialog = page.getByRole("dialog");
       await expect(providerDialog.getByRole("heading", { name: "Choose a provider" })).toBeVisible();
-      await expect(providerDialog.getByText("Available providers", { exact: true })).toBeVisible();
+      await expect(providerDialog.getByRole("button", { name: "OpenAI Compatible E2E", exact: true })).toHaveCount(0);
       await expect(providerDialog.getByRole("button", { name: /OpenAI Compatible E2E Alt/ })).toBeVisible();
       await providerDialog.getByRole("button", { name: "Close" }).click();
     }
