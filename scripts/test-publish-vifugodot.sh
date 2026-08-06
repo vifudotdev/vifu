@@ -4,6 +4,12 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd -P)"
 VIFU_ROOT="$(cd "$SCRIPT_DIR/.." && pwd -P)"
+PACKAGE_VERSION="$(sed -n '/vifudotdev\/vifu\.git/ s/.*exact: "\([^"]*\)".*/\1/p' "$VIFU_ROOT/integrations/godot/apple/Package.swift")"
+if [[ ! "$PACKAGE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.-]+)?$ ]]; then
+    echo "VifuGodot Package.swift must pin a Vifu semantic version." >&2
+    exit 64
+fi
+RELEASE_TAG="v$PACKAGE_VERSION"
 mkdir -p "$VIFU_ROOT/.build"
 WORK_DIR="$(mktemp -d "$VIFU_ROOT/.build/vifugodot-publish-test.XXXXXX")"
 
@@ -41,7 +47,7 @@ git -C "$SOURCE_DIR" config tag.gpgSign false
 git -C "$SOURCE_DIR" config core.hooksPath /dev/null
 git -C "$SOURCE_DIR" add integrations scripts/publish-vifugodot.sh
 git -C "$SOURCE_DIR" commit -q -m "test: VifuGodot release source"
-git -C "$SOURCE_DIR" tag v0.1.9
+git -C "$SOURCE_DIR" tag "$RELEASE_TAG"
 
 SOURCE_COMMIT="$(git -C "$SOURCE_DIR" rev-parse HEAD)"
 SOURCE_TREE="$(git -C "$SOURCE_DIR" rev-parse HEAD:integrations/godot/apple)"
@@ -63,15 +69,15 @@ if [ "$subcommand" = "release" ]; then
     case "$operation" in
         view)
             if [ -f "$FAKE_STATE_DIR/release-created" ]; then
-                printf '{"tagName":"v0.1.9"}\n'
+                jq -cn --arg tag "$FAKE_RELEASE_TAG" '{tagName: $tag}'
                 exit 0
             fi
             exit 1
             ;;
         create)
-            [ "$1" = "v0.1.9" ]
+            [ "$1" = "$FAKE_RELEASE_TAG" ]
             printf 'created\n' > "$FAKE_STATE_DIR/release-created"
-            printf 'https://github.com/%s/releases/tag/v0.1.9\n' "$FAKE_TARGET_REPOSITORY"
+            printf 'https://github.com/%s/releases/tag/%s\n' "$FAKE_TARGET_REPOSITORY" "$FAKE_RELEASE_TAG"
             exit 0
             ;;
         *)
@@ -141,12 +147,13 @@ case "$method:$endpoint" in
         jq -cn --arg repository "$FAKE_TARGET_REPOSITORY" \
             '{repositories: [{full_name: $repository}]}'
         ;;
-    "GET:repos/$FAKE_TARGET_REPOSITORY/git/ref/tags/v0.1.9")
+    "GET:repos/$FAKE_TARGET_REPOSITORY/git/ref/tags/$FAKE_RELEASE_TAG")
         if [ ! -f "$FAKE_STATE_DIR/tag-created" ]; then
             exit 1
         fi
         jq -cn --arg sha "$FAKE_RELEASE_COMMIT" \
-            '{ref: "refs/tags/v0.1.9", object: {type: "commit", sha: $sha}}'
+            --arg tag "$FAKE_RELEASE_TAG" \
+            '{ref: ("refs/tags/" + $tag), object: {type: "commit", sha: $sha}}'
         ;;
     "GET:repos/$FAKE_TARGET_REPOSITORY/git/ref/heads/main")
         jq -cn --arg sha "$FAKE_PARENT_COMMIT" \
@@ -168,7 +175,7 @@ case "$method:$endpoint" in
         ;;
     "POST:repos/$FAKE_TARGET_REPOSITORY/git/commits")
         jq -e \
-            --arg message "release: VifuGodot v0.1.9 from Vifu $FAKE_SOURCE_COMMIT" \
+            --arg message "release: VifuGodot $FAKE_RELEASE_TAG from Vifu $FAKE_SOURCE_COMMIT" \
             --arg tree "$FAKE_SOURCE_TREE" \
             --arg parent "$FAKE_PARENT_COMMIT" \
             '.message == $message and .tree == $tree and .parents == [$parent] and (has("author") | not) and (has("committer") | not) and (has("signature") | not)' \
@@ -187,13 +194,14 @@ case "$method:$endpoint" in
             '{ref: "refs/heads/main", object: {type: "commit", sha: $sha}}'
         ;;
     "POST:repos/$FAKE_TARGET_REPOSITORY/git/refs")
-        [ "$(field_value ref)" = "refs/tags/v0.1.9" ]
+        [ "$(field_value ref)" = "refs/tags/$FAKE_RELEASE_TAG" ]
         [ "$(field_value sha)" = "$FAKE_RELEASE_COMMIT" ]
         printf 'created\n' > "$FAKE_STATE_DIR/tag-created"
         jq -cn --arg sha "$FAKE_RELEASE_COMMIT" \
-            '{ref: "refs/tags/v0.1.9", object: {type: "commit", sha: $sha}}'
+            --arg tag "$FAKE_RELEASE_TAG" \
+            '{ref: ("refs/tags/" + $tag), object: {type: "commit", sha: $sha}}'
         ;;
-    "GET:repos/$FAKE_TARGET_REPOSITORY/commits/v0.1.9")
+    "GET:repos/$FAKE_TARGET_REPOSITORY/commits/$FAKE_RELEASE_TAG")
         [ -f "$FAKE_STATE_DIR/tag-created" ]
         jq -cn \
             --arg sha "$FAKE_RELEASE_COMMIT" \
@@ -214,13 +222,14 @@ export FAKE_SOURCE_COMMIT="$SOURCE_COMMIT"
 export FAKE_SOURCE_TREE="$SOURCE_TREE"
 export FAKE_STATE_DIR="$STATE_DIR"
 export FAKE_TARGET_REPOSITORY="$TARGET_REPOSITORY"
+export FAKE_RELEASE_TAG="$RELEASE_TAG"
 
 (
     cd "$SOURCE_DIR"
     PATH="$FAKE_BIN:$PATH" \
     GH_TOKEN=fake-installation-token \
     VIFUGODOT_RELEASE_REPOSITORY="$TARGET_REPOSITORY" \
-        bash scripts/publish-vifugodot.sh v0.1.9
+        bash scripts/publish-vifugodot.sh "$RELEASE_TAG"
 )
 
 test -f "$STATE_DIR/main-updated"
@@ -234,7 +243,7 @@ test "$(wc -l < "$STATE_DIR/commits" | tr -d ' ')" = "1"
     PATH="$FAKE_BIN:$PATH" \
     GH_TOKEN=fake-installation-token \
     VIFUGODOT_RELEASE_REPOSITORY="$TARGET_REPOSITORY" \
-        bash scripts/publish-vifugodot.sh v0.1.9
+        bash scripts/publish-vifugodot.sh "$RELEASE_TAG"
 )
 test "$(wc -l < "$STATE_DIR/commits" | tr -d ' ')" = "1"
 
