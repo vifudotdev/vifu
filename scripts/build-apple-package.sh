@@ -12,14 +12,16 @@ FFI_LIBRARY="libvifu_mobile_ffi.a"
 FFI_FEATURES="${VIFU_APPLE_FFI_FEATURES:-local-llama,local-whisper}"
 UPDATE_BINDINGS=false
 MACOS_ONLY=false
+CI_ONLY=false
 
 usage() {
     cat <<'EOF'
-Usage: scripts/build-apple-package.sh [--update-bindings] [--macos-only]
+Usage: scripts/build-apple-package.sh [--update-bindings] [--macos-only] [--ci]
 
 Builds VifuMobileFFI.xcframework for iOS, iOS Simulator, and macOS.
 The optional flag refreshes the tracked UniFFI Swift wrapper.
 Use --macos-only for a smaller local macOS development artifact.
+Use --ci for an arm64 macOS and iOS Simulator verification artifact.
 EOF
 }
 
@@ -30,6 +32,9 @@ while [[ $# -gt 0 ]]; do
             ;;
         --macos-only)
             MACOS_ONLY=true
+            ;;
+        --ci)
+            CI_ONLY=true
             ;;
         -h|--help)
             usage
@@ -43,8 +48,15 @@ while [[ $# -gt 0 ]]; do
     shift
 done
 
+if [[ "$MACOS_ONLY" == "true" && "$CI_ONLY" == "true" ]]; then
+    echo "--macos-only and --ci cannot be used together." >&2
+    exit 2
+fi
+
 if [[ "$MACOS_ONLY" == "true" ]]; then
     required_targets=(aarch64-apple-darwin)
+elif [[ "$CI_ONLY" == "true" ]]; then
+    required_targets=(aarch64-apple-ios-sim aarch64-apple-darwin)
 else
     required_targets=(
         aarch64-apple-ios
@@ -136,6 +148,15 @@ if [[ "$MACOS_ONLY" == "true" ]]; then
     cp \
         "$TARGET_DIR/aarch64-apple-darwin/release/$FFI_LIBRARY" \
         "$macos_dir/libVifuMobileFFI.a"
+elif [[ "$CI_ONLY" == "true" ]]; then
+    simulator_dir="$work_dir/ios-simulator"
+    mkdir -p "$simulator_dir"
+    cp \
+        "$TARGET_DIR/aarch64-apple-ios-sim/release/$FFI_LIBRARY" \
+        "$simulator_dir/libVifuMobileFFI.a"
+    cp \
+        "$TARGET_DIR/aarch64-apple-darwin/release/$FFI_LIBRARY" \
+        "$macos_dir/libVifuMobileFFI.a"
 else
     device_dir="$work_dir/ios-device"
     simulator_dir="$work_dir/ios-simulator"
@@ -160,6 +181,11 @@ if [[ "$MACOS_ONLY" == "true" ]]; then
     xcodebuild -create-xcframework \
         -library "$macos_dir/libVifuMobileFFI.a" -headers "$headers_dir" \
         -output "$xcframework"
+elif [[ "$CI_ONLY" == "true" ]]; then
+    xcodebuild -create-xcframework \
+        -library "$simulator_dir/libVifuMobileFFI.a" -headers "$headers_dir" \
+        -library "$macos_dir/libVifuMobileFFI.a" -headers "$headers_dir" \
+        -output "$xcframework"
 else
     xcodebuild -create-xcframework \
         -library "$device_dir/libVifuMobileFFI.a" -headers "$headers_dir" \
@@ -170,7 +196,7 @@ fi
 
 # xcodebuild may emit AvailableLibraries in a different order between runs.
 # Normalize the plist so SwiftPM receives a reproducible archive checksum.
-if [[ "$MACOS_ONLY" != "true" ]]; then
+if [[ "$MACOS_ONLY" != "true" && "$CI_ONLY" != "true" ]]; then
 cat > "$xcframework/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -255,6 +281,9 @@ verify_architectures() {
 }
 
 if [[ "$MACOS_ONLY" == "true" ]]; then
+    verify_architectures "$macos_dir/libVifuMobileFFI.a" arm64
+elif [[ "$CI_ONLY" == "true" ]]; then
+    verify_architectures "$simulator_dir/libVifuMobileFFI.a" arm64
     verify_architectures "$macos_dir/libVifuMobileFFI.a" arm64
 else
     verify_architectures "$device_dir/libVifuMobileFFI.a" arm64

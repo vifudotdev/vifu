@@ -18,6 +18,55 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  mobile-changes:
+    name: Mobile change scope
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      apple: ${{ steps.scope.outputs.apple }}
+      android: ${{ steps.scope.outputs.android }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Detect mobile changes
+        id: scope
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          base="$BASE_SHA"
+          head="$GITHUB_SHA"
+          if [[ -z "$base" ]] \
+            || [[ "$base" =~ ^0+$ ]] \
+            || ! git cat-file -e "$base^{commit}"; then
+            base="$(git rev-list --max-parents=0 "$head" | tail -1)"
+          fi
+
+          apple=false
+          android=false
+          while IFS= read -r changed_path; do
+            case "$changed_path" in
+              Cargo.toml|Cargo.lock|rust-toolchain|rust-toolchain.toml|.cargo/*|crates/vifu-mobile-ffi/*|crates/vifu-runtime/*|crates/vifu-gateway/*|crates/vifu-provider-llama/*)
+                apple=true
+                android=true
+                ;;
+              Package.swift|apple/*|integrations/godot/apple/*|scripts/build-apple-package.sh)
+                apple=true
+                ;;
+              scripts/build-android-package.sh)
+                android=true
+                ;;
+              .github/workflows/ci.yml)
+                apple=true
+                android=true
+                ;;
+            esac
+          done < <(git diff --name-only "$base" "$head")
+
+          echo "apple=$apple" >> "$GITHUB_OUTPUT"
+          echo "android=$android" >> "$GITHUB_OUTPUT"
+
   rust:
     name: Rust
     runs-on: ubuntu-latest
@@ -106,6 +155,13 @@ jobs:
 
   mobile-ffi-apple:
     name: Mobile FFI (Apple)
+    needs:
+      - mobile-changes
+      - rust
+      - rust-packages
+      - dashboard
+      - self-hosted-docker
+    if: needs.mobile-changes.outputs.apple == 'true'
     runs-on: macos-14
     timeout-minutes: 60
     steps:
@@ -118,12 +174,13 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: mobile-ffi-apple
+          workspaces: . -> target/vifu-apple-ci-build
       - name: Build and verify Swift package
         env:
-          CARGO_TARGET_DIR: ${{ runner.temp }}/vifu-apple-target
+          CARGO_TARGET_DIR: target/vifu-apple-ci-build
           VIFU_APPLE_DIST_DIR: ${{ runner.temp }}/dist
         run: |
-          scripts/build-apple-package.sh
+          scripts/build-apple-package.sh --ci
           mkdir -p target/vifu-apple-ci
           cp -R \
             "$RUNNER_TEMP/dist/VifuMobileFFI.xcframework" \
@@ -181,6 +238,13 @@ jobs:
 
   mobile-ffi-android:
     name: Mobile FFI (Android)
+    needs:
+      - mobile-changes
+      - rust
+      - rust-packages
+      - dashboard
+      - self-hosted-docker
+    if: needs.mobile-changes.outputs.android == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
