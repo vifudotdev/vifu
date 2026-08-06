@@ -137,9 +137,15 @@ jobs:
               -derivedDataPath "$RUNNER_TEMP/vifu-swift-ios-derived" \
               CODE_SIGNING_ALLOWED=NO \
               build
+      - uses: actions/upload-artifact@v7
+        with:
+          name: mobile-ffi-apple-framework
+          path: target/vifu-apple-ci/VifuMobileFFI.xcframework
+          if-no-files-found: error
 
   godot-bridge-apple:
     name: Godot bridge (Apple)
+    needs: mobile-ffi-apple
     runs-on: macos-14
     timeout-minutes: 30
     steps:
@@ -159,6 +165,10 @@ jobs:
           ref: 6633cb9044400291ec56ad67552dddb34a3870e5
           path: vifu-godot-workspace/libgodot/SwiftGodotKit
           persist-credentials: false
+      - uses: actions/download-artifact@v8
+        with:
+          name: mobile-ffi-apple-framework
+          path: vifu-godot-workspace/vifu/target/vifu-apple-ci
       - name: Test VifuGodot package
         working-directory: vifu-godot-workspace/vifu
         env:
@@ -166,6 +176,7 @@ jobs:
           VIFU_GODOT_SWIFTGODOTKIT_PATH: ${{ github.workspace }}/vifu-godot-workspace/libgodot/SwiftGodotKit
           VIFU_GODOT_SWIFTGODOT_PATH: ${{ github.workspace }}/vifu-godot-workspace/libgodot/SwiftGodot
           SWIFTGODOTKIT_SWIFTGODOT_PATH: ${{ github.workspace }}/vifu-godot-workspace/libgodot/SwiftGodot
+          VIFU_SWIFT_LOCAL_ARTIFACT: ${{ github.workspace }}/vifu-godot-workspace/vifu/target/vifu-apple-ci/VifuMobileFFI.xcframework
         run: swift test --package-path integrations/godot/apple
 
   mobile-ffi-android:
