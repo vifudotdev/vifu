@@ -356,7 +356,6 @@ function CreateApiKeyDialog({
   onCreated: (apiKey: ApiKeyRecord) => void;
 }) {
   const host = useRuntimeConsoleHost();
-  const router = useRuntimeConsoleRouter();
   const dialogRef = useRef<HTMLDialogElement>(null);
   const [name, setName] = useState("");
   const [scopeMode, setScopeMode] = useState<ApiKeyAgentScope["mode"]>("all");
@@ -407,9 +406,7 @@ function CreateApiKeyDialog({
   }
 
   function close() {
-    const refresh = createdKey !== null;
     reset();
-    if (refresh) router.refresh();
   }
 
   return (
@@ -628,6 +625,7 @@ function ApiKeyAgentScopeFields({
               <label key={option.profileId}>
                 <input
                   type="checkbox"
+                  value={option.profileId}
                   checked={selectedProfileIds.includes(option.profileId)}
                   onChange={() => toggleProfile(option.profileId)}
                 />

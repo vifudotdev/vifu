@@ -1672,6 +1672,88 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn project_api_key_creation_preserves_selected_agent_scope() {
+        let (storage, path) = temp_sqlite_storage("selected-api-key-scope").await;
+        let project_id = uuid::Uuid::new_v4();
+        let profile_id = uuid::Uuid::new_v4();
+        crate::db::create_project(
+            &storage,
+            crate::db::NewProject {
+                id: project_id,
+                owner_user_id: None,
+                slug: "selected-scope",
+                name: "Selected scope",
+                description: None,
+                gateway_id: "project-selected-scope",
+                binding_ids: &[],
+            },
+        )
+        .await
+        .unwrap();
+        crate::db::create_profile(
+            &storage,
+            profile_id,
+            project_id,
+            "selected-agent",
+            "Selected agent",
+            None,
+        )
+        .await
+        .unwrap();
+
+        let config = Config::from_env().unwrap();
+        let admin_key = config.admin_key.clone();
+        let router = app(state_with_storage(config, storage.clone()));
+        let created = router
+            .clone()
+            .oneshot(
+                Request::post("/v1/project/selected-scope/api-keys")
+                    .header("authorization", format!("Bearer {admin_key}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "projectId": project_id,
+                            "name": "Selected key",
+                            "agentScope": {
+                                "mode": "selected",
+                                "profileIds": [profile_id],
+                            },
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(created.status(), StatusCode::CREATED);
+        let created = response_json(created).await;
+        assert_eq!(created["apiKey"]["agentScope"]["mode"], "selected");
+        assert_eq!(
+            created["apiKey"]["agentScope"]["profileIds"][0],
+            profile_id.to_string()
+        );
+
+        let listed = router
+            .oneshot(
+                Request::get("/v1/project/selected-scope/api-keys")
+                    .header("authorization", format!("Bearer {admin_key}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(listed.status(), StatusCode::OK);
+        let listed = response_json(listed).await;
+        assert_eq!(listed["apiKeys"][0]["agentScope"]["mode"], "selected");
+        assert_eq!(
+            listed["apiKeys"][0]["agentScope"]["profileIds"][0],
+            profile_id.to_string()
+        );
+
+        close_temp_storage(storage, path).await;
+    }
+
+    #[tokio::test]
     async fn project_profile_delete_route_is_registered() {
         let config = Config::from_env().unwrap();
         let pool = PgPoolOptions::new()

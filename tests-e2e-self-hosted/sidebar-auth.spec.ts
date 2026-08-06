@@ -96,8 +96,11 @@ test("session remains valid across sidebar navigation on the bind address", asyn
   await expect(keyDialog.getByPlaceholder("Search agents")).toBeVisible();
   const agentOptions = keyDialog.locator(".api-key-agent-options input[type=checkbox]");
   const hasAgentOptions = await agentOptions.count() > 0;
+  let selectedProfileId: string | null = null;
   if (hasAgentOptions) {
     await expect(agentOptions.first()).toBeVisible();
+    selectedProfileId = await agentOptions.first().getAttribute("value");
+    expect(selectedProfileId).toBeTruthy();
     await agentOptions.first().check();
     await expect(keyDialog.getByText("1 selected", { exact: true })).toBeVisible();
   } else {
@@ -112,8 +115,24 @@ test("session remains valid across sidebar navigation on the bind address", asyn
   await keyDialog.getByRole("button", { name: "Create key" }).click();
   const createKeyResponse = await createKeyResponsePromise;
   expect(createKeyResponse.status()).toBe(201);
-  const createKeyPayload = await createKeyResponse.json() as { apiKey?: { key?: unknown } };
+  const createKeyRequest = createKeyResponse.request().postDataJSON() as {
+    agentScope?: { mode?: unknown; profileIds?: unknown };
+  };
+  expect(createKeyRequest.agentScope?.mode).toBe(hasAgentOptions ? "selected" : "all");
+  if (hasAgentOptions) {
+    expect(createKeyRequest.agentScope?.profileIds).toEqual([selectedProfileId]);
+  }
+  const createKeyPayload = await createKeyResponse.json() as {
+    apiKey?: {
+      key?: unknown;
+      agentScope?: { mode?: unknown; profileIds?: unknown };
+    };
+  };
   expect(typeof createKeyPayload.apiKey?.key).toBe("string");
+  expect(createKeyPayload.apiKey?.agentScope?.mode).toBe(hasAgentOptions ? "selected" : "all");
+  if (hasAgentOptions) {
+    expect(createKeyPayload.apiKey?.agentScope?.profileIds).toEqual([selectedProfileId]);
+  }
   await expect(keyDialog.getByRole("heading", { name: "Save your API key" })).toBeVisible();
   await expect(keyDialog.getByText("Shown once")).toBeVisible();
   await keyDialog.getByRole("button", { name: "Done" }).click();
