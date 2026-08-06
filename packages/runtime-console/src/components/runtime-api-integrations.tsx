@@ -369,7 +369,6 @@ function CreateApiKeyDialog({
       const key = payload.apiKey?.key;
       if (!key) throw new Error("The runtime did not return the new key.");
       setCreatedKey(key);
-      router.refresh();
     } catch (nextError) {
       setError(nextError instanceof Error ? nextError.message : "Could not create the API key.");
     } finally {
@@ -392,12 +391,18 @@ function CreateApiKeyDialog({
     setError(null);
   }
 
+  function close() {
+    const refresh = createdKey !== null;
+    reset();
+    if (refresh) router.refresh();
+  }
+
   return (
     <>
       <button className="primary-button" type="button" onClick={open}>
         <Plus aria-hidden="true" />Create key
       </button>
-      <dialog className="api-key-dialog" ref={dialogRef} onClose={reset}>
+      <dialog className="api-key-dialog" ref={dialogRef} onClose={close}>
         <div className="api-dialog-shell api-key-dialog-shell">
           <header>
             <div>
