@@ -163,7 +163,14 @@ test("session remains valid across sidebar navigation on the bind address", asyn
   await expect(keyRow).toContainText("Chat completions, Embeddings, Agents read, Project write");
 
   page.once("dialog", (dialog) => dialog.accept());
+  const revokeKeyResponsePromise = page.waitForResponse((response) => (
+    response.request().method() === "POST"
+      && /^\/api\/runtime\/project\/[^/]+\/api-keys\/[^/]+\/revoke$/.test(new URL(response.url()).pathname)
+  ));
   await page.getByRole("button", { name: `Revoke ${keyName}` }).click();
+  const revokeKeyResponse = await revokeKeyResponsePromise;
+  expect(revokeKeyResponse.status()).toBe(200);
+  await expect(page.getByRole("cell", { name: keyName, exact: true })).toHaveCount(0);
   const revokedTab = page.getByRole("tab", { name: /^Revoked / });
   await expect(revokedTab).toBeVisible();
   await revokedTab.click();
