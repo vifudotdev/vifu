@@ -54,6 +54,103 @@ pub struct ServerEndpointIdentity {
     pub certificate_sha256: Option<String>,
 }
 
+impl ServerEndpointIdentity {
+    pub fn gateway_pairing_uri(&self, authorization_token: &str) -> Result<String, String> {
+        let authorization_token = authorization_token.trim();
+        if !(16..=512).contains(&authorization_token.len())
+            || authorization_token.chars().any(char::is_control)
+        {
+            return Err("Gateway authorization token is invalid".to_string());
+        }
+        let mut pairing = reqwest::Url::parse("vifu://gateway/enroll")
+            .map_err(|error| format!("Gateway pairing URI is invalid: {error}"))?;
+        {
+            let mut query = pairing.query_pairs_mut();
+            query
+                .append_pair("server", &self.server_url)
+                .append_pair("token", authorization_token);
+            if let (Some(certificate), Some(fingerprint)) = (
+                self.certificate_der_base64.as_deref(),
+                self.certificate_sha256.as_deref(),
+            ) {
+                query
+                    .append_pair("certificate", certificate)
+                    .append_pair("fingerprint", fingerprint);
+            }
+        }
+        Ok(pairing.to_string())
+    }
+
+    pub fn gateway_pairing_terminal_qr(&self, authorization_token: &str) -> Result<String, String> {
+        let uri = self.gateway_pairing_compact_uri(authorization_token)?;
+        let code = qrcode::QrCode::with_error_correction_level(uri.as_bytes(), qrcode::EcLevel::L)
+            .map_err(|error| format!("Gateway pairing QR code could not be generated: {error}"))?;
+        Ok(compact_terminal_qr(&code))
+    }
+
+    fn gateway_pairing_compact_uri(&self, authorization_token: &str) -> Result<String, String> {
+        let full_uri = self.gateway_pairing_uri(authorization_token)?;
+        let mut uri = reqwest::Url::parse(&full_uri)
+            .map_err(|error| format!("Gateway pairing URI is invalid: {error}"))?;
+        if self.certificate_der_base64.is_some() && self.certificate_sha256.is_some() {
+            let pairs = uri
+                .query_pairs()
+                .filter(|(key, _)| key != "certificate")
+                .map(|(key, value)| (key.into_owned(), value.into_owned()))
+                .collect::<Vec<_>>();
+            uri.query_pairs_mut().clear().extend_pairs(pairs);
+        }
+        let query = uri
+            .query()
+            .ok_or_else(|| "Gateway pairing URI has no payload".to_string())?;
+        Ok(format!("https://vifu.ai/pair#{query}"))
+    }
+}
+
+fn compact_terminal_qr(code: &qrcode::QrCode) -> String {
+    const QUIET_ZONE: usize = 4;
+    let width = code.width();
+    let padded_width = width + QUIET_ZONE * 2;
+    let padded_height = width + QUIET_ZONE * 2;
+    let is_dark = |x: usize, y: usize| {
+        x >= QUIET_ZONE
+            && y >= QUIET_ZONE
+            && x < width + QUIET_ZONE
+            && y < width + QUIET_ZONE
+            && code[(x - QUIET_ZONE, y - QUIET_ZONE)] == qrcode::types::Color::Dark
+    };
+    let mut output = String::new();
+    for y in (0..padded_height).step_by(2) {
+        for x in (0..padded_width).step_by(2) {
+            let bits = u8::from(is_dark(x, y)) << 3
+                | u8::from(is_dark(x + 1, y)) << 2
+                | u8::from(is_dark(x, y + 1)) << 1
+                | u8::from(is_dark(x + 1, y + 1));
+            output.push(match bits {
+                0b0000 => ' ',
+                0b1000 => '▘',
+                0b0100 => '▝',
+                0b1100 => '▀',
+                0b0010 => '▖',
+                0b1010 => '▌',
+                0b0110 => '▞',
+                0b1110 => '▛',
+                0b0001 => '▗',
+                0b1001 => '▚',
+                0b0101 => '▐',
+                0b1101 => '▜',
+                0b0011 => '▄',
+                0b1011 => '▙',
+                0b0111 => '▟',
+                0b1111 => '█',
+                _ => unreachable!(),
+            });
+        }
+        output.push('\n');
+    }
+    output
+}
+
 pub async fn connect(config: Config) -> Result<AppState, ApiError> {
     let pool = db::connect(&config.database_url, config.database_max_connections)
         .await
@@ -645,7 +742,7 @@ mod tests {
 
     use super::{
         app, load_server_endpoint_identity, state, state_with_storage, state_with_storage_and_auth,
-        AppState,
+        AppState, ServerEndpointIdentity,
     };
     use crate::auth::{
         AccessTokenAuth, AccessTokenAuthFuture, ApplicationAuth, Identity, Operation,
@@ -653,6 +750,82 @@ mod tests {
     use crate::config::{Config, DeploymentMode};
     use crate::db::Storage;
     use crate::error::ApiError;
+
+    #[test]
+    fn gateway_pairing_uri_contains_the_endpoint_token_and_pinned_certificate() {
+        let endpoint = ServerEndpointIdentity {
+            server_url: "https://192.168.1.20:6790".to_string(),
+            certificate_der_base64: Some("certificate+/=".to_string()),
+            certificate_sha256: Some("sha256:abcdef".to_string()),
+        };
+        let pairing = endpoint
+            .gateway_pairing_uri(
+                "vifu_gb_0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            )
+            .unwrap();
+        let parsed = reqwest::Url::parse(&pairing).unwrap();
+        let query = parsed
+            .query_pairs()
+            .collect::<std::collections::HashMap<_, _>>();
+
+        assert_eq!(query.get("server").unwrap(), "https://192.168.1.20:6790");
+        assert!(query.get("token").unwrap().starts_with("vifu_gb_"));
+        assert_eq!(query.get("certificate").unwrap(), "certificate+/=");
+        assert_eq!(query.get("fingerprint").unwrap(), "sha256:abcdef");
+    }
+
+    #[test]
+    fn gateway_pairing_terminal_qr_is_compact() {
+        let endpoint = ServerEndpointIdentity {
+            server_url: "https://192.0.2.20:6790".to_string(),
+            certificate_der_base64: Some("synthetic-certificate".repeat(12)),
+            certificate_sha256: Some("sha256:synthetic-fingerprint".to_string()),
+        };
+        let terminal_qr = endpoint
+            .gateway_pairing_terminal_qr(
+                "vifu_gb_0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            )
+            .unwrap();
+        let compact_uri = endpoint
+            .gateway_pairing_compact_uri(
+                "vifu_gb_0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            )
+            .unwrap();
+
+        assert!(terminal_qr.lines().count() > 10);
+        assert!(terminal_qr.lines().count() <= 40);
+        let bridge = reqwest::Url::parse(&compact_uri).unwrap();
+        assert_eq!(
+            bridge.as_str().split('#').next(),
+            Some("https://vifu.ai/pair")
+        );
+        assert!(bridge.query().is_none());
+        assert!(bridge.fragment().is_some());
+        assert!(compact_uri.contains("fingerprint="));
+        assert!(!compact_uri.contains("certificate="));
+        assert!(terminal_qr.lines().all(|line| {
+            line.chars().all(|character| {
+                matches!(
+                    character,
+                    ' ' | '\u{2598}'
+                        | '\u{259d}'
+                        | '\u{2580}'
+                        | '\u{2596}'
+                        | '\u{258c}'
+                        | '\u{259e}'
+                        | '\u{259b}'
+                        | '\u{2597}'
+                        | '\u{259a}'
+                        | '\u{2590}'
+                        | '\u{259c}'
+                        | '\u{2584}'
+                        | '\u{2599}'
+                        | '\u{259f}'
+                        | '\u{2588}'
+                )
+            })
+        }));
+    }
 
     #[tokio::test]
     async fn health_is_public_and_does_not_require_database_readiness() {
@@ -708,6 +881,17 @@ mod tests {
         );
         assert_eq!(restored.certificate_sha256, first.certificate_sha256);
         assert!(sidecar.is_file());
+        let qr = restored
+            .gateway_pairing_terminal_qr(
+                "vifu_gb_0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            )
+            .unwrap();
+        let qr_width = qr.lines().map(|line| line.chars().count()).max().unwrap();
+        let qr_height = qr.lines().count();
+        assert!(
+            qr_width <= 32 && qr_height <= 32,
+            "generated LAN pairing QR is too large for a normal terminal: {qr_width}x{qr_height}"
+        );
         std::fs::remove_dir_all(directory).unwrap();
     }
 

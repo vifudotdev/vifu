@@ -2756,23 +2756,9 @@ async fn create_agent_gateway_enrollment_for_deployment(
 }
 
 fn agent_gateway_pairing(endpoint: &crate::ServerEndpointIdentity, token: &str) -> Value {
-    let mut pairing = reqwest::Url::parse("vifu://gateway/enroll")
-        .expect("static Vifu pairing URL must be valid");
-    {
-        let mut query = pairing.query_pairs_mut();
-        query
-            .append_pair("server", &endpoint.server_url)
-            .append_pair("token", token);
-        if let (Some(certificate), Some(fingerprint)) = (
-            endpoint.certificate_der_base64.as_deref(),
-            endpoint.certificate_sha256.as_deref(),
-        ) {
-            query
-                .append_pair("certificate", certificate)
-                .append_pair("fingerprint", fingerprint);
-        }
-    }
-    let pairing_uri = pairing.to_string();
+    let pairing_uri = endpoint
+        .gateway_pairing_uri(token)
+        .expect("generated Gateway enrollment token must be valid");
     let qr_svg = qrcode::QrCode::new(pairing_uri.as_bytes())
         .map(|code| {
             code.render::<qrcode::render::svg::Color<'_>>()
