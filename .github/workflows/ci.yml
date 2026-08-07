@@ -225,7 +225,7 @@ jobs:
       - uses: actions/download-artifact@v8
         with:
           name: mobile-ffi-apple-framework
-          path: vifu-godot-workspace/vifu/target/vifu-apple-ci
+          path: vifu-godot-workspace/vifu/target/vifu-apple-ci/VifuMobileFFI.xcframework
       - name: Test VifuGodot package
         working-directory: vifu-godot-workspace/vifu
         env:
