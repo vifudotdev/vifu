@@ -328,10 +328,10 @@ jobs:
           bun run build
           bun run build:console
           test -s target/vifu-console-assets/index.html
-      - name: Install focused browser
-        run: bunx playwright install --with-deps chromium
       - name: Focused runtime console browser contract
         run: bunx playwright test --config playwright.console.config.ts
+        env:
+          VIFU_PLAYWRIGHT_CHANNEL: chrome
       - name: Inspect public package artifacts
         run: npm pack --dry-run --json ./packages/protocol
 
@@ -348,8 +348,6 @@ jobs:
           bun-version: 1.3.9
       - name: Install dashboard test dependencies
         run: bun install --frozen-lockfile
-      - name: Install browser
-        run: bunx playwright install --with-deps chromium
       - uses: docker/setup-buildx-action@v3
       - name: Build cached runtime image
         uses: docker/build-push-action@v6
@@ -378,6 +376,7 @@ jobs:
         env:
           VIFU_E2E_PREBUILT_IMAGES: "1"
           VIFU_E2E_RUNTIME_IMAGE: vifu-runtime:local
+          VIFU_PLAYWRIGHT_CHANNEL: chrome
       - name: Upload self-hosted browser failure artifacts
         if: failure()
         uses: actions/upload-artifact@v7

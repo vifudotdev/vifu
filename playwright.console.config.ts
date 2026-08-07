@@ -1,5 +1,7 @@
 import { defineConfig, devices } from "@playwright/test";
 
+const browserChannel = process.env.VIFU_PLAYWRIGHT_CHANNEL;
+
 export default defineConfig({
   testDir: "./tests-e2e-console",
   timeout: 30_000,
@@ -16,6 +18,9 @@ export default defineConfig({
   },
   projects: [{
     name: "chromium",
-    use: { ...devices["Desktop Chrome"] },
+    use: {
+      ...devices["Desktop Chrome"],
+      ...(browserChannel ? { channel: browserChannel } : {}),
+    },
   }],
 });
