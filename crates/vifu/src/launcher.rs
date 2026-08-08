@@ -334,10 +334,8 @@ async fn run_combined_tui(config: LoadedRuntimeConfig) -> Result<(), String> {
     let server_monitor = server_state.monitor.subscribe();
     let monitor_bridge = tokio::spawn(bridge_server_monitor(server_monitor, monitor_tx.clone()));
     let (local_monitor_tx, local_monitor_rx) = runtime_event_channel();
-    let local_monitor_bridge = tokio::spawn(bridge_local_gateway_diagnostics(
-        local_monitor_rx,
-        monitor_tx,
-    ));
+    let local_monitor_bridge =
+        tokio::spawn(bridge_local_gateway_monitor(local_monitor_rx, monitor_tx));
     let gateway_control = gateway::GatewayControl::new();
     let optimization = gateway_control.optimization();
     let device_pairing = gateway_control.device_pairing();
@@ -638,21 +636,25 @@ fn runtime_telemetry_io_event(
     })
 }
 
-async fn bridge_local_gateway_diagnostics(
+async fn bridge_local_gateway_monitor(
     mut receiver: crate::monitor::RuntimeEventReceiver,
     sender: RuntimeEventSender,
 ) {
     while let Some(event) = receiver.recv().await {
-        if let Some(event) = local_gateway_diagnostic_event(event) {
+        if let Some(event) = local_gateway_monitor_event(event) {
             let _ = sender.send(event);
         }
     }
 }
 
-fn local_gateway_diagnostic_event(event: RuntimeEvent) -> Option<RuntimeEvent> {
+fn local_gateway_monitor_event(event: RuntimeEvent) -> Option<RuntimeEvent> {
     match event {
-        RuntimeEvent::BackendsChanged(_) | RuntimeEvent::LoadedModelsChanged(_) => Some(event),
-        _ => None,
+        // The Server owns the gateway roster and namespaces its provider IDs.
+        // Everything else is only available from the local Gateway for normal
+        // OpenAI-compatible invocations; filtering those events makes the TUI
+        // appear idle even while requests are running.
+        RuntimeEvent::AgentsRegistered(_) => None,
+        _ => Some(event),
     }
 }
 
@@ -685,7 +687,7 @@ async fn run_gateway_only_tui(config: LoadedRuntimeConfig) -> Result<(), String>
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let (monitor_tx, monitor_rx) = runtime_event_channel();
     let (local_monitor_tx, local_monitor_rx) = runtime_event_channel();
-    let local_monitor_bridge = tokio::spawn(bridge_local_gateway_diagnostics(
+    let local_monitor_bridge = tokio::spawn(bridge_local_gateway_monitor(
         local_monitor_rx,
         monitor_tx.clone(),
     ));
@@ -1057,7 +1059,7 @@ mod tests {
 
     use super::{
         apply_local_server_certificate, auto_browser_policy, join_result, local_console_url,
-        local_gateway_diagnostic_event, monitor_agent_id, monitor_credential_from,
+        local_gateway_monitor_event, monitor_agent_id, monitor_credential_from,
         runtime_telemetry_io_event, start_plan, wait_for_console, RuntimeEvent, RuntimeHealth,
         StartPlan,
     };
@@ -1188,16 +1190,33 @@ mod tests {
     }
 
     #[test]
-    fn local_gateway_bridge_forwards_only_device_diagnostics() {
+    fn local_gateway_bridge_forwards_invocation_activity_but_not_the_raw_roster() {
         assert!(matches!(
-            local_gateway_diagnostic_event(RuntimeEvent::LoadedModelsChanged(2)),
+            local_gateway_monitor_event(RuntimeEvent::LoadedModelsChanged(2)),
             Some(RuntimeEvent::LoadedModelsChanged(2))
         ));
-        assert!(local_gateway_diagnostic_event(RuntimeEvent::HealthChanged {
-            health: RuntimeHealth::Live,
-            message: None,
-        })
-        .is_none());
+        assert!(matches!(
+            local_gateway_monitor_event(RuntimeEvent::HealthChanged {
+                health: RuntimeHealth::Live,
+                message: None,
+            }),
+            Some(RuntimeEvent::HealthChanged {
+                health: RuntimeHealth::Live,
+                message: None,
+            })
+        ));
+        assert!(local_gateway_monitor_event(RuntimeEvent::AgentsRegistered(Vec::new())).is_none());
+        assert!(matches!(
+            local_gateway_monitor_event(RuntimeEvent::InvocationCancelled {
+                invocation_id: uuid::Uuid::nil(),
+            }),
+            Some(RuntimeEvent::InvocationCancelled { invocation_id })
+                if invocation_id == uuid::Uuid::nil()
+        ));
+        assert!(matches!(
+            local_gateway_monitor_event(RuntimeEvent::MonitorEventsDropped { dropped_events: 3 }),
+            Some(RuntimeEvent::MonitorEventsDropped { dropped_events: 3 })
+        ));
     }
 
     #[test]
