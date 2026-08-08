@@ -19,12 +19,11 @@ build. The copy-pasteable commands and `LIBCLANG_PATH` troubleshooting are in
 ## Source Development
 
 The first run needs no Vifu configuration. Install the workspace dependencies,
-build the official Console bundle, then start Vifu:
+then build the official Console bundle and start Vifu with one Cargo command:
 
 ```bash
 bun install --frozen-lockfile
-bun run build:console
-cargo run -p vifu
+cargo vifu
 ```
 
 The default build includes the llama.cpp and Local Whisper Providers. Vifu
@@ -34,6 +33,11 @@ on loopback, and opens the live Runtime TUI in an interactive terminal. Press
 active requests, or a session route override trigger confirmation. Runtime and
 Gateway state is stored in `~/.vifu/runtime.sqlite`; local Server data is stored
 in `~/.vifu/vifu.sqlite`.
+
+`cargo vifu` is the repository's complete source-development command. It runs
+`bun run build:console` and then `cargo run -p vifu`. Cargo run options are
+forwarded, so `cargo vifu --release` starts a release build. Pass Vifu options
+after `--`, for example `cargo vifu -- -c server.address=https://192.0.2.10:6790`.
 
 `bun run build:console` compiles the shared React Console into
 `target/vifu-console-assets/`. Cargo embeds the files already present in that

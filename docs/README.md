@@ -27,6 +27,8 @@ stable endpoints, Gateway transport, and traces.
 - [Embed the Runtime](runtime-embedding.md)
 - [Runtime API](https://docs.rs/vifu-runtime)
 - [Gateway crate](../crates/vifu-gateway/README.md)
+- [VifuGodot for Apple hosts](../integrations/godot/apple/README.md)
+- [Mobile FFI for Apple and Android hosts](../crates/vifu-mobile-ffi/README.md)
 
 ## Reference
 

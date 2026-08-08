@@ -156,8 +156,11 @@ runtime.cancel_invocation(&handle)?;
 ```
 
 Apple hosts use the equivalent `VifuEmbeddedRuntime` UniFFI object and implement
-`VifuAgentProvider` as a native callback. Generated Kotlin/Android bindings are
-experimental and follow the same contract.
+`VifuAgentProvider` as a native callback. Android hosts use the generated Kotlin
+bindings and JNI library, which follow the same contract. The repository
+currently distributes Android as a buildable `arm64-v8a` Gradle source-set
+rather than a Maven artifact; see the
+[`vifu-mobile-ffi` guide](../crates/vifu-mobile-ffi/README.md).
 
 ## Connect An Embedded Runtime To Vifu Server
 

@@ -30,6 +30,14 @@ and opens the live Runtime TUI. Press `B` to open the Dashboard for persistent
 Traces and Comparisons. Vifu keeps serving until you quit the TUI. The local
 Dashboard is normally available at `http://127.0.0.1:6790`.
 
+To run from a source checkout, install the workspace dependencies once and use
+the repository command that builds the Console before starting Vifu:
+
+```bash
+bun install --frozen-lockfile
+cargo vifu
+```
+
 ## Description
 
 Vifu gives applications one stable endpoint contract for local and remote AI
@@ -39,7 +47,7 @@ transport, keys, and traces.
 
 - Operate many projects from one Console.
 - Connect external Providers or in-process local Providers.
-- Monitor hundreds of Agent lanes and inspect typed Trace boundaries in one TUI.
+- Monitor concurrent Agent lanes and inspect typed Trace boundaries in one TUI.
 - Compare configured local models, activate a measured session route, and Undo.
 - Call project endpoints through an OpenAI-compatible HTTP API.
 - Embed the Rust Runtime directly inside an application.
@@ -47,17 +55,17 @@ transport, keys, and traces.
 - Manage Project Settings in the Console; JSON is an import/export artifact for
   backup, migration, and embedded targets.
 
-## Supported surfaces
+## Available surfaces
 
-| Surface | Status | Start here |
+| Surface | Distribution | Start here |
 | --- | --- | --- |
-| Local Server and embedded Console | Supported | [Install](docs/install.md) or [Embedded Console](docs/embedded-console.md) |
-| Self-host Server and Console | Supported | [Self-host](docs/self-hosting.md) |
-| Agent Providers | Supported | [Provider integrations](providers/README.md) |
-| Rust embedding | Supported | [Embed the Runtime](docs/runtime-embedding.md) |
-| Swift on iOS/macOS | Supported | [Apple application guide](docs/runtime-embedding.md#add-vifu-to-an-apple-application) |
-| Godot in an Apple host | Experimental | [Runtime Bridge](docs/runtime-embedding.md#connect-a-game-engine) |
-| Kotlin/Android | Experimental | [Runtime embedding](docs/runtime-embedding.md) |
+| Local Server and embedded Console | Release binary | [Install](docs/install.md) or [Embedded Console](docs/embedded-console.md) |
+| Self-host Server and Console | Docker Compose | [Self-host](docs/self-hosting.md) |
+| Agent Providers | Built-in and configurable adapters | [Provider integrations](providers/README.md) |
+| Rust embedding | crates.io package | [Embed the Runtime](docs/runtime-embedding.md) |
+| Swift on iOS/macOS | SwiftPM package | [Apple application guide](docs/runtime-embedding.md#add-vifu-to-an-apple-application) |
+| Godot in an Apple host | VifuGodot SwiftPM package | [VifuGodot guide](integrations/godot/apple/README.md) |
+| Kotlin/Android | Buildable Kotlin/JNI source set | [Mobile FFI guide](crates/vifu-mobile-ffi/README.md) |
 
 ## Documentation
 
@@ -78,6 +86,8 @@ transport, keys, and traces.
 - [Embed the Runtime](docs/runtime-embedding.md)
 - [vifu-runtime API](https://docs.rs/vifu-runtime)
 - [vifu-gateway](crates/vifu-gateway/README.md)
+- [VifuGodot for Apple hosts](integrations/godot/apple/README.md)
+- [Mobile FFI for Apple and Android hosts](crates/vifu-mobile-ffi/README.md)
 
 #### Development
 

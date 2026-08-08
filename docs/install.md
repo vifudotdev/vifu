@@ -108,8 +108,7 @@ cargo --version
 
 ```bash
 bun install --frozen-lockfile
-bun run build:console
-cargo run -p vifu
+cargo vifu
 ```
 
 The first run creates `~/.vifu/config.toml` and
@@ -157,11 +156,11 @@ for every placement combination and credential boundary.
 On Unix systems, Vifu restricts the `~/.vifu` directory to mode `0700` and its
 configuration and local database files to mode `0600`.
 
-`cargo run` embeds the assets already generated in
-`target/vifu-console-assets/`; it does not invoke Bun automatically. The source
-startup sequence above builds the official Console first. Re-run
-`bun run build:console` after changing its UI and before rebuilding Vifu. See
-[Embedded Console](embedded-console.md).
+`cargo vifu` builds the official Console and then runs the Vifu binary. Plain
+`cargo run -p vifu` embeds the assets already present in
+`target/vifu-console-assets/`; it does not invoke Bun automatically. Use
+`cargo vifu` after changing the Console UI so the embedded bundle stays current.
+See [Embedded Console](embedded-console.md).
 
 ### Build Troubleshooting
 
@@ -172,7 +171,7 @@ not name the library file itself.
 
 Errors from `llama-cpp-sys` or `whisper-rs-sys` normally mean that CMake, the
 C/C++ compiler, or libclang is missing. Run the three verification commands
-above, correct the missing tool, then run `cargo run -p vifu` again.
+above, correct the missing tool, then run `cargo vifu` again.
 
 The repository requests Rust's minimal toolchain profile so a first build does
 not download the optional offline Rust documentation component. If an

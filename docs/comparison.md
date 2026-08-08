@@ -41,9 +41,12 @@ backend used by Vifu's current local provider.
 ## Current limits
 
 The published integration matrix is intentionally literal. Rust and the Apple
-Swift package are supported. The Apple-hosted Godot bridge and Kotlin/Android
-bindings are experimental. Generic Godot and managed-language adapters remain
-future integration work and are not described as current support.
+Swift package are released integration surfaces. Apple-hosted Godot applications
+use the separately released `VifuGodot` SwiftPM package and its pinned Godot
+compatibility set. Android applications can build the generated Kotlin bindings
+and `arm64-v8a` JNI library from this repository; Vifu does not currently
+publish them as a Maven artifact. Generic Godot hosts and other managed-language
+adapters are not current distribution surfaces.
 
 Any latency, memory, binary-size, or task-success comparison needs a committed
 workload, pinned artifacts, and raw traces before it is published as evidence.

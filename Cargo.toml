@@ -6,6 +6,7 @@ members = [
   "crates/vifu-mobile-ffi",
   "crates/vifu",
   "crates/vifu-server",
+  "scripts/xtask",
 ]
 resolver = "2"
 
