@@ -36,8 +36,8 @@ tower-http = { version = "0.7.0", features = ["catch-panic", "cors", "limit", "r
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 uuid = { version = "1", features = ["serde", "v4"] }
-vifu-gateway = { version = "0.1.10", path = "../vifu-gateway", default-features = false }
-vifu-runtime = { version = "0.1.10", path = "../vifu-runtime", default-features = false }
+vifu-gateway = { version = "0.1.11", path = "../vifu-gateway", default-features = false }
+vifu-runtime = { version = "0.1.11", path = "../vifu-runtime", default-features = false }
 
 [features]
 default = ["local-whisper"]

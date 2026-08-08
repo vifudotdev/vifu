@@ -2,6 +2,15 @@
 
 All notable changes to Vifu are documented here.
 
+## 0.1.11 - 2026-08-08
+
+- Added topology-aware Runtime monitoring across local, self-hosted, and Cloud
+  server paths, including device identity and host resource attribution.
+- Added centralized device pairing and an Android Runtime distribution package
+  for embedded Vifu applications.
+- Restored local Agent activity in the TUI and added reproducible topology,
+  MacBook agent-swarm, and StarDojo integration test harnesses.
+
 ## 0.1.10 - 2026-08-06
 
 - Published a compatible Runtime, local Llama provider, Gateway, Server, and
