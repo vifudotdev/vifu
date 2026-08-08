@@ -13,18 +13,18 @@ use tokio::sync::{mpsc, watch, Notify};
 
 use crate::{
     EffectRequest, EffectResult, LocalProviderBinding, ProjectSettings, RuntimeManifest,
-    RuntimeRelease, RuntimeSnapshot, RuntimeTraceRecord,
+    RuntimeRelease, RuntimeSnapshot, RuntimeTraceRecord, MAX_ENDPOINT_TIMEOUT_MS,
 };
 
 const SNAPSHOT_VERSION: u32 = 1;
 const DEFAULT_TIMEOUT_MS: u64 = 30_000;
-const MAX_TIMEOUT_MS: u64 = 120_000;
 const DEFAULT_EFFECT_LIMIT: usize = 64;
 const MAX_IN_FLIGHT_INVOCATIONS: usize = 64;
 const MAX_RETAINED_INVOCATIONS: usize = 256;
 const MAX_RETAINED_INVOCATION_EVENTS: usize = 256;
 const MAX_COALESCED_EVENT_BYTES: usize = 64 * 1024;
 const WORKER_QUEUE_CAPACITY: usize = 64;
+const MAX_RUNTIME_MONITOR_IO_BYTES: usize = 128 * 1024;
 
 /// A boxed provider future used by [`AgentProvider`].
 pub type ProviderFuture<'a> =
@@ -335,6 +335,12 @@ pub enum RuntimeMonitorEvent {
         elapsed_ms: Option<u64>,
         request_elapsed_ms: u64,
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        input_tokens: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        output_tokens: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        resident: Option<bool>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         error: Option<String>,
     },
     InvocationFinished {
@@ -351,6 +357,33 @@ pub enum RuntimeMonitorEvent {
 /// Thread-safe callback installed by an embedding host that wants live,
 /// payload-safe runtime lifecycle metadata.
 pub type RuntimeMonitorObserver = Arc<dyn Fn(RuntimeMonitorEvent) + Send + Sync>;
+
+/// Bounded process-local I/O summary for an opt-in diagnostic observer.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeMonitorIoSummary {
+    pub value: Value,
+    pub truncated: bool,
+}
+
+/// Invocation I/O exposed only to an explicitly installed diagnostic observer.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "camelCase")]
+pub enum RuntimeMonitorIoEvent {
+    InvocationInput {
+        trace_id: String,
+        invocation_id: String,
+        summary: RuntimeMonitorIoSummary,
+    },
+    InvocationOutput {
+        trace_id: String,
+        invocation_id: String,
+        summary: RuntimeMonitorIoSummary,
+    },
+}
+
+/// Thread-safe callback for bounded invocation I/O diagnostics.
+pub type RuntimeMonitorIoObserver = Arc<dyn Fn(RuntimeMonitorIoEvent) + Send + Sync>;
 
 /// One ordered event produced by an invocation.
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
@@ -970,6 +1003,7 @@ struct RuntimeCore {
     invocations: Mutex<InvocationRegistry>,
     next_invocation: AtomicU64,
     monitor_observer: RwLock<Option<RuntimeMonitorObserver>>,
+    monitor_io_observer: RwLock<Option<RuntimeMonitorIoObserver>>,
 }
 
 struct InvocationEntry {
@@ -1202,6 +1236,13 @@ impl RuntimeCore {
             },
         };
         let _ = self.store.enqueue_trace(&trace);
+        if let Ok(output) = &result {
+            self.emit_monitor_io_event(RuntimeMonitorIoEvent::InvocationOutput {
+                trace_id: trace_id.clone(),
+                invocation_id: invocation_id.clone(),
+                summary: runtime_monitor_io_summary(&output.data),
+            });
+        }
         self.emit_monitor_event(RuntimeMonitorEvent::InvocationFinished {
             trace_id,
             invocation_id,
@@ -1286,6 +1327,11 @@ impl RuntimeCore {
             provider_id: agent.provider.clone(),
             capability: endpoint.capability.clone(),
             started_at_ms,
+        });
+        self.emit_monitor_io_event(RuntimeMonitorIoEvent::InvocationInput {
+            trace_id: trace_id.clone(),
+            invocation_id: invocation_id.clone(),
+            summary: runtime_monitor_io_summary(&input.data),
         });
 
         let snapshot = self.load_snapshot(&input.session_id)?;
@@ -1422,29 +1468,37 @@ impl RuntimeCore {
             if let Ok(mut invocations) = core.invocations.lock() {
                 invocations.push_provider_event(&handle, event.clone());
             }
-            let (stage, status, elapsed_ms, error) = match event {
+            let (stage, status, elapsed_ms, metadata, error) = match event {
                 ProviderEvent::Activity => return,
                 ProviderEvent::OutputDelta { .. } => return,
-                ProviderEvent::StageStarted { stage, .. } => {
-                    (stage, RuntimeMonitorStageStatus::Started, None, None)
-                }
+                ProviderEvent::StageStarted { stage, metadata } => (
+                    stage,
+                    RuntimeMonitorStageStatus::Started,
+                    None,
+                    metadata,
+                    None,
+                ),
                 ProviderEvent::StageCompleted {
-                    stage, elapsed_ms, ..
+                    stage,
+                    elapsed_ms,
+                    metadata,
                 } => (
                     stage,
                     RuntimeMonitorStageStatus::Completed,
                     Some(elapsed_ms),
+                    metadata,
                     None,
                 ),
                 ProviderEvent::StageFailed {
                     stage,
                     elapsed_ms,
                     error,
-                    ..
+                    metadata,
                 } => (
                     stage,
                     RuntimeMonitorStageStatus::Failed,
                     Some(elapsed_ms),
+                    metadata,
                     Some(error),
                 ),
             };
@@ -1455,6 +1509,9 @@ impl RuntimeCore {
                 status,
                 elapsed_ms,
                 request_elapsed_ms: duration_ms(request_started.elapsed()),
+                input_tokens: monitor_u64(&metadata, "inputTokens"),
+                output_tokens: monitor_u64(&metadata, "outputTokens"),
+                resident: metadata.get("resident").and_then(Value::as_bool),
                 error,
             });
         })
@@ -1470,6 +1527,60 @@ impl RuntimeCore {
             observer(event);
         }
     }
+
+    fn emit_monitor_io_event(&self, event: RuntimeMonitorIoEvent) {
+        let observer = self
+            .monitor_io_observer
+            .read()
+            .ok()
+            .and_then(|observer| observer.clone());
+        if let Some(observer) = observer {
+            observer(event);
+        }
+    }
+}
+
+fn runtime_monitor_io_summary(data: &InvocationData) -> RuntimeMonitorIoSummary {
+    match data {
+        InvocationData::Binary(bytes) => RuntimeMonitorIoSummary {
+            value: json!({
+                "_vifuBinary": true,
+                "bytes": bytes.len(),
+            }),
+            truncated: true,
+        },
+        InvocationData::Json(value)
+            if serde_json::to_vec(value)
+                .is_ok_and(|encoded| encoded.len() <= MAX_RUNTIME_MONITOR_IO_BYTES) =>
+        {
+            RuntimeMonitorIoSummary {
+                value: value.clone(),
+                truncated: false,
+            }
+        }
+        InvocationData::Json(value) => RuntimeMonitorIoSummary {
+            value: json!({
+                "summary": monitor_value_shape(value),
+                "truncated": true,
+            }),
+            truncated: true,
+        },
+    }
+}
+
+fn monitor_value_shape(value: &Value) -> &'static str {
+    match value {
+        Value::Null => "null",
+        Value::Bool(_) => "boolean",
+        Value::Number(_) => "number",
+        Value::String(_) => "string",
+        Value::Array(_) => "array",
+        Value::Object(_) => "object",
+    }
+}
+
+fn monitor_u64(metadata: &Value, key: &str) -> Option<u64> {
+    metadata.get(key).and_then(Value::as_u64)
 }
 
 fn is_null(value: &Value) -> bool {
@@ -1656,6 +1767,7 @@ impl VifuRuntime {
             invocations: Mutex::new(InvocationRegistry::default()),
             next_invocation: AtomicU64::new(1),
             monitor_observer: RwLock::new(None),
+            monitor_io_observer: RwLock::new(None),
         });
         let worker = Arc::new(Mutex::new(None));
         Ok(Self { core, worker })
@@ -1673,6 +1785,19 @@ impl VifuRuntime {
         *self
             .core
             .monitor_observer
+            .write()
+            .map_err(|_| RuntimeError::Internal)? = observer;
+        Ok(())
+    }
+
+    /// Installs or clears the opt-in bounded invocation I/O observer.
+    pub fn set_monitor_io_observer(
+        &self,
+        observer: Option<RuntimeMonitorIoObserver>,
+    ) -> Result<(), RuntimeError> {
+        *self
+            .core
+            .monitor_io_observer
             .write()
             .map_err(|_| RuntimeError::Internal)? = observer;
         Ok(())
@@ -1725,9 +1850,9 @@ impl VifuRuntime {
         validate_identifier("agent", &endpoint.agent)?;
         endpoint.capability = endpoint.capability.trim().to_ascii_lowercase();
         validate_identifier("capability", &endpoint.capability)?;
-        if !(1..=MAX_TIMEOUT_MS).contains(&endpoint.timeout_ms) {
+        if !(1..=MAX_ENDPOINT_TIMEOUT_MS).contains(&endpoint.timeout_ms) {
             return Err(RuntimeError::InvalidDefinition(format!(
-                "endpoint timeout must be between 1 and {MAX_TIMEOUT_MS} ms"
+                "endpoint timeout must be between 1 and {MAX_ENDPOINT_TIMEOUT_MS} ms"
             )));
         }
         let mut registry = self
@@ -2365,6 +2490,23 @@ mod tests {
         runtime
     }
 
+    #[test]
+    fn dynamic_endpoint_accepts_slow_local_model_inference() {
+        let runtime = configured_runtime(Arc::new(TestProvider::immediate()));
+
+        let result = runtime.register_endpoint(EndpointDefinition {
+            name: "slow-chat".to_string(),
+            agent: "guide".to_string(),
+            capability: "chat".to_string(),
+            timeout_ms: 300_000,
+        });
+
+        assert!(
+            result.is_ok(),
+            "five-minute endpoint should register: {result:?}"
+        );
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn embedded_runtime_invokes_chat_speech_and_transcription_without_a_server() {
         let runtime = configured_runtime(Arc::new(TestProvider::immediate()));
@@ -2379,6 +2521,60 @@ mod tests {
                 .expect("endpoint should invoke");
             assert_eq!(output.capability, capability);
         }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn monitor_observer_receives_provider_performance_metadata() {
+        let runtime = configured_runtime(Arc::new(StreamingTestProvider));
+        let monitor_events = Arc::new(Mutex::new(Vec::new()));
+        let captured_events = Arc::clone(&monitor_events);
+        runtime
+            .set_monitor_observer(Some(Arc::new(move |event| {
+                captured_events.lock().unwrap().push(event);
+            })))
+            .unwrap();
+
+        runtime
+            .invoke(InvocationInput::json("chat", json!({ "text": "hello" })))
+            .await
+            .unwrap();
+
+        assert!(monitor_events.lock().unwrap().iter().any(|event| matches!(
+            event,
+            RuntimeMonitorEvent::ProviderStage {
+                stage: ProviderStage::Tokenize,
+                status: RuntimeMonitorStageStatus::Completed,
+                input_tokens: Some(4),
+                ..
+            }
+        )));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn monitor_io_observer_receives_chat_input_and_output() {
+        let runtime = configured_runtime(Arc::new(TestProvider::immediate()));
+        let monitor_events = Arc::new(Mutex::new(Vec::new()));
+        let captured_events = Arc::clone(&monitor_events);
+        runtime
+            .set_monitor_io_observer(Some(Arc::new(move |event| {
+                captured_events.lock().unwrap().push(event);
+            })))
+            .unwrap();
+
+        runtime
+            .invoke(InvocationInput::json("chat", json!({ "text": "hello" })))
+            .await
+            .unwrap();
+
+        let events = monitor_events.lock().unwrap();
+        assert!(matches!(
+            events.as_slice(),
+            [
+                RuntimeMonitorIoEvent::InvocationInput { summary: input, .. },
+                RuntimeMonitorIoEvent::InvocationOutput { summary: output, .. }
+            ] if input.value == json!({ "text": "hello" })
+                && output.value["input"] == json!({ "text": "hello" })
+        ));
     }
 
     #[tokio::test(flavor = "current_thread")]

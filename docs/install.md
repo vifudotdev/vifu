@@ -130,6 +130,9 @@ The generated configuration makes both network roles explicit:
 [server]
 address = "http://127.0.0.1:6790"
 
+[server.guest_bootstrap]
+enabled = true
+
 [gateway]
 address = "http://127.0.0.1:6790"
 ```
@@ -140,6 +143,16 @@ local `gateway.address` starts the Agent Gateway in this process, and that
 Gateway connects outward to `server.address`. A remote `gateway.address`
 describes a Gateway running elsewhere, such as an iPhone, so the CLI does not
 start another local Gateway.
+
+The TUI always reads its agent roster and Runtime telemetry from the configured
+Server. When `server.address` is remote, provide a project-scoped monitor key
+through `VIFU_MONITOR_KEY` or `VIFU_MONITOR_KEY_FILE`; a local Gateway that is
+granted a Guest project can supply its own Guest project key after bootstrap.
+The default local first run obtains its project-scoped monitor credential from
+the local Guest bootstrap and does not show a pairing QR automatically. Press
+`P` when an embedded Runtime or mobile app is ready to scan. See
+[Runtime topology, monitoring, and Gateway enrollment](topology-and-pairing.md)
+for every placement combination and credential boundary.
 
 On Unix systems, Vifu restricts the `~/.vifu` directory to mode `0700` and its
 configuration and local database files to mode `0600`.

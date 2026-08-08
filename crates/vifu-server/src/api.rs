@@ -38,13 +38,13 @@ use crate::models::{
     ApiKeyPermissions, ApiKeyRecord, AssignProjectOwner, BootstrapGatewayRuntimeRelease,
     Capabilities, ClaimGuestProject, CreateApiKey, CreateBinding, CreateEndpoint, CreateProfile,
     CreateProfileVersion, CreateProject, CreateProjectProvider, CreateRuntimeDeployment,
-    CreatedApiKey, CustomProvider, EndpointRoute, EndpointTrace, ImportProjectAgent,
-    ImportProjectProfile, ImportProjectProvider, ImportProjectSettings, ProfileCapabilityDraft,
-    ProjectOwnership, ProviderAdapter, ProviderAdapterField, ProviderConnection,
-    ProviderConnectionSecret, RegisterAgentGateway, ReportRuntimeReleaseApplied, RuntimeDeployment,
-    RuntimeDeploymentView, SetProfileRollout, SyncProfileSource, TestProfile, UpdateApiKey,
-    UpdateBinding, UpdateEndpoint, UpdateProfile, UpdateProject, UpdateProjectProvider,
-    UpdateRuntimeDeployment,
+    CreateRuntimeDistribution, CreatedApiKey, CustomProvider, EndpointRoute, EndpointTrace,
+    ImportProjectAgent, ImportProjectProfile, ImportProjectProvider, ImportProjectSettings,
+    ProfileCapabilityDraft, ProjectOwnership, ProviderAdapter, ProviderAdapterField,
+    ProviderConnection, ProviderConnectionSecret, RegisterAgentGateway,
+    ReportRuntimeReleaseApplied, RuntimeDeployment, RuntimeDeploymentView, SetProfileRollout,
+    SyncProfileSource, TestProfile, UpdateApiKey, UpdateBinding, UpdateEndpoint, UpdateProfile,
+    UpdateProject, UpdateProjectProvider, UpdateRuntimeDeployment,
 };
 use crate::openclaw_device;
 use crate::relay::RelayAgentProvider;
@@ -253,6 +253,10 @@ async fn ensure_guest_project_key(
                 && key.revoked_at.is_none()
         });
     if !exists {
+        let permissions = ApiKeyPermissions {
+            project: crate::models::ResourcePermission::Read,
+            ..ApiKeyPermissions::default()
+        };
         let key_hash = hash_api_key(&raw_key, &state.config.api_key_pepper);
         let created = db::create_api_key(
             &state.pool,
@@ -261,7 +265,7 @@ async fn ensure_guest_project_key(
                 project_id: project.project.id,
                 name: "Guest project key",
                 agent_scope: &ApiKeyAgentScope::All,
-                permissions: &ApiKeyPermissions::default(),
+                permissions: &permissions,
                 key_prefix: &key_prefix,
                 key_hash: &key_hash,
             },
@@ -2611,6 +2615,115 @@ pub async fn create_project_agent_gateway_enrollment(
     create_agent_gateway_enrollment_for_deployment(&state, &headers, project, deployment).await
 }
 
+pub async fn list_project_runtime_distributions(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(slug): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let project = authorized_project_by_slug(&state, &headers, &slug, ProjectAccess::Read).await?;
+    Ok(Json(json!({
+        "distributions": db::list_runtime_distributions(&state.pool, project.project.id).await?
+    })))
+}
+
+pub async fn create_project_runtime_distribution(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(slug): Path<String>,
+    Json(input): Json<CreateRuntimeDistribution>,
+) -> Result<(StatusCode, Json<Value>), ApiError> {
+    let project = authorized_project_by_slug(&state, &headers, &slug, ProjectAccess::Write).await?;
+    let name = input.name.trim();
+    if name.is_empty() || name.chars().count() > 128 || name.chars().any(char::is_control) {
+        return Err(ApiError::Invalid(
+            "runtime distribution name must contain between 1 and 128 characters".to_string(),
+        ));
+    }
+    let max_gateways = input.max_gateways.unwrap_or(1_000);
+    if !(1..=100_000).contains(&max_gateways) {
+        return Err(ApiError::Invalid(
+            "maxGateways must be between 1 and 100000".to_string(),
+        ));
+    }
+    let deployment = match input.deployment {
+        Some(deployment) => {
+            let deployment = validate_explicit_slug(&deployment)?;
+            db::get_runtime_deployment(&state.pool, project.project.id, &deployment).await?
+        }
+        None => db::list_runtime_deployments(&state.pool, project.project.id)
+            .await?
+            .into_iter()
+            .find(|deployment| deployment.is_primary)
+            .ok_or(ApiError::NotFound)?,
+    };
+    let public_id = format!(
+        "vifu_di_{}{}",
+        Uuid::new_v4().simple(),
+        Uuid::new_v4().simple()
+    );
+    let distribution = db::create_runtime_distribution(
+        &state.pool,
+        db::NewRuntimeDistribution {
+            id: Uuid::new_v4(),
+            project_id: project.project.id,
+            deployment_id: deployment.id,
+            name,
+            public_id: &public_id,
+            max_gateways,
+        },
+    )
+    .await?;
+    Ok((
+        StatusCode::CREATED,
+        Json(json!({ "distribution": distribution })),
+    ))
+}
+
+pub async fn revoke_project_runtime_distribution(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((slug, distribution_id)): Path<(String, Uuid)>,
+) -> Result<Json<Value>, ApiError> {
+    let project = authorized_project_by_slug(&state, &headers, &slug, ProjectAccess::Write).await?;
+    let distribution =
+        db::revoke_runtime_distribution(&state.pool, project.project.id, distribution_id).await?;
+    Ok(Json(json!({ "distribution": distribution })))
+}
+
+pub async fn create_guest_agent_gateway_enrollment(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<(StatusCode, Json<Value>), ApiError> {
+    let token = bearer_token(&headers).ok_or(ApiError::Unauthorized)?;
+    let key_hash = hash_api_key(token, &state.config.api_key_pepper);
+    let key = db::active_api_key_by_hash(&state.pool, &key_hash).await?;
+    if !matches!(
+        key.permissions.project,
+        crate::models::ResourcePermission::Read | crate::models::ResourcePermission::Write
+    ) {
+        return Err(ApiError::Forbidden);
+    }
+    if db::get_active_guest_project_by_project_id(&state.pool, key.project_id)
+        .await?
+        .is_none()
+    {
+        return Err(ApiError::Forbidden);
+    }
+    let project = db::get_project(&state.pool, key.project_id).await?;
+    let deployment = db::list_runtime_deployments(&state.pool, key.project_id)
+        .await?
+        .into_iter()
+        .find(|deployment| deployment.is_primary)
+        .ok_or(ApiError::NotFound)?;
+    issue_agent_gateway_enrollment(
+        &state,
+        project,
+        deployment,
+        format!("guest:{}", key.project_id),
+    )
+    .await
+}
+
 pub async fn create_runtime_deployment_agent_gateway_enrollment(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -2721,6 +2834,15 @@ async fn create_agent_gateway_enrollment_for_deployment(
             .clone()
             .unwrap_or_else(|| "deployment-admin".to_string()),
     };
+    issue_agent_gateway_enrollment(state, project, deployment, owner_user_id).await
+}
+
+async fn issue_agent_gateway_enrollment(
+    state: &AppState,
+    project: crate::models::ProjectWithBindings,
+    deployment: RuntimeDeployment,
+    owner_user_id: String,
+) -> Result<(StatusCode, Json<Value>), ApiError> {
     let token = format!(
         "vifu_ge_{}{}",
         Uuid::new_v4().simple(),
@@ -2728,12 +2850,13 @@ async fn create_agent_gateway_enrollment_for_deployment(
     );
     let expires_at = Utc::now() + ChronoDuration::minutes(5);
     let token_hash = hash_agent_gateway_enrollment(&token, &state.config.api_key_pepper);
+    let enrollment_id = Uuid::new_v4();
     db::create_agent_gateway_enrollment(
         &state.pool,
         db::NewAgentGatewayEnrollment {
-            id: Uuid::new_v4(),
+            id: enrollment_id,
             project_id: project.project.id,
-            owner_user_id: &owner_user_id,
+            owner_user_id: owner_user_id.as_str(),
             deployment_id: deployment.id,
             token_hash: &token_hash,
             expires_at,
@@ -2747,6 +2870,7 @@ async fn create_agent_gateway_enrollment_for_deployment(
     Ok((
         StatusCode::CREATED,
         Json(json!({
+            "enrollmentId": enrollment_id,
             "enrollmentToken": token,
             "expiresAt": expires_at,
             "deployment": deployment.name,
@@ -2756,8 +2880,11 @@ async fn create_agent_gateway_enrollment_for_deployment(
 }
 
 fn agent_gateway_pairing(endpoint: &crate::ServerEndpointIdentity, token: &str) -> Value {
-    let pairing_uri = endpoint
+    let pairing_deep_link = endpoint
         .gateway_pairing_uri(token)
+        .expect("generated Gateway enrollment token must be valid");
+    let pairing_uri = endpoint
+        .gateway_pairing_web_uri(token)
         .expect("generated Gateway enrollment token must be valid");
     let qr_svg = qrcode::QrCode::new(pairing_uri.as_bytes())
         .map(|code| {
@@ -2766,12 +2893,15 @@ fn agent_gateway_pairing(endpoint: &crate::ServerEndpointIdentity, token: &str) 
                 .build()
         })
         .ok();
+    let terminal_qr = endpoint.gateway_pairing_direct_terminal_qr(token).ok();
     json!({
         "serverUrl": endpoint.server_url,
         "certificateDer": endpoint.certificate_der_base64,
         "certificateSha256": endpoint.certificate_sha256,
         "pairingUri": pairing_uri,
+        "pairingDeepLink": pairing_deep_link,
         "pairingQrSvg": qr_svg,
+        "pairingTerminalQr": terminal_qr,
     })
 }
 
@@ -8493,8 +8623,11 @@ mod tests {
             },
             "vifu_ge_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         );
-        let uri = reqwest::Url::parse(pairing["pairingUri"].as_str().unwrap()).unwrap();
-        let query = uri
+        let bridge = reqwest::Url::parse(pairing["pairingUri"].as_str().unwrap()).unwrap();
+        assert_eq!(bridge.origin().ascii_serialization(), "https://vifu.ai");
+        assert!(bridge.fragment().is_some());
+        let deep_link = reqwest::Url::parse(pairing["pairingDeepLink"].as_str().unwrap()).unwrap();
+        let query = deep_link
             .query_pairs()
             .collect::<std::collections::HashMap<_, _>>();
 

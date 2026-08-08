@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-use crate::{AgentDefinition, EndpointDefinition, RuntimeError};
+use crate::{AgentDefinition, EndpointDefinition, RuntimeError, MAX_ENDPOINT_TIMEOUT_MS};
 
 pub const RUNTIME_MANIFEST_SCHEMA_VERSION: u32 = 1;
 
@@ -160,10 +160,10 @@ impl RuntimeManifest {
             if !endpoint_names.insert(endpoint.name.as_str()) {
                 return Err(duplicate("endpoint", &endpoint.name));
             }
-            if !(1..=120_000).contains(&endpoint.timeout_ms) {
-                return Err(RuntimeError::InvalidDefinition(
-                    "endpoint timeout must be between 1 and 120000 milliseconds".to_string(),
-                ));
+            if !(1..=MAX_ENDPOINT_TIMEOUT_MS).contains(&endpoint.timeout_ms) {
+                return Err(RuntimeError::InvalidDefinition(format!(
+                    "endpoint timeout must be between 1 and {MAX_ENDPOINT_TIMEOUT_MS} milliseconds"
+                )));
             }
             let agent = self
                 .agents
@@ -485,6 +485,26 @@ mod tests {
         manifest.endpoints[0].timeout_ms = 0;
         let error = manifest.validate().unwrap_err();
         assert!(error.to_string().contains("endpoint timeout"));
+    }
+
+    #[test]
+    fn endpoint_timeout_accepts_slow_local_model_inference() {
+        let mut manifest = manifest();
+        manifest.endpoints[0].timeout_ms = 300_000;
+
+        assert!(
+            manifest.validate().is_ok(),
+            "five-minute local inference should be supported"
+        );
+    }
+
+    #[test]
+    fn endpoint_timeout_rejects_values_above_the_runtime_bound() {
+        let mut manifest = manifest();
+        manifest.endpoints[0].timeout_ms = MAX_ENDPOINT_TIMEOUT_MS + 1;
+
+        let error = manifest.validate().unwrap_err();
+        assert!(error.to_string().contains("900000 milliseconds"));
     }
 
     #[test]

@@ -1,0 +1,29 @@
+{
+  "protocol": "vifu.stardew-valley-roster/1",
+  "upstream": {
+    "repository": "https://github.com/chenyanming/stardojo",
+    "commit": "e251401cf1e84ba07cbfa08283a7aba52290e578"
+  },
+  "model": {
+    "repository": "ggml-org/Qwen3-1.7B-GGUF",
+    "commit": "daeb8e2d528a760970442092f6bf1e55c3b659eb",
+    "file": "Qwen3-1.7B-Q4_K_M.gguf",
+    "bytes": 1282439264,
+    "sha256": "d2387ca2dbfee2ffabce7120d3770dadca0b293052bc2f0e138fdc940d9bc7b5"
+  },
+  "categories": [
+    { "name": "combat", "tasks": 12 },
+    { "name": "crafting", "tasks": 14 },
+    { "name": "exploration", "tasks": 23 },
+    { "name": "farming", "tasks": 21 },
+    { "name": "social", "tasks": 25 }
+  ],
+  "rosterStages": [5, 21, 50, 95],
+  "demoBoard": [
+    { "suite": "farming_lite", "taskId": 0, "label": "Clear 10 weeds" },
+    { "suite": "farming_lite", "taskId": 1, "label": "Clear 5 stones" },
+    { "suite": "farming_lite", "taskId": 3, "label": "Till 5 tiles" },
+    { "suite": "farming_lite", "taskId": 6, "label": "Sow 5 cauliflower seeds" },
+    { "suite": "farming_lite", "taskId": 8, "label": "Water 5 crops" }
+  ]
+}

@@ -113,21 +113,28 @@ the Server-scoped record inside `~/.vifu/runtime.sqlite`. If authorization is
 required again, Vifu prints a Dashboard link and keeps retrying while the
 operator reviews the request.
 
-To use a second Vifu CLI only as the remote TUI, configure its remote
-`server.address` and omit `[gateway]`. Provide that deployment's admin
-credential through `VIFU_ADMIN_KEY` or `VIFU_ADMIN_KEY_FILE`. The CLI opens an
-authenticated monitor WebSocket on the same Server origin and receives the
-current Gateway snapshot followed by live runtime events.
+To use a second Vifu CLI as the remote TUI, configure its remote
+`server.address`. Omit `[gateway]` for monitor-only operation, or keep a local
+Gateway when this computer also hosts agents. Provide a project API key with
+project read access through `VIFU_MONITOR_KEY` or `VIFU_MONITOR_KEY_FILE`. The
+Server filters the monitor stream to that project. Deployment operators may use
+`VIFU_ADMIN_KEY` or `VIFU_ADMIN_KEY_FILE` for deployment-wide monitoring.
+
+The TUI and Gateway open separate Server connections. Gateway enrollment does
+not authenticate the TUI. See
+[Runtime topology, monitoring, and Gateway enrollment](topology-and-pairing.md)
+for the four placement combinations and complete credential table.
 
 Each project starts with a `development` deployment. More deployments can use
 different Gateways and active Runtime Releases while keeping the same project
 contract. The primary deployment serves the existing project endpoint.
 
-When a Server operator enables guest bootstrap, an unpaired Gateway can receive
+When a Server operator explicitly enables guest bootstrap, an unpaired Gateway can receive
 a temporary project, deployment, project key, and claim token on first
 connection. Claiming the project from the Console transfers it to the signed-in
 owner without replacing the Gateway identity. Guest projects expire according
-to the Server's configured lifetime.
+to the Server's configured lifetime. Project enrollment and the managed
+deployment bootstrap credential never create Guest projects.
 
 Agent Gateway is a Server transport: it requires a reachable Vifu Server.
 Applications that embed `VifuRuntime` register their providers directly as

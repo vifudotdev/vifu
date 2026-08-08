@@ -169,6 +169,12 @@ Server deployment:
 2. Generate a device identity and keep it in the Apple Keychain.
 3. Start `VifuEmbeddedGateway` with that identity and the enrollment token.
 
+Mobile camera flows scan the HTTPS URL returned by the enrollment API. The
+Vifu web bridge opens the standard `vifu://gateway/enroll` application link;
+the app accepts only one-time `vifu_ge_...` enrollment tokens. It stores the
+resulting Device Token and reconnects to that Server on later launches. An app
+does not need an APK-specific Server address or a separate pairing protocol.
+
 ```swift
 let identityStore = VifuGatewayIdentityStore()
 let identity = try identityStore.loadOrCreateMachineIdentity()
@@ -192,6 +198,23 @@ if let updated = try gateway.status().authorization {
     try identityStore.saveAuthorization(updated, for: serverURL)
 }
 ```
+
+`start` sends the agent roster, timing stages, model identity, host metrics,
+terminal status, and bounded errors. It does not send root invocation input or
+output. A private debugging surface may send those bounded summaries only after
+the host application obtains explicit user consent:
+
+```swift
+try gateway.startWithMonitorIo(
+    identity: identity,
+    authorization: authorization,
+    enrollmentToken: enrollmentToken,
+    captureMonitorIo: true
+)
+```
+
+Call one start method, not both. The application owns the consent UI and should
+return to the default `start` path when content sharing is disabled.
 
 The enrollment token is consumed once. Later starts load the same Machine
 identity and server-specific Device Token from Keychain and omit the token.
@@ -220,12 +243,15 @@ let identity = MachineIdentity::from_encoded_private_key(&machine_private_key)?;
 gateway.start(identity, device_token, enrollment_token)?;
 ```
 
+Rust hosts use `start_with_monitor_io(..., true)` only after the same explicit
+consent decision. The ordinary `start` method is content-private by default.
+
 `start` requires applied Project Settings or an active release. It derives
 advertised Agent/provider descriptors from those settings and runs the
 reconnecting Gateway on its own worker thread. Custom Rust hosts must keep the
-Machine private key and latest Device Token in their credential store. `status` reports
-`Stopped`, `Running`, or `Failed`; `stop` cancels the network loop and joins the
-worker.
+Machine private key and latest Device Token in their credential store. `status`
+reports the current connection lifecycle; `stop` cancels the network loop and
+joins the worker.
 
 The first connection to an empty deployment imports the active Project Settings
 as release 1. Later release activation, configuration sync, trace upload, and

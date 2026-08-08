@@ -8,7 +8,11 @@ so an example may depend on an integration without copying its implementation.
 | --- | --- | --- |
 | [`ios-embedding`](ios-embedding/) | Native SwiftUI app with an embedded Runtime, local model, Gateway pairing, and monitoring | None |
 | [`godot-ios-embedding`](godot-ios-embedding/) | iOS host that connects the embedded Runtime to a Godot stage | libgodot and SwiftGodotKit |
+| [`macbook-agent-swarm`](macbook-agent-swarm/) | Repeatable standard-library Python benchmark that configures many logical agents against one local Vifu Provider | Vifu CLI and a local Provider |
 
 Start with `ios-embedding` when validating the Vifu Runtime and mobile Gateway.
 Use `godot-ios-embedding` when validating the additional engine lifecycle and
 Runtime Bridge boundary.
+
+Use `macbook-agent-swarm` to compare local-provider settings under concurrent
+logical-agent load on an Apple-silicon MacBook.

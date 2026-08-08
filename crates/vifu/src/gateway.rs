@@ -40,6 +40,7 @@ type RuntimeRosterTask = Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>;
 #[derive(Clone)]
 pub(crate) struct GatewayControl {
     optimization: OptimizationController,
+    device_pairing: DevicePairingController,
     #[cfg(feature = "local-llama")]
     local_model_pool: LocalModelPool,
 }
@@ -56,6 +57,7 @@ impl GatewayControl {
         );
         Self {
             optimization,
+            device_pairing: DevicePairingController::default(),
             #[cfg(feature = "local-llama")]
             local_model_pool,
         }
@@ -64,11 +66,81 @@ impl GatewayControl {
     pub(crate) fn optimization(&self) -> OptimizationController {
         self.optimization.clone()
     }
+
+    pub(crate) fn device_pairing(&self) -> DevicePairingController {
+        self.device_pairing.clone()
+    }
+}
+
+#[derive(Clone, Default)]
+pub(crate) struct DevicePairingController {
+    current_guest: Arc<Mutex<Option<GuestPairingContext>>>,
+}
+
+#[derive(Clone)]
+struct GuestPairingContext {
+    server_url: String,
+    server_certificate_der: Option<Vec<u8>>,
+    project_api_key: String,
+}
+
+impl DevicePairingController {
+    fn clear(&self) {
+        if let Ok(mut current) = self.current_guest.lock() {
+            *current = None;
+        }
+    }
+
+    fn set_guest(
+        &self,
+        server_url: &str,
+        server_certificate_der: Option<&[u8]>,
+        guest: &session::GuestProjectSummary,
+    ) {
+        if let Ok(mut current) = self.current_guest.lock() {
+            *current = Some(GuestPairingContext {
+                server_url: server_url.to_string(),
+                server_certificate_der: server_certificate_der.map(<[u8]>::to_vec),
+                project_api_key: guest.api_key.clone(),
+            });
+        }
+    }
+
+    pub(crate) async fn create_enrollment(
+        &self,
+    ) -> Result<vifu_gateway::control::GuestGatewayEnrollment, String> {
+        let context = self
+            .current_guest
+            .lock()
+            .map_err(|_| "Guest device pairing state is unavailable".to_string())?
+            .clone()
+            .ok_or_else(|| {
+                "Waiting for the Agent Gateway to create its Guest project".to_string()
+            })?;
+        RuntimeControlClient::create_guest_gateway_enrollment_with_server_certificate(
+            &context.server_url,
+            &context.project_api_key,
+            context.server_certificate_der.as_deref(),
+        )
+        .await
+    }
+}
+
+fn restore_device_pairing(
+    controller: &DevicePairingController,
+    server_url: &str,
+    server_certificate_der: Option<&[u8]>,
+    guest: Option<&session::GuestProjectSummary>,
+) {
+    if let Some(guest) = guest {
+        controller.set_guest(server_url, server_certificate_der, guest);
+    }
 }
 
 #[derive(Debug, Clone)]
 pub struct GatewayRuntimeOptions {
     pub server_url: String,
+    pub server_certificate_der: Option<Vec<u8>>,
     pub allow_guest_bootstrap: bool,
     pub enrollment_token: Option<String>,
     pub session_scope: String,
@@ -76,7 +148,11 @@ pub struct GatewayRuntimeOptions {
 
 impl GatewayRuntimeOptions {
     pub fn load_config(&self) -> Result<Config, String> {
-        Config::load(self.server_url.clone(), self.enrollment_token.clone())
+        Config::load_with_implicit_local_bootstrap(
+            self.server_url.clone(),
+            self.enrollment_token.clone(),
+            !self.allow_guest_bootstrap,
+        )
     }
 }
 
@@ -502,6 +578,7 @@ pub async fn run(
             return Ok(());
         }
         control.optimization.clear_runtime_control();
+        control.device_pairing.clear();
         let mut config = options.load_config()?;
         let provider_file = config.agent_providers_file.clone();
         let provider_snapshot = fs::read(&provider_file).unwrap_or_default();
@@ -668,6 +745,12 @@ pub async fn run(
         let session_store = GatewaySessionStore::open(&runtime_database_file)?;
         let session_key = gateway_session_state_key(&options.session_scope, &config.server_url)?;
         let mut session = load_or_create_session(&session_store, &session_key)?;
+        restore_device_pairing(
+            &control.device_pairing,
+            &config.server_url,
+            options.server_certificate_der.as_deref(),
+            session.guest_project.as_ref(),
+        );
         send_monitor(
             monitor.as_ref(),
             RuntimeEvent::IdentityChanged {
@@ -710,7 +793,7 @@ pub async fn run(
         ));
         let runtime = relay::AgentGatewayRuntime {
             server_url: &config.server_url,
-            server_certificate_der: None,
+            server_certificate_der: options.server_certificate_der.as_deref(),
             agent_gateway_bootstrap_token: config.agent_gateway_bootstrap_token.as_deref(),
             enrollment_token: config.enrollment_token.take(),
             allow_guest_bootstrap: options.allow_guest_bootstrap,
@@ -734,19 +817,28 @@ pub async fn run(
         let guest_project_observer = match monitor.clone() {
             None => {
                 let server_url = config.server_url.clone();
+                let server_certificate_der = options.server_certificate_der.clone();
+                let device_pairing = control.device_pairing.clone();
                 Some(Arc::new(move |guest: &session::GuestProjectSummary| {
+                    device_pairing.set_guest(&server_url, server_certificate_der.as_deref(), guest);
                     print_guest_management_link(&server_url, guest);
                 }) as relay::GuestProjectObserver)
             }
-            Some(monitor) => Some(Arc::new(move |guest: &session::GuestProjectSummary| {
-                send_monitor(
-                    Some(&monitor),
-                    RuntimeEvent::IdentityChanged {
-                        project: Some(guest.project_slug.clone()),
-                        deployment: Some(guest.deployment.clone()),
-                    },
-                );
-            }) as relay::GuestProjectObserver),
+            Some(monitor) => {
+                let server_url = config.server_url.clone();
+                let server_certificate_der = options.server_certificate_der.clone();
+                let device_pairing = control.device_pairing.clone();
+                Some(Arc::new(move |guest: &session::GuestProjectSummary| {
+                    device_pairing.set_guest(&server_url, server_certificate_der.as_deref(), guest);
+                    send_monitor(
+                        Some(&monitor),
+                        RuntimeEvent::IdentityChanged {
+                            project: Some(guest.project_slug.clone()),
+                            deployment: Some(guest.deployment.clone()),
+                        },
+                    );
+                }) as relay::GuestProjectObserver)
+            }
         };
         let runtime_roster_task = RuntimeRosterTask::default();
         let authorization_observer = {
@@ -1549,8 +1641,9 @@ mod tests {
     use super::load_local_whisper_provider;
     use super::{
         format_terminal_link, gateway_runtime_observer, load_openai_compatible_provider,
-        mark_gateway_authorized, project_profile_registrations, run_capture_worker,
-        runtime_backends, should_register_openai_compatible, AgentProviderConfig,
+        mark_gateway_authorized, project_profile_registrations, restore_device_pairing,
+        run_capture_worker, runtime_backends, should_register_openai_compatible,
+        AgentProviderConfig, DevicePairingController,
     };
     use crate::monitor::{RuntimeEvent, RuntimeHealth, RuntimeStage, StageStatus};
     use serde_json::json;
@@ -1562,6 +1655,42 @@ mod tests {
             #[cfg(feature = "local-llama")]
             crate::local_models::LocalModelPool::for_device(),
         )
+    }
+
+    #[test]
+    fn persisted_guest_restores_device_pairing_context() {
+        let controller = DevicePairingController::default();
+        let guest = vifu_gateway::session::GuestProjectSummary {
+            project_id: Uuid::nil(),
+            project_slug: "guest-test".to_string(),
+            deployment_id: Uuid::nil(),
+            deployment: "development".to_string(),
+            endpoint_path: "/guest-test/v1".to_string(),
+            api_key: "synthetic-project-key".to_string(),
+            claim_token: "synthetic-claim-token".to_string(),
+            expires_at: "2099-01-01T00:00:00Z".to_string(),
+        };
+
+        restore_device_pairing(
+            &controller,
+            "https://192.0.2.20:6790",
+            Some(&[1, 2, 3]),
+            Some(&guest),
+        );
+
+        let current = controller.current_guest.lock().unwrap().clone().unwrap();
+        assert_eq!(
+            (
+                current.server_url,
+                current.server_certificate_der,
+                current.project_api_key,
+            ),
+            (
+                "https://192.0.2.20:6790".to_string(),
+                Some(vec![1, 2, 3]),
+                "synthetic-project-key".to_string(),
+            )
+        );
     }
 
     #[test]

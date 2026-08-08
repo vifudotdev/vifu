@@ -171,6 +171,10 @@ dispatch! {
     pub async fn unassign_runtime_deployment_gateway(storage: &Storage, project_id: Uuid, deployment_id: Uuid, gateway_id: &str) -> Result<(), ApiError>;
     pub async fn list_runtime_deployments_for_gateway(storage: &Storage, gateway_id: &str) -> Result<Vec<RuntimeDeployment>, ApiError>;
     pub async fn runtime_deployment_allows_remote_invocation(storage: &Storage, project_id: Uuid, gateway_id: &str) -> Result<bool, ApiError>;
+    pub async fn create_runtime_distribution(storage: &Storage, input: NewRuntimeDistribution<'_>) -> Result<RuntimeDistribution, ApiError>;
+    pub async fn list_runtime_distributions(storage: &Storage, project_id: Uuid) -> Result<Vec<RuntimeDistribution>, ApiError>;
+    pub async fn revoke_runtime_distribution(storage: &Storage, project_id: Uuid, distribution_id: Uuid) -> Result<RuntimeDistribution, ApiError>;
+    pub async fn authorize_runtime_distribution_gateway(storage: &Storage, public_id: &str, machine_id: &str, suggested_gateway_id: &str) -> Result<RuntimeDistributionGatewayAssignment, ApiError>;
     pub async fn create_project_runtime_release(storage: &Storage, input: NewProjectRuntimeRelease<'_>) -> Result<ProjectRuntimeRelease, ApiError>;
     pub async fn list_project_runtime_releases(storage: &Storage, project_id: Uuid) -> Result<Vec<ProjectRuntimeRelease>, ApiError>;
     pub async fn get_project_runtime_release(storage: &Storage, project_id: Uuid, version: i64) -> Result<ProjectRuntimeRelease, ApiError>;
@@ -179,6 +183,7 @@ dispatch! {
     pub async fn activate_profile_runtime_release(storage: &Storage, profile_id: Uuid, profile_version_id: Uuid, deployment_id: Uuid, release: NewProjectRuntimeRelease<'_>) -> Result<(), ApiError>;
     pub async fn create_guest_project(storage: &Storage, input: NewGuestProject<'_>) -> Result<(), ApiError>;
     pub async fn get_active_guest_project_for_gateway(storage: &Storage, gateway_id: &str) -> Result<Option<(ProjectWithBindings, DateTime<Utc>)>, ApiError>;
+    pub async fn get_active_guest_project_by_project_id(storage: &Storage, project_id: Uuid) -> Result<Option<DateTime<Utc>>, ApiError>;
     pub async fn count_active_guest_projects(storage: &Storage) -> Result<i64, ApiError>;
     pub async fn prune_expired_guest_projects(storage: &Storage) -> Result<u64, ApiError>;
     pub async fn claim_guest_project(storage: &Storage, claim_token_hash: &[u8], owner_user_id: &str) -> Result<ProjectWithBindings, ApiError>;
@@ -1302,6 +1307,91 @@ mod tests {
             .await
             .expect("profile should restore");
 
+        close_and_remove(storage, &path).await;
+    }
+
+    #[tokio::test]
+    async fn sqlite_runtime_distribution_is_idempotent_and_enforces_its_device_limit() {
+        let (storage, path) = sqlite_storage().await;
+        let project_id = Uuid::new_v4();
+        create_project(
+            &storage,
+            NewProject {
+                id: project_id,
+                owner_user_id: Some("user-123"),
+                slug: "distributed-runtime",
+                name: "Distributed runtime",
+                description: None,
+                gateway_id: "project-distributed-runtime",
+                binding_ids: &[],
+            },
+        )
+        .await
+        .expect("project should be created");
+        let deployment_id = primary_deployment_id(&storage, project_id).await;
+        let distribution_id = Uuid::new_v4();
+        let public_id = format!("vifu_di_{}", "a".repeat(64));
+        create_runtime_distribution(
+            &storage,
+            NewRuntimeDistribution {
+                id: distribution_id,
+                project_id,
+                deployment_id,
+                name: "Public Android build",
+                public_id: &public_id,
+                max_gateways: 1,
+            },
+        )
+        .await
+        .expect("distribution should be created");
+
+        let first = authorize_runtime_distribution_gateway(
+            &storage,
+            &public_id,
+            "machine-one",
+            "gateway-one",
+        )
+        .await
+        .expect("first device should join");
+        assert_eq!(first.gateway_id, "gateway-one");
+        assert_eq!(first.owner_user_id.as_deref(), Some("user-123"));
+        let repeated = authorize_runtime_distribution_gateway(
+            &storage,
+            &public_id,
+            "machine-one",
+            "gateway-different",
+        )
+        .await
+        .expect("the same installation should rejoin idempotently");
+        assert_eq!(repeated.gateway_id, "gateway-one");
+        assert!(matches!(
+            authorize_runtime_distribution_gateway(
+                &storage,
+                &public_id,
+                "machine-two",
+                "gateway-two",
+            )
+            .await,
+            Err(ApiError::Conflict(_))
+        ));
+        assert!(list_runtime_deployment_gateway_ids(&storage, deployment_id)
+            .await
+            .unwrap()
+            .contains(&"gateway-one".to_string()));
+
+        revoke_runtime_distribution(&storage, project_id, distribution_id)
+            .await
+            .expect("distribution should revoke");
+        assert!(matches!(
+            authorize_runtime_distribution_gateway(
+                &storage,
+                &public_id,
+                "machine-three",
+                "gateway-three",
+            )
+            .await,
+            Err(ApiError::Unauthorized)
+        ));
         close_and_remove(storage, &path).await;
     }
 

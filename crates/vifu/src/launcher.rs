@@ -123,10 +123,17 @@ async fn run_combined(config: LoadedRuntimeConfig, open_browser: bool) -> Result
     }
     let server_config = config.server_config()?;
     let console_url = local_console_url(&server_config);
-    let gateway_options = config.gateway_options()?;
+    let mut gateway_options = config.gateway_options()?;
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
-    let mut server = tokio::spawn(vifu_server::serve(
-        server_config,
+    let server_state = vifu_server::connect(server_config)
+        .await
+        .map_err(|error| error.to_string())?;
+    apply_local_server_certificate(
+        &mut gateway_options,
+        server_state.server_endpoint.as_deref(),
+    )?;
+    let mut server = tokio::spawn(vifu_server::serve_state(
+        server_state,
         wait_for_shutdown(shutdown_rx.clone()),
     ));
     announce_console(console_url, open_browser);
@@ -221,33 +228,53 @@ async fn run_remote_server_only(
     open_browser: bool,
 ) -> Result<(), String> {
     let server_address = config.server_address()?.to_string();
+    let dashboard_url = config.dashboard_url();
     if tui::should_run() {
         let (monitor_tx, monitor_rx) = runtime_event_channel();
-        let credential = vifu_server::config::Config::from_env()?.admin_key;
+        let credential = RemoteMonitorCredential::Static(remote_monitor_credential()?);
         let remote_monitor = tokio::spawn(stream_remote_server_monitor(
             server_address.clone(),
             credential,
             monitor_tx,
         ));
-        let result = tui::run(monitor_rx, Some(server_address), None)
+        let result = tui::run(monitor_rx, dashboard_url, None, None)
             .await
             .map_err(|error| format!("Vifu TUI failed: {error}"));
         remote_monitor.abort();
         return result;
     }
-    announce_console(Some(server_address), open_browser);
+    announce_console(dashboard_url, open_browser);
     shutdown_signal().await;
     Ok(())
 }
 
 async fn stream_remote_server_monitor(
     server_address: String,
-    credential: String,
+    credential: RemoteMonitorCredential,
     monitor: RuntimeEventSender,
 ) {
     let (server_events, receiver) = tokio::sync::broadcast::channel(2_048);
     let bridge = tokio::spawn(bridge_server_monitor(receiver, monitor.clone()));
     loop {
+        let credential = match credential.current() {
+            Ok(Some(credential)) => credential,
+            Ok(None) => {
+                let _ = monitor.send(RuntimeEvent::HealthChanged {
+                    health: RuntimeHealth::Starting,
+                    message: Some("Waiting for Guest project monitor authorization".to_string()),
+                });
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                continue;
+            }
+            Err(error) => {
+                let _ = monitor.send(RuntimeEvent::HealthChanged {
+                    health: RuntimeHealth::Reconnecting,
+                    message: Some(crate::monitor::safe_error_message(&error)),
+                });
+                tokio::time::sleep(Duration::from_secs(2)).await;
+                continue;
+            }
+        };
         let _ = monitor.send(RuntimeEvent::HealthChanged {
             health: RuntimeHealth::Reconnecting,
             message: Some("Connecting to Vifu Server".to_string()),
@@ -293,19 +320,27 @@ async fn stream_remote_server_monitor(
 async fn run_combined_tui(config: LoadedRuntimeConfig) -> Result<(), String> {
     let server_config = config.server_config()?;
     let console_url = local_console_url(&server_config);
-    let gateway_options = config.gateway_options()?;
-    let dashboard_url = console_url
-        .clone()
-        .or_else(|| Some(gateway_options.server_url.clone()));
+    let mut gateway_options = config.gateway_options()?;
+    let dashboard_url = console_url.clone();
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let (monitor_tx, monitor_rx) = runtime_event_channel();
     let server_state = vifu_server::connect(server_config)
         .await
         .map_err(|error| error.to_string())?;
+    apply_local_server_certificate(
+        &mut gateway_options,
+        server_state.server_endpoint.as_deref(),
+    )?;
     let server_monitor = server_state.monitor.subscribe();
     let monitor_bridge = tokio::spawn(bridge_server_monitor(server_monitor, monitor_tx.clone()));
+    let (local_monitor_tx, local_monitor_rx) = runtime_event_channel();
+    let local_monitor_bridge = tokio::spawn(bridge_local_gateway_diagnostics(
+        local_monitor_rx,
+        monitor_tx,
+    ));
     let gateway_control = gateway::GatewayControl::new();
     let optimization = gateway_control.optimization();
+    let device_pairing = gateway_control.device_pairing();
     let mut server = tokio::spawn(vifu_server::serve_state(
         server_state,
         wait_for_shutdown(shutdown_rx.clone()),
@@ -313,10 +348,15 @@ async fn run_combined_tui(config: LoadedRuntimeConfig) -> Result<(), String> {
     let mut gateway = tokio::spawn(gateway::run(
         gateway_options,
         shutdown_rx,
-        Some(monitor_tx),
+        Some(local_monitor_tx),
         gateway_control,
     ));
-    let mut terminal = Box::pin(tui::run(monitor_rx, dashboard_url, Some(optimization)));
+    let mut terminal = Box::pin(tui::run(
+        monitor_rx,
+        dashboard_url,
+        Some(optimization),
+        Some(device_pairing),
+    ));
     let outcome = tokio::select! {
         () = shutdown_signal() => CombinedRuntimeOutcome::Shutdown,
         result = &mut terminal => CombinedRuntimeOutcome::Tui(result),
@@ -325,6 +365,7 @@ async fn run_combined_tui(config: LoadedRuntimeConfig) -> Result<(), String> {
     };
     let _ = shutdown_tx.send(true);
     monitor_bridge.abort();
+    local_monitor_bridge.abort();
     match outcome {
         CombinedRuntimeOutcome::Shutdown | CombinedRuntimeOutcome::Tui(Ok(())) => {
             let _ = server.await;
@@ -376,7 +417,7 @@ async fn run_server_only_tui(config: LoadedRuntimeConfig) -> Result<(), String> 
         server_state,
         wait_for_shutdown(shutdown_rx),
     ));
-    let mut terminal = Box::pin(tui::run(monitor_rx, console_url, None));
+    let mut terminal = Box::pin(tui::run(monitor_rx, console_url, None, None));
     let outcome = tokio::select! {
         () = shutdown_signal() => SingleRuntimeOutcome::Shutdown,
         result = &mut terminal => SingleRuntimeOutcome::Tui(result),
@@ -462,6 +503,9 @@ async fn bridge_server_monitor(
                     message: Some(format!("Device Gateway {gateway_id} disconnected")),
                 });
             }
+            vifu_server::monitor::ServerMonitorEvent::GatewayEnrolled { enrollment_id, .. } => {
+                let _ = sender.send(RuntimeEvent::GatewayEnrolled { enrollment_id });
+            }
             vifu_server::monitor::ServerMonitorEvent::RuntimeTelemetry { gateway_id, batch } => {
                 let invocation_key = (gateway_id.clone(), batch.trace_id.clone());
                 let invocation_id = *invocations
@@ -481,6 +525,10 @@ async fn bridge_server_monitor(
                         dropped_events: usize::try_from(batch.dropped_events).unwrap_or(usize::MAX),
                     });
                 }
+                if let Some(event) = runtime_telemetry_io_event(invocation_id, &batch) {
+                    let _ = sender.send(event);
+                }
+                let host_metrics = batch.host_metrics;
                 for telemetry in batch.events {
                     match telemetry {
                         vifu_gateway::protocol::TraceTelemetry::InvocationStarted {
@@ -540,6 +588,13 @@ async fn bridge_server_monitor(
                         vifu_gateway::protocol::TraceTelemetry::Delivery { .. } => {}
                     }
                 }
+                if let Some(host_metrics) = host_metrics {
+                    let _ = sender.send(RuntimeEvent::RuntimeHostMetrics {
+                        invocation_id,
+                        process_rss_bytes: host_metrics.process_rss_bytes,
+                        total_memory_bytes: host_metrics.total_memory_bytes,
+                    });
+                }
                 if let Some(terminal) = batch.terminal {
                     match terminal.status {
                         vifu_gateway::protocol::RuntimeTelemetryTerminalStatus::Cancelled => {
@@ -568,6 +623,39 @@ async fn bridge_server_monitor(
     }
 }
 
+fn runtime_telemetry_io_event(
+    invocation_id: uuid::Uuid,
+    batch: &vifu_gateway::protocol::RuntimeTelemetryBatch,
+) -> Option<RuntimeEvent> {
+    let input = batch.root_input_summary.as_ref();
+    let output = batch.root_output_summary.as_ref();
+    (input.is_some() || output.is_some()).then(|| RuntimeEvent::IoCaptured {
+        invocation_id,
+        input: input.map(|summary| summary.value.clone()),
+        output: output.map(|summary| summary.value.clone()),
+        truncated: input.is_some_and(|summary| summary.effective_truncated())
+            || output.is_some_and(|summary| summary.effective_truncated()),
+    })
+}
+
+async fn bridge_local_gateway_diagnostics(
+    mut receiver: crate::monitor::RuntimeEventReceiver,
+    sender: RuntimeEventSender,
+) {
+    while let Some(event) = receiver.recv().await {
+        if let Some(event) = local_gateway_diagnostic_event(event) {
+            let _ = sender.send(event);
+        }
+    }
+}
+
+fn local_gateway_diagnostic_event(event: RuntimeEvent) -> Option<RuntimeEvent> {
+    match event {
+        RuntimeEvent::BackendsChanged(_) | RuntimeEvent::LoadedModelsChanged(_) => Some(event),
+        _ => None,
+    }
+}
+
 fn monitor_agent_id(gateway_id: &str, agent_id: &str) -> String {
     format!("{gateway_id}/{agent_id}")
 }
@@ -586,24 +674,49 @@ fn runtime_stage(stage: vifu_gateway::relay::ProviderStage) -> RuntimeStage {
 
 async fn run_gateway_only_tui(config: LoadedRuntimeConfig) -> Result<(), String> {
     let gateway_options = config.gateway_options()?;
-    let dashboard_url = Some(gateway_options.server_url.clone());
+    let server_address = gateway_options.server_url.clone();
+    let dashboard_url = config.dashboard_url();
+    let credential = match configured_monitor_credential()? {
+        Some(credential) => RemoteMonitorCredential::Static(credential),
+        None => {
+            RemoteMonitorCredential::GatewayGuest(gateway_guest_monitor_source(&gateway_options)?)
+        }
+    };
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let (monitor_tx, monitor_rx) = runtime_event_channel();
+    let (local_monitor_tx, local_monitor_rx) = runtime_event_channel();
+    let local_monitor_bridge = tokio::spawn(bridge_local_gateway_diagnostics(
+        local_monitor_rx,
+        monitor_tx.clone(),
+    ));
+    let remote_monitor = tokio::spawn(stream_remote_server_monitor(
+        server_address,
+        credential,
+        monitor_tx,
+    ));
     let gateway_control = gateway::GatewayControl::new();
     let optimization = gateway_control.optimization();
+    let device_pairing = gateway_control.device_pairing();
     let mut gateway = tokio::spawn(gateway::run(
         gateway_options,
         shutdown_rx,
-        Some(monitor_tx),
+        Some(local_monitor_tx),
         gateway_control,
     ));
-    let mut terminal = Box::pin(tui::run(monitor_rx, dashboard_url, Some(optimization)));
+    let mut terminal = Box::pin(tui::run(
+        monitor_rx,
+        dashboard_url,
+        Some(optimization),
+        Some(device_pairing),
+    ));
     let outcome = tokio::select! {
         () = shutdown_signal() => SingleRuntimeOutcome::Shutdown,
         result = &mut terminal => SingleRuntimeOutcome::Tui(result),
         result = &mut gateway => SingleRuntimeOutcome::Role(result),
     };
     let _ = shutdown_tx.send(true);
+    remote_monitor.abort();
+    local_monitor_bridge.abort();
     match outcome {
         SingleRuntimeOutcome::Shutdown | SingleRuntimeOutcome::Tui(Ok(())) => {
             let _ = gateway.await;
@@ -642,10 +755,137 @@ fn join_result(
 }
 
 fn local_console_url(config: &ServerConfig) -> Option<String> {
-    config.server_url.clone().or_else(|| {
-        (config.deployment_mode == DeploymentMode::Local && config.addr.ip().is_loopback())
-            .then(|| format!("http://{}", config.addr))
+    if config.deployment_mode == DeploymentMode::Local && config.addr.ip().is_loopback() {
+        return config
+            .server_url
+            .clone()
+            .or_else(|| Some(format!("http://{}", config.addr)));
+    }
+    config
+        .dashboard_addr
+        .as_ref()
+        .and_then(|_| config.server_url.clone())
+}
+
+fn apply_local_server_certificate(
+    options: &mut crate::gateway::GatewayRuntimeOptions,
+    endpoint: Option<&vifu_server::ServerEndpointIdentity>,
+) -> Result<(), String> {
+    options.server_certificate_der = endpoint
+        .map(vifu_server::ServerEndpointIdentity::certificate_der)
+        .transpose()?
+        .flatten();
+    Ok(())
+}
+
+fn remote_monitor_credential() -> Result<String, String> {
+    configured_monitor_credential()?.ok_or_else(|| {
+        "remote Server monitoring requires VIFU_MONITOR_KEY (a project API key with project read access) or VIFU_MONITOR_KEY_FILE"
+            .to_string()
     })
+}
+
+fn configured_monitor_credential() -> Result<Option<String>, String> {
+    optional_monitor_credential_from(
+        std::env::var("VIFU_MONITOR_KEY").ok(),
+        std::env::var_os("VIFU_MONITOR_KEY_FILE").map(std::path::PathBuf::from),
+        std::env::var("VIFU_ADMIN_KEY").ok(),
+        std::env::var_os("VIFU_ADMIN_KEY_FILE").map(std::path::PathBuf::from),
+    )
+}
+
+#[cfg(test)]
+fn monitor_credential_from(
+    monitor_key: Option<String>,
+    monitor_key_file: Option<std::path::PathBuf>,
+    admin_key: Option<String>,
+    admin_key_file: Option<std::path::PathBuf>,
+) -> Result<String, String> {
+    optional_monitor_credential_from(monitor_key, monitor_key_file, admin_key, admin_key_file)?
+        .ok_or_else(|| {
+            "remote Server monitoring requires VIFU_MONITOR_KEY (a project API key with project read access) or VIFU_MONITOR_KEY_FILE"
+                .to_string()
+        })
+}
+
+fn optional_monitor_credential_from(
+    monitor_key: Option<String>,
+    monitor_key_file: Option<std::path::PathBuf>,
+    admin_key: Option<String>,
+    admin_key_file: Option<std::path::PathBuf>,
+) -> Result<Option<String>, String> {
+    let (value, file) = if monitor_key.is_some() || monitor_key_file.is_some() {
+        (monitor_key, monitor_key_file)
+    } else {
+        (admin_key, admin_key_file)
+    };
+    match (value, file) {
+        (Some(value), None) if !value.trim().is_empty() => Ok(Some(value.trim().to_string())),
+        (None, Some(path)) => {
+            let value = std::fs::read_to_string(&path).map_err(|error| {
+                format!(
+                    "remote monitor credential {} could not be read: {error}",
+                    path.display()
+                )
+            })?;
+            let value = value.trim();
+            if value.is_empty() {
+                return Err(format!(
+                    "remote monitor credential {} is empty",
+                    path.display()
+                ));
+            }
+            Ok(Some(value.to_string()))
+        }
+        (Some(_), Some(_)) => {
+            Err("set either VIFU_MONITOR_KEY or VIFU_MONITOR_KEY_FILE, not both".to_string())
+        }
+        _ => Ok(None),
+    }
+}
+
+#[derive(Clone)]
+enum RemoteMonitorCredential {
+    Static(String),
+    GatewayGuest(GatewayGuestMonitorSource),
+}
+
+impl RemoteMonitorCredential {
+    fn current(&self) -> Result<Option<String>, String> {
+        match self {
+            Self::Static(credential) => Ok(Some(credential.clone())),
+            Self::GatewayGuest(source) => source.current(),
+        }
+    }
+}
+
+#[derive(Clone)]
+struct GatewayGuestMonitorSource {
+    store: vifu_gateway::session_store::GatewaySessionStore,
+    state_key: String,
+}
+
+impl GatewayGuestMonitorSource {
+    fn current(&self) -> Result<Option<String>, String> {
+        Ok(self
+            .store
+            .load(&self.state_key, None, None)?
+            .and_then(|session| session.guest_project)
+            .map(|guest| guest.api_key))
+    }
+}
+
+fn gateway_guest_monitor_source(
+    options: &crate::gateway::GatewayRuntimeOptions,
+) -> Result<GatewayGuestMonitorSource, String> {
+    let config = options.load_config()?;
+    let store =
+        vifu_gateway::session_store::GatewaySessionStore::open(config.runtime_database_file())?;
+    let state_key = vifu_gateway::session_store::gateway_session_state_key(
+        &options.session_scope,
+        &config.server_url,
+    )?;
+    Ok(GatewayGuestMonitorSource { store, state_key })
 }
 
 fn announce_console(console_url: Option<String>, open_browser: bool) {
@@ -816,8 +1056,32 @@ mod tests {
     use tokio::net::TcpListener;
 
     use super::{
-        auto_browser_policy, join_result, monitor_agent_id, start_plan, wait_for_console, StartPlan,
+        apply_local_server_certificate, auto_browser_policy, join_result, local_console_url,
+        local_gateway_diagnostic_event, monitor_agent_id, monitor_credential_from,
+        runtime_telemetry_io_event, start_plan, wait_for_console, RuntimeEvent, RuntimeHealth,
+        StartPlan,
     };
+    use vifu_server::config::{Config as ServerConfig, DeploymentMode};
+
+    #[test]
+    fn combined_gateway_uses_the_local_server_certificate() {
+        let endpoint = vifu_server::ServerEndpointIdentity {
+            server_url: "https://192.0.2.20:6790".to_string(),
+            certificate_der_base64: Some("AQID".to_string()),
+            certificate_sha256: Some("sha256:synthetic".to_string()),
+        };
+        let mut options = crate::gateway::GatewayRuntimeOptions {
+            server_url: endpoint.server_url.clone(),
+            server_certificate_der: None,
+            allow_guest_bootstrap: true,
+            enrollment_token: None,
+            session_scope: "test".to_string(),
+        };
+
+        apply_local_server_certificate(&mut options, Some(&endpoint)).unwrap();
+
+        assert_eq!(options.server_certificate_der, Some(vec![1, 2, 3]));
+    }
 
     #[test]
     fn remote_server_with_local_gateway_starts_only_the_gateway() {
@@ -857,12 +1121,100 @@ mod tests {
     }
 
     #[test]
+    fn embedded_runtime_io_becomes_a_live_tui_capture_event() {
+        let invocation_id = uuid::Uuid::new_v4();
+        let input = vifu_gateway::protocol::canonical_trace_io_summary(&serde_json::json!({
+            "messages": [{"role": "user", "content": "hello"}]
+        }));
+        let output = vifu_gateway::protocol::canonical_trace_io_summary(&serde_json::json!({
+            "choices": [{"message": {"role": "assistant", "content": "hi"}}]
+        }));
+        let batch = vifu_gateway::protocol::RuntimeTelemetryBatch {
+            deployment_id: uuid::Uuid::new_v4(),
+            trace_id: "trace-io".to_string(),
+            invocation_id: "invocation-io".to_string(),
+            project_id: "android-demo".to_string(),
+            endpoint: "chat".to_string(),
+            agent_id: "android-chat".to_string(),
+            started_at_ms: 1,
+            events: Vec::new(),
+            dropped_events: 0,
+            root_input_summary: Some(input.clone()),
+            root_output_summary: Some(output.clone()),
+            host_metrics: None,
+            terminal: None,
+        };
+
+        assert!(matches!(
+            runtime_telemetry_io_event(invocation_id, &batch),
+            Some(RuntimeEvent::IoCaptured {
+                invocation_id: captured_id,
+                input: Some(captured_input),
+                output: Some(captured_output),
+                truncated: false,
+            }) if captured_id == invocation_id
+                && captured_input == input.value
+                && captured_output == output.value
+        ));
+    }
+
+    #[test]
     fn automatic_browser_launch_requires_a_fully_interactive_terminal() {
         assert!(auto_browser_policy(true, true, false, false));
         assert!(!auto_browser_policy(false, true, false, false));
         assert!(!auto_browser_policy(true, false, false, false));
         assert!(!auto_browser_policy(true, true, true, false));
         assert!(!auto_browser_policy(true, true, false, true));
+    }
+
+    #[test]
+    fn remote_monitor_prefers_a_project_scoped_monitor_key() {
+        let credential = monitor_credential_from(
+            Some(" vifu_pk_project ".to_string()),
+            None,
+            Some("deployment-admin".to_string()),
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(credential, "vifu_pk_project");
+    }
+
+    #[test]
+    fn remote_monitor_does_not_generate_an_implicit_admin_key() {
+        let error = monitor_credential_from(None, None, None, None).unwrap_err();
+
+        assert!(error.contains("VIFU_MONITOR_KEY"));
+    }
+
+    #[test]
+    fn local_gateway_bridge_forwards_only_device_diagnostics() {
+        assert!(matches!(
+            local_gateway_diagnostic_event(RuntimeEvent::LoadedModelsChanged(2)),
+            Some(RuntimeEvent::LoadedModelsChanged(2))
+        ));
+        assert!(local_gateway_diagnostic_event(RuntimeEvent::HealthChanged {
+            health: RuntimeHealth::Live,
+            message: None,
+        })
+        .is_none());
+    }
+
+    #[test]
+    fn self_hosted_api_root_is_not_presented_as_a_dashboard() {
+        let mut config = ServerConfig::from_env().unwrap();
+        config.deployment_mode = DeploymentMode::SelfHosted;
+        config.addr = "0.0.0.0:6790".parse().unwrap();
+        config.server_url = Some("https://192.0.2.20:6790".to_string());
+        config.dashboard_addr = None;
+
+        assert_eq!(local_console_url(&config), None);
+
+        config.dashboard_addr = Some("dashboard:6791".to_string());
+        assert_eq!(
+            local_console_url(&config).as_deref(),
+            Some("https://192.0.2.20:6790")
+        );
     }
 
     #[tokio::test]

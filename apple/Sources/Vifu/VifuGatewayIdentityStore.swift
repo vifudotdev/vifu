@@ -258,6 +258,21 @@ public extension VifuEmbeddedGateway {
             enrollmentToken: enrollmentToken
         )
     }
+
+    /// Starts monitoring with an explicit application consent decision for invocation content.
+    func startWithMonitorIo(
+        identity: VifuGatewayMachineIdentity,
+        authorization: VifuGatewayAuthorization? = nil,
+        enrollmentToken: String? = nil,
+        captureMonitorIo: Bool
+    ) throws {
+        try startWithMonitorIo(
+            machinePrivateKey: identity.privateKey,
+            deviceToken: authorization?.deviceToken,
+            enrollmentToken: enrollmentToken,
+            captureMonitorIo: captureMonitorIo
+        )
+    }
 }
 
 public extension VifuEmbeddedGatewayConfig {

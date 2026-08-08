@@ -1,0 +1,15 @@
+{
+  "providers": [
+    {
+      "key": "stardew-valley-llama",
+      "name": "Stardew Valley Qwen 3 1.7B",
+      "type": "llama",
+      "config": {
+        "modelPath": "models/Qwen3-1.7B-Q4_K_M.gguf",
+        "contextSize": 4096,
+        "defaultMaxTokens": 256,
+        "maxConcurrency": 1
+      }
+    }
+  ]
+}

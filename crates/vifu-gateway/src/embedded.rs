@@ -9,11 +9,12 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::Value;
 use vifu_runtime::{
-    CancellationToken, InvocationData, InvocationInput, RuntimeError, RuntimeManifest, VifuRuntime,
+    CancellationToken, InvocationData, InvocationInput, RuntimeError, RuntimeManifest,
+    RuntimeMonitorIoEvent, VifuRuntime,
 };
 
 use crate::identity::MachineIdentity;
-use crate::protocol::AgentDescriptor;
+use crate::protocol::{canonical_trace_io_summary, AgentDescriptor};
 use crate::relay::{self, AgentGatewayRuntime};
 use crate::relay::{
     AgentGatewayProvider, GatewayConnectionState, GatewayProviderError, GatewayRuntimeEvent,
@@ -307,12 +308,26 @@ impl EmbeddedRuntimeGateway {
         device_token: Option<String>,
         enrollment_token: Option<String>,
     ) -> Result<(), String> {
+        self.start_with_monitor_io(identity, device_token, enrollment_token, false)
+    }
+
+    /// Starts the Gateway and optionally sends bounded root invocation input/output summaries.
+    ///
+    /// Full invocation content is disabled by default. Hosts must expose their own explicit
+    /// consent control before setting `capture_monitor_io` to `true`.
+    pub fn start_with_monitor_io(
+        &self,
+        identity: MachineIdentity,
+        device_token: Option<String>,
+        enrollment_token: Option<String>,
+        capture_monitor_io: bool,
+    ) -> Result<(), String> {
         identity.validate()?;
         if let Some(device_token) = device_token.as_deref() {
             crate::session::validate_device_token(device_token)?;
         }
         let manifest = runtime_manifest(&self.runtime)?;
-        let (providers, agents) = gateway_components(&self.runtime, &manifest);
+        let (providers, agents, provider_models) = gateway_components(&self.runtime, &manifest);
         let mut task = self
             .task
             .lock()
@@ -334,19 +349,14 @@ impl EmbeddedRuntimeGateway {
         let (monitor_sender, monitor_receiver) =
             tokio::sync::mpsc::channel(EMBEDDED_MONITOR_QUEUE_CAPACITY);
         let monitor_drops = Arc::new(AtomicU32::new(0));
-        let observer_drops = Arc::clone(&monitor_drops);
-        self.runtime
-            .set_monitor_observer(Some(Arc::new(move |event| {
-                if monitor_sender.try_send(event).is_err() {
-                    let _ = observer_drops.fetch_update(
-                        Ordering::Relaxed,
-                        Ordering::Relaxed,
-                        |dropped| Some(dropped.saturating_add(1)),
-                    );
-                }
-            })))
-            .map_err(|error| error.public_message())?;
-        let embedded_monitor = relay::EmbeddedRuntimeMonitor::new(monitor_receiver, monitor_drops);
+        install_embedded_monitor_observers(
+            &self.runtime,
+            monitor_sender,
+            Arc::clone(&monitor_drops),
+            capture_monitor_io,
+        )?;
+        let embedded_monitor =
+            relay::EmbeddedRuntimeMonitor::new_with_io(monitor_receiver, monitor_drops);
         let status = Arc::clone(&self.status);
         let guest_project = Arc::clone(&self.guest_project);
         #[cfg(feature = "sqlite")]
@@ -429,8 +439,10 @@ impl EmbeddedRuntimeGateway {
                                         });
                                     }
                                 });
-                            let allow_guest_bootstrap =
-                                cfg!(feature = "sqlite") && enrollment_token.is_none();
+                            let allow_guest_bootstrap = cfg!(feature = "sqlite")
+                                && authorization_token_allows_guest_bootstrap(
+                                    enrollment_token.as_deref(),
+                                );
                             let connection_status = Arc::clone(&status);
                             let runtime_observer = Arc::new(move |event: GatewayRuntimeEvent| {
                                 let GatewayRuntimeEvent::ConnectionStatus { state, message } =
@@ -466,7 +478,7 @@ impl EmbeddedRuntimeGateway {
                                 runtime_observer: Some(runtime_observer),
                                 capture_sender: None,
                                 config_epoch: 0,
-                                provider_models: None,
+                                provider_models: Some(provider_models),
                                 session_path: None,
                                 runtime_database_path: &runtime_database_path,
                                 embedded_runtime: Some(&embedded_runtime),
@@ -507,6 +519,7 @@ impl EmbeddedRuntimeGateway {
             Ok(thread) => thread,
             Err(error) => {
                 let _ = self.runtime.set_monitor_observer(None);
+                let _ = self.runtime.set_monitor_io_observer(None);
                 set_gateway_status(
                     &self.status,
                     EmbeddedRuntimeGatewayState::Failed,
@@ -568,14 +581,77 @@ impl EmbeddedRuntimeGateway {
             self.runtime
                 .set_monitor_observer(None)
                 .map_err(|error| error.public_message())?;
+            self.runtime
+                .set_monitor_io_observer(None)
+                .map_err(|error| error.public_message())?;
         }
         set_gateway_status(&self.status, EmbeddedRuntimeGatewayState::Stopped, None)
     }
 }
 
+fn install_embedded_monitor_observers(
+    runtime: &VifuRuntime,
+    monitor_sender: tokio::sync::mpsc::Sender<relay::EmbeddedRuntimeMonitorEvent>,
+    monitor_drops: Arc<AtomicU32>,
+    capture_monitor_io: bool,
+) -> Result<(), String> {
+    let lifecycle_sender = monitor_sender.clone();
+    let observer_drops = Arc::clone(&monitor_drops);
+    runtime
+        .set_monitor_observer(Some(Arc::new(move |event| {
+            try_send_embedded_monitor_event(
+                &lifecycle_sender,
+                relay::EmbeddedRuntimeMonitorEvent::Lifecycle(event),
+                &observer_drops,
+            );
+        })))
+        .map_err(|error| error.public_message())?;
+
+    if !capture_monitor_io {
+        return runtime
+            .set_monitor_io_observer(None)
+            .map_err(|error| error.public_message());
+    }
+
+    let io_drops = Arc::clone(&monitor_drops);
+    if let Err(error) = runtime.set_monitor_io_observer(Some(Arc::new(move |event| {
+        let event = match event {
+            RuntimeMonitorIoEvent::InvocationInput {
+                trace_id, summary, ..
+            } => relay::EmbeddedRuntimeMonitorEvent::RootInput {
+                trace_id,
+                summary: canonical_trace_io_summary(&summary.value),
+            },
+            RuntimeMonitorIoEvent::InvocationOutput {
+                trace_id, summary, ..
+            } => relay::EmbeddedRuntimeMonitorEvent::RootOutput {
+                trace_id,
+                summary: canonical_trace_io_summary(&summary.value),
+            },
+        };
+        try_send_embedded_monitor_event(&monitor_sender, event, &io_drops);
+    }))) {
+        let _ = runtime.set_monitor_observer(None);
+        return Err(error.public_message());
+    }
+    Ok(())
+}
+
 impl Drop for EmbeddedRuntimeGateway {
     fn drop(&mut self) {
         let _ = self.stop_inner();
+    }
+}
+
+fn try_send_embedded_monitor_event(
+    sender: &tokio::sync::mpsc::Sender<relay::EmbeddedRuntimeMonitorEvent>,
+    event: relay::EmbeddedRuntimeMonitorEvent,
+    dropped_events: &AtomicU32,
+) {
+    if sender.try_send(event).is_err() {
+        let _ = dropped_events.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |dropped| {
+            Some(dropped.saturating_add(1))
+        });
     }
 }
 
@@ -598,7 +674,11 @@ fn runtime_manifest(runtime: &VifuRuntime) -> Result<RuntimeManifest, String> {
 fn gateway_components(
     runtime: &VifuRuntime,
     manifest: &RuntimeManifest,
-) -> (Vec<Arc<dyn AgentGatewayProvider>>, Vec<AgentDescriptor>) {
+) -> (
+    Vec<Arc<dyn AgentGatewayProvider>>,
+    Vec<AgentDescriptor>,
+    relay::ProviderModels,
+) {
     let providers = manifest
         .providers
         .iter()
@@ -658,8 +738,42 @@ fn gateway_components(
                 metadata: Value::Object(metadata),
             }
         })
-        .collect();
-    (providers, agents)
+        .collect::<Vec<_>>();
+    let provider_models = Arc::new(
+        agents
+            .iter()
+            .flat_map(|agent| {
+                let provider = agent
+                    .metadata
+                    .get("providerKey")
+                    .and_then(Value::as_str)
+                    .unwrap_or(&agent.id)
+                    .to_string();
+                let model = agent
+                    .metadata
+                    .get("model")
+                    .and_then(Value::as_str)
+                    .map(str::to_string);
+                agent
+                    .metadata
+                    .get("capabilities")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(Value::as_str)
+                    .filter_map(move |capability| {
+                        let model = agent
+                            .metadata
+                            .pointer(&format!("/models/{capability}"))
+                            .and_then(Value::as_str)
+                            .map(str::to_string)
+                            .or_else(|| model.clone())?;
+                        Some(((provider.clone(), capability.to_string()), model))
+                    })
+            })
+            .collect(),
+    );
+    (providers, agents, provider_models)
 }
 
 fn set_gateway_status(
@@ -698,6 +812,10 @@ fn clear_guest_project(guest_project: &Mutex<Option<EmbeddedGuestProject>>) -> R
     Ok(())
 }
 
+fn authorization_token_allows_guest_bootstrap(token: Option<&str>) -> bool {
+    token.is_none()
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
@@ -712,6 +830,17 @@ mod tests {
     };
 
     use super::*;
+
+    #[test]
+    fn only_an_unpaired_gateway_can_create_a_guest_project() {
+        assert!(authorization_token_allows_guest_bootstrap(None));
+        assert!(!authorization_token_allows_guest_bootstrap(Some(
+            "vifu_gb_0123456789abcdef"
+        )));
+        assert!(!authorization_token_allows_guest_bootstrap(Some(
+            "vifu_ge_0123456789abcdef"
+        )));
+    }
 
     struct EchoProvider;
 
@@ -814,6 +943,41 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(output, json!({ "message": "hello" }));
+    }
+
+    #[tokio::test]
+    async fn embedded_monitor_io_requires_explicit_consent() {
+        for (capture_monitor_io, expected_io_events) in [(false, 0), (true, 2)] {
+            let runtime = runtime();
+            let (sender, mut receiver) = tokio::sync::mpsc::channel(32);
+            install_embedded_monitor_observers(
+                &runtime,
+                sender,
+                Arc::new(AtomicU32::new(0)),
+                capture_monitor_io,
+            )
+            .unwrap();
+
+            runtime
+                .invoke(InvocationInput::json(
+                    "mizuki-chat",
+                    json!({"messages": [{"role": "user", "content": "private"}]}),
+                ))
+                .await
+                .unwrap();
+
+            let mut io_events = 0;
+            while let Ok(event) = receiver.try_recv() {
+                if matches!(
+                    event,
+                    relay::EmbeddedRuntimeMonitorEvent::RootInput { .. }
+                        | relay::EmbeddedRuntimeMonitorEvent::RootOutput { .. }
+                ) {
+                    io_events += 1;
+                }
+            }
+            assert_eq!(io_events, expected_io_events);
+        }
     }
 
     #[tokio::test]
@@ -966,7 +1130,7 @@ mod tests {
         manifest.agents = runtime.agent_definitions().unwrap();
         manifest.endpoints = runtime.endpoint_definitions().unwrap();
 
-        let (providers, agents) = gateway_components(&runtime, &manifest);
+        let (providers, agents, _provider_models) = gateway_components(&runtime, &manifest);
 
         assert_eq!(providers[0].id(), "local-llama");
         assert_eq!(agents[0].metadata["providerKey"], "local-llama");

@@ -57,6 +57,50 @@ impl Config {
         Self::from_lookup(|key| std::env::var(key).ok())
     }
 
+    /// Loads a self-hosted Server whose deployment secrets are owned by the
+    /// local Vifu installation. Explicit environment values still win; missing
+    /// secrets are generated once in `secret_dir` and reused on later starts.
+    pub fn from_env_with_managed_self_hosted_secrets(
+        secret_dir: &std::path::Path,
+    ) -> Result<Self, String> {
+        let secret_files = [
+            ("VIFU_ADMIN_KEY_FILE", "admin", "vifu_admin_"),
+            (
+                "VIFU_AGENT_GATEWAY_BOOTSTRAP_TOKEN_FILE",
+                "agent-gateway-bootstrap",
+                "vifu_gb_",
+            ),
+            ("VIFU_API_KEY_PEPPER_FILE", "api-key-pepper", "vifu_pepper_"),
+            (
+                "VIFU_PROVIDER_SECRET_KEY_FILE",
+                "provider-secret",
+                "vifu_provider_",
+            ),
+        ];
+        for (_, file_name, prefix) in secret_files {
+            ensure_managed_secret(&secret_dir.join(file_name), prefix)?;
+        }
+        Self::from_lookup(|key| {
+            std::env::var(key).ok().or_else(|| match key {
+                "VIFU_DEPLOYMENT_MODE" => Some("self-hosted".to_string()),
+                "VIFU_ADMIN_KEY_FILE" => Some(secret_dir.join("admin").display().to_string()),
+                "VIFU_AGENT_GATEWAY_BOOTSTRAP_TOKEN_FILE" => Some(
+                    secret_dir
+                        .join("agent-gateway-bootstrap")
+                        .display()
+                        .to_string(),
+                ),
+                "VIFU_API_KEY_PEPPER_FILE" => {
+                    Some(secret_dir.join("api-key-pepper").display().to_string())
+                }
+                "VIFU_PROVIDER_SECRET_KEY_FILE" => {
+                    Some(secret_dir.join("provider-secret").display().to_string())
+                }
+                _ => None,
+            })
+        })
+    }
+
     pub fn apply_service_version(
         &mut self,
         service_version: impl AsRef<str>,
@@ -297,6 +341,21 @@ impl Config {
     }
 }
 
+fn ensure_managed_secret(path: &std::path::Path, prefix: &str) -> Result<(), String> {
+    match std::fs::read_to_string(path) {
+        Ok(value) if !value.trim().is_empty() => return Ok(()),
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(format!("{} could not be read: {error}", path.display())),
+    }
+    let secret = format!(
+        "{prefix}{}{}",
+        uuid::Uuid::new_v4().simple(),
+        uuid::Uuid::new_v4().simple()
+    );
+    vifu_gateway::config::write_private_file(path, &format!("{secret}\n"))
+}
+
 impl AccessTokenAuthorityConfig {
     pub fn new(url: impl Into<String>, deployment_id: impl Into<String>) -> Result<Self, String> {
         let config = Self {
@@ -484,6 +543,38 @@ mod tests {
             config.provider_secret_key
         );
         assert_ne!(config.api_key_pepper, config.provider_secret_key);
+    }
+
+    #[test]
+    fn managed_self_hosted_secrets_are_generated_once_and_reused() {
+        let directory = std::env::temp_dir().join(format!(
+            "vifu-managed-secrets-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let first = Config::from_env_with_managed_self_hosted_secrets(&directory).unwrap();
+        let second = Config::from_env_with_managed_self_hosted_secrets(&directory).unwrap();
+
+        assert_eq!(first.deployment_mode, DeploymentMode::SelfHosted);
+        assert_eq!(first.admin_key, second.admin_key);
+        assert_eq!(
+            first.agent_gateway_bootstrap_token,
+            second.agent_gateway_bootstrap_token
+        );
+        assert_ne!(first.admin_key, first.agent_gateway_bootstrap_token);
+        assert!(first.agent_gateway_bootstrap_token.starts_with("vifu_gb_"));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(directory.join("admin"))
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o600
+            );
+        }
+        fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]

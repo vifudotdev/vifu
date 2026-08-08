@@ -8,12 +8,14 @@ stable endpoints, Gateway transport, and traces.
 ## Start
 
 - [Install Vifu](install.md)
+- [Runtime topology, monitoring, and Gateway enrollment](topology-and-pairing.md)
 - [Embedded Console](embedded-console.md)
 - [Self-host a full or headless deployment with Docker](self-hosting.md)
 - [Project Settings](project-settings.md)
 
 ## Operate
 
+- [Topology protocol live testing](topology-live-testing.md)
 - [ARM optimization TUI](arm-optimization-tui.md)
 - [Provider integrations](../providers/README.md)
 - [Local llama Provider](../providers/llama/README.md)

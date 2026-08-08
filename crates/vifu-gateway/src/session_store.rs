@@ -101,13 +101,24 @@ impl GatewaySessionStore {
             (Some(external), _) => Some(external.to_string()),
             (None, stored) => stored,
         };
+        let (gateway_id, token_generation, token_expires_at, resume_session_id) =
+            if device_token.is_some() {
+                (
+                    stored.gateway_id,
+                    stored.token_generation,
+                    stored.token_expires_at,
+                    stored.resume_session_id,
+                )
+            } else {
+                (None, None, None, None)
+            };
         let session = SessionSummary {
             identity,
-            gateway_id: stored.gateway_id,
+            gateway_id,
             device_token,
-            token_generation: stored.token_generation,
-            token_expires_at: stored.token_expires_at,
-            resume_session_id: stored.resume_session_id,
+            token_generation,
+            token_expires_at,
+            resume_session_id,
             created_at_unix: stored.created_at_unix,
             guest_project: stored.guest_project,
             pairing: stored.pairing,
@@ -227,6 +238,43 @@ mod tests {
         assert_eq!(
             store.load("ios", Some(&identity), None).unwrap(),
             Some(session)
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn external_storage_recovers_when_device_token_is_missing() {
+        let path = std::env::temp_dir().join(format!(
+            "vifu-session-store-{}.sqlite",
+            uuid::Uuid::new_v4()
+        ));
+        let store = GatewaySessionStore::open(&path).unwrap();
+        let identity = MachineIdentity::generate().unwrap();
+        let mut session = SessionSummary::new(identity.clone(), 42).unwrap();
+        session.gateway_id = Some("gateway-test".to_string());
+        session.device_token = Some(format!("vifu_gw_{}", "a".repeat(64)));
+        session.token_generation = Some(1);
+        session.token_expires_at = Some("2099-01-01T00:00:00Z".to_string());
+        session.resume_session_id = Some(uuid::Uuid::new_v4());
+        store
+            .persistence("android", GatewaySecretStorage::External)
+            .save(&session)
+            .unwrap();
+
+        let recovered = store
+            .load("android", Some(&identity), None)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(
+            (
+                recovered.gateway_id,
+                recovered.device_token,
+                recovered.token_generation,
+                recovered.token_expires_at,
+                recovered.resume_session_id,
+            ),
+            (None, None, None, None, None)
         );
         let _ = std::fs::remove_file(path);
     }

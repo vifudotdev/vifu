@@ -115,11 +115,12 @@ async fn run_socket(
         followup.as_deref(),
     )
     .await?;
-    let (authorization, device_token) = match authorization {
+    let (authorization, device_token, enrollment_id) = match authorization {
         GatewayAuthorizationOutcome::Authorized {
             authorization,
             device_token,
-        } => (authorization, device_token),
+            enrollment_id,
+        } => (*authorization, device_token, enrollment_id),
         GatewayAuthorizationOutcome::PairingRequired { request_id } => {
             send_command(
                 socket,
@@ -140,6 +141,8 @@ async fn run_socket(
         gateway_supports_feature(&metadata, protocol::APPLICATION_FEEDBACK_FEATURE);
     let embedded_monitoring_supported =
         gateway_supports_feature(&metadata, protocol::EMBEDDED_LIVE_MONITOR_FEATURE);
+    let runtime_host_metrics_supported =
+        gateway_supports_feature(&metadata, protocol::RUNTIME_HOST_METRICS_FEATURE);
     let invocation_activity_supported =
         gateway_supports_feature(&metadata, protocol::INVOCATION_ACTIVITY_FEATURE);
 
@@ -192,8 +195,17 @@ async fn run_socket(
         gateway_id: gateway_id.to_string(),
         agents: agents.clone(),
     });
+    if let Some(enrollment_id) = enrollment_id {
+        state.monitor.publish(ServerMonitorEvent::GatewayEnrolled {
+            gateway_id: gateway_id.to_string(),
+            enrollment_id,
+        });
+    }
     if embedded_monitoring_supported {
         send_command(socket, &AgentGatewayCommand::RuntimeMonitoringReady).await?;
+    }
+    if runtime_host_metrics_supported {
+        send_command(socket, &AgentGatewayCommand::RuntimeHostMetricsReady).await?;
     }
     if invocation_activity_supported {
         send_command(socket, &AgentGatewayCommand::InvocationActivityReady).await?;
@@ -268,7 +280,7 @@ async fn run_socket(
                         match persist_runtime_telemetry(state, gateway_id, &batch).await {
                             Ok(true) => state.monitor.publish(ServerMonitorEvent::RuntimeTelemetry {
                                 gateway_id: gateway_id.to_string(),
-                                batch,
+                                batch: Box::new(batch),
                             }),
                             Ok(false) => {}
                             Err(RuntimeTelemetryPersistError::Invalid(message)) => break Err(message),
@@ -410,15 +422,18 @@ async fn persist_runtime_telemetry(
         .await
         .map_err(|error| RuntimeTelemetryPersistError::Storage(error.to_string()))?;
     }
-    if !batch.events.is_empty() {
+    if !batch.events.is_empty()
+        || batch.root_input_summary.is_some()
+        || batch.root_output_summary.is_some()
+    {
         crate::telemetry::persist_batch(
             &state.pool,
             request_id,
             protocol::TraceTelemetryBatch {
                 events: batch.events.clone(),
                 dropped_events: batch.dropped_events,
-                root_input_summary: None,
-                root_output_summary: None,
+                root_input_summary: batch.root_input_summary.clone(),
+                root_output_summary: batch.root_output_summary.clone(),
             },
         )
         .await
@@ -468,8 +483,9 @@ fn gateway_supports_feature(metadata: &serde_json::Value, feature: &str) -> bool
 
 enum GatewayAuthorizationOutcome {
     Authorized {
-        authorization: AgentGatewayAuthorization,
+        authorization: Box<AgentGatewayAuthorization>,
         device_token: Option<String>,
+        enrollment_id: Option<Uuid>,
     },
     PairingRequired {
         request_id: Uuid,
@@ -489,6 +505,7 @@ async fn authorize_gateway_machine(
     let mut approved_owner = None;
     let mut explicitly_approved = false;
     let mut preferred_gateway_id = None;
+    let mut enrollment_id = None;
 
     if let Some(enrollment_token) = followup.filter(|value| value.starts_with("vifu_ge_")) {
         let gateway_id = authorization
@@ -507,6 +524,24 @@ async fn authorize_gateway_machine(
         approved_owner = Some(assignment.owner_user_id);
         explicitly_approved = true;
         preferred_gateway_id = Some(gateway_id);
+        enrollment_id = Some(assignment.enrollment_id);
+    } else if let Some(distribution_id) = followup.filter(|value| is_runtime_distribution_id(value))
+    {
+        let suggested_gateway_id = authorization
+            .as_ref()
+            .map(|value| value.gateway_id.clone())
+            .unwrap_or_else(new_gateway_id);
+        let assignment = db::authorize_runtime_distribution_gateway(
+            &state.pool,
+            distribution_id,
+            machine_id,
+            &suggested_gateway_id,
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+        approved_owner = assignment.owner_user_id;
+        explicitly_approved = true;
+        preferred_gateway_id = Some(assignment.gateway_id);
     } else if let Some(pairing_id) = followup.and_then(|value| Uuid::parse_str(value).ok()) {
         if let Ok(pairing) =
             db::consume_agent_gateway_pairing(&state.pool, pairing_id, machine_id).await
@@ -549,8 +584,9 @@ async fn authorize_gateway_machine(
             .await
             .map_err(|error| error.to_string())?;
             return Ok(GatewayAuthorizationOutcome::Authorized {
-                authorization: created,
+                authorization: Box::new(created),
                 device_token: Some(issued.raw),
+                enrollment_id,
             });
         }
         return pending_pairing(state, machine_id).await;
@@ -593,8 +629,9 @@ async fn authorize_gateway_machine(
                 > chrono::Utc::now() + chrono::Duration::days(DEVICE_TOKEN_ROTATION_WINDOW_DAYS)
             {
                 return Ok(GatewayAuthorizationOutcome::Authorized {
-                    authorization: current,
+                    authorization: Box::new(current),
                     device_token: None,
+                    enrollment_id: None,
                 });
             }
         } else {
@@ -615,9 +652,18 @@ async fn authorize_gateway_machine(
     .await
     .map_err(|error| error.to_string())?;
     Ok(GatewayAuthorizationOutcome::Authorized {
-        authorization: rotated,
+        authorization: Box::new(rotated),
         device_token: Some(issued.raw),
+        enrollment_id,
     })
+}
+
+fn is_runtime_distribution_id(value: &str) -> bool {
+    value.len() == "vifu_di_".len() + 64
+        && value.starts_with("vifu_di_")
+        && value["vifu_di_".len()..]
+            .chars()
+            .all(|character| character.is_ascii_hexdigit())
 }
 
 async fn pending_pairing(
@@ -956,7 +1002,7 @@ mod tests {
     };
     use crate::auth::hash_api_key;
     use crate::config::Config;
-    use crate::db::{self, NewEndpoint, NewProject};
+    use crate::db::{self, NewEndpoint, NewProject, NewRuntimeDistribution};
     use crate::error::ApiError;
     use crate::models::{
         ApiKeyAgentScope, ApiKeyPermissions, EndpointPermission, ProfileCapabilityDraft,
@@ -1262,6 +1308,7 @@ mod tests {
             GatewayAuthorizationOutcome::Authorized {
                 authorization,
                 device_token,
+                ..
             } => (authorization, device_token.expect("new Device Token")),
             GatewayAuthorizationOutcome::PairingRequired { .. } => {
                 panic!("approved pairing must authorize the machine")
@@ -1316,6 +1363,76 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[tokio::test]
+    async fn runtime_distribution_authorizes_a_new_installation_without_guest_bootstrap() {
+        let Some(pool) = maybe_test_pool().await else {
+            return;
+        };
+        let project_id = Uuid::new_v4();
+        db::create_project(
+            &pool,
+            NewProject {
+                id: project_id,
+                owner_user_id: Some("distribution-owner"),
+                slug: "distribution-project",
+                name: "Distribution project",
+                description: None,
+                gateway_id: "project-distribution-project",
+                binding_ids: &[],
+            },
+        )
+        .await
+        .unwrap();
+        let deployment = db::list_runtime_deployments(&pool, project_id)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|deployment| deployment.is_primary)
+            .unwrap();
+        let public_id = format!("vifu_di_{}", "b".repeat(64));
+        db::create_runtime_distribution(
+            &pool,
+            NewRuntimeDistribution {
+                id: Uuid::new_v4(),
+                project_id,
+                deployment_id: deployment.id,
+                name: "Android release",
+                public_id: &public_id,
+                max_gateways: 10,
+            },
+        )
+        .await
+        .unwrap();
+        let machine = MachineIdentity::generate().unwrap();
+        db::upsert_agent_gateway_machine(&pool, &machine.machine_id, &machine.public_key)
+            .await
+            .unwrap();
+        let state = state_with_storage(Config::from_env().unwrap(), pool.clone());
+
+        let authorization =
+            match authorize_gateway_machine(&state, &machine.machine_id, None, Some(&public_id))
+                .await
+                .unwrap()
+            {
+                GatewayAuthorizationOutcome::Authorized {
+                    authorization,
+                    device_token: Some(_),
+                    ..
+                } => authorization,
+                _ => panic!("a valid Distribution ID must authorize the installation"),
+            };
+        assert_eq!(
+            authorization.owner_user_id.as_deref(),
+            Some("distribution-owner")
+        );
+        assert!(
+            db::list_runtime_deployment_gateway_ids(&pool, deployment.id)
+                .await
+                .unwrap()
+                .contains(&authorization.gateway_id)
+        );
     }
 
     #[tokio::test]

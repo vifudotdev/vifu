@@ -120,16 +120,32 @@ impl LoadedRuntimeConfig {
             )
         })?;
         gateway.validate()?;
-        let server_url = self
+        let server = self
             .config
             .server
             .as_ref()
-            .ok_or_else(|| "an Agent Gateway requires a configured Vifu Server".to_string())?
-            .address
-            .clone();
+            .ok_or_else(|| "an Agent Gateway requires a configured Vifu Server".to_string())?;
+        let server_url = server.address.clone();
+        let local_server = server.local_socket_addr()?.is_some();
+        let local_guest_enabled = server
+            .guest_bootstrap
+            .as_ref()
+            .is_some_and(|guest| guest.enabled);
+        let allow_guest_bootstrap = gateway.guest_bootstrap.unwrap_or(if local_server {
+            local_guest_enabled
+        } else {
+            true
+        });
+        if local_server && allow_guest_bootstrap && !local_guest_enabled {
+            return Err(
+                "gateway.guest_bootstrap requires server.guest_bootstrap.enabled for a local Server"
+                    .to_string(),
+            );
+        }
         Ok(GatewayRuntimeOptions {
             server_url,
-            allow_guest_bootstrap: gateway.guest_bootstrap.unwrap_or(true),
+            server_certificate_der: None,
+            allow_guest_bootstrap,
             enrollment_token: None,
             session_scope: self
                 .profile
@@ -144,7 +160,15 @@ impl LoadedRuntimeConfig {
                 format!("{} does not configure a Vifu Server", self.path.display())
             })?;
         let local_address = server.local_socket_addr()?;
-        let mut config = vifu_server::config::Config::from_env()?;
+        let managed_lan = local_address.is_some_and(|address| !address.ip().is_loopback())
+            && std::env::var_os("VIFU_DEPLOYMENT_MODE").is_none();
+        let mut config = if managed_lan {
+            vifu_server::config::Config::from_env_with_managed_self_hosted_secrets(
+                &managed_server_secret_dir(&self.path),
+            )?
+        } else {
+            vifu_server::config::Config::from_env()?
+        };
         config.apply_service_version(env!("CARGO_PKG_VERSION"))?;
         let listen_address = server_listen_address(
             config.deployment_mode,
@@ -195,6 +219,14 @@ impl LoadedRuntimeConfig {
             .ok_or_else(|| format!("{} does not configure a Vifu Server", self.path.display()))
     }
 
+    /// Browser-visible Dashboard URL when the Server proxy is explicitly configured.
+    pub fn dashboard_url(&self) -> Option<String> {
+        self.config
+            .server
+            .as_ref()
+            .and_then(|server| server.dashboard.as_ref().map(|_| server.address.clone()))
+    }
+
     pub fn gateway_is_local(&self) -> Result<bool, String> {
         self.config
             .gateway
@@ -203,6 +235,18 @@ impl LoadedRuntimeConfig {
             .transpose()
             .map(|address| address.flatten().is_some())
     }
+}
+
+fn managed_server_secret_dir(config_path: &Path) -> PathBuf {
+    let stem = config_path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .filter(|value| !value.is_empty())
+        .unwrap_or("config");
+    config_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join(format!("{stem}-server-secrets"))
 }
 
 impl RuntimeConfig {
@@ -237,7 +281,11 @@ impl RuntimeConfig {
                 database_url_file: None,
                 runtime_extensions: Vec::new(),
                 authority: None,
-                guest_bootstrap: None,
+                guest_bootstrap: Some(GuestBootstrapConfig {
+                    enabled: true,
+                    ttl_hours: default_guest_ttl_hours(),
+                    max_projects: default_guest_project_limit(),
+                }),
             }),
             gateway: Some(GatewayRuntimeConfig {
                 address: vifu_gateway::config::DEFAULT_SERVER_URL.to_string(),
@@ -701,7 +749,8 @@ mod tests {
     use std::path::Path;
 
     use super::{
-        deployment_owns_server, server_listen_address, RuntimeConfig, DEFAULT_LOCAL_DATABASE_FILE,
+        deployment_owns_server, server_listen_address, LoadedRuntimeConfig, RuntimeConfig,
+        DEFAULT_LOCAL_DATABASE_FILE,
     };
 
     #[test]
@@ -787,6 +836,34 @@ address = "https://macbook.local:6790"
         .unwrap();
 
         assert!(config.server.is_some());
+    }
+
+    #[test]
+    fn dashboard_url_requires_an_explicit_server_dashboard_proxy() {
+        let without_dashboard = LoadedRuntimeConfig {
+            path: "/tmp/config.toml".into(),
+            profile: None,
+            config: RuntimeConfig::parse(
+                Path::new("/tmp/config.toml"),
+                "[server]\naddress = \"https://api.example.com\"\n",
+            )
+            .unwrap(),
+        };
+        assert_eq!(without_dashboard.dashboard_url(), None);
+
+        let with_dashboard = LoadedRuntimeConfig {
+            path: "/tmp/config.toml".into(),
+            profile: None,
+            config: RuntimeConfig::parse(
+                Path::new("/tmp/config.toml"),
+                "[server]\naddress = \"https://api.example.com\"\n\n[server.dashboard]\naddress = \"dashboard:6791\"\n",
+            )
+            .unwrap(),
+        };
+        assert_eq!(
+            with_dashboard.dashboard_url().as_deref(),
+            Some("https://api.example.com")
+        );
     }
 
     #[test]
@@ -917,6 +994,45 @@ database_url = "postgres://vifu@127.0.0.1:5432/vifu"
     }
 
     #[test]
+    fn all_interface_server_address_enables_managed_tls_and_guest_device_enrollment() {
+        let directory =
+            std::env::temp_dir().join(format!("vifu-lan-config-{}", uuid::Uuid::new_v4()));
+        let path = directory.join("config.toml");
+        let config = RuntimeConfig::parse(
+            &path,
+            r#"
+[server]
+address = "https://0.0.0.0:6790"
+
+[server.guest_bootstrap]
+enabled = true
+
+[gateway]
+address = "http://127.0.0.1:6790"
+"#,
+        )
+        .unwrap();
+        let loaded = super::LoadedRuntimeConfig {
+            path,
+            profile: None,
+            config,
+        };
+
+        let server = loaded.server_config().unwrap();
+
+        assert_eq!(
+            server.deployment_mode,
+            vifu_server::config::DeploymentMode::SelfHosted
+        );
+        assert_eq!(server.addr, "0.0.0.0:6790".parse().unwrap());
+        assert_eq!(server.server_url.as_deref(), Some("https://0.0.0.0:6790"));
+        assert!(server.tls.is_some());
+        assert!(server.guest_bootstrap_enabled);
+        assert!(loaded.gateway_options().unwrap().allow_guest_bootstrap);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
     fn rejects_ambiguous_database_configuration() {
         let error = RuntimeConfig::parse(
             Path::new("/tmp/config.toml"),
@@ -1044,6 +1160,10 @@ credential_file = "extension_key"
 
         let server = config.server.as_ref().expect("first run enables Server");
         assert_eq!(server.address, vifu_gateway::config::DEFAULT_SERVER_URL);
+        assert!(server
+            .guest_bootstrap
+            .as_ref()
+            .is_some_and(|guest| guest.enabled));
         assert_eq!(
             server.database_url(&path).unwrap(),
             format!(
@@ -1053,9 +1173,18 @@ credential_file = "extension_key"
         );
         let gateway = config.gateway.as_ref().expect("first run enables Gateway");
         assert_eq!(gateway.address, vifu_gateway::config::DEFAULT_SERVER_URL);
+        let loaded = super::LoadedRuntimeConfig {
+            path: path.clone(),
+            profile: None,
+            config: config.clone(),
+        };
+        assert!(loaded.gateway_options().unwrap().allow_guest_bootstrap);
         assert!(std::fs::read_to_string(&path)
             .unwrap()
             .contains("[gateway]\naddress = \"http://127.0.0.1:6790\""));
+        assert!(std::fs::read_to_string(&path)
+            .unwrap()
+            .contains("[server.guest_bootstrap]"));
         assert!(!std::fs::read_to_string(&path).unwrap().contains("version"));
         assert!(path.exists());
         std::fs::remove_dir_all(directory).unwrap();

@@ -34,6 +34,9 @@ pub(crate) fn render(frame: &mut Frame<'_>, app: &mut App, now: Instant, no_colo
     if app.quit_confirmation {
         render_quit_confirmation(frame, area, app.active_invocations(), app.override_active);
     }
+    if let Some(pairing) = app.device_pairing.as_ref() {
+        render_device_pairing(frame, area, pairing);
+    }
 }
 
 fn render_main(frame: &mut Frame<'_>, app: &mut App, area: Rect, now: Instant, no_color: bool) {
@@ -61,10 +64,69 @@ fn render_main(frame: &mut Frame<'_>, app: &mut App, area: Rect, now: Instant, n
         if app.search_active {
             "Search: type · Enter Keep · Esc Cancel"
         } else {
-            "↑↓ Select  → Focus  O Optimize  F Filter  / Search  S Sort  B Dashboard  Q Quit"
+            "↑↓ Select  → Focus  O Optimize  P Pair device  F Filter  / Search  S Sort  B Dashboard  Q Quit"
         },
         app.notice.as_deref(),
     );
+}
+
+fn render_device_pairing(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    pairing: &super::model::DevicePairingView,
+) {
+    let qr_content_width = pairing
+        .terminal_qr
+        .lines()
+        .map(|line| line.chars().count())
+        .max()
+        .unwrap_or(0);
+    let qr_content_height = pairing.terminal_qr.lines().count();
+    let required_width = qr_content_width
+        .saturating_add(4)
+        .min(usize::from(u16::MAX)) as u16;
+    let required_height = qr_content_height
+        .saturating_add(7)
+        .min(usize::from(u16::MAX)) as u16;
+    let qr_fits = required_width <= area.width && required_height <= area.height;
+    let popup = if qr_fits {
+        centered_fixed_rect(required_width, required_height, area)
+    } else {
+        centered_fixed_rect(area.width.min(72), area.height.min(8), area)
+    };
+    frame.render_widget(Clear, popup);
+    let content = if qr_fits {
+        format!(
+            "Scan inside the Vifu Android app\n{}\nServer: {}\nExpires: {}\nP/Esc Close",
+            pairing.terminal_qr, pairing.server_url, pairing.expires_at
+        )
+    } else {
+        format!(
+            "Resize the terminal to show the pairing QR\nRequired: {} columns × {} rows\nServer: {}\nP/Esc Close",
+            required_width, required_height, pairing.server_url
+        )
+    };
+    frame.render_widget(
+        Paragraph::new(content).alignment(Alignment::Center).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(" Pair device "),
+        ),
+        popup,
+    );
+}
+
+fn centered_fixed_rect(width: u16, height: u16, area: Rect) -> Rect {
+    let width = width.min(area.width);
+    let height = height.min(area.height);
+    Rect {
+        x: area.x.saturating_add(area.width.saturating_sub(width) / 2),
+        y: area
+            .y
+            .saturating_add(area.height.saturating_sub(height) / 2),
+        width,
+        height,
+    }
 }
 
 fn render_runtime_header(frame: &mut Frame<'_>, app: &App, area: Rect, no_color: bool) {
@@ -84,13 +146,22 @@ fn render_runtime_header(frame: &mut Frame<'_>, app: &App, area: Rect, no_color:
                 .add_modifier(Modifier::BOLD)
         },
     );
-    let second = Line::raw(format_system_metrics(
-        app.metrics,
-        app.loaded_models,
-        std::env::consts::ARCH,
-        &app.runtime_backends,
-        area.width,
-    ));
+    let second = Line::raw(
+        app.selected_lane()
+            .and_then(|lane| {
+                lane.runtime_metrics
+                    .map(|metrics| format_runtime_metrics(metrics, lane, area.width))
+            })
+            .unwrap_or_else(|| {
+                format_system_metrics(
+                    app.metrics,
+                    app.loaded_models,
+                    std::env::consts::ARCH,
+                    &app.runtime_backends,
+                    area.width,
+                )
+            }),
+    );
     frame.render_widget(Paragraph::new(vec![first, second]), area);
 }
 
@@ -752,14 +823,22 @@ fn render_observations(frame: &mut Frame<'_>, pane: TraceObservationPane<'_>) {
     });
     let observations = matching_observations.iter().map(|observation| {
         let status = observation.status;
-        let detail = if timeline {
-            format!(
-                "{} {}",
-                stage_status_symbol(status),
-                format_duration(observation.elapsed)
-            )
+        let timing = if observation.observation_type == ObservationType::Event {
+            observation
+                .request_elapsed
+                .or(observation.end_offset)
+                .or(observation.start_offset)
+                .map_or_else(
+                    || "@ --".to_string(),
+                    |at| format!("@ {}", format_duration(at)),
+                )
         } else {
             format_duration(observation.elapsed)
+        };
+        let detail = if timeline {
+            format!("{} {timing}", stage_status_symbol(status))
+        } else {
+            timing
         };
         let is_cursor = observation_cursor == Some(observation.id);
         let is_selected = selected_observation == Some(observation.id);
@@ -897,18 +976,20 @@ fn render_trace_detail(
                 .rev()
                 .find(|(_, stage)| trace.observation_status(**stage) == StageStatus::Passed)
                 .map(|(_, stage)| stage);
-            let (blocked, unknown) = RuntimeStage::ORDERED.iter().enumerate().fold(
-                (0_usize, 0_usize),
-                |(blocked, unknown), (index, stage)| {
-                    if trace.observation_status(*stage) != StageStatus::Unknown {
-                        (blocked, unknown)
-                    } else if first_failed_index.is_some_and(|failed| index > failed) {
-                        (blocked + 1, unknown)
-                    } else {
-                        (blocked, unknown + 1)
-                    }
-                },
-            );
+            let reported = RuntimeStage::ORDERED
+                .iter()
+                .filter(|stage| trace.observation_status(**stage) != StageStatus::Unknown)
+                .count();
+            let reported_label = if reported == 1 { "stage" } else { "stages" };
+            let blocked = first_failed_index.map_or(0, |failed| {
+                RuntimeStage::ORDERED
+                    .iter()
+                    .enumerate()
+                    .filter(|(index, stage)| {
+                        *index > failed && trace.observation_status(**stage) == StageStatus::Unknown
+                    })
+                    .count()
+            });
             let first_problem = first_failure.map_or_else(
                 || {
                     if trace.outcome == LaneOutcome::Timeout {
@@ -948,9 +1029,13 @@ fn render_trace_detail(
                     last_success.map_or("none observed", |stage| stage.label())
                 )),
                 Line::raw(format!("First error/timeout: {first_problem}")),
-                Line::raw(format!(
-                    "Unobserved: {unknown} unknown · {blocked} blocked after failure"
-                )),
+                Line::raw(if blocked == 0 {
+                    format!("Telemetry: {reported} {reported_label} reported")
+                } else {
+                    format!(
+                        "Telemetry: {reported} {reported_label} reported · {blocked} blocked after failure"
+                    )
+                }),
                 Line::raw(format!(
                     "Error: {}",
                     trace.error.as_deref().unwrap_or("none")
@@ -2199,7 +2284,7 @@ fn format_system_metrics(
         .map_or_else(|| "--".to_string(), |value| format!("{value:.0}%"));
     if width < 76 {
         format!(
-            " {} · OS CPU {} · OS RSS {} · VIFU MODELS {}",
+            " HOST {} · CPU {} · RSS {} · VIFU MODELS {}",
             architecture_label(arch),
             cpu,
             format_bytes(metrics.rss_bytes),
@@ -2207,13 +2292,32 @@ fn format_system_metrics(
         )
     } else {
         format!(
-            " {} · BACKEND {} · OS PROCESS CPU {} · RSS {} / {} · VIFU RESIDENT MODELS {}",
+            " TUI HOST {} · BACKEND {} · TUI PROCESS CPU {} · RSS {} / {} · VIFU RESIDENT MODELS {}",
             architecture_label(arch),
             backends,
             cpu,
             format_bytes(metrics.rss_bytes),
             format_bytes(metrics.total_memory_bytes),
             loaded_models
+        )
+    }
+}
+
+fn format_runtime_metrics(metrics: SystemMetrics, lane: &AgentLane, width: u16) -> String {
+    if width < 76 {
+        format!(
+            " DEVICE {} · RSS {}",
+            lane.name,
+            format_bytes(metrics.rss_bytes)
+        )
+    } else {
+        format!(
+            " DEVICE {} · BACKEND {} · MODEL {} · RUNTIME PROCESS RSS {} / {}",
+            lane.name,
+            lane.provider,
+            lane.model,
+            format_bytes(metrics.rss_bytes),
+            format_bytes(metrics.total_memory_bytes)
         )
     }
 }
@@ -2383,7 +2487,8 @@ mod tests {
         short_uuid,
     };
     use crate::tui::model::{
-        App, ComparisonRow, LaneFilter, LaneOutcome, OptimizationSummary, TraceTab, View,
+        App, ComparisonRow, DevicePairingView, LaneFilter, LaneOutcome, OptimizationSummary,
+        TraceTab, View,
     };
 
     fn rendered_content(app: &mut App, now: Instant, width: u16, height: u16) -> String {
@@ -2399,6 +2504,44 @@ mod tests {
             .iter()
             .map(|cell| cell.symbol())
             .collect()
+    }
+
+    #[test]
+    fn pairing_qr_uses_its_exact_size_when_the_terminal_is_large_enough() {
+        let mut app = App::default();
+        app.device_pairing = Some(DevicePairingView {
+            enrollment_id: Some(Uuid::new_v4()),
+            server_url: "https://api.example.com".to_string(),
+            terminal_qr: "QR-MODULES\nQR-MODULES\nQR-MODULES".to_string(),
+            expires_at: "soon".to_string(),
+        });
+
+        let content = rendered_content(&mut app, Instant::now(), 80, 24);
+
+        assert!(content.contains("QR-MODULES"));
+        assert!(!content.contains("Resize the terminal"));
+    }
+
+    #[test]
+    fn pairing_qr_is_not_clipped_or_reflowed_in_a_small_terminal() {
+        let mut app = App::default();
+        let oversized_qr = std::iter::repeat_n(
+            "████████████████████████████████████████████████████████████████████████████████",
+            16,
+        )
+        .collect::<Vec<_>>()
+        .join("\n");
+        app.device_pairing = Some(DevicePairingView {
+            enrollment_id: Some(Uuid::new_v4()),
+            server_url: "https://api.example.com".to_string(),
+            terminal_qr: oversized_qr,
+            expires_at: "soon".to_string(),
+        });
+
+        let content = rendered_content(&mut app, Instant::now(), 52, 18);
+
+        assert!(content.contains("Resize the terminal"), "{content:?}");
+        assert!(!content.contains("████████"));
     }
 
     fn comparison_row(index: usize) -> ComparisonRow {
@@ -2501,6 +2644,51 @@ mod tests {
         assert!(content.contains("BACKEND llama.cpp"));
         assert!(content.contains("Agent 000"));
         assert!(!content.contains("Agent 099"));
+    }
+
+    #[test]
+    fn runtime_header_should_render_the_selected_device_metrics() {
+        let mut app = App::default();
+        let now = Instant::now();
+        let invocation_id = Uuid::new_v4();
+        app.apply(
+            RuntimeEvent::InvocationStarted {
+                invocation_id,
+                agent_id: "android-chat".to_string(),
+                agent_name: "Android Local Companion · Xiaomi 2407FPN8ER".to_string(),
+                source_agent_id: "phone-gateway/android-chat".to_string(),
+                capability: "chat".to_string(),
+                provider: "local-llama".to_string(),
+                model: "Qwen3-1.7B".to_string(),
+                started_unix_ms: 1,
+            },
+            now,
+        );
+        app.apply(
+            RuntimeEvent::RuntimeHostMetrics {
+                invocation_id,
+                process_rss_bytes: Some(805_306_368),
+                total_memory_bytes: Some(12_884_901_888),
+            },
+            now,
+        );
+        let backend = TestBackend::new(160, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        terminal
+            .draw(|frame| render(frame, &mut app, now, true))
+            .unwrap();
+        let content = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+
+        assert!(content.contains("DEVICE Android Local Companion · Xiaomi 2407FPN8ER"));
+        assert!(content.contains("RUNTIME PROCESS RSS 768 MiB / 12.0 GiB"));
+        assert!(!content.contains("TUI PROCESS"));
     }
 
     #[test]
@@ -3094,8 +3282,9 @@ mod tests {
 
         let content = rendered_content(&mut app, now, 52, 18);
 
-        assert!(content.contains("OS CPU"));
-        assert!(content.contains("OS RSS"));
+        assert!(content.contains("HOST"));
+        assert!(content.contains("CPU"));
+        assert!(content.contains("RSS"));
         assert!(content.contains("VIFU MODELS"));
     }
 
@@ -3258,9 +3447,11 @@ mod tests {
             selected_observation: None,
         };
 
-        let content = rendered_content(&mut app, now, 120, 26);
+        let content = rendered_content(&mut app, now, 120, 60);
 
         assert!(content.contains("Runtime passed · Application outcome unknown"));
+        assert!(content.contains("Telemetry: 1 stage reported"));
+        assert!(!content.contains("Unobserved:"));
     }
 
     #[test]

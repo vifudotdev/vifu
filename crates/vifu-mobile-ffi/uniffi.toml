@@ -8,3 +8,4 @@ generate_module_map = true
 
 [bindings.kotlin]
 package_name = "dev.vifu.runtime"
+android = true

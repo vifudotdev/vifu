@@ -21,6 +21,12 @@ cooperate with their platform cancellation APIs when they can.
 Agent capabilities are declared when the host registers an agent, so capability
 checks do not require a synchronous native callback.
 
+`VifuEmbeddedGateway.start` publishes performance telemetry but keeps root
+invocation input and output on the device. Hosts that provide an explicit
+content-sharing consent control can instead call `startWithMonitorIo` /
+`start_with_monitor_io` with `captureMonitorIo = true` for a private debugging
+session.
+
 Apple application developers can add `https://github.com/vifudotdev/vifu` as a
 Swift Package and select the `Vifu` product. The release package contains the
 generated Swift source and a checksum-verified XCFramework built with the
@@ -43,14 +49,25 @@ Refresh the tracked Swift wrapper after changing the UniFFI surface:
 scripts/build-apple-package.sh --update-bindings
 ```
 
-Android build example:
+Build the Android `arm64-v8a` package sources from the repository root:
 
 ```bash
-cd vifu
-rustup target add aarch64-linux-android armv7-linux-androideabi i686-linux-android x86_64-linux-android
-export ANDROID_NDK_HOME=/path/to/android-ndk
-export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/$(uname -s | tr '[:upper:]' '[:lower:]')-x86_64/bin/aarch64-linux-android24-clang"
-cargo build -p vifu-mobile-ffi --target aarch64-linux-android --release
+rustup target add aarch64-linux-android
+ANDROID_NDK_HOME=/path/to/android-ndk scripts/build-android-package.sh
+```
+
+The generated Gradle source-set layout is under
+`target/vifu-android-dist/src/main/`: Kotlin bindings are in `kotlin/` and the
+native library is in `jniLibs/arm64-v8a/`. The default mobile artifact keeps
+the Runtime and Gateway but omits optional on-device model providers. Set
+`VIFU_ANDROID_FFI_FEATURES=local-llama,local-whisper` when the Android host
+intentionally ships those providers.
+
+Generate only the Kotlin bindings when validating the interface on a machine
+without the Rust Android target:
+
+```bash
+scripts/build-android-package.sh --bindings-only
 ```
 
 Generate bindings with the crate-local UniFFI bindgen binary and

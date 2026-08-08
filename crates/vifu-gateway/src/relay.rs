@@ -24,9 +24,9 @@ use crate::openclaw::{self, Endpoint};
 use crate::optimization::SessionRouteOverrides;
 use crate::protocol::{
     self, canonical_trace_io_summary, AgentDescriptor, AgentGatewayCommand, ApplicationFeedback,
-    RuntimeTelemetryBatch, RuntimeTelemetryTerminal, RuntimeTelemetryTerminalStatus,
-    TraceDeliveryStatus, TraceIoSummary, TraceStageStatus, TraceTelemetry, TraceTelemetryBatch,
-    MAX_TRACE_DROPPED_EVENTS, MAX_TRACE_TELEMETRY_EVENTS,
+    RuntimeHostMetrics, RuntimeTelemetryBatch, RuntimeTelemetryTerminal,
+    RuntimeTelemetryTerminalStatus, TraceDeliveryStatus, TraceIoSummary, TraceStageStatus,
+    TraceTelemetry, TraceTelemetryBatch, MAX_TRACE_DROPPED_EVENTS, MAX_TRACE_TELEMETRY_EVENTS,
 };
 use crate::session::{self, GuestProjectSummary, PairingSummary, SessionSummary};
 #[cfg(feature = "sqlite")]
@@ -51,12 +51,30 @@ const TELEMETRY_RETRY_MAX_DELAY: Duration = Duration::from_secs(5);
 const EMBEDDED_TRACE_RETENTION: Duration = Duration::from_secs(150);
 const PROVIDER_CANCELLATION_GRACE: Duration = Duration::from_secs(1);
 
+pub(crate) enum EmbeddedRuntimeMonitorEvent {
+    Lifecycle(RuntimeMonitorEvent),
+    RootInput {
+        trace_id: String,
+        summary: TraceIoSummary,
+    },
+    RootOutput {
+        trace_id: String,
+        summary: TraceIoSummary,
+    },
+}
+
+enum EmbeddedRuntimeMonitorReceiver {
+    Lifecycle(tokio::sync::Mutex<mpsc::Receiver<RuntimeMonitorEvent>>),
+    WithIo(tokio::sync::Mutex<mpsc::Receiver<EmbeddedRuntimeMonitorEvent>>),
+}
+
 /// Bounded bridge between an embedded runtime callback and the Gateway socket.
 #[derive(Clone)]
 pub struct EmbeddedRuntimeMonitor {
-    receiver: Arc<tokio::sync::Mutex<mpsc::Receiver<RuntimeMonitorEvent>>>,
-    deployment_id: Arc<Mutex<Option<Uuid>>>,
+    receiver: Arc<EmbeddedRuntimeMonitorReceiver>,
+    deployment: Arc<Mutex<Option<(Uuid, String)>>>,
     dropped_events: Arc<std::sync::atomic::AtomicU32>,
+    host_metrics_ready: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl EmbeddedRuntimeMonitor {
@@ -65,31 +83,68 @@ impl EmbeddedRuntimeMonitor {
         dropped_events: Arc<std::sync::atomic::AtomicU32>,
     ) -> Self {
         Self {
-            receiver: Arc::new(tokio::sync::Mutex::new(receiver)),
-            deployment_id: Arc::new(Mutex::new(None)),
+            receiver: Arc::new(EmbeddedRuntimeMonitorReceiver::Lifecycle(
+                tokio::sync::Mutex::new(receiver),
+            )),
+            deployment: Arc::new(Mutex::new(None)),
             dropped_events,
+            host_metrics_ready: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        }
+    }
+
+    pub(crate) fn new_with_io(
+        receiver: mpsc::Receiver<EmbeddedRuntimeMonitorEvent>,
+        dropped_events: Arc<std::sync::atomic::AtomicU32>,
+    ) -> Self {
+        Self {
+            receiver: Arc::new(EmbeddedRuntimeMonitorReceiver::WithIo(
+                tokio::sync::Mutex::new(receiver),
+            )),
+            deployment: Arc::new(Mutex::new(None)),
+            dropped_events,
+            host_metrics_ready: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
 
     #[cfg(feature = "sqlite")]
-    fn set_deployment_id(&self, deployment_id: Uuid) {
-        if let Ok(mut stored) = self.deployment_id.lock() {
-            *stored = Some(deployment_id);
+    fn set_deployment(&self, deployment_id: Uuid, project_slug: String) {
+        if let Ok(mut stored) = self.deployment.lock() {
+            *stored = Some((deployment_id, project_slug));
         }
     }
 
-    fn deployment_id(&self) -> Option<Uuid> {
-        self.deployment_id.lock().ok().and_then(|value| *value)
+    fn deployment(&self) -> Option<(Uuid, String)> {
+        self.deployment.lock().ok().and_then(|value| value.clone())
     }
 
-    async fn receive(&self) -> Option<RuntimeMonitorEvent> {
-        self.receiver.lock().await.recv().await
+    async fn receive(&self) -> Option<EmbeddedRuntimeMonitorEvent> {
+        match self.receiver.as_ref() {
+            EmbeddedRuntimeMonitorReceiver::Lifecycle(receiver) => receiver
+                .lock()
+                .await
+                .recv()
+                .await
+                .map(EmbeddedRuntimeMonitorEvent::Lifecycle),
+            EmbeddedRuntimeMonitorReceiver::WithIo(receiver) => receiver.lock().await.recv().await,
+        }
     }
 
     fn take_dropped_events(&self) -> u32 {
         self.dropped_events
             .swap(0, std::sync::atomic::Ordering::AcqRel)
             .min(protocol::MAX_TRACE_DROPPED_EVENTS)
+    }
+
+    fn enable_host_metrics(&self) {
+        self.host_metrics_ready
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
+
+    fn host_metrics(&self) -> Option<RuntimeHostMetrics> {
+        self.host_metrics_ready
+            .load(std::sync::atomic::Ordering::Acquire)
+            .then(runtime_host_metrics)
+            .flatten()
     }
 }
 
@@ -139,13 +194,16 @@ struct EmbeddedMonitorTrace {
     started_at_ms: u64,
     last_event_at: Instant,
     stage_observations: HashMap<ProviderStage, Uuid>,
+    root_input_summary: Option<TraceIoSummary>,
+    root_output_summary: Option<TraceIoSummary>,
 }
 
 impl EmbeddedMonitorTrace {
     fn batch(
-        &self,
+        &mut self,
         events: Vec<TraceTelemetry>,
         dropped_events: u32,
+        host_metrics: Option<RuntimeHostMetrics>,
         terminal: Option<RuntimeTelemetryTerminal>,
     ) -> RuntimeTelemetryBatch {
         RuntimeTelemetryBatch {
@@ -158,8 +216,42 @@ impl EmbeddedMonitorTrace {
             started_at_ms: self.started_at_ms,
             events,
             dropped_events,
+            root_input_summary: self.root_input_summary.take(),
+            root_output_summary: self.root_output_summary.take(),
+            host_metrics,
             terminal,
         }
+    }
+}
+
+#[cfg(any(target_os = "android", target_os = "linux"))]
+fn runtime_host_metrics() -> Option<RuntimeHostMetrics> {
+    let process_rss_bytes = std::fs::read_to_string("/proc/self/status")
+        .ok()
+        .and_then(|status| parse_proc_kib_value(&status, "VmRSS:"));
+    let total_memory_bytes = std::fs::read_to_string("/proc/meminfo")
+        .ok()
+        .and_then(|meminfo| parse_proc_kib_value(&meminfo, "MemTotal:"));
+    (process_rss_bytes.is_some() || total_memory_bytes.is_some()).then_some(RuntimeHostMetrics {
+        process_rss_bytes,
+        total_memory_bytes,
+    })
+}
+
+#[cfg(not(any(target_os = "android", target_os = "linux")))]
+fn runtime_host_metrics() -> Option<RuntimeHostMetrics> {
+    None
+}
+
+#[cfg(any(target_os = "android", target_os = "linux", test))]
+fn parse_proc_kib_value(contents: &str, key: &str) -> Option<u64> {
+    let line = contents.lines().find(|line| line.starts_with(key))?;
+    let mut fields = line[key.len()..].split_whitespace();
+    let value = fields.next()?.parse::<u64>().ok()?;
+    match fields.next() {
+        Some("kB") => value.checked_mul(1_024),
+        None => Some(value),
+        Some(_) => None,
     }
 }
 
@@ -1832,6 +1924,7 @@ async fn run_connection(
     ];
     if runtime.embedded_monitor.is_some() {
         features.push(protocol::EMBEDDED_LIVE_MONITOR_FEATURE);
+        features.push(protocol::RUNTIME_HOST_METRICS_FEATURE);
     }
 
     send_command(
@@ -1929,7 +2022,6 @@ async fn run_connection(
     }
 
     if runtime.allow_guest_bootstrap
-        && runtime.enrollment_token.is_none()
         && runtime.agent_gateway_bootstrap_token.is_none()
         && session.guest_project.is_none()
     {
@@ -2040,12 +2132,33 @@ async fn run_connection(
                     embedded_monitoring_ready = false;
                     continue;
                 };
-                if let Some(command) = embedded_runtime_telemetry_command(
-                    runtime.embedded_monitor.as_ref(),
-                    &mut embedded_traces,
-                    event,
-                ) {
-                    send_command(&mut socket, &command).await?;
+                match event {
+                    EmbeddedRuntimeMonitorEvent::Lifecycle(event) => {
+                        if let Some(command) = embedded_runtime_telemetry_command(
+                            runtime.embedded_monitor.as_ref(),
+                            runtime.provider_models.as_ref(),
+                            &mut embedded_traces,
+                            event,
+                        ) {
+                            send_command(&mut socket, &command).await?;
+                        }
+                    }
+                    EmbeddedRuntimeMonitorEvent::RootInput { trace_id, summary } => {
+                        record_embedded_runtime_io(
+                            &mut embedded_traces,
+                            &trace_id,
+                            Some(summary),
+                            None,
+                        );
+                    }
+                    EmbeddedRuntimeMonitorEvent::RootOutput { trace_id, summary } => {
+                        record_embedded_runtime_io(
+                            &mut embedded_traces,
+                            &trace_id,
+                            None,
+                            Some(summary),
+                        );
+                    }
                 }
             }
             incoming = receive_command(&mut socket) => {
@@ -2494,6 +2607,11 @@ async fn run_connection(
                     AgentGatewayCommand::RuntimeMonitoringReady => {
                         embedded_monitoring_ready = runtime.embedded_monitor.is_some();
                     }
+                    AgentGatewayCommand::RuntimeHostMetricsReady => {
+                        if let Some(monitor) = runtime.embedded_monitor.as_ref() {
+                            monitor.enable_host_metrics();
+                        }
+                    }
                     AgentGatewayCommand::InvocationActivityReady => {
                         invocation_activity_ready = true;
                     }
@@ -2567,7 +2685,7 @@ async fn run_connection(
 
 async fn receive_embedded_monitor_event(
     monitor: Option<&EmbeddedRuntimeMonitor>,
-) -> Option<RuntimeMonitorEvent> {
+) -> Option<EmbeddedRuntimeMonitorEvent> {
     match monitor {
         Some(monitor) => monitor.receive().await,
         None => std::future::pending().await,
@@ -2576,6 +2694,7 @@ async fn receive_embedded_monitor_event(
 
 fn embedded_runtime_telemetry_command(
     monitor: Option<&EmbeddedRuntimeMonitor>,
+    provider_models: Option<&ProviderModels>,
     traces: &mut HashMap<String, EmbeddedMonitorTrace>,
     event: RuntimeMonitorEvent,
 ) -> Option<AgentGatewayCommand> {
@@ -2584,15 +2703,16 @@ fn embedded_runtime_telemetry_command(
         RuntimeMonitorEvent::InvocationStarted {
             trace_id,
             invocation_id,
-            project_id,
+            project_id: _,
             endpoint,
             agent_id,
             provider_id,
             capability,
             started_at_ms,
         } => {
-            let trace = EmbeddedMonitorTrace {
-                deployment_id: monitor.deployment_id()?,
+            let (deployment_id, project_id) = monitor.deployment()?;
+            let mut trace = EmbeddedMonitorTrace {
+                deployment_id,
                 trace_id: trace_id.clone(),
                 invocation_id,
                 project_id,
@@ -2601,15 +2721,22 @@ fn embedded_runtime_telemetry_command(
                 started_at_ms,
                 last_event_at: Instant::now(),
                 stage_observations: HashMap::new(),
+                root_input_summary: None,
+                root_output_summary: None,
             };
             let dropped_events = monitor.take_dropped_events();
             let batch = trace.batch(
                 vec![TraceTelemetry::InvocationStarted {
+                    model: provider_models.and_then(|models| {
+                        models
+                            .get(&(provider_id.clone(), capability.clone()))
+                            .cloned()
+                    }),
                     provider_key: provider_id,
                     capability,
-                    model: None,
                 }],
                 dropped_events,
+                monitor.host_metrics(),
                 None,
             );
             traces.insert(trace_id, trace);
@@ -2621,6 +2748,9 @@ fn embedded_runtime_telemetry_command(
             status,
             elapsed_ms,
             request_elapsed_ms,
+            input_tokens,
+            output_tokens,
+            resident,
             error,
             ..
         } => {
@@ -2649,14 +2779,19 @@ fn embedded_runtime_telemetry_command(
                 end_offset_ms,
                 elapsed_ms,
                 request_elapsed_ms: Some(request_elapsed_ms),
-                input_tokens: None,
-                output_tokens: None,
-                resident: None,
+                input_tokens,
+                output_tokens,
+                resident,
                 error: error.map(|error| safe_observer_error(&error)),
             };
             let dropped_events = monitor.take_dropped_events();
             Some(AgentGatewayCommand::RuntimeTelemetry {
-                batch: trace.batch(vec![telemetry], dropped_events, None),
+                batch: trace.batch(
+                    vec![telemetry],
+                    dropped_events,
+                    monitor.host_metrics(),
+                    None,
+                ),
             })
         }
         RuntimeMonitorEvent::InvocationFinished {
@@ -2667,7 +2802,7 @@ fn embedded_runtime_telemetry_command(
             error,
             ..
         } => {
-            let trace = traces.remove(&trace_id)?;
+            let mut trace = traces.remove(&trace_id)?;
             let dropped_events = monitor.take_dropped_events();
             let terminal = RuntimeTelemetryTerminal {
                 status: match status {
@@ -2680,9 +2815,32 @@ fn embedded_runtime_telemetry_command(
                 error: error.map(|error| safe_observer_error(&error)),
             };
             Some(AgentGatewayCommand::RuntimeTelemetry {
-                batch: trace.batch(Vec::new(), dropped_events, Some(terminal)),
+                batch: trace.batch(
+                    Vec::new(),
+                    dropped_events,
+                    monitor.host_metrics(),
+                    Some(terminal),
+                ),
             })
         }
+    }
+}
+
+fn record_embedded_runtime_io(
+    traces: &mut HashMap<String, EmbeddedMonitorTrace>,
+    trace_id: &str,
+    input: Option<TraceIoSummary>,
+    output: Option<TraceIoSummary>,
+) {
+    let Some(trace) = traces.get_mut(trace_id) else {
+        return;
+    };
+    trace.last_event_at = Instant::now();
+    if let Some(input) = input {
+        trace.root_input_summary = Some(input);
+    }
+    if let Some(output) = output {
+        trace.root_output_summary = Some(output);
     }
 }
 
@@ -2708,7 +2866,7 @@ fn expire_embedded_runtime_traces(
     let mut dropped_events = monitor.take_dropped_events();
     let mut commands = Vec::with_capacity(expired.len());
     for trace_id in expired {
-        let Some(trace) = traces.remove(&trace_id) else {
+        let Some(mut trace) = traces.remove(&trace_id) else {
             continue;
         };
         let terminal = RuntimeTelemetryTerminal {
@@ -2718,7 +2876,12 @@ fn expire_embedded_runtime_traces(
             error: Some("embedded telemetry ended without a terminal event".to_string()),
         };
         commands.push(AgentGatewayCommand::RuntimeTelemetry {
-            batch: trace.batch(Vec::new(), dropped_events, Some(terminal)),
+            batch: trace.batch(
+                Vec::new(),
+                dropped_events,
+                monitor.host_metrics(),
+                Some(terminal),
+            ),
         });
         dropped_events = 0;
     }
@@ -2856,15 +3019,19 @@ async fn sync_runtime_state(
     }
     let store = SqliteRuntimeStore::open(runtime.runtime_database_path)
         .map_err(|error| error.to_string())?;
-    for mut deployment in configuration.deployments {
-        if runtime
-            .embedded_runtime
-            .is_some_and(|embedded| embedded.project_id() == deployment.project_slug)
-        {
-            if let Some(monitor) = runtime.embedded_monitor.as_ref() {
-                monitor.set_deployment_id(deployment.deployment_id);
-            }
-        }
+    let deployments = configuration.deployments;
+    let embedded_deployment = runtime.embedded_runtime.and_then(|embedded| {
+        deployments
+            .iter()
+            .find(|deployment| embedded.project_id() == deployment.project_slug)
+            .or_else(|| (deployments.len() == 1).then(|| &deployments[0]))
+    });
+    if let (Some(deployment), Some(monitor)) =
+        (embedded_deployment, runtime.embedded_monitor.as_ref())
+    {
+        monitor.set_deployment(deployment.deployment_id, deployment.project_slug.clone());
+    }
+    for mut deployment in deployments {
         if deployment.policies.config_sync {
             if deployment.release.is_none() {
                 if let Some(embedded) = runtime
@@ -3160,21 +3327,22 @@ mod tests {
         dispatch_preflight_failure, embedded_runtime_telemetry_command, encode_command,
         enqueue_telemetry_batch, expire_embedded_runtime_traces, guest_claim_url,
         handle_telemetry_flush_result, observe_capture_dropped, pairing_authorization_url,
-        queue_error, resolve_provider, runtime_profile_name, safe_observer_error,
-        safe_trace_telemetry, sanitize_error, trigger_telemetry_flush, try_capture,
-        write_terminal_line, AgentGatewayProvider, EmbeddedRuntimeMonitor, GatewayCaptureEvent,
-        GatewayInvocationTerminal, GatewayOutputPolicy, GatewayRuntimeEvent,
-        InProcessGatewayProvider, InvocationDelivery, InvocationTelemetry, OpenClawGatewayProvider,
-        PendingTelemetryBatch, RuntimeControlClient, SessionRouteOverrides, TelemetryBacklogState,
-        EMBEDDED_TRACE_RETENTION, MAX_PENDING_TELEMETRY_BATCHES,
+        parse_proc_kib_value, queue_error, record_embedded_runtime_io, resolve_provider,
+        runtime_profile_name, safe_observer_error, safe_trace_telemetry, sanitize_error,
+        trigger_telemetry_flush, try_capture, write_terminal_line, AgentGatewayProvider,
+        EmbeddedRuntimeMonitor, GatewayCaptureEvent, GatewayInvocationTerminal,
+        GatewayOutputPolicy, GatewayRuntimeEvent, InProcessGatewayProvider, InvocationDelivery,
+        InvocationTelemetry, OpenClawGatewayProvider, PendingTelemetryBatch, RuntimeControlClient,
+        SessionRouteOverrides, TelemetryBacklogState, EMBEDDED_TRACE_RETENTION,
+        MAX_PENDING_TELEMETRY_BATCHES,
     };
     use crate::control::TraceObservationUploadError;
     use crate::gateway_frame;
     use crate::openclaw::Endpoint;
     use crate::protocol::{
-        AgentGatewayCommand, RuntimeTelemetryTerminalStatus, TraceStageStatus, TraceTelemetry,
-        TraceTelemetryBatch, AGENT_GATEWAY_HEARTBEAT_EVENT, AGENT_GATEWAY_HELLO_METHOD,
-        AGENT_GATEWAY_HELLO_REQUEST_ID, VERSION,
+        canonical_trace_io_summary, AgentGatewayCommand, RuntimeTelemetryTerminalStatus,
+        TraceStageStatus, TraceTelemetry, TraceTelemetryBatch, AGENT_GATEWAY_HEARTBEAT_EVENT,
+        AGENT_GATEWAY_HELLO_METHOD, AGENT_GATEWAY_HELLO_REQUEST_ID, VERSION,
     };
     use vifu_runtime::{
         AgentProvider, CancellationToken, InvocationData, ProviderEvent, ProviderEventSink,
@@ -3186,8 +3354,16 @@ mod tests {
         let (_sender, receiver) = tokio::sync::mpsc::channel(1);
         let dropped_events = Arc::new(AtomicU32::new(dropped));
         let monitor = EmbeddedRuntimeMonitor::new(receiver, Arc::clone(&dropped_events));
-        *monitor.deployment_id.lock().unwrap() = Some(Uuid::nil());
+        *monitor.deployment.lock().unwrap() = Some((Uuid::nil(), "server-project".to_string()));
         (monitor, dropped_events)
+    }
+
+    #[test]
+    fn proc_memory_value_converts_kib_to_bytes() {
+        assert_eq!(
+            parse_proc_kib_value("Name:\tvifu\nVmRSS:\t65536 kB\n", "VmRSS:"),
+            Some(67_108_864)
+        );
     }
 
     #[test]
@@ -3201,11 +3377,155 @@ mod tests {
             status: RuntimeMonitorStageStatus::Started,
             elapsed_ms: None,
             request_elapsed_ms: 1,
+            input_tokens: None,
+            output_tokens: None,
+            resident: None,
             error: None,
         };
 
-        assert!(embedded_runtime_telemetry_command(Some(&monitor), &mut traces, event).is_none());
+        assert!(
+            embedded_runtime_telemetry_command(Some(&monitor), None, &mut traces, event).is_none()
+        );
         assert_eq!(dropped_events.load(Ordering::Acquire), 3);
+    }
+
+    #[test]
+    fn embedded_invocation_telemetry_uses_the_registered_model_name() {
+        let (monitor, _) = embedded_monitor(0);
+        let models = Arc::new(HashMap::from([(
+            ("android-local-model".to_string(), "chat".to_string()),
+            "Qwen3-4B-Instruct".to_string(),
+        )]));
+        let mut traces = HashMap::new();
+        let started = RuntimeMonitorEvent::InvocationStarted {
+            trace_id: "trace-model".to_string(),
+            invocation_id: "invocation-model".to_string(),
+            project_id: "android-demo".to_string(),
+            endpoint: "chat".to_string(),
+            agent_id: "android-chat".to_string(),
+            provider_id: "android-local-model".to_string(),
+            capability: "chat".to_string(),
+            started_at_ms: 1,
+        };
+
+        let command =
+            embedded_runtime_telemetry_command(Some(&monitor), Some(&models), &mut traces, started)
+                .unwrap();
+        let AgentGatewayCommand::RuntimeTelemetry { batch } = command else {
+            panic!("embedded invocation start must emit runtime telemetry");
+        };
+        assert_eq!(batch.project_id, "server-project");
+        assert!(matches!(
+            batch.events.as_slice(),
+            [TraceTelemetry::InvocationStarted { model: Some(model), .. }]
+                if model == "Qwen3-4B-Instruct"
+        ));
+    }
+
+    #[test]
+    fn embedded_provider_stage_preserves_performance_metadata() {
+        let (monitor, _) = embedded_monitor(0);
+        let mut traces = HashMap::new();
+        let started = RuntimeMonitorEvent::InvocationStarted {
+            trace_id: "trace-metrics".to_string(),
+            invocation_id: "invocation-metrics".to_string(),
+            project_id: "android-demo".to_string(),
+            endpoint: "chat".to_string(),
+            agent_id: "android-chat".to_string(),
+            provider_id: "android-local-model".to_string(),
+            capability: "chat".to_string(),
+            started_at_ms: 1,
+        };
+        let _ =
+            embedded_runtime_telemetry_command(Some(&monitor), None, &mut traces, started).unwrap();
+
+        let command = embedded_runtime_telemetry_command(
+            Some(&monitor),
+            None,
+            &mut traces,
+            RuntimeMonitorEvent::ProviderStage {
+                trace_id: "trace-metrics".to_string(),
+                invocation_id: "invocation-metrics".to_string(),
+                stage: ProviderStage::Decode,
+                status: RuntimeMonitorStageStatus::Completed,
+                elapsed_ms: Some(250),
+                request_elapsed_ms: 400,
+                input_tokens: Some(12),
+                output_tokens: Some(8),
+                resident: Some(true),
+                error: None,
+            },
+        )
+        .unwrap();
+
+        let AgentGatewayCommand::RuntimeTelemetry { batch } = command else {
+            panic!("embedded provider stage must emit runtime telemetry");
+        };
+        assert!(matches!(
+            batch.events.as_slice(),
+            [TraceTelemetry::ProviderStage {
+                input_tokens: Some(12),
+                output_tokens: Some(8),
+                resident: Some(true),
+                ..
+            }]
+        ));
+    }
+
+    #[test]
+    fn embedded_terminal_telemetry_includes_recorded_chat_io() {
+        let (monitor, _) = embedded_monitor(0);
+        let mut traces = HashMap::new();
+        let _ = embedded_runtime_telemetry_command(
+            Some(&monitor),
+            None,
+            &mut traces,
+            RuntimeMonitorEvent::InvocationStarted {
+                trace_id: "trace-io".to_string(),
+                invocation_id: "invocation-io".to_string(),
+                project_id: "android-demo".to_string(),
+                endpoint: "chat".to_string(),
+                agent_id: "android-chat".to_string(),
+                provider_id: "android-local-model".to_string(),
+                capability: "chat".to_string(),
+                started_at_ms: 10,
+            },
+        )
+        .unwrap();
+        let input = canonical_trace_io_summary(&json!({
+            "messages": [{"role": "user", "content": "hello"}]
+        }));
+        let output = canonical_trace_io_summary(&json!({
+            "choices": [{"message": {"role": "assistant", "content": "hi"}}]
+        }));
+        record_embedded_runtime_io(
+            &mut traces,
+            "trace-io",
+            Some(input.clone()),
+            Some(output.clone()),
+        );
+
+        let command = embedded_runtime_telemetry_command(
+            Some(&monitor),
+            None,
+            &mut traces,
+            RuntimeMonitorEvent::InvocationFinished {
+                trace_id: "trace-io".to_string(),
+                invocation_id: "invocation-io".to_string(),
+                status: vifu_runtime::RuntimeMonitorStatus::Completed,
+                duration_ms: 5,
+                ended_at_ms: 15,
+                error: None,
+            },
+        )
+        .unwrap();
+
+        let AgentGatewayCommand::RuntimeTelemetry { batch } = command else {
+            panic!("embedded invocation finish must emit runtime telemetry");
+        };
+        assert!(
+            batch.root_input_summary == Some(input) && batch.root_output_summary == Some(output)
+        );
     }
 
     #[test]
@@ -3222,7 +3542,8 @@ mod tests {
             capability: "chat".to_string(),
             started_at_ms: 1,
         };
-        let _ = embedded_runtime_telemetry_command(Some(&monitor), &mut traces, started).unwrap();
+        let _ =
+            embedded_runtime_telemetry_command(Some(&monitor), None, &mut traces, started).unwrap();
         traces.get_mut("trace-1").unwrap().last_event_at =
             Instant::now() - EMBEDDED_TRACE_RETENTION - Duration::from_secs(1);
 

@@ -55,10 +55,24 @@ pub struct ServerEndpointIdentity {
 }
 
 impl ServerEndpointIdentity {
+    pub fn certificate_der(&self) -> Result<Option<Vec<u8>>, String> {
+        self.certificate_der_base64
+            .as_deref()
+            .map(|encoded| {
+                base64::engine::general_purpose::STANDARD
+                    .decode(encoded)
+                    .map_err(|error| format!("server certificate DER is invalid: {error}"))
+            })
+            .transpose()
+    }
+
     pub fn gateway_pairing_uri(&self, authorization_token: &str) -> Result<String, String> {
         let authorization_token = authorization_token.trim();
-        if !(16..=512).contains(&authorization_token.len())
-            || authorization_token.chars().any(char::is_control)
+        if !authorization_token.starts_with("vifu_ge_")
+            || authorization_token.len() != "vifu_ge_".len() + 64
+            || !authorization_token["vifu_ge_".len()..]
+                .chars()
+                .all(|character| character.is_ascii_hexdigit())
         {
             return Err("Gateway authorization token is invalid".to_string());
         }
@@ -82,10 +96,16 @@ impl ServerEndpointIdentity {
     }
 
     pub fn gateway_pairing_terminal_qr(&self, authorization_token: &str) -> Result<String, String> {
+        let uri = self.gateway_pairing_web_uri(authorization_token)?;
+        self.terminal_qr(&uri)
+    }
+
+    pub fn gateway_pairing_direct_terminal_qr(
+        &self,
+        authorization_token: &str,
+    ) -> Result<String, String> {
         let uri = self.gateway_pairing_compact_uri(authorization_token)?;
-        let code = qrcode::QrCode::with_error_correction_level(uri.as_bytes(), qrcode::EcLevel::L)
-            .map_err(|error| format!("Gateway pairing QR code could not be generated: {error}"))?;
-        Ok(compact_terminal_qr(&code))
+        self.terminal_qr(&uri)
     }
 
     fn gateway_pairing_compact_uri(&self, authorization_token: &str) -> Result<String, String> {
@@ -100,6 +120,19 @@ impl ServerEndpointIdentity {
                 .collect::<Vec<_>>();
             uri.query_pairs_mut().clear().extend_pairs(pairs);
         }
+        Ok(uri.to_string())
+    }
+
+    fn terminal_qr(&self, uri: &str) -> Result<String, String> {
+        let code = qrcode::QrCode::with_error_correction_level(uri.as_bytes(), qrcode::EcLevel::L)
+            .map_err(|error| format!("Gateway pairing QR code could not be generated: {error}"))?;
+        Ok(compact_terminal_qr(&code))
+    }
+
+    pub fn gateway_pairing_web_uri(&self, authorization_token: &str) -> Result<String, String> {
+        let compact_uri = self.gateway_pairing_compact_uri(authorization_token)?;
+        let uri = reqwest::Url::parse(&compact_uri)
+            .map_err(|error| format!("Gateway pairing URI is invalid: {error}"))?;
         let query = uri
             .query()
             .ok_or_else(|| "Gateway pairing URI has no payload".to_string())?;
@@ -121,29 +154,12 @@ fn compact_terminal_qr(code: &qrcode::QrCode) -> String {
     };
     let mut output = String::new();
     for y in (0..padded_height).step_by(2) {
-        for x in (0..padded_width).step_by(2) {
-            let bits = u8::from(is_dark(x, y)) << 3
-                | u8::from(is_dark(x + 1, y)) << 2
-                | u8::from(is_dark(x, y + 1)) << 1
-                | u8::from(is_dark(x + 1, y + 1));
-            output.push(match bits {
-                0b0000 => ' ',
-                0b1000 => '▘',
-                0b0100 => '▝',
-                0b1100 => '▀',
-                0b0010 => '▖',
-                0b1010 => '▌',
-                0b0110 => '▞',
-                0b1110 => '▛',
-                0b0001 => '▗',
-                0b1001 => '▚',
-                0b0101 => '▐',
-                0b1101 => '▜',
-                0b0011 => '▄',
-                0b1011 => '▙',
-                0b0111 => '▟',
-                0b1111 => '█',
-                _ => unreachable!(),
+        for x in 0..padded_width {
+            output.push(match (is_dark(x, y), is_dark(x, y + 1)) {
+                (false, false) => ' ',
+                (true, false) => '▀',
+                (false, true) => '▄',
+                (true, true) => '█',
             });
         }
         output.push('\n');
@@ -367,6 +383,10 @@ pub fn app(state: AppState) -> Router {
             post(api::exchange_deployment_credential),
         )
         .route("/v1/guest/bootstrap", post(api::bootstrap_guest_project))
+        .route(
+            "/v1/guest/agent-gateway-enrollments",
+            post(api::create_guest_agent_gateway_enrollment),
+        )
         .route("/v1/guest/claim", post(api::claim_guest_project))
         .route("/v1/admin/verify", get(api::verify_admin))
         .route(
@@ -708,6 +728,15 @@ pub fn app(state: AppState) -> Router {
             post(api::create_project_agent_gateway_enrollment),
         )
         .route(
+            "/v1/project/{slug}/runtime-distributions",
+            get(api::list_project_runtime_distributions)
+                .post(api::create_project_runtime_distribution),
+        )
+        .route(
+            "/v1/project/{slug}/runtime-distributions/{distribution_id}/revoke",
+            post(api::revoke_project_runtime_distribution),
+        )
+        .route(
             "/v1/agent-gateways/{gateway_id}/revoke",
             post(api::revoke_agent_gateway),
         )
@@ -760,7 +789,7 @@ mod tests {
         };
         let pairing = endpoint
             .gateway_pairing_uri(
-                "vifu_gb_0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                "vifu_ge_0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
             )
             .unwrap();
         let parsed = reqwest::Url::parse(&pairing).unwrap();
@@ -769,9 +798,20 @@ mod tests {
             .collect::<std::collections::HashMap<_, _>>();
 
         assert_eq!(query.get("server").unwrap(), "https://192.168.1.20:6790");
-        assert!(query.get("token").unwrap().starts_with("vifu_gb_"));
+        assert!(query.get("token").unwrap().starts_with("vifu_ge_"));
         assert_eq!(query.get("certificate").unwrap(), "certificate+/=");
         assert_eq!(query.get("fingerprint").unwrap(), "sha256:abcdef");
+    }
+
+    #[test]
+    fn server_endpoint_identity_exposes_the_pinned_certificate_der() {
+        let endpoint = ServerEndpointIdentity {
+            server_url: "https://192.0.2.20:6790".to_string(),
+            certificate_der_base64: Some("AQID".to_string()),
+            certificate_sha256: Some("sha256:synthetic".to_string()),
+        };
+
+        assert_eq!(endpoint.certificate_der().unwrap(), Some(vec![1, 2, 3]));
     }
 
     #[test]
@@ -783,17 +823,24 @@ mod tests {
         };
         let terminal_qr = endpoint
             .gateway_pairing_terminal_qr(
-                "vifu_gb_0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                "vifu_ge_0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
             )
             .unwrap();
         let compact_uri = endpoint
-            .gateway_pairing_compact_uri(
-                "vifu_gb_0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            .gateway_pairing_web_uri(
+                "vifu_ge_0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
             )
             .unwrap();
 
         assert!(terminal_qr.lines().count() > 10);
         assert!(terminal_qr.lines().count() <= 40);
+        let qr_height = terminal_qr.lines().count();
+        let qr_width = terminal_qr
+            .lines()
+            .map(|line| line.chars().count())
+            .max()
+            .unwrap();
+        assert!(qr_width.abs_diff(qr_height.saturating_mul(2)) <= 1);
         let bridge = reqwest::Url::parse(&compact_uri).unwrap();
         assert_eq!(
             bridge.as_str().split('#').next(),
@@ -804,27 +851,51 @@ mod tests {
         assert!(compact_uri.contains("fingerprint="));
         assert!(!compact_uri.contains("certificate="));
         assert!(terminal_qr.lines().all(|line| {
-            line.chars().all(|character| {
-                matches!(
-                    character,
-                    ' ' | '\u{2598}'
-                        | '\u{259d}'
-                        | '\u{2580}'
-                        | '\u{2596}'
-                        | '\u{258c}'
-                        | '\u{259e}'
-                        | '\u{259b}'
-                        | '\u{2597}'
-                        | '\u{259a}'
-                        | '\u{2590}'
-                        | '\u{259c}'
-                        | '\u{2584}'
-                        | '\u{2599}'
-                        | '\u{259f}'
-                        | '\u{2588}'
-                )
-            })
+            line.chars()
+                .all(|character| matches!(character, ' ' | '\u{2580}' | '\u{2584}' | '\u{2588}'))
         }));
+    }
+
+    #[test]
+    fn direct_gateway_pairing_qr_contains_the_native_enrollment_uri() {
+        let endpoint = ServerEndpointIdentity {
+            server_url: "https://api.vifu.ai".to_string(),
+            certificate_der_base64: None,
+            certificate_sha256: None,
+        };
+        let terminal_qr = endpoint
+            .gateway_pairing_direct_terminal_qr(
+                "vifu_ge_0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            )
+            .unwrap();
+
+        assert!(!terminal_qr.is_empty());
+        assert!(terminal_qr.lines().count() <= 40);
+    }
+
+    #[test]
+    fn compact_native_pairing_keeps_the_certificate_fingerprint_without_the_der() {
+        let endpoint = ServerEndpointIdentity {
+            server_url: "https://192.0.2.20:6790".to_string(),
+            certificate_der_base64: Some("synthetic-certificate".repeat(32)),
+            certificate_sha256: Some(format!("sha256:{}", "a".repeat(64))),
+        };
+
+        let uri = endpoint
+            .gateway_pairing_compact_uri(
+                "vifu_ge_0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            )
+            .unwrap();
+        let terminal_qr = endpoint
+            .gateway_pairing_direct_terminal_qr(
+                "vifu_ge_0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            )
+            .unwrap();
+
+        assert!(uri.starts_with("vifu://gateway/enroll?"));
+        assert!(uri.contains("fingerprint="));
+        assert!(!uri.contains("certificate="));
+        assert!(terminal_qr.lines().count() <= 40);
     }
 
     #[tokio::test]
@@ -883,13 +954,15 @@ mod tests {
         assert!(sidecar.is_file());
         let qr = restored
             .gateway_pairing_terminal_qr(
-                "vifu_gb_0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                "vifu_ge_0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
             )
             .unwrap();
         let qr_width = qr.lines().map(|line| line.chars().count()).max().unwrap();
         let qr_height = qr.lines().count();
         assert!(
-            qr_width <= 32 && qr_height <= 32,
+            qr_width <= 64
+                && qr_height <= 32
+                && qr_width.abs_diff(qr_height.saturating_mul(2)) <= 1,
             "generated LAN pairing QR is too large for a normal terminal: {qr_width}x{qr_height}"
         );
         std::fs::remove_dir_all(directory).unwrap();
@@ -1187,6 +1260,8 @@ mod tests {
         assert_eq!(enrollment.status(), StatusCode::CREATED);
         let body = to_bytes(enrollment.into_body(), 64 * 1024).await.unwrap();
         let enrollment: Value = serde_json::from_slice(&body).unwrap();
+        let enrollment_id =
+            uuid::Uuid::parse_str(enrollment["enrollmentId"].as_str().unwrap()).unwrap();
         let token = enrollment["enrollmentToken"].as_str().unwrap();
 
         let machine = vifu_gateway::identity::MachineIdentity::generate().unwrap();
@@ -1201,6 +1276,7 @@ mod tests {
         )
         .await
         .unwrap();
+        assert_eq!(assignment.enrollment_id, enrollment_id);
         let device_token =
             "vifu_gw_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
         let device_token_hash =
@@ -1608,6 +1684,14 @@ mod tests {
         let claim_token = created["claimToken"].as_str().unwrap();
         assert!(api_key.starts_with("vifu_pk_"));
         assert!(claim_token.starts_with("vifu_gc_"));
+        let guest_key_hash = crate::auth::hash_api_key(api_key, &api_key_pepper);
+        let guest_key = crate::db::active_api_key_by_hash(&storage, &guest_key_hash)
+            .await
+            .unwrap();
+        assert_eq!(
+            guest_key.permissions.project,
+            crate::models::ResourcePermission::Read
+        );
         assert_eq!(created["project"].as_object().unwrap().len(), 2);
         assert_eq!(created["deployment"].as_object().unwrap().len(), 2);
         assert_eq!(created["deployment"]["name"], "development");
@@ -1628,6 +1712,25 @@ mod tests {
         assert_eq!(repeated["project"]["id"], project_id);
         assert_eq!(repeated["apiKey"], api_key);
         assert_eq!(repeated["claimToken"], claim_token);
+
+        let enrollment = guest_app
+            .clone()
+            .oneshot(
+                Request::post("/v1/guest/agent-gateway-enrollments")
+                    .header("authorization", format!("Bearer {api_key}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(enrollment.status(), StatusCode::CREATED);
+        let body = to_bytes(enrollment.into_body(), 64 * 1024).await.unwrap();
+        let enrollment: Value = serde_json::from_slice(&body).unwrap();
+        assert!(enrollment["enrollmentToken"]
+            .as_str()
+            .unwrap()
+            .starts_with("vifu_ge_"));
+        assert_eq!(enrollment["deployment"], "development");
 
         let runtime_config = guest_app
             .clone()
@@ -1668,6 +1771,18 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(claimed.status(), StatusCode::OK);
+
+        let expired_guest_access = guest_app
+            .clone()
+            .oneshot(
+                Request::post("/v1/guest/agent-gateway-enrollments")
+                    .header("authorization", format!("Bearer {api_key}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(expired_guest_access.status(), StatusCode::FORBIDDEN);
 
         let projects = guest_app
             .clone()

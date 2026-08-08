@@ -11,7 +11,7 @@
 [![CI](https://github.com/vifudotdev/vifu/actions/workflows/ci.yml/badge.svg)](https://github.com/vifudotdev/vifu/actions/workflows/ci.yml)
 [![Discord](https://img.shields.io/badge/Discord-Join-5865F2?logo=discord&logoColor=white)](https://discord.com/invite/VdqqFwJbNE)
 
-[quick start](#quick-start) / [docs](docs/README.md) / [install](docs/install.md) / [console](docs/embedded-console.md) / [providers](providers/README.md) / [embed](docs/runtime-embedding.md) / [self-host](docs/self-hosting.md) / [build](BUILD.md)
+[quick start](#quick-start) / [docs](docs/README.md) / [install](docs/install.md) / [topology](docs/topology-and-pairing.md) / [console](docs/embedded-console.md) / [providers](providers/README.md) / [embed](docs/runtime-embedding.md) / [self-host](docs/self-hosting.md) / [build](BUILD.md)
 
 </div>
 
@@ -64,6 +64,7 @@ transport, keys, and traces.
 #### Use Vifu
 
 - [Install Vifu](docs/install.md)
+- [Runtime topology and Gateway enrollment](docs/topology-and-pairing.md)
 - [Embedded Console](docs/embedded-console.md)
 - [ARM optimization TUI](docs/arm-optimization-tui.md)
 - [Self-host with Docker](docs/self-hosting.md)

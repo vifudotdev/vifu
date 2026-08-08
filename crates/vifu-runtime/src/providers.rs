@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
+#[cfg(feature = "local-whisper")]
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use reqwest::header::{HeaderMap, CONTENT_TYPE};
@@ -16,6 +18,142 @@ const PROVIDER_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_se
 pub struct BinaryProviderResponse {
     pub content_type: String,
     pub body: Vec<u8>,
+}
+
+/// In-process Whisper provider whose model context remains resident between
+/// transcription requests.
+#[cfg(feature = "local-whisper")]
+pub struct LocalWhisperProvider {
+    name: String,
+    model_path: PathBuf,
+    language: Option<String>,
+    context: Arc<Mutex<Option<whisper_rs::WhisperContext>>>,
+}
+
+#[cfg(feature = "local-whisper")]
+impl fmt::Debug for LocalWhisperProvider {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("LocalWhisperProvider")
+            .field("name", &self.name)
+            .field("model_path", &"[REDACTED]")
+            .field("language", &self.language)
+            .finish()
+    }
+}
+
+#[cfg(feature = "local-whisper")]
+impl LocalWhisperProvider {
+    pub fn new(
+        name: impl Into<String>,
+        model_path: impl Into<PathBuf>,
+        language: Option<String>,
+    ) -> Result<Self, RuntimeError> {
+        let name = name.into();
+        if name.trim().is_empty() {
+            return Err(RuntimeError::InvalidDefinition(
+                "provider name is required".to_string(),
+            ));
+        }
+        let model_path = model_path.into();
+        if model_path.as_os_str().is_empty() {
+            return Err(RuntimeError::InvalidDefinition(
+                "Whisper model path is required".to_string(),
+            ));
+        }
+        let language = language
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
+        Ok(Self {
+            name,
+            model_path,
+            language,
+            context: Arc::new(Mutex::new(None)),
+        })
+    }
+}
+
+#[cfg(feature = "local-whisper")]
+impl AgentProvider for LocalWhisperProvider {
+    fn supports(&self, capability: &str) -> bool {
+        capability == "transcription"
+    }
+
+    fn invoke<'a>(
+        &'a self,
+        request: ProviderRequest,
+        cancellation: CancellationToken,
+    ) -> ProviderFuture<'a> {
+        self.invoke_with_events(request, cancellation, ProviderEventSink::discard())
+    }
+
+    fn invoke_with_events<'a>(
+        &'a self,
+        request: ProviderRequest,
+        cancellation: CancellationToken,
+        events: ProviderEventSink,
+    ) -> ProviderFuture<'a> {
+        let name = self.name.clone();
+        let model_path = self.model_path.clone();
+        let context = Arc::clone(&self.context);
+        let language = request
+            .metadata
+            .pointer("/binding/language")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .or_else(|| self.language.clone());
+        Box::pin(async move {
+            let InvocationData::Binary(audio) = request.data else {
+                return Err(RuntimeError::InvalidDefinition(
+                    "transcription capability requires binary input".to_string(),
+                ));
+            };
+            if cancellation.is_cancelled() {
+                return Err(RuntimeError::Cancelled);
+            }
+            events.stage_started(ProviderStage::Queue, Value::Null);
+            events.stage_completed(ProviderStage::Queue, 0, Value::Null);
+            let worker_events = events.clone();
+            let worker_name = name.clone();
+            let worker = tokio::task::spawn_blocking(move || {
+                transcribe_with_resident_whisper(
+                    &worker_name,
+                    &model_path,
+                    &context,
+                    &audio,
+                    language.as_deref(),
+                    &worker_events,
+                )
+            });
+            let text = tokio::select! {
+                _ = cancellation.cancelled() => return Err(RuntimeError::Cancelled),
+                result = worker => result
+                    .map_err(|_| RuntimeError::provider(&name, "Whisper worker stopped"))?
+                    .map_err(|message| RuntimeError::provider(&name, message))?,
+            };
+            if cancellation.is_cancelled() {
+                return Err(RuntimeError::Cancelled);
+            }
+            let validate_started = Instant::now();
+            events.stage_started(ProviderStage::Validate, Value::Null);
+            let data = json!({ "text": text });
+            if let Err(error) = validate_transcription_response(&data) {
+                let elapsed = elapsed_ms(validate_started);
+                events.stage_failed(ProviderStage::Validate, elapsed, &error, Value::Null);
+                return Err(RuntimeError::provider(&name, error));
+            }
+            events.stage_completed(
+                ProviderStage::Validate,
+                elapsed_ms(validate_started),
+                Value::Null,
+            );
+            Ok(ProviderResponse {
+                data: InvocationData::Json(data),
+                metadata: json!({ "contentType": "application/json" }),
+                state: None,
+            })
+        })
+    }
 }
 
 /// Capability protocol used by [`HttpCapabilityProvider`].
@@ -594,6 +732,127 @@ pub fn local_whisper_transcription(
         })
         .collect::<Result<Vec<_>, _>>()?;
     Ok(segments.join("").trim().to_string())
+}
+
+#[cfg(feature = "local-whisper")]
+fn transcribe_with_resident_whisper(
+    provider_name: &str,
+    model_path: &Path,
+    context: &Mutex<Option<whisper_rs::WhisperContext>>,
+    wav: &[u8],
+    language: Option<&str>,
+    events: &ProviderEventSink,
+) -> Result<String, String> {
+    use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
+
+    let mut context = context
+        .lock()
+        .map_err(|_| "Whisper model context is unavailable".to_string())?;
+    let resident = context.is_some();
+    let load_started = Instant::now();
+    events.stage_started(ProviderStage::Load, json!({ "resident": resident }));
+    if context.is_none() {
+        let model_path = model_path
+            .to_str()
+            .ok_or_else(|| "Whisper model path is not valid UTF-8".to_string())?;
+        match WhisperContext::new_with_params(model_path, WhisperContextParameters::default()) {
+            Ok(loaded) => *context = Some(loaded),
+            Err(error) => {
+                let message = format!("Whisper model could not be loaded: {error}");
+                events.stage_failed(
+                    ProviderStage::Load,
+                    elapsed_ms(load_started),
+                    &message,
+                    json!({ "resident": false }),
+                );
+                return Err(message);
+            }
+        }
+    }
+    events.stage_completed(
+        ProviderStage::Load,
+        elapsed_ms(load_started),
+        json!({ "resident": resident }),
+    );
+
+    let samples = decode_whisper_wav(wav)?;
+    let decode_started = Instant::now();
+    events.stage_started(ProviderStage::Decode, Value::Null);
+    let loaded = context
+        .as_ref()
+        .ok_or_else(|| "Whisper model context is unavailable".to_string())?;
+    let mut state = loaded
+        .create_state()
+        .map_err(|error| format!("Whisper state could not be created: {error}"))?;
+    let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
+    params.set_print_progress(false);
+    params.set_print_realtime(false);
+    params.set_print_timestamps(false);
+    params.set_language(language);
+    if let Err(error) = state.full(params, &samples) {
+        let message = format!("Whisper transcription failed: {error}");
+        events.stage_failed(
+            ProviderStage::Decode,
+            elapsed_ms(decode_started),
+            &message,
+            Value::Null,
+        );
+        return Err(message);
+    }
+    let segments = state
+        .as_iter()
+        .map(|segment| {
+            segment
+                .to_str_lossy()
+                .map(|text| text.into_owned())
+                .map_err(|error| format!("Whisper segment could not be decoded: {error}"))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    events.stage_completed(
+        ProviderStage::Decode,
+        elapsed_ms(decode_started),
+        json!({ "provider": provider_name }),
+    );
+    Ok(segments.join("").trim().to_string())
+}
+
+#[cfg(feature = "local-whisper")]
+fn decode_whisper_wav(wav: &[u8]) -> Result<Vec<f32>, String> {
+    use std::io::Cursor;
+
+    let mut reader = hound::WavReader::new(Cursor::new(wav))
+        .map_err(|error| format!("audio must be a valid WAV file: {error}"))?;
+    let spec = reader.spec();
+    let channels = usize::from(spec.channels);
+    if channels == 0 || spec.sample_rate == 0 {
+        return Err("WAV audio has an invalid channel count or sample rate".to_string());
+    }
+    let interleaved = match spec.sample_format {
+        hound::SampleFormat::Float => reader
+            .samples::<f32>()
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| format!("WAV samples could not be decoded: {error}"))?,
+        hound::SampleFormat::Int => {
+            let scale = 2_f32.powi(i32::from(spec.bits_per_sample.saturating_sub(1)));
+            reader
+                .samples::<i32>()
+                .map(|sample| {
+                    sample
+                        .map(|sample| sample as f32 / scale)
+                        .map_err(|error| format!("WAV samples could not be decoded: {error}"))
+                })
+                .collect::<Result<Vec<_>, _>>()?
+        }
+    };
+    let mono = interleaved
+        .chunks(channels)
+        .map(|frame| frame.iter().copied().sum::<f32>() / frame.len() as f32)
+        .collect::<Vec<_>>();
+    let samples = resample_linear(&mono, spec.sample_rate, 16_000);
+    if samples.is_empty() {
+        return Err("WAV audio does not contain samples".to_string());
+    }
+    Ok(samples)
 }
 
 #[cfg(not(feature = "local-whisper"))]

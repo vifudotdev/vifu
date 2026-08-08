@@ -12,12 +12,15 @@ mod runtime;
 #[cfg(feature = "sqlite")]
 mod sqlite_store;
 
+const MAX_ENDPOINT_TIMEOUT_MS: u64 = 15 * 60 * 1_000;
+
 pub use application::{
     AgentDefinition, AgentProvider, CancellationToken, EffectExecution, EndpointDefinition,
     InvocationData, InvocationEvent, InvocationEventKind, InvocationHandle, InvocationInput,
     InvocationOutput, InvocationPoll, InvocationStatus, InvocationTraceEvent, MemoryRuntimeStore,
     ProviderEvent, ProviderEventSink, ProviderFuture, ProviderRequest, ProviderResponse,
-    ProviderStage, RuntimeError, RuntimeMonitorEvent, RuntimeMonitorObserver,
+    ProviderStage, RuntimeError, RuntimeMonitorEvent, RuntimeMonitorIoEvent,
+    RuntimeMonitorIoObserver, RuntimeMonitorIoSummary, RuntimeMonitorObserver,
     RuntimeMonitorStageStatus, RuntimeMonitorStatus, RuntimeSession, RuntimeStore, VifuRuntime,
 };
 pub use bridge::{
@@ -37,6 +40,8 @@ pub use protocol::{
     ProtocolFrame, RequestFrame, RequestFrameType, ResponseFrame, ResponseFrameType, StateVersion,
     MAX_PROTOCOL_FRAME_BYTES,
 };
+#[cfg(feature = "local-whisper")]
+pub use providers::LocalWhisperProvider;
 pub use providers::{HttpCapabilityProvider, HttpCapabilityRoute};
 pub use runtime::{
     EffectRequest, EffectRequestQueue, EffectResult, EffectResultQueue, HeadlessRuntime,
@@ -61,6 +66,8 @@ pub mod prelude {
     pub use bevy_ecs::prelude::*;
     pub use serde_json::{json, Value};
 
+    #[cfg(feature = "local-whisper")]
+    pub use crate::LocalWhisperProvider;
     pub use crate::{
         AgentDefinition, AgentProvider, CancellationToken, EffectExecution, EffectRequest,
         EffectRequestQueue, EffectResult, EffectResultQueue, EndpointDefinition, HeadlessRuntime,
@@ -70,7 +77,8 @@ pub mod prelude {
         ProviderEventSink, ProviderFuture, ProviderRequest, ProviderRequirement, ProviderResponse,
         ProviderStage, RuntimeAdvance, RuntimeBridge, RuntimeBridgeError, RuntimeCommand,
         RuntimeCommandQueue, RuntimeError, RuntimeEvent, RuntimeEventQueue, RuntimeManifest,
-        RuntimeMonitorEvent, RuntimeMonitorObserver, RuntimeMonitorStageStatus,
+        RuntimeMonitorEvent, RuntimeMonitorIoEvent, RuntimeMonitorIoObserver,
+        RuntimeMonitorIoSummary, RuntimeMonitorObserver, RuntimeMonitorStageStatus,
         RuntimeMonitorStatus, RuntimeRelease, RuntimeSchedule, RuntimeSession, RuntimeSnapshot,
         RuntimeState, RuntimeStore, RuntimeTraceRecord, VifuRuntime, VifuRuntimePlugin,
     };

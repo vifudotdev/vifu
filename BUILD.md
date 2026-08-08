@@ -134,6 +134,18 @@ cargo build --workspace
 cargo build -p vifu
 ```
 
+Run the isolated protocol-level topology matrix with one command:
+
+```bash
+scripts/test-topologies.sh
+```
+
+It uses real loopback HTTP and WebSocket connections while keeping every case's
+Vifu home, temporary files, ports, and SQLite database independent from the
+machine configuration. See
+[Topology protocol live testing](docs/topology-live-testing.md) for its test
+matrix, reports, and the separate Docker release gate.
+
 SQLite and PostgreSQL migrations are embedded in the Vifu Server role and run
 at startup. The Dashboard authenticates against the runtime Admin Key and keeps
 only a signed, HttpOnly browser session; it has no user or session database.

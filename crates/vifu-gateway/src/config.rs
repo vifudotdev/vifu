@@ -73,13 +73,41 @@ impl fmt::Debug for AgentProviderConfig {
 
 impl Config {
     pub fn load(server_url: String, enrollment_token: Option<String>) -> Result<Self, String> {
-        Self::load_from_home_dir(default_home_dir()?, server_url, enrollment_token)
+        Self::load_with_implicit_local_bootstrap(server_url, enrollment_token, true)
     }
 
+    pub fn load_with_implicit_local_bootstrap(
+        server_url: String,
+        enrollment_token: Option<String>,
+        enabled: bool,
+    ) -> Result<Self, String> {
+        Self::load_from_home_dir_with_implicit_local_bootstrap(
+            default_home_dir()?,
+            server_url,
+            enrollment_token,
+            enabled,
+        )
+    }
+
+    #[cfg(test)]
     fn load_from_home_dir(
         home_dir: PathBuf,
         server_url: String,
         enrollment_token: Option<String>,
+    ) -> Result<Self, String> {
+        Self::load_from_home_dir_with_implicit_local_bootstrap(
+            home_dir,
+            server_url,
+            enrollment_token,
+            true,
+        )
+    }
+
+    fn load_from_home_dir_with_implicit_local_bootstrap(
+        home_dir: PathBuf,
+        server_url: String,
+        enrollment_token: Option<String>,
+        implicit_local_bootstrap: bool,
     ) -> Result<Self, String> {
         let enrollment_token = enrollment_token
             .map(|token| token.trim().to_string())
@@ -91,7 +119,7 @@ impl Config {
         let agent_gateway_bootstrap_token = match env_or_file("VIFU_AGENT_GATEWAY_BOOTSTRAP_TOKEN")?
         {
             Some(token) => Some(token),
-            None if is_local_server_url(&server_url) => {
+            None if implicit_local_bootstrap && is_local_server_url(&server_url) => {
                 Some(DEFAULT_AGENT_GATEWAY_BOOTSTRAP_TOKEN.to_string())
             }
             None => None,
@@ -607,6 +635,32 @@ mod tests {
         .unwrap();
 
         assert!(config.enrollment_token.unwrap().starts_with("vifu_ge_"));
+        assert!(config.agent_gateway_bootstrap_token.is_none());
+        restore_env("VIFU_AGENT_GATEWAY_BOOTSTRAP_TOKEN", previous_token);
+        restore_env(
+            "VIFU_AGENT_GATEWAY_BOOTSTRAP_TOKEN_FILE",
+            previous_token_file,
+        );
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn guest_mode_does_not_inject_the_legacy_local_bootstrap_token() {
+        let _guard = env_lock().lock().unwrap();
+        let dir = unique_directory("vifu-gateway-guest-mode");
+        let previous_token = std::env::var_os("VIFU_AGENT_GATEWAY_BOOTSTRAP_TOKEN");
+        let previous_token_file = std::env::var_os("VIFU_AGENT_GATEWAY_BOOTSTRAP_TOKEN_FILE");
+        std::env::remove_var("VIFU_AGENT_GATEWAY_BOOTSTRAP_TOKEN");
+        std::env::remove_var("VIFU_AGENT_GATEWAY_BOOTSTRAP_TOKEN_FILE");
+
+        let config = Config::load_from_home_dir_with_implicit_local_bootstrap(
+            dir.clone(),
+            DEFAULT_SERVER_URL.to_string(),
+            None,
+            false,
+        )
+        .unwrap();
+
         assert!(config.agent_gateway_bootstrap_token.is_none());
         restore_env("VIFU_AGENT_GATEWAY_BOOTSTRAP_TOKEN", previous_token);
         restore_env(

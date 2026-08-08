@@ -125,6 +125,28 @@ pub struct RuntimeDeploymentApplyState {
     pub applied_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone, Serialize, FromRow)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeDistribution {
+    pub id: Uuid,
+    pub project_id: Uuid,
+    pub deployment_id: Uuid,
+    pub name: String,
+    pub public_id: String,
+    pub status: String,
+    pub max_gateways: i64,
+    pub created_at: DateTime<Utc>,
+    pub revoked_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CreateRuntimeDistribution {
+    pub name: String,
+    pub deployment: Option<String>,
+    pub max_gateways: Option<i64>,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ReportRuntimeReleaseApplied {

@@ -449,6 +449,7 @@ pub(crate) struct AgentLane {
     pub(crate) capability: String,
     capabilities: Vec<String>,
     pub(crate) model: String,
+    pub(crate) runtime_metrics: Option<SystemMetrics>,
     configured: bool,
     active: HashMap<Uuid, TraceRecord>,
     history: VecDeque<TraceRecord>,
@@ -469,6 +470,7 @@ impl AgentLane {
             capability: registration.capability,
             capabilities,
             model: registration.model,
+            runtime_metrics: None,
             configured: true,
             active: HashMap::new(),
             history: VecDeque::new(),
@@ -489,6 +491,7 @@ impl AgentLane {
             capability,
             capabilities,
             model: registration.model,
+            runtime_metrics: None,
             configured: true,
             active: HashMap::new(),
             history: VecDeque::new(),
@@ -630,6 +633,15 @@ pub(crate) struct App {
     pub(crate) override_route_count: usize,
     pub(crate) quit_confirmation: bool,
     pub(crate) notice: Option<String>,
+    pub(crate) device_pairing: Option<DevicePairingView>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DevicePairingView {
+    pub(crate) enrollment_id: Option<Uuid>,
+    pub(crate) server_url: String,
+    pub(crate) terminal_qr: String,
+    pub(crate) expires_at: String,
 }
 
 impl Default for App {
@@ -670,6 +682,7 @@ impl Default for App {
             override_route_count: 0,
             quit_confirmation: false,
             notice: None,
+            device_pairing: None,
         }
     }
 }
@@ -760,6 +773,16 @@ impl App {
                     }
                 }
                 self.normalize_lane_selection(now);
+            }
+            RuntimeEvent::GatewayEnrolled { enrollment_id } => {
+                if self
+                    .device_pairing
+                    .as_ref()
+                    .is_some_and(|pairing| pairing.enrollment_id == Some(enrollment_id))
+                {
+                    self.device_pairing = None;
+                    self.notice = Some("Device paired and connected".to_string());
+                }
             }
             RuntimeEvent::ProjectProfilesRegistered(registrations) => {
                 self.project_configured_sources = registrations
@@ -963,7 +986,11 @@ impl App {
                 trace.upsert_observation(TraceObservation {
                     id: observation_id,
                     parent_observation_id: Some(invocation_id),
-                    observation_type: ObservationType::Span,
+                    observation_type: if stage == RuntimeStage::FirstToken {
+                        ObservationType::Event
+                    } else {
+                        ObservationType::Span
+                    },
                     name: stage.label().to_string(),
                     stage: Some(stage),
                     status,
@@ -1027,6 +1054,22 @@ impl App {
                     .and_then(|lane| lane.trace_mut(invocation_id))
                 {
                     trace.io_dropped = true;
+                }
+            }
+            RuntimeEvent::RuntimeHostMetrics {
+                invocation_id,
+                process_rss_bytes,
+                total_memory_bytes,
+            } => {
+                let Some(lane_key) = self.invocation_lanes.get(&invocation_id) else {
+                    return;
+                };
+                if let Some(lane) = self.lanes.get_mut(lane_key) {
+                    lane.runtime_metrics = Some(SystemMetrics {
+                        cpu_percent: None,
+                        rss_bytes: process_rss_bytes,
+                        total_memory_bytes,
+                    });
                 }
             }
             RuntimeEvent::ApplicationFeedback {
@@ -1729,9 +1772,86 @@ mod tests {
     };
 
     use super::{
-        App, ComparisonRow, LaneFilter, LaneOutcome, LaneSort, OptimizationExclusion,
-        OptimizationSummary, View,
+        App, ComparisonRow, DevicePairingView, LaneFilter, LaneOutcome, LaneSort, ObservationType,
+        OptimizationExclusion, OptimizationSummary, View,
     };
+
+    #[test]
+    fn pairing_closes_only_for_its_enrollment() {
+        let now = Instant::now();
+        let mut app = App::default();
+        let enrollment_id = Uuid::new_v4();
+        app.device_pairing = Some(DevicePairingView {
+            enrollment_id: Some(enrollment_id),
+            server_url: "https://127.0.0.1:6790".to_string(),
+            terminal_qr: "qr".to_string(),
+            expires_at: "soon".to_string(),
+        });
+
+        app.apply(RuntimeEvent::AgentsRegistered(Vec::new()), now);
+        assert!(app.device_pairing.is_some());
+
+        app.apply(
+            RuntimeEvent::GatewayEnrolled {
+                enrollment_id: Uuid::new_v4(),
+            },
+            now,
+        );
+        assert!(app.device_pairing.is_some());
+
+        app.apply(RuntimeEvent::GatewayEnrolled { enrollment_id }, now);
+        assert!(app.device_pairing.is_none());
+        assert_eq!(app.notice.as_deref(), Some("Device paired and connected"));
+    }
+
+    #[test]
+    fn first_token_is_recorded_as_a_timed_event() {
+        let now = Instant::now();
+        let mut app = App::default();
+        app.apply(RuntimeEvent::AgentsRegistered(vec![registration(0)]), now);
+        let invocation_id = Uuid::new_v4();
+        app.apply(
+            RuntimeEvent::InvocationStarted {
+                invocation_id,
+                agent_id: "agent-000".to_string(),
+                agent_name: "Agent 000".to_string(),
+                source_agent_id: "agent-000".to_string(),
+                capability: "chat".to_string(),
+                provider: "local-qwen".to_string(),
+                model: "qwen2.5:2b".to_string(),
+                started_unix_ms: 1,
+            },
+            now,
+        );
+        app.apply(
+            RuntimeEvent::StageChanged {
+                invocation_id,
+                observation_id: Uuid::new_v4(),
+                stage: RuntimeStage::FirstToken,
+                status: StageStatus::Passed,
+                start_offset: Duration::from_millis(1_900),
+                end_offset: Some(Duration::from_millis(1_900)),
+                elapsed: Duration::ZERO,
+                request_elapsed: Some(Duration::from_millis(1_900)),
+                input_tokens: None,
+                output_tokens: Some(1),
+                resident: None,
+                error: None,
+            },
+            now,
+        );
+
+        let trace = app
+            .lanes
+            .get("agent-000\0")
+            .and_then(|lane| lane.trace(invocation_id))
+            .unwrap();
+        assert_eq!(trace.ttft, Some(Duration::from_millis(1_900)));
+        assert_eq!(
+            trace.observations[0].observation_type,
+            ObservationType::Event
+        );
+    }
 
     fn registration(index: usize) -> RegisteredAgent {
         RegisteredAgent {

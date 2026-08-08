@@ -17,8 +17,8 @@ use crate::models::{
     ApiKeyPermissions, ApiKeyRecord, AvailableAgent, EndpointRoute, EndpointTrace,
     ProfileCapabilityDraft, ProfileRoute, Project, ProjectRuntimeChannel, ProjectRuntimeExtension,
     ProjectRuntimeRelease, ProjectWithBindings, ProviderConnection, ProviderConnectionSecret,
-    PublicAgent, RealtimeSession, RuntimeDeployment, RuntimeDeploymentApplyState, TraceScore,
-    TraceSpan,
+    PublicAgent, RealtimeSession, RuntimeDeployment, RuntimeDeploymentApplyState,
+    RuntimeDistribution, TraceScore, TraceSpan,
 };
 use crate::trace_redaction::{redact_trace_text, redact_trace_value};
 
@@ -505,6 +505,134 @@ pub async fn runtime_deployment_allows_remote_invocation(
     .map_err(ApiError::Database)
 }
 
+pub async fn create_runtime_distribution(
+    pool: &PgPool,
+    input: NewRuntimeDistribution<'_>,
+) -> Result<RuntimeDistribution, ApiError> {
+    sqlx::query_as::<_, RuntimeDistribution>(
+        "INSERT INTO runtime_distributions(
+            id, project_id, deployment_id, name, public_id, max_gateways
+         ) VALUES ($1, $2, $3, $4, $5, $6)
+         RETURNING id, project_id, deployment_id, name, public_id, status,
+                   max_gateways, created_at, revoked_at",
+    )
+    .bind(input.id)
+    .bind(input.project_id)
+    .bind(input.deployment_id)
+    .bind(input.name)
+    .bind(input.public_id)
+    .bind(input.max_gateways)
+    .fetch_one(pool)
+    .await
+    .map_err(map_database_error)
+}
+
+pub async fn list_runtime_distributions(
+    pool: &PgPool,
+    project_id: Uuid,
+) -> Result<Vec<RuntimeDistribution>, ApiError> {
+    sqlx::query_as::<_, RuntimeDistribution>(
+        "SELECT id, project_id, deployment_id, name, public_id, status,
+                max_gateways, created_at, revoked_at
+         FROM runtime_distributions WHERE project_id = $1
+         ORDER BY created_at DESC",
+    )
+    .bind(project_id)
+    .fetch_all(pool)
+    .await
+    .map_err(ApiError::Database)
+}
+
+pub async fn revoke_runtime_distribution(
+    pool: &PgPool,
+    project_id: Uuid,
+    distribution_id: Uuid,
+) -> Result<RuntimeDistribution, ApiError> {
+    sqlx::query_as::<_, RuntimeDistribution>(
+        "UPDATE runtime_distributions
+         SET status = 'revoked', revoked_at = COALESCE(revoked_at, NOW())
+         WHERE id = $1 AND project_id = $2
+         RETURNING id, project_id, deployment_id, name, public_id, status,
+                   max_gateways, created_at, revoked_at",
+    )
+    .bind(distribution_id)
+    .bind(project_id)
+    .fetch_optional(pool)
+    .await?
+    .ok_or(ApiError::NotFound)
+}
+
+pub async fn authorize_runtime_distribution_gateway(
+    pool: &PgPool,
+    public_id: &str,
+    machine_id: &str,
+    suggested_gateway_id: &str,
+) -> Result<RuntimeDistributionGatewayAssignment, ApiError> {
+    let mut transaction = pool.begin().await?;
+    let (distribution_id, deployment_id, max_gateways, owner_user_id) =
+        sqlx::query_as::<_, (Uuid, Uuid, i64, Option<String>)>(
+            "SELECT distribution.id, distribution.deployment_id,
+                    distribution.max_gateways, project.owner_user_id
+             FROM runtime_distributions AS distribution
+             JOIN projects AS project ON project.id = distribution.project_id
+             WHERE distribution.public_id = $1 AND distribution.status = 'active'
+             FOR UPDATE OF distribution",
+        )
+        .bind(public_id)
+        .fetch_optional(&mut *transaction)
+        .await?
+        .ok_or(ApiError::Unauthorized)?;
+    if let Some(gateway_id) = sqlx::query_scalar::<_, String>(
+        "SELECT gateway_id FROM runtime_distribution_gateways
+         WHERE distribution_id = $1 AND machine_id = $2",
+    )
+    .bind(distribution_id)
+    .bind(machine_id)
+    .fetch_optional(&mut *transaction)
+    .await?
+    {
+        transaction.commit().await?;
+        return Ok(RuntimeDistributionGatewayAssignment {
+            gateway_id,
+            owner_user_id,
+        });
+    }
+    let count = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM runtime_distribution_gateways WHERE distribution_id = $1",
+    )
+    .bind(distribution_id)
+    .fetch_one(&mut *transaction)
+    .await?;
+    if count >= max_gateways {
+        return Err(ApiError::Conflict(
+            "runtime distribution device limit reached".to_string(),
+        ));
+    }
+    sqlx::query(
+        "INSERT INTO runtime_distribution_gateways(distribution_id, machine_id, gateway_id)
+         VALUES ($1, $2, $3)",
+    )
+    .bind(distribution_id)
+    .bind(machine_id)
+    .bind(suggested_gateway_id)
+    .execute(&mut *transaction)
+    .await
+    .map_err(map_database_error)?;
+    sqlx::query(
+        "INSERT INTO runtime_deployment_gateways(deployment_id, gateway_id)
+         VALUES ($1, $2) ON CONFLICT DO NOTHING",
+    )
+    .bind(deployment_id)
+    .bind(suggested_gateway_id)
+    .execute(&mut *transaction)
+    .await?;
+    transaction.commit().await?;
+    Ok(RuntimeDistributionGatewayAssignment {
+        gateway_id: suggested_gateway_id.to_string(),
+        owner_user_id,
+    })
+}
+
 pub async fn create_project_runtime_release(
     pool: &PgPool,
     input: NewProjectRuntimeRelease<'_>,
@@ -711,6 +839,21 @@ pub async fn get_active_guest_project_for_gateway(
         }
         None => Ok(None),
     }
+}
+
+pub async fn get_active_guest_project_by_project_id(
+    pool: &PgPool,
+    project_id: Uuid,
+) -> Result<Option<DateTime<Utc>>, ApiError> {
+    sqlx::query_scalar(
+        "SELECT expires_at
+         FROM guest_projects
+         WHERE project_id = $1 AND claimed_at IS NULL AND expires_at > NOW()",
+    )
+    .bind(project_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(ApiError::Database)
 }
 
 pub async fn count_active_guest_projects(pool: &PgPool) -> Result<i64, ApiError> {
@@ -1277,7 +1420,18 @@ pub async fn list_projects_for_gateway(
     sqlx::query_as::<_, (Uuid, String)>(
         "SELECT id, slug
          FROM projects
-         WHERE gateway_id = $1 AND enabled = TRUE
+         WHERE enabled = TRUE
+           AND (
+             gateway_id = $1
+             OR EXISTS (
+               SELECT 1
+               FROM runtime_deployments AS deployment
+               JOIN runtime_deployment_gateways AS assignment
+                 ON assignment.deployment_id = deployment.id
+               WHERE deployment.project_id = projects.id
+                 AND assignment.gateway_id = $1
+             )
+           )
          ORDER BY created_at ASC",
     )
     .bind(gateway_id)
@@ -3220,11 +3374,11 @@ pub async fn consume_agent_gateway_machine_enrollment(
     gateway_id: &str,
 ) -> Result<AgentGatewayEnrollmentAssignment, ApiError> {
     let mut transaction = pool.begin().await?;
-    let claimed = sqlx::query_as::<_, AgentGatewayEnrollmentSecret>(
+    let claimed = sqlx::query_as::<_, AgentGatewayMachineEnrollmentSecret>(
         "UPDATE agent_gateway_enrollments
          SET gateway_id = $2, consumed_at = NOW()
          WHERE token_hash = $1 AND consumed_at IS NULL AND revoked_at IS NULL AND expires_at > NOW()
-         RETURNING project_id, deployment_id, owner_user_id, gateway_id, consumed_at,
+         RETURNING id, project_id, deployment_id, owner_user_id, gateway_id, consumed_at,
                    revoked_at, expires_at",
     )
     .bind(token_hash)
@@ -3234,8 +3388,8 @@ pub async fn consume_agent_gateway_machine_enrollment(
     let enrollment = match claimed {
         Some(enrollment) => enrollment,
         None => {
-            let existing = sqlx::query_as::<_, AgentGatewayEnrollmentSecret>(
-                "SELECT project_id, deployment_id, owner_user_id, gateway_id, consumed_at,
+            let existing = sqlx::query_as::<_, AgentGatewayMachineEnrollmentSecret>(
+                "SELECT id, project_id, deployment_id, owner_user_id, gateway_id, consumed_at,
                         revoked_at, expires_at
                  FROM agent_gateway_enrollments WHERE token_hash = $1 FOR UPDATE",
             )
@@ -3284,10 +3438,23 @@ pub async fn consume_agent_gateway_machine_enrollment(
     .await?;
     transaction.commit().await?;
     Ok(AgentGatewayEnrollmentAssignment {
+        enrollment_id: enrollment.id,
         project_id: enrollment.project_id,
         deployment_id: enrollment.deployment_id,
         owner_user_id: enrollment.owner_user_id,
     })
+}
+
+#[derive(Debug, FromRow)]
+struct AgentGatewayMachineEnrollmentSecret {
+    id: Uuid,
+    project_id: Uuid,
+    deployment_id: Uuid,
+    owner_user_id: String,
+    gateway_id: Option<String>,
+    consumed_at: Option<DateTime<Utc>>,
+    revoked_at: Option<DateTime<Utc>>,
+    expires_at: DateTime<Utc>,
 }
 
 pub async fn create_or_get_agent_gateway_pairing(

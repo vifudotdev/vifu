@@ -473,6 +473,30 @@ fileprivate struct FfiConverterUInt64: FfiConverterPrimitive {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterBool : FfiConverter {
+    typealias FfiType = Int8
+    typealias SwiftType = Bool
+
+    public static func lift(_ value: Int8) throws -> Bool {
+        return value != 0
+    }
+
+    public static func lower(_ value: Bool) -> Int8 {
+        return value ? 1 : 0
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> Bool {
+        return try lift(readInt(&buf))
+    }
+
+    public static func write(_ value: Bool, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterString: FfiConverter {
     typealias SwiftType = String
     typealias FfiType = RustBuffer
@@ -538,6 +562,11 @@ public protocol VifuEmbeddedGatewayProtocol: AnyObject, Sendable {
      * Starts the optional network Gateway with caller-owned credential storage.
      */
     func start(machinePrivateKey: String, deviceToken: String?, enrollmentToken: String?) throws
+
+    /**
+     * Starts the Gateway with an explicit host consent decision for root invocation content.
+     */
+    func startWithMonitorIo(machinePrivateKey: String, deviceToken: String?, enrollmentToken: String?, captureMonitorIo: Bool) throws
 
     func status() throws  -> VifuEmbeddedGatewayStatus
 
@@ -610,6 +639,20 @@ open func start(machinePrivateKey: String, deviceToken: String?, enrollmentToken
         FfiConverterString.lower(machinePrivateKey),
         FfiConverterOptionString.lower(deviceToken),
         FfiConverterOptionString.lower(enrollmentToken),$0
+    )
+}
+}
+
+    /**
+     * Starts the Gateway with an explicit host consent decision for root invocation content.
+     */
+open func startWithMonitorIo(machinePrivateKey: String, deviceToken: String?, enrollmentToken: String?, captureMonitorIo: Bool)throws   {try rustCallWithError(FfiConverterTypeVifuRuntimeError_lift) {
+    uniffi_vifu_mobile_ffi_fn_method_vifuembeddedgateway_start_with_monitor_io(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(machinePrivateKey),
+        FfiConverterOptionString.lower(deviceToken),
+        FfiConverterOptionString.lower(enrollmentToken),
+        FfiConverterBool.lower(captureMonitorIo),$0
     )
 }
 }
@@ -714,6 +757,8 @@ public protocol VifuEmbeddedRuntimeProtocol: AnyObject, Sendable {
     func registerLlamaProvider(providerId: String, config: VifuLlamaProviderConfig) throws
 
     func registerProvider(providerId: String, provider: VifuAgentProvider) throws
+
+    func registerWhisperProvider(providerId: String, config: VifuWhisperProviderConfig) throws
 
     func restoreActiveRuntimeRelease() throws  -> UInt64?
 
@@ -943,6 +988,15 @@ open func registerProvider(providerId: String, provider: VifuAgentProvider)throw
             self.uniffiCloneHandle(),
         FfiConverterString.lower(providerId),
         FfiConverterCallbackInterfaceVifuAgentProvider_lower(provider),$0
+    )
+}
+}
+
+open func registerWhisperProvider(providerId: String, config: VifuWhisperProviderConfig)throws   {try rustCallWithError(FfiConverterTypeVifuRuntimeError_lift) {
+    uniffi_vifu_mobile_ffi_fn_method_vifuembeddedruntime_register_whisper_provider(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(providerId),
+        FfiConverterTypeVifuWhisperProviderConfig_lower(config),$0
     )
 }
 }
@@ -1956,6 +2010,58 @@ public func FfiConverterTypeVifuRuntimeConfig_lower(_ value: VifuRuntimeConfig) 
     return FfiConverterTypeVifuRuntimeConfig.lower(value)
 }
 
+
+public struct VifuWhisperProviderConfig: Equatable, Hashable {
+    public var modelPath: String
+    public var language: String?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(modelPath: String, language: String?) {
+        self.modelPath = modelPath
+        self.language = language
+    }
+
+
+}
+
+#if compiler(>=6)
+extension VifuWhisperProviderConfig: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeVifuWhisperProviderConfig: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> VifuWhisperProviderConfig {
+        return
+            try VifuWhisperProviderConfig(
+                modelPath: FfiConverterString.read(from: &buf),
+                language: FfiConverterOptionString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: VifuWhisperProviderConfig, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.modelPath, into: &buf)
+        FfiConverterOptionString.write(value.language, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeVifuWhisperProviderConfig_lift(_ buf: RustBuffer) throws -> VifuWhisperProviderConfig {
+    return try FfiConverterTypeVifuWhisperProviderConfig.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeVifuWhisperProviderConfig_lower(_ value: VifuWhisperProviderConfig) -> RustBuffer {
+    return FfiConverterTypeVifuWhisperProviderConfig.lower(value)
+}
+
 // Note that we don't yet support `indirect` for enums.
 // See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
 
@@ -2884,6 +2990,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_vifu_mobile_ffi_checksum_method_vifuembeddedgateway_start() != 30311) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_vifu_mobile_ffi_checksum_method_vifuembeddedgateway_start_with_monitor_io() != 41577) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_vifu_mobile_ffi_checksum_method_vifuembeddedgateway_status() != 52520) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -2939,6 +3048,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_vifu_mobile_ffi_checksum_method_vifuembeddedruntime_register_provider() != 20943) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_vifu_mobile_ffi_checksum_method_vifuembeddedruntime_register_whisper_provider() != 56163) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_vifu_mobile_ffi_checksum_method_vifuembeddedruntime_restore_active_runtime_release() != 9118) {

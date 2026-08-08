@@ -26,8 +26,8 @@ use crate::benchmark::{BenchmarkOutcome, OptimizationController, OptimizationRep
 use crate::monitor::{RuntimeEventReceiver, RuntimeStage};
 
 use self::model::{
-    App, ComparisonRow, LaneOutcome, MetricSummary, OptimizationExclusion, OptimizationSummary,
-    View,
+    App, ComparisonRow, DevicePairingView, LaneOutcome, MetricSummary, OptimizationExclusion,
+    OptimizationSummary, View,
 };
 use self::system::SystemSampler;
 
@@ -45,6 +45,7 @@ pub(crate) async fn run(
     mut events: RuntimeEventReceiver,
     dashboard_url: Option<String>,
     optimization: Option<OptimizationController>,
+    device_pairing: Option<crate::gateway::DevicePairingController>,
 ) -> Result<(), String> {
     let mut terminal = TerminalSession::enter()?;
     let mut app = App::default();
@@ -62,6 +63,10 @@ pub(crate) async fn run(
     let (dashboard_result_tx, mut dashboard_results) =
         tokio::sync::mpsc::channel::<Result<(), String>>(1);
     let mut dashboard_opening = false;
+    let (pairing_result_tx, mut pairing_results) = tokio::sync::mpsc::channel::<
+        Result<vifu_gateway::control::GuestGatewayEnrollment, String>,
+    >(1);
+    let mut pairing_opening = false;
 
     loop {
         let mut action = UiAction::Continue;
@@ -122,6 +127,33 @@ pub(crate) async fn run(
                     None => "Dashboard opener stopped unexpectedly".to_string(),
                 });
             }
+            result = pairing_results.recv(), if pairing_opening => {
+                pairing_opening = false;
+                match result {
+                    Some(Ok(enrollment)) => match enrollment.pairing {
+                        Some(pairing) => match pairing.pairing_terminal_qr {
+                            Some(terminal_qr) => {
+                                app.device_pairing = Some(DevicePairingView {
+                                    enrollment_id: enrollment.enrollment_id,
+                                    server_url: pairing.server_url,
+                                    terminal_qr,
+                                    expires_at: enrollment.expires_at,
+                                });
+                                app.notice = None;
+                            }
+                            None => app.notice = Some(
+                                "The configured Server did not provide a terminal pairing QR"
+                                    .to_string(),
+                            ),
+                        },
+                        None => app.notice = Some(
+                            "The configured Server has no public device endpoint".to_string(),
+                        ),
+                    },
+                    Some(Err(error)) => app.notice = Some(error),
+                    None => app.notice = Some("Device pairing worker stopped unexpectedly".to_string()),
+                }
+            }
         }
 
         match action {
@@ -145,6 +177,24 @@ pub(crate) async fn run(
                         None => Some("No Dashboard URL is configured for this Runtime".to_string()),
                     }
                 };
+            }
+            UiAction::PairDevice => {
+                if pairing_opening {
+                    app.notice = Some("Preparing a one-time device pairing code…".to_string());
+                } else if let Some(controller) = device_pairing.as_ref() {
+                    pairing_opening = true;
+                    app.notice = Some("Preparing a one-time device pairing code…".to_string());
+                    let controller = controller.clone();
+                    let result_tx = pairing_result_tx.clone();
+                    std::mem::drop(tokio::spawn(async move {
+                        let _ = result_tx.send(controller.create_enrollment().await).await;
+                    }));
+                } else {
+                    app.notice = Some(
+                        "Device pairing is available when the Agent Gateway owns a Guest project"
+                            .to_string(),
+                    );
+                }
             }
             UiAction::ExternalEditor => {
                 app.notice =
@@ -210,6 +260,7 @@ enum UiAction {
     Continue,
     Quit,
     Dashboard,
+    PairDevice,
     ExternalEditor,
     Optimize,
     Activate,
@@ -217,6 +268,12 @@ enum UiAction {
 }
 
 fn handle_key(app: &mut App, key: KeyEvent, now: Instant) -> UiAction {
+    if app.device_pairing.is_some() {
+        if matches!(key.code, KeyCode::Esc | KeyCode::Char('p' | 'P')) {
+            app.device_pairing = None;
+        }
+        return UiAction::Continue;
+    }
     if app.quit_confirmation {
         return match key.code {
             KeyCode::Char('y' | 'Y') => UiAction::Quit,
@@ -274,6 +331,7 @@ fn handle_key(app: &mut App, key: KeyEvent, now: Instant) -> UiAction {
             KeyCode::Char('/') => app.search_active = true,
             KeyCode::Char('o' | 'O') => return UiAction::Optimize,
             KeyCode::Char('b' | 'B') => return UiAction::Dashboard,
+            KeyCode::Char('p' | 'P') => return UiAction::PairDevice,
             KeyCode::Char('q' | 'Q') => return request_quit(app),
             _ => {}
         },
@@ -286,6 +344,7 @@ fn handle_key(app: &mut App, key: KeyEvent, now: Instant) -> UiAction {
             KeyCode::Left | KeyCode::Esc => app.go_back(),
             KeyCode::Char('o' | 'O') => return UiAction::Optimize,
             KeyCode::Char('b' | 'B') => return UiAction::Dashboard,
+            KeyCode::Char('p' | 'P') => return UiAction::PairDevice,
             KeyCode::Char('q' | 'Q') => return request_quit(app),
             _ => {}
         },
@@ -303,6 +362,7 @@ fn handle_key(app: &mut App, key: KeyEvent, now: Instant) -> UiAction {
             KeyCode::Char('e' | 'E') => return UiAction::ExternalEditor,
             KeyCode::Char('o' | 'O') => return UiAction::Optimize,
             KeyCode::Char('b' | 'B') => return UiAction::Dashboard,
+            KeyCode::Char('p' | 'P') => return UiAction::PairDevice,
             KeyCode::Left | KeyCode::Esc => app.go_back(),
             KeyCode::Char('q' | 'Q') => return request_quit(app),
             _ => {}
@@ -319,6 +379,7 @@ fn handle_key(app: &mut App, key: KeyEvent, now: Instant) -> UiAction {
             KeyCode::Char('u' | 'U') => return UiAction::Undo,
             KeyCode::Left | KeyCode::Esc => app.go_back(),
             KeyCode::Char('b' | 'B') => return UiAction::Dashboard,
+            KeyCode::Char('p' | 'P') => return UiAction::PairDevice,
             KeyCode::Char('q' | 'Q') => return request_quit(app),
             _ => {}
         },

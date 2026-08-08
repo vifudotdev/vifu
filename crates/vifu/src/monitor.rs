@@ -360,6 +360,9 @@ pub enum RuntimeEvent {
         message: Option<String>,
     },
     AgentsRegistered(Vec<RegisteredAgent>),
+    GatewayEnrolled {
+        enrollment_id: Uuid,
+    },
     ProjectProfilesRegistered(Vec<ProjectProfileRegistration>),
     BackendsChanged(Vec<String>),
     LoadedModelsChanged(usize),
@@ -407,6 +410,11 @@ pub enum RuntimeEvent {
     IoDropped {
         invocation_id: Uuid,
     },
+    RuntimeHostMetrics {
+        invocation_id: Uuid,
+        process_rss_bytes: Option<u64>,
+        total_memory_bytes: Option<u64>,
+    },
     ApplicationFeedback {
         invocation_id: Uuid,
         observation_id: Uuid,
@@ -431,6 +439,7 @@ pub enum RuntimeEvent {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum RuntimeEventKey {
     Global(u8),
+    Enrollment(Uuid),
     Invocation(Uuid, u8),
     Observation(Uuid, Uuid),
 }
@@ -439,11 +448,14 @@ fn event_coalescing_key(event: &RuntimeEvent) -> RuntimeEventKey {
     match event {
         RuntimeEvent::HealthChanged { .. } => RuntimeEventKey::Global(0),
         RuntimeEvent::AgentsRegistered(_) => RuntimeEventKey::Global(1),
-        RuntimeEvent::BackendsChanged(_) => RuntimeEventKey::Global(2),
-        RuntimeEvent::LoadedModelsChanged(_) => RuntimeEventKey::Global(3),
-        RuntimeEvent::IdentityChanged { .. } => RuntimeEventKey::Global(4),
-        RuntimeEvent::MonitorEventsDropped { .. } => RuntimeEventKey::Global(5),
-        RuntimeEvent::ProjectProfilesRegistered(_) => RuntimeEventKey::Global(6),
+        RuntimeEvent::GatewayEnrolled { enrollment_id } => {
+            RuntimeEventKey::Enrollment(*enrollment_id)
+        }
+        RuntimeEvent::BackendsChanged(_) => RuntimeEventKey::Global(3),
+        RuntimeEvent::LoadedModelsChanged(_) => RuntimeEventKey::Global(4),
+        RuntimeEvent::IdentityChanged { .. } => RuntimeEventKey::Global(5),
+        RuntimeEvent::MonitorEventsDropped { .. } => RuntimeEventKey::Global(6),
+        RuntimeEvent::ProjectProfilesRegistered(_) => RuntimeEventKey::Global(7),
         RuntimeEvent::InvocationStarted { invocation_id, .. } => {
             RuntimeEventKey::Invocation(*invocation_id, 0)
         }
@@ -461,6 +473,9 @@ fn event_coalescing_key(event: &RuntimeEvent) -> RuntimeEventKey {
             ..
         } => RuntimeEventKey::Invocation(*invocation_id, if input.is_some() { 2 } else { 3 }),
         RuntimeEvent::IoDropped { invocation_id } => RuntimeEventKey::Invocation(*invocation_id, 4),
+        RuntimeEvent::RuntimeHostMetrics { invocation_id, .. } => {
+            RuntimeEventKey::Invocation(*invocation_id, 5)
+        }
         RuntimeEvent::ApplicationFeedback {
             invocation_id,
             observation_id,

@@ -168,6 +168,12 @@ pub struct VifuLlamaProviderConfig {
     pub default_max_tokens: u32,
 }
 
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct VifuWhisperProviderConfig {
+    pub model_path: String,
+    pub language: Option<String>,
+}
+
 #[uniffi::export(callback_interface)]
 pub trait VifuAgentProvider: Send + Sync {
     fn invoke(
@@ -413,6 +419,32 @@ impl VifuEmbeddedRuntime {
         }
     }
 
+    pub fn register_whisper_provider(
+        &self,
+        provider_id: String,
+        config: VifuWhisperProviderConfig,
+    ) -> Result<(), VifuRuntimeError> {
+        #[cfg(feature = "local-whisper")]
+        {
+            let provider = vifu_runtime::LocalWhisperProvider::new(
+                provider_id.clone(),
+                config.model_path,
+                config.language,
+            )?;
+            self.runtime
+                .register_provider(provider_id.clone(), Arc::new(provider))?;
+            self.remember_provider_type(provider_id, "local-whisper")?;
+            Ok(())
+        }
+        #[cfg(not(feature = "local-whisper"))]
+        {
+            let _ = (provider_id, config);
+            Err(VifuRuntimeError::InvalidConfig {
+                message: "this Vifu build does not include the local Whisper provider".to_string(),
+            })
+        }
+    }
+
     pub fn register_agent(
         &self,
         agent_id: String,
@@ -610,13 +642,6 @@ impl VifuEmbeddedRuntime {
     }
 
     fn prepare_gateway_release(&self) -> Result<RuntimeManifest, VifuRuntimeError> {
-        if let Some(manifest) = self.runtime.current_manifest()? {
-            return Ok(manifest);
-        }
-        if let Some(release) = self.runtime.restore_active_release()? {
-            return Ok(release.manifest);
-        }
-
         let agents = self.runtime.agent_definitions()?;
         let endpoints = self.runtime.endpoint_definitions()?;
         let provider_types = self
@@ -659,7 +684,32 @@ impl VifuEmbeddedRuntime {
         manifest.agents = agents;
         manifest.endpoints = endpoints;
         manifest.metadata = serde_json::json!({ "source": "embedded-runtime" });
-        Ok(self.runtime.bootstrap_release(manifest)?.manifest)
+        let releases = self.runtime.releases()?;
+        if let Some(active_version) = self.runtime.active_release_version()? {
+            if let Some(active) = releases
+                .iter()
+                .find(|release| release.version == active_version)
+            {
+                if active.manifest == manifest {
+                    return Ok(self.runtime.activate_release(active_version)?.manifest);
+                }
+            }
+        }
+        if releases.is_empty() {
+            return Ok(self.runtime.bootstrap_release(manifest)?.manifest);
+        }
+        let version = releases
+            .iter()
+            .map(|release| release.version)
+            .max()
+            .unwrap_or(0)
+            .checked_add(1)
+            .ok_or_else(|| VifuRuntimeError::Runtime {
+                message: "embedded Runtime release version is exhausted".to_string(),
+            })?;
+        let release = RuntimeRelease::new(version, manifest)?;
+        self.runtime.install_release(&release)?;
+        Ok(self.runtime.activate_release(version)?.manifest)
     }
 }
 
@@ -763,6 +813,21 @@ impl VifuEmbeddedGateway {
         let identity = MachineIdentity::from_encoded_private_key(&machine_private_key)?;
         self.gateway
             .start(identity, device_token, enrollment_token)
+            .map_err(Into::into)
+    }
+
+    /// Starts the Gateway with an explicit host consent decision for root invocation content.
+    pub fn start_with_monitor_io(
+        &self,
+        machine_private_key: String,
+        device_token: Option<String>,
+        enrollment_token: Option<String>,
+        capture_monitor_io: bool,
+    ) -> Result<(), VifuRuntimeError> {
+        self.runtime.prepare_gateway_release()?;
+        let identity = MachineIdentity::from_encoded_private_key(&machine_private_key)?;
+        self.gateway
+            .start_with_monitor_io(identity, device_token, enrollment_token, capture_monitor_io)
             .map_err(Into::into)
     }
 
@@ -961,6 +1026,64 @@ mod tests {
         assert_eq!(manifest.providers[0].provider_type, "native");
         assert_eq!(manifest.agents[0].id, "guide");
         assert_eq!(manifest.endpoints[0].name, "guide");
+    }
+
+    #[test]
+    fn embedded_gateway_refreshes_a_persisted_empty_manifest_after_models_are_registered() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!(
+            "vifu-mobile-release-refresh-{}-{unique}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let database = directory.join("runtime.sqlite");
+
+        let empty = VifuEmbeddedRuntime::open(
+            "distribution-project".to_string(),
+            database.display().to_string(),
+        )
+        .unwrap();
+        assert!(empty.prepare_gateway_release().unwrap().agents.is_empty());
+        drop(empty);
+
+        let configured = VifuEmbeddedRuntime::open(
+            "distribution-project".to_string(),
+            database.display().to_string(),
+        )
+        .unwrap();
+        configured
+            .register_provider("native".to_string(), Box::new(EchoProvider))
+            .unwrap();
+        configured
+            .register_agent(
+                "guide".to_string(),
+                "Guide".to_string(),
+                "native".to_string(),
+                vec!["chat".to_string()],
+                "{}".to_string(),
+            )
+            .unwrap();
+        configured
+            .register_endpoint(
+                "guide".to_string(),
+                "guide".to_string(),
+                "chat".to_string(),
+                500,
+            )
+            .unwrap();
+
+        let refreshed = configured.prepare_gateway_release().unwrap();
+
+        assert_eq!(refreshed.agents[0].id, "guide");
+        assert_eq!(
+            configured.runtime.active_release_version().unwrap(),
+            Some(2)
+        );
+        drop(configured);
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]

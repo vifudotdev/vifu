@@ -59,6 +59,26 @@ pub struct GuestDeployment {
     pub name: String,
 }
 
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GuestGatewayEnrollment {
+    #[serde(default)]
+    pub enrollment_id: Option<Uuid>,
+    pub enrollment_token: String,
+    pub expires_at: String,
+    pub deployment: String,
+    pub pairing: Option<GatewayPairing>,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct GatewayPairing {
+    pub server_url: String,
+    pub pairing_uri: String,
+    pub pairing_deep_link: String,
+    pub pairing_terminal_qr: Option<String>,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct GatewayRuntimeConfiguration {
@@ -282,6 +302,33 @@ impl RuntimeControlClient {
             .await
             .map_err(|error| format!("guest project request failed: {error}"))?;
         decode_response(response, "guest project bootstrap").await
+    }
+
+    pub async fn create_guest_gateway_enrollment(
+        server_url: &str,
+        project_api_key: &str,
+    ) -> Result<GuestGatewayEnrollment, String> {
+        Self::create_guest_gateway_enrollment_with_server_certificate(
+            server_url,
+            project_api_key,
+            None,
+        )
+        .await
+    }
+
+    pub async fn create_guest_gateway_enrollment_with_server_certificate(
+        server_url: &str,
+        project_api_key: &str,
+        server_certificate_der: Option<&[u8]>,
+    ) -> Result<GuestGatewayEnrollment, String> {
+        let url = server_endpoint_url(server_url, "v1/guest/agent-gateway-enrollments")?;
+        let response = http_client(server_certificate_der)?
+            .post(url)
+            .bearer_auth(project_api_key)
+            .send()
+            .await
+            .map_err(|error| format!("Guest device enrollment request failed: {error}"))?;
+        decode_response(response, "Guest device enrollment").await
     }
 
     pub async fn upload_traces(
@@ -517,6 +564,19 @@ mod tests {
                 .as_str(),
             "https://runtime.example.com/api/v1/guest/bootstrap"
         );
+    }
+
+    #[test]
+    fn guest_enrollment_accepts_servers_from_before_enrollment_correlation() {
+        let enrollment: GuestGatewayEnrollment = serde_json::from_value(serde_json::json!({
+            "enrollmentToken": "vifu_ge_example",
+            "expiresAt": "2026-08-08T00:00:00Z",
+            "deployment": "development",
+            "pairing": null
+        }))
+        .unwrap();
+
+        assert_eq!(enrollment.enrollment_id, None);
     }
 
     #[test]

@@ -112,6 +112,17 @@ jobs:
         run: |
           cargo test --workspace --locked --exclude vifu-provider-llama
           cargo test --locked -p vifu-provider-llama
+      - name: Topology protocol live matrix
+        env:
+          VIFU_TOPOLOGY_REPORT_DIR: ${{ runner.temp }}/vifu-topology-live
+        run: scripts/test-topologies.sh
+      - name: Upload topology live-test report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: topology-live-test-report
+          path: ${{ runner.temp }}/vifu-topology-live
+          if-no-files-found: error
       - name: Clippy
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - name: Vifu application configurations
@@ -284,22 +295,16 @@ jobs:
           echo "CC_aarch64_linux_android=$ndk_bin/aarch64-linux-android24-clang" >> "$GITHUB_ENV"
           echo "CXX_aarch64_linux_android=$ndk_bin/aarch64-linux-android24-clang++" >> "$GITHUB_ENV"
           echo "AR_aarch64_linux_android=$ndk_bin/llvm-ar" >> "$GITHUB_ENV"
-      - name: Build Android library
+          echo "ANDROID_NDK_HOME=$ANDROID_NDK_LATEST_HOME" >> "$GITHUB_ENV"
+      - name: Build Android package sources
         if: steps.android-ndk.outputs.available == 'true'
+        env:
+          VIFU_ANDROID_DIST_DIR: ${{ runner.temp }}/vifu-android-dist
+          VIFU_ANDROID_FFI_FEATURES: local-llama,local-whisper
         run: |
-          cargo build --locked -p vifu-mobile-ffi
-          cargo build --locked -p vifu-mobile-ffi --bin uniffi-bindgen
-          cargo build --locked -p vifu-mobile-ffi --release --target aarch64-linux-android
-      - name: Generate Kotlin bindings
-        if: steps.android-ndk.outputs.available == 'true'
-        run: |
-          bindings="$RUNNER_TEMP/vifu-mobile-bindings"
-          target/debug/uniffi-bindgen generate \
-            --library target/debug/libvifu_mobile_ffi.so \
-            --language kotlin \
-            --out-dir "$bindings" \
-            --config crates/vifu-mobile-ffi/uniffi.toml
-          test -f "$bindings/dev/vifu/runtime/vifu_mobile_ffi.kt"
+          scripts/build-android-package.sh
+          test -s "$VIFU_ANDROID_DIST_DIR/src/main/kotlin/dev/vifu/runtime/vifu_mobile_ffi.kt"
+          test -s "$VIFU_ANDROID_DIST_DIR/src/main/jniLibs/arm64-v8a/libvifu_mobile_ffi.so"
       - name: Skip Android library
         if: steps.android-ndk.outputs.available != 'true'
         run: echo "Android FFI build skipped because this runner does not provide Android NDK."

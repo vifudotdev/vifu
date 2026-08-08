@@ -34,6 +34,21 @@ pub struct NewRuntimeDeployment<'a> {
     pub remote_invocation_enabled: bool,
 }
 
+pub struct NewRuntimeDistribution<'a> {
+    pub id: Uuid,
+    pub project_id: Uuid,
+    pub deployment_id: Uuid,
+    pub name: &'a str,
+    pub public_id: &'a str,
+    pub max_gateways: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeDistributionGatewayAssignment {
+    pub gateway_id: String,
+    pub owner_user_id: Option<String>,
+}
+
 pub struct RuntimeDeploymentPatch<'a> {
     pub config_sync_enabled: Option<bool>,
     pub trace_mode: Option<&'a str>,
@@ -158,6 +173,7 @@ pub struct RotatedAgentGatewayAuthorization<'a> {
 
 #[derive(Debug, Clone)]
 pub struct AgentGatewayEnrollmentAssignment {
+    pub enrollment_id: Uuid,
     pub project_id: Uuid,
     pub deployment_id: Uuid,
     pub owner_user_id: String,
