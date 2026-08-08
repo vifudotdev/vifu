@@ -23,7 +23,7 @@ local-llama = ["dep:vifu-provider-llama"]
 local-whisper = ["vifu-gateway/local-whisper", "vifu-server/local-whisper"]
 
 [dependencies]
-crossterm = "0.28"
+crossterm = "0.29"
 libc = "0.2"
 ratatui = "0.29"
 serde = { workspace = true, features = ["derive"] }
