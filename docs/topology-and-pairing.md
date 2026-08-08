@@ -70,9 +70,12 @@ When the same CLI starts a new local Gateway and the Server explicitly grants
 it a Guest project, the TUI waits for bootstrap to finish and reads that Guest
 project key from the Gateway's protected local session automatically.
 
-`B` opens a Dashboard only when the topology explicitly configures a Dashboard
-proxy under `[server.dashboard]`. A Gateway-only TUI never treats a bare API
-Server origin as a Dashboard URL.
+`server.address` is the single Server origin for API and Dashboard access.
+Press `B` to open that address. The TUI does not classify the Server as
+loopback, LAN, self-hosted, or hosted before deciding where the Dashboard lives;
+it opens the configured Server just like any other client. In local mode the
+Server serves the embedded Console itself. Self-hosted and hosted Servers may
+attach their authenticated operations Dashboard to the same origin.
 
 ## Enrollment Is Gateway To Server
 

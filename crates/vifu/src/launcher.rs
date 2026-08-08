@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use tokio::sync::watch;
 use tracing_subscriber::EnvFilter;
-use vifu_server::config::{Config as ServerConfig, DeploymentMode};
+use vifu_server::config::Config as ServerConfig;
 
 use crate::cli::{help_text, Command, Options};
 use crate::gateway;
@@ -757,16 +757,10 @@ fn join_result(
 }
 
 fn local_console_url(config: &ServerConfig) -> Option<String> {
-    if config.deployment_mode == DeploymentMode::Local && config.addr.ip().is_loopback() {
-        return config
-            .server_url
-            .clone()
-            .or_else(|| Some(format!("http://{}", config.addr)));
-    }
     config
-        .dashboard_addr
-        .as_ref()
-        .and_then(|_| config.server_url.clone())
+        .server_url
+        .clone()
+        .or_else(|| Some(format!("http://{}", config.addr)))
 }
 
 fn apply_local_server_certificate(
@@ -1220,16 +1214,33 @@ mod tests {
     }
 
     #[test]
-    fn self_hosted_api_root_is_not_presented_as_a_dashboard() {
+    fn self_hosted_server_presents_its_own_dashboard_origin() {
         let mut config = ServerConfig::from_env().unwrap();
         config.deployment_mode = DeploymentMode::SelfHosted;
         config.addr = "0.0.0.0:6790".parse().unwrap();
         config.server_url = Some("https://192.0.2.20:6790".to_string());
         config.dashboard_addr = None;
 
-        assert_eq!(local_console_url(&config), None);
+        assert_eq!(
+            local_console_url(&config).as_deref(),
+            Some("https://192.0.2.20:6790")
+        );
 
         config.dashboard_addr = Some("dashboard:6791".to_string());
+        assert_eq!(
+            local_console_url(&config).as_deref(),
+            Some("https://192.0.2.20:6790")
+        );
+    }
+
+    #[test]
+    fn local_lan_server_uses_its_own_console_address() {
+        let mut config = ServerConfig::from_env().unwrap();
+        config.deployment_mode = DeploymentMode::Local;
+        config.addr = "192.0.2.20:6790".parse().unwrap();
+        config.server_url = Some("https://192.0.2.20:6790".to_string());
+        config.dashboard_addr = None;
+
         assert_eq!(
             local_console_url(&config).as_deref(),
             Some("https://192.0.2.20:6790")

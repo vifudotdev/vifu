@@ -1,14 +1,15 @@
 # Embedded Console
 
-The Vifu binary includes a local Console for the loopback runtime. A release
-binary starts the local Server, Agent Gateway, and Console from one process:
+The Vifu binary includes a Console on the configured Vifu Server. A release
+binary starts the default local Server, Agent Gateway, and Console from one
+process:
 
 ```bash
 vifu
 ```
 
 In an interactive terminal, the binary opens the live Runtime TUI. Press `B`
-to open the Console served by the same process. Its default local address is:
+to open the Console at `server.address`. Its default address is:
 
 ```text
 http://127.0.0.1:6790
@@ -41,8 +42,10 @@ vifu binary -> /
 ```
 
 Rust does not render React. It embeds the generated HTML, JavaScript, CSS, and
-brand assets, serves the Console from `/`, and proxies `/api/runtime/*` to the
-local Server API with server-side authority.
+brand assets, serves the Console and API from the same configured Server
+listener, and proxies `/api/runtime/*` internally with server-side authority.
+Changing `server.address` changes the address for both surfaces; it does not
+start another Console listener.
 The browser executes the React bundle and calls the Runtime API through that
 same-origin proxy.
 
@@ -98,8 +101,8 @@ If the asset directory is absent, the Rust server embeds a fallback page that
 asks the developer to run `bun run build:console`.
 
 After startup, use the TUI for live supervision and press `B` for persistent
-Trace and Comparison history. The loopback Console uses Vifu's same-origin
-server proxy, so its browser bundle never needs the local Admin Key.
+Trace and Comparison history. The Console uses Vifu's same-origin Server proxy,
+so its browser bundle never receives the local Admin Key.
 
 The release workflow runs `bun run build:console`, verifies `index.html`, and
 requires the bundle when compiling every release binary. A release fails rather
@@ -118,12 +121,15 @@ behavior should stay in the host adapter.
 
 Current limitations:
 
-- The embedded Console is available only in local loopback mode.
+- When no operations Dashboard is attached, the Server serves the embedded
+  Console on `server.address`. Its administration proxy accepts only requests
+  originating on the Server host; other devices continue to use the public
+  Runtime and Gateway APIs.
 - It is a static browser app, so it should not depend on Next.js server
   features, server actions, or React Server Components.
 - Browser-visible code must not contain admin keys, provider credentials,
   deploy keys, or signing material.
 - Large provider files, model downloads, and device-local credentials are not
   bundled into the Console assets.
-- Self-hosted and cloud deployments should continue to use the dashboard host
-  that matches their authority model.
+- Self-hosted and cloud deployments use the Dashboard host attached to that
+  same Server address for account sessions and multi-user access.

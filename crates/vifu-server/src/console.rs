@@ -1,5 +1,5 @@
 use axum::body::{Body, Bytes};
-use axum::extract::State;
+use axum::extract::{ConnectInfo, State};
 use axum::http::header::{
     ACCEPT, ACCEPT_LANGUAGE, CACHE_CONTROL, CONTENT_TYPE, COOKIE, HOST, ORIGIN, REFERER,
     SET_COOKIE, USER_AGENT,
@@ -9,7 +9,6 @@ use axum::response::{IntoResponse, Response};
 use serde_json::json;
 use std::time::Duration;
 
-use crate::config::DeploymentMode;
 use crate::AppState;
 
 include!(concat!(env!("OUT_DIR"), "/console_assets.rs"));
@@ -19,7 +18,7 @@ pub async fn serve_console_asset(
     headers: HeaderMap,
     uri: Uri,
 ) -> Response {
-    if !local_console_enabled(&state) {
+    if !embedded_console_enabled(&state) {
         return proxy_dashboard(state, Method::GET, headers, uri, Bytes::new()).await;
     }
     let Some(asset_path) = asset_path_for_uri(&uri) else {
@@ -165,18 +164,25 @@ async fn dashboard_response(response: reqwest::Response) -> Response {
 
 pub async fn proxy_runtime_request(
     State(state): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<std::net::SocketAddr>,
     method: Method,
     headers: HeaderMap,
     uri: Uri,
     body: Bytes,
 ) -> Response {
-    if !local_console_enabled(&state) {
+    if !embedded_console_enabled(&state) {
         return proxy_dashboard(state, method, headers, uri, body).await;
     }
-    if !same_origin_request(&headers, state.config.addr) {
+    if !same_origin_server_request(&headers, &uri, &state) {
         return json_error(
             StatusCode::FORBIDDEN,
             "embedded console requests must be same-origin",
+        );
+    }
+    if !local_console_peer(peer) {
+        return json_error(
+            StatusCode::FORBIDDEN,
+            "embedded console administration is available only on the Server host",
         );
     }
     let Some(runtime_path) = runtime_path_for_uri(&uri) else {
@@ -186,13 +192,26 @@ pub async fn proxy_runtime_request(
         return json_error(StatusCode::BAD_REQUEST, "runtime API path is invalid");
     }
 
-    let mut target = format!("http://{}/v1/{runtime_path}", state.config.addr);
+    let server_url = state
+        .config
+        .server_url
+        .clone()
+        .unwrap_or_else(|| format!("http://{}", state.config.addr));
+    let mut target = format!("{}/v1/{runtime_path}", server_url.trim_end_matches('/'));
     if let Some(query) = uri.query() {
         target.push('?');
         target.push_str(query);
     }
 
-    let client = reqwest::Client::new();
+    let client = match embedded_console_client(&state) {
+        Ok(client) => client,
+        Err(_) => {
+            return json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "embedded console proxy could not be initialized",
+            );
+        }
+    };
     let request_method =
         reqwest::Method::from_bytes(method.as_str().as_bytes()).unwrap_or(reqwest::Method::GET);
     let mut request = client
@@ -237,8 +256,38 @@ fn runtime_proxy_timeout(
     (!server_owns_deadline).then_some(timeout)
 }
 
-fn local_console_enabled(state: &AppState) -> bool {
-    state.config.deployment_mode == DeploymentMode::Local && state.config.addr.ip().is_loopback()
+fn embedded_console_enabled(state: &AppState) -> bool {
+    state.config.dashboard_addr.is_none()
+}
+
+fn local_console_peer(peer: std::net::SocketAddr) -> bool {
+    if peer.ip().is_loopback() {
+        return true;
+    }
+    let origin = match peer {
+        std::net::SocketAddr::V4(peer) => format!("http://{}:{}", peer.ip(), peer.port()),
+        std::net::SocketAddr::V6(peer) => format!("http://[{}]:{}", peer.ip(), peer.port()),
+    };
+    vifu_gateway::config::local_component_socket_addr(&origin)
+        .is_ok_and(|address| address.is_some())
+}
+
+fn embedded_console_client(state: &AppState) -> Result<reqwest::Client, String> {
+    let mut client = reqwest::Client::builder().redirect(reqwest::redirect::Policy::none());
+    if let Some(certificate_der) = state
+        .server_endpoint
+        .as_deref()
+        .map(crate::ServerEndpointIdentity::certificate_der)
+        .transpose()?
+        .flatten()
+    {
+        let certificate = reqwest::Certificate::from_der(&certificate_der)
+            .map_err(|error| format!("embedded Console certificate is invalid: {error}"))?;
+        client = client.add_root_certificate(certificate);
+    }
+    client
+        .build()
+        .map_err(|error| format!("embedded Console client could not be initialized: {error}"))
 }
 
 fn asset_for_path(path: &str) -> Option<&'static ConsoleAsset> {
@@ -281,7 +330,46 @@ fn valid_runtime_path(path: &str) -> bool {
     valid_asset_path(path)
 }
 
+#[cfg(test)]
 fn same_origin_request(headers: &HeaderMap, expected_addr: std::net::SocketAddr) -> bool {
+    same_origin_request_for(
+        headers,
+        None,
+        &expected_addr.to_string(),
+        &format!("http://{expected_addr}"),
+    )
+}
+
+fn same_origin_server_request(headers: &HeaderMap, uri: &Uri, state: &AppState) -> bool {
+    let fallback = format!("http://{}", state.config.addr);
+    let server_url = state.config.server_url.as_deref().unwrap_or(&fallback);
+    let Ok(server_url) = reqwest::Url::parse(server_url) else {
+        return false;
+    };
+    let Some(host) = server_url.host_str() else {
+        return false;
+    };
+    let authority = match (host.parse::<std::net::Ipv6Addr>(), server_url.port()) {
+        (Ok(_), Some(port)) => format!("[{host}]:{port}"),
+        (Ok(_), None) => format!("[{host}]"),
+        (Err(_), Some(port)) => format!("{host}:{port}"),
+        (Err(_), None) => host.to_string(),
+    };
+    let origin = format!("{}://{authority}", server_url.scheme());
+    same_origin_request_for(
+        headers,
+        uri.authority().map(|value| value.as_str()),
+        &authority,
+        &origin,
+    )
+}
+
+fn same_origin_request_for(
+    headers: &HeaderMap,
+    request_authority: Option<&str>,
+    expected_authority: &str,
+    expected_origin: &str,
+) -> bool {
     let fetch_site = headers
         .get("sec-fetch-site")
         .and_then(|value| value.to_str().ok())
@@ -290,17 +378,20 @@ fn same_origin_request(headers: &HeaderMap, expected_addr: std::net::SocketAddr)
         return false;
     }
 
-    let Some(host) = headers.get(HOST).and_then(|value| value.to_str().ok()) else {
+    let Some(host) = headers
+        .get(HOST)
+        .and_then(|value| value.to_str().ok())
+        .or(request_authority)
+    else {
         return false;
     };
-    let expected_authority = expected_addr.to_string();
-    if !host.eq_ignore_ascii_case(&expected_authority) {
+    if !host.eq_ignore_ascii_case(expected_authority) {
         return false;
     }
     headers
         .get(ORIGIN)
         .and_then(|value| value.to_str().ok())
-        .is_none_or(|origin| origin.eq_ignore_ascii_case(&format!("http://{expected_authority}")))
+        .is_none_or(|origin| origin.eq_ignore_ascii_case(expected_origin))
 }
 
 fn asset_response(asset: &'static ConsoleAsset) -> Response {
@@ -377,7 +468,7 @@ mod tests {
     use std::time::Duration;
 
     use axum::body::Bytes;
-    use axum::extract::State;
+    use axum::extract::{ConnectInfo, State};
     use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, Uri};
     use axum::routing::{get, post};
     use axum::Router;
@@ -385,8 +476,9 @@ mod tests {
     use tokio::net::TcpListener;
 
     use super::{
-        asset_path_for_uri, dashboard_client, dashboard_target, proxy_runtime_request,
-        runtime_proxy_timeout, same_origin_request, valid_runtime_path,
+        asset_path_for_uri, dashboard_client, dashboard_target, embedded_console_enabled,
+        proxy_runtime_request, runtime_proxy_timeout, same_origin_request,
+        same_origin_server_request, valid_runtime_path,
     };
     use crate::config::{Config, DeploymentMode};
 
@@ -404,6 +496,50 @@ mod tests {
             runtime_proxy_timeout(&Method::POST, "chat/completions", Duration::from_secs(8),),
             None,
         );
+    }
+
+    #[tokio::test]
+    async fn local_console_uses_the_server_listener_on_lan_addresses() {
+        let mut config = Config::from_env().unwrap();
+        config.deployment_mode = DeploymentMode::Local;
+        config.addr = "192.0.2.20:6790".parse().unwrap();
+        let pool = PgPoolOptions::new()
+            .connect_lazy("postgres://vifu@127.0.0.1:1/vifu")
+            .unwrap();
+
+        assert!(embedded_console_enabled(&crate::state(config, pool)));
+    }
+
+    #[tokio::test]
+    async fn lan_console_accepts_its_public_https_authority() {
+        let mut config = Config::from_env().unwrap();
+        config.addr = "0.0.0.0:6790".parse().unwrap();
+        config.server_url = Some("https://192.168.50.246:6790".to_string());
+        let pool = PgPoolOptions::new()
+            .connect_lazy("postgres://vifu@127.0.0.1:1/vifu")
+            .unwrap();
+        let state = crate::state(config, pool);
+        let mut headers = HeaderMap::new();
+        headers.insert("host", HeaderValue::from_static("192.168.50.246:6790"));
+        headers.insert(
+            "origin",
+            HeaderValue::from_static("https://192.168.50.246:6790"),
+        );
+
+        assert!(same_origin_server_request(
+            &headers,
+            &"/api/runtime/status".parse().unwrap(),
+            &state
+        ));
+
+        headers.remove("host");
+        assert!(same_origin_server_request(
+            &headers,
+            &"https://192.168.50.246:6790/api/runtime/status"
+                .parse()
+                .unwrap(),
+            &state
+        ));
     }
 
     #[tokio::test]
@@ -473,6 +609,7 @@ mod tests {
             .unwrap();
         let response = proxy_runtime_request(
             State(crate::state(config, pool)),
+            ConnectInfo("127.0.0.1:12345".parse().unwrap()),
             Method::POST,
             HeaderMap::new(),
             "/api/runtime/project/demo/api-keys".parse().unwrap(),

@@ -49,6 +49,7 @@ if (typeof window !== "undefined") {
 
 function EmbeddedRuntimeConsole() {
   const [route, setRoute] = useRoute();
+  const [displayRoute, setDisplayRoute] = useState(route);
   const [refreshVersion, setRefreshVersion] = useState(0);
   const [data, setData] = useState<RuntimeConsoleData | null>(null);
   const [loading, setLoading] = useState(true);
@@ -58,10 +59,12 @@ function EmbeddedRuntimeConsole() {
     const controller = new AbortController();
     setLoading(true);
     setError(null);
-    setData(null);
     void loadEmbeddedDashboardData(route.projectSlug, route.section, controller.signal)
       .then((nextData) => {
-        if (!controller.signal.aborted) setData(nextData);
+        if (!controller.signal.aborted) {
+          setData(nextData);
+          setDisplayRoute(route);
+        }
       })
       .catch((nextError: unknown) => {
         if (controller.signal.aborted) return;
@@ -98,8 +101,8 @@ function EmbeddedRuntimeConsole() {
       {error && !data ? <EmbeddedState title="Console unavailable" message={error} onRetry={() => setRefreshVersion((value) => value + 1)} /> : null}
       {data ? (
         <RuntimeConsole
-          section={route.section}
-          projectSlug={route.projectSlug}
+          section={displayRoute.section}
+          projectSlug={displayRoute.projectSlug}
           data={data}
           browserApiBaseUrl={window.location.origin}
         />

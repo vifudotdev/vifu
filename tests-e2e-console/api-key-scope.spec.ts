@@ -42,6 +42,7 @@ test("created selected-agent key keeps its scope in the row and edit dialog", as
   let createdRecord: Record<string, unknown> | null = null;
   let createBody: Record<string, unknown> | null = null;
   let apiKeyListReads = 0;
+  let delayNextStatusRead = false;
   await page.route("**/api/runtime/**", async (route) => {
     const request = route.request();
     const path = new URL(request.url()).pathname.replace(/^\/api\/runtime\/?/, "");
@@ -62,6 +63,10 @@ test("created selected-agent key keeps its scope in the row and edit dialog", as
     }
     if (request.method() !== "GET") return json(route, 405, { error: "unexpected method" });
     if (path === "status") {
+      if (delayNextStatusRead) {
+        delayNextStatusRead = false;
+        await new Promise((resolve) => setTimeout(resolve, 750));
+      }
       return json(route, 200, {
         service: "vifu-server",
         status: "ready",
@@ -101,7 +106,12 @@ test("created selected-agent key keeps its scope in the row and edit dialog", as
 
   await page.goto("/index.html");
   await page.getByRole("link", { name: "Demo project" }).click();
+  await expect(page.getByRole("heading", { name: "Overview" })).toBeVisible();
+  delayNextStatusRead = true;
   await page.getByRole("link", { name: "API", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "Loading console" })).toHaveCount(0);
+  await expect(page.getByRole("heading", { name: "Overview" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "API Integrations" })).toBeVisible();
   await page.getByRole("button", { name: "Create key" }).click();
   const createDialog = page.getByRole("dialog");
   await createDialog.getByRole("group", { name: "Agents permission" })

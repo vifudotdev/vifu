@@ -219,12 +219,12 @@ impl LoadedRuntimeConfig {
             .ok_or_else(|| format!("{} does not configure a Vifu Server", self.path.display()))
     }
 
-    /// Browser-visible Dashboard URL when the Server proxy is explicitly configured.
+    /// Browser-visible Dashboard URL served by the configured Vifu Server.
     pub fn dashboard_url(&self) -> Option<String> {
         self.config
             .server
             .as_ref()
-            .and_then(|server| server.dashboard.as_ref().map(|_| server.address.clone()))
+            .map(|server| server.address.clone())
     }
 
     pub fn gateway_is_local(&self) -> Result<bool, String> {
@@ -839,7 +839,7 @@ address = "https://macbook.local:6790"
     }
 
     #[test]
-    fn dashboard_url_requires_an_explicit_server_dashboard_proxy() {
+    fn dashboard_url_is_the_configured_server_address() {
         let without_dashboard = LoadedRuntimeConfig {
             path: "/tmp/config.toml".into(),
             profile: None,
@@ -849,7 +849,10 @@ address = "https://macbook.local:6790"
             )
             .unwrap(),
         };
-        assert_eq!(without_dashboard.dashboard_url(), None);
+        assert_eq!(
+            without_dashboard.dashboard_url().as_deref(),
+            Some("https://api.example.com")
+        );
 
         let with_dashboard = LoadedRuntimeConfig {
             path: "/tmp/config.toml".into(),

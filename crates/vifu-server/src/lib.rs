@@ -208,10 +208,13 @@ where
             .await
             .map_err(|error| format!("could not bind {addr}: {error}"))?;
         info!(%addr, "vifu server listening");
-        return axum::serve(listener, app(state))
-            .with_graceful_shutdown(shutdown)
-            .await
-            .map_err(|error| format!("http server failed: {error}"));
+        return axum::serve(
+            listener,
+            app(state).into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .with_graceful_shutdown(shutdown)
+        .await
+        .map_err(|error| format!("http server failed: {error}"));
     };
     let tls = axum_server::tls_rustls::RustlsConfig::from_pem_file(
         &server_tls.certificate_path,
@@ -223,7 +226,7 @@ where
     let mut server = Box::pin(
         axum_server::bind_rustls(addr, tls)
             .handle(handle.clone())
-            .serve(app(state).into_make_service()),
+            .serve(app(state).into_make_service_with_connect_info::<std::net::SocketAddr>()),
     );
     info!(%addr, "vifu server listening with TLS");
     tokio::select! {
