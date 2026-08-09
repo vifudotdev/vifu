@@ -1,14 +1,14 @@
 # Self-host Vifu
 
-Self-hosted mode runs Vifu as managed services. The Vifu Server does not expose
-the embedded local Dashboard in this mode, and it does not open a browser. The
-operations Dashboard is a separate, optional Compose service. `--no-browser`
-remains accepted as a compatibility option. Interactive `vifu` opens the local
-Dashboard only when you press `B`, and headless `vifu` never opens a browser
-automatically.
+Self-hosted mode runs Vifu with Docker Compose. You can start the full stack, a
+headless Runtime, or only the Server.
+
+The operations Dashboard is a separate Compose service. The Vifu Server does
+not include the embedded local Dashboard in self-hosted mode.
+`--no-browser` remains available for compatibility.
 
 The Compose backend and Dashboard use separate images. The backend image does
-not build or copy the Dashboard bundle; the Full Operations Stack builds the
+not contain the Dashboard bundle. The Full Operations Stack builds the
 Dashboard image independently.
 
 ## Choose A Deployment Shape
@@ -36,12 +36,12 @@ Read the generated Admin Key and enter it in the Console:
 docker compose exec backend cat /run/vifu/secrets/admin_key
 ```
 
-The Compose project starts:
+The full stack starts:
 
-- PostgreSQL;
-- Vifu Server;
-- Vifu Agent Gateway;
-- the operations Console.
+- PostgreSQL
+- Vifu Server
+- Vifu Agent Gateway
+- the operations Console
 
 The Server and Gateway containers use the same `vifu` image with different
 runtime configuration files.
@@ -55,8 +55,8 @@ docker compose up -d backend agent-gateway
 ```
 
 Compose starts the required secrets and PostgreSQL dependencies automatically.
-The Server API is available on the configured port, normally
-`http://localhost:6790`; the `dashboard` service is not started. Operate the
+The Server API is available on the configured port. The default address is
+`http://localhost:6790`. The `dashboard` service does not start. Operate the
 deployment through the Server API using the generated Admin Key.
 
 Read that key when an API client needs deployment-admin access:
@@ -76,7 +76,7 @@ docker compose up -d backend
 
 The backend remains headless. Enroll remote Gateways as described below.
 
-Server and Gateway may also run as roles in the same local `vifu` process. The
+Server and Gateway can also run as roles in the same local `vifu` process. The
 combined and Compose configurations use a deployment bootstrap credential
 shared only between those managed roles.
 
@@ -101,24 +101,31 @@ address = "https://api.vifu.ai"
 address = "http://localhost:6790"
 ```
 
-For example, point the file variable at a private temporary file containing
-only the token, start `vifu`, then remove the file after enrollment succeeds.
+Put the token in a private temporary file. Set the file variable to that path.
+Then start `vifu`. Remove the file after enrollment succeeds.
 The token is consumed by Server and is not copied into `config.toml`.
 
-Enrollment tokens expire after five minutes, can be used once, and are never
-written to the persistent runtime configuration. Issuing a new unused token for
-the deployment revokes the previous unused token. A Gateway that has enrolled
-reconnects with its stable Machine identity and Server-issued Device Token in
-the Server-scoped record inside `~/.vifu/runtime.sqlite`. If authorization is
-required again, Vifu prints a Dashboard link and keeps retrying while the
-operator reviews the request.
+An enrollment token expires after five minutes and works once. Vifu does not
+write it to persistent Runtime configuration. A new token revokes the previous
+unused token.
+
+After enrollment, the Gateway reconnects with its stable Machine identity and
+Server-issued Device Token. Vifu stores this Server-specific record in
+`~/.vifu/runtime.sqlite`.
+
+If the Gateway needs authorization again, Vifu prints a Dashboard link. It
+keeps retrying while the operator reviews the request.
 
 To use a second Vifu CLI as the remote TUI, configure its remote
-`server.address`. Omit `[gateway]` for monitor-only operation, or keep a local
-Gateway when this computer also hosts agents. Provide a project API key with
-project read access through `VIFU_MONITOR_KEY` or `VIFU_MONITOR_KEY_FILE`. The
-Server filters the monitor stream to that project. Deployment operators may use
-`VIFU_ADMIN_KEY` or `VIFU_ADMIN_KEY_FILE` for deployment-wide monitoring.
+`server.address`. Omit `[gateway]` for monitor-only operation. Keep a local
+Gateway if this computer also hosts Agents.
+
+Provide a project API key through `VIFU_MONITOR_KEY` or
+`VIFU_MONITOR_KEY_FILE`. The key must have project read access. The Server
+filters the monitor stream to that project.
+
+Deployment operators can use `VIFU_ADMIN_KEY` or `VIFU_ADMIN_KEY_FILE` for
+deployment-wide monitoring.
 
 The TUI and Gateway open separate Server connections. Gateway enrollment does
 not authenticate the TUI. See
@@ -129,12 +136,16 @@ Each project starts with a `development` deployment. More deployments can use
 different Gateways and active Runtime Releases while keeping the same project
 contract. The primary deployment serves the existing project endpoint.
 
-When a Server operator explicitly enables guest bootstrap, an unpaired Gateway can receive
-a temporary project, deployment, project key, and claim token on first
-connection. Claiming the project from the Console transfers it to the signed-in
-owner without replacing the Gateway identity. Guest projects expire according
-to the Server's configured lifetime. Project enrollment and the managed
-deployment bootstrap credential never create Guest projects.
+Guest bootstrap is optional. If an operator enables it, an unpaired Gateway can
+receive a temporary project and deployment. It also receives a project key and
+claim token.
+
+The Console can transfer the Guest project to a signed-in owner. This transfer
+does not replace the Gateway identity. Guest projects use the configured
+lifetime.
+
+Project enrollment does not create a Guest project. The managed deployment
+bootstrap credential also does not create one.
 
 Agent Gateway is a Server transport: it requires a reachable Vifu Server.
 Applications that embed `VifuRuntime` register their providers directly as
@@ -171,21 +182,23 @@ docker compose exec pgadmin cat /run/vifu/secrets/pgadmin_password
 ```
 
 The `Vifu PostgreSQL` server is registered automatically. Its database password
-is loaded from the deployment secret volume and is not stored in the Compose
-file. Keep the pgAdmin bind host on loopback or a private operator network such
-as Tailscale; do not expose it directly to the public Internet.
+comes from the deployment secret volume. The Compose file does not store this
+password.
+
+Keep the pgAdmin bind host on loopback or a private operator network. Do not
+expose pgAdmin directly to the public Internet.
 
 ## Configure
 
-Copy `.env.example` once and set deployment-local values there. Runtime role and
-network settings are defined by `docker-compose.yml`; generated deployment
-secrets remain in the named `vifu_secrets` volume across normal restarts.
-Set `VIFU_SERVER_API_ADDR` to the HTTPS address used by clients when an ingress,
-reverse proxy, or tunnel exposes Vifu outside the local machine.
+Copy `.env.example` once and set deployment-local values there.
+`docker-compose.yml` defines the Runtime roles and network configuration.
+Generated secrets remain in the `vifu_secrets` volume across normal restarts.
+Set `VIFU_SERVER_API_ADDR` to the public HTTPS address. Clients use this address
+through an ingress, reverse proxy, or tunnel.
 
 The corresponding Server configuration uses `server.address` for that one
 public origin. In `self-hosted` deployment mode the process owns the Server and
-uses its deployment-managed internal port (6790 by default); the internal bind
+uses its deployment-managed internal port (6790 by default). The internal bind
 is not a second client address and does not belong in `config.toml`.
 
 Provider integrations are configured independently. Runtime-owned providers live
@@ -196,7 +209,6 @@ provider keys to each project from the Dashboard or API.
 
 ## Network Boundary
 
-The default Compose ports bind to loopback. Put a TLS reverse proxy in front of
-the Server and Console before exposing them to another machine or the public
-Internet. Keep the runtime admin credential on the Console server; browser code
-for applications must use project API keys instead.
+The default Compose ports bind to loopback. Add a TLS reverse proxy before you
+expose the Server and Console. Keep the Runtime Admin Key on the Console server.
+Application browser code must use project API keys instead.

@@ -4,10 +4,10 @@ Project Settings are the provider, agent, and endpoint graph for one Vifu
 project. They are normal project state: the Console edits them and Vifu Server
 stores them in the database.
 
-Use JSON only as an import/export artifact. Export settings to back up a
-project, move it to another deployment, or bundle the same graph with an
-embedded target. Import the JSON through the Console when the target should use
-that project graph.
+Use JSON only as an import/export artifact. Export settings for backup or
+migration. You can also bundle the exported graph with an embedded target.
+
+If a target uses this project graph, import the JSON through the Console.
 
 Project Settings reference Provider keys. Provider URLs, model paths,
 credentials, and device-local resource settings stay with the Provider registry

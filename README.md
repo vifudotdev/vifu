@@ -17,21 +17,26 @@
 
 ## Quick start
 
-Download the archive for your platform from the
-[latest release](https://github.com/vifudotdev/vifu/releases/latest), extract
-it, then run Vifu:
+1. Download the archive for your platform from the
+   [latest release](https://github.com/vifudotdev/vifu/releases/latest).
+2. Extract the archive.
+3. Start Vifu:
 
 ```bash
 ./vifu
 ```
 
-Vifu creates its local Runtime profile, stores state in SQLite under `~/.vifu`,
-and opens the live Runtime TUI. Press `B` to open the Dashboard for persistent
-Traces and Comparisons. Vifu keeps serving until you quit the TUI. The local
-Dashboard is normally available at `http://127.0.0.1:6790`.
+Vifu creates a local Runtime profile and opens the Runtime TUI. It stores local
+state in SQLite under `~/.vifu`.
 
-To run from a source checkout, install the workspace dependencies once and use
-the repository command that builds the Console before starting Vifu:
+Press `B` to open the Dashboard. The default Dashboard address is
+`http://127.0.0.1:6790`. Vifu continues to serve requests until you stop the
+TUI.
+
+To run from a source checkout:
+
+1. Install the workspace dependencies.
+2. Build the Console and start Vifu:
 
 ```bash
 bun install --frozen-lockfile
@@ -40,20 +45,18 @@ cargo vifu
 
 ## Description
 
-Vifu gives applications one stable endpoint contract for local and remote AI
-agents. Product code owns state, UI, safety rules, and allowed actions. Vifu
-owns projects, provider bindings, agents, endpoints, sessions, Gateway
-transport, keys, and traces.
+Vifu gives products stable endpoints for local and remote AI Agents. Product
+code owns the state, UI, safety rules, and allowed actions.
 
-- Operate many projects from one Console.
-- Connect external Providers or in-process local Providers.
-- Monitor concurrent Agent lanes and inspect typed Trace boundaries in one TUI.
-- Compare configured local models, activate a measured session route, and Undo.
-- Call project endpoints through an OpenAI-compatible HTTP API.
-- Embed the Rust Runtime directly inside an application.
-- Sync embedded agents through Agent Gateway when a deployment needs operations.
-- Manage Project Settings in the Console; JSON is an import/export artifact for
-  backup, migration, and embedded targets.
+Vifu manages the provider connections, Agents, endpoints, sessions, keys,
+routes, and traces for each project.
+
+- Connect local or external Providers to named endpoints.
+- Call endpoints through an OpenAI-compatible HTTP API.
+- Inspect Agents and traces in the TUI or Console.
+- Embed the Rust Runtime in an application.
+- Connect an embedded Runtime to a Server through Agent Gateway.
+- Import or export Project Settings as JSON.
 
 ## Available surfaces
 
@@ -99,4 +102,4 @@ transport, keys, and traces.
 - [Security](SECURITY.md)
 
 Vifu is licensed under [Apache-2.0](LICENSE). The license does not grant rights
-to the Vifu name and logos; see [TRADEMARKS.md](TRADEMARKS.md).
+to the Vifu name and logos. See [TRADEMARKS.md](TRADEMARKS.md).

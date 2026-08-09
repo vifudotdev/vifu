@@ -1,6 +1,11 @@
-# Runtime Topology, Monitoring, And Gateway Enrollment
+# Runtime Topology, Monitoring, and Gateway Enrollment
 
-Vifu uses the same three roles in local, self-hosted, and hosted deployments:
+Vifu uses four parts:
+
+- An embedded Runtime runs Agents and Providers inside a product.
+- An Agent Gateway connects a Runtime to a Server.
+- A Vifu Server stores projects, deployments, keys, and traces.
+- A Vifu TUI reads the monitor stream from a Server.
 
 ```text
 Application agents / embedded Runtime
@@ -17,27 +22,19 @@ Application agents / embedded Runtime
               Vifu TUI
 ```
 
-The Server is the operational source of truth. Gateways publish their agent
-roster and Runtime telemetry to it. Every TUI—including a TUI running in the
-same process as a local Gateway—reads the Server monitor stream. This keeps the
-view consistent when several laptops, phones, or embedded products connect to
-one deployment.
+The Server is the source of operational state. Gateways send their Agent roster
+and Runtime telemetry to the Server. Each TUI reads the Server monitor stream.
+The Server resolves project profiles before it filters each device roster.
 
-Project monitor authorization follows deployment-to-Gateway assignments, so a
-single project can expose every enrolled installation. Logical project profiles
-are resolved to their physical provider/resource IDs before the Server filters
-the device roster; profile display slugs are not treated as Gateway agent IDs.
+An application can also use an embedded Runtime without a Server. In this mode,
+the host calls `VifuRuntime` directly. A later Gateway connection does not
+change the Runtime API of the application.
 
-An application may also use an embedded Runtime offline. In that shape the
-host invokes `VifuRuntime` directly and there is no Server, Gateway connection,
-monitor stream, or enrollment step. Connecting an embedded Runtime later does
-not change its application-facing Runtime API.
+## Choose a Network Shape
 
-## The Four Network Shapes
-
-`server.address` selects where the Server runs. `gateway.address` selects
-whether this CLI starts a Gateway. A loopback/local address means the role is
-owned by this process; another origin means the role runs elsewhere.
+`server.address` selects the Server. `gateway.address` selects the Gateway. A
+loopback address starts that role in this `vifu` process. Another address uses
+a role that runs elsewhere.
 
 | Server | Gateway | What this `vifu` process starts | TUI data source |
 | --- | --- | --- | --- |
@@ -46,38 +43,37 @@ owned by this process; another origin means the role runs elsewhere.
 | Remote | Local | Gateway | Remote Server monitor |
 | Remote | Remote or omitted | Neither network role | Remote Server monitor |
 
-The default first run is the first row. It creates a loopback configuration,
-starts the local Server and Gateway, creates one temporary local Guest project,
-and opens the TUI. Device enrollment is not part of startup and no pairing QR
-is shown automatically. Press `P` only when another Runtime installation is
-ready to scan its one-time enrollment QR.
+The default first run uses the first row. It starts a local Server, a local
+Gateway, and the TUI. It also creates a temporary local Guest project.
 
-For a remote Server, an interactive TUI normally uses a separate monitor
-credential:
+Startup does not enroll another device. Press `P` to create an enrollment QR
+for another Runtime installation.
+
+## Monitor a Server
+
+For a remote Server, give the TUI a project monitor key:
 
 ```bash
 export VIFU_MONITOR_KEY='vifu_pk_...'
 ./vifu
 ```
 
-`VIFU_MONITOR_KEY_FILE` reads the credential from a private file. A project API
-key must have `project: read` or `project: write`; its monitor stream contains
-only that project. An account deployment credential can see projects owned by
-that account. Deployment operators may use `VIFU_ADMIN_KEY` or
-`VIFU_ADMIN_KEY_FILE` as a compatibility fallback and receive the deployment
-scope. Headless Gateway-only operation does not need a monitor credential.
-When the same CLI starts a new local Gateway and the Server explicitly grants
-it a Guest project, the TUI waits for bootstrap to finish and reads that Guest
-project key from the Gateway's protected local session automatically.
+`VIFU_MONITOR_KEY_FILE` reads the key from a private file. The project key must
+have `project: read` or `project: write` access. Its monitor stream contains
+only that project.
 
-`server.address` is the single Server origin for API and Dashboard access.
-Press `B` to open that address. The TUI does not classify the Server as
-loopback, LAN, self-hosted, or hosted before deciding where the Dashboard lives;
-it opens the configured Server just like any other client. In local mode the
-Server serves the embedded Console itself. Self-hosted and hosted Servers may
-attach their authenticated operations Dashboard to the same origin.
+An account credential can monitor projects owned by that account. A deployment
+operator can use `VIFU_ADMIN_KEY` or `VIFU_ADMIN_KEY_FILE` for deployment-wide
+access.
 
-## Enrollment Is Gateway To Server
+A headless Gateway does not need a monitor key. A local Guest Gateway gives its
+project key to the TUI after bootstrap.
+
+`server.address` is the Server origin for the API and Dashboard. Press `B` to
+open this address. A local Server serves the embedded Console. A self-hosted or
+cloud Server can attach an authenticated Dashboard to the same origin.
+
+## Enroll a Gateway
 
 Pairing authorizes one Gateway installation to one project deployment. It does
 not pair a phone to a TUI, and it does not identify two processes as the same
@@ -92,21 +88,21 @@ user.
 5. Server returns a Server-scoped Device Token. The Gateway stores that token
    in the platform credential store and uses it for later reconnects.
 
-The TUI tracks the enrollment ID behind the displayed QR and closes that QR
-only when the Server confirms that exact enrollment. Other Gateway reconnects
-do not dismiss it. The QR is rendered at its exact terminal dimensions; if the
-window is too small, the TUI asks for the required size instead of clipping or
-reflowing the code.
+The TUI closes the QR after the Server verifies the same enrollment. A reconnect
+from another Gateway does not close it.
 
-Dashboard QR codes may contain an `https://vifu.ai/pair#...` bridge URL so an
-ordinary camera app can open them. Sensitive enrollment data stays in the URL
-fragment and the bridge hands it to the installed application as a
-`vifu://gateway/enroll?...` deep link. The TUI displays the direct `vifu://`
-payload for its in-app scanner, including the generated local Server certificate
-fingerprint when the Server is privately hosted. The app captures the presented
-certificate, verifies that fingerprint, and pins the verified DER for later
-connections. In both cases, the selected Server is the only component that
-validates and consumes the token.
+The QR keeps its exact terminal dimensions. If the window is too small, the TUI
+shows the required size.
+
+A Dashboard QR can contain an `https://vifu.ai/pair#...` bridge URL. A camera
+app opens this URL. The bridge passes the URL fragment to the installed app as
+a `vifu://gateway/enroll?...` link.
+
+The TUI shows the direct `vifu://` payload for its in-app scanner. For a private
+Server, this payload includes the generated certificate fingerprint. The app
+verifies the fingerprint and pins the certificate for later connections.
+
+Only the selected Server validates and consumes the enrollment token.
 
 `vifu_gb_...` is the managed deployment bootstrap credential used between
 Server and Gateway roles started by the same deployment. It is not a user
@@ -116,7 +112,7 @@ mobile pairing parser.
 ## Guest Bootstrap
 
 Guest bootstrap is an explicit Server policy. When enabled, a Gateway that
-connects without an enrollment token may receive one independent temporary
+connects without an enrollment token can receive one independent temporary
 project, deployment, project API key, and claim token. Each Gateway Machine
 identity receives its own guest project. The returned project key has project
 read access, so it can authenticate a project-scoped monitor without receiving
@@ -127,11 +123,11 @@ creates a Guest project. A managed `vifu_gb_...` credential never enters the
 Guest flow. Claiming a Guest project associates it with the signed-in owner but
 does not replace the Gateway identity.
 
-## Android Runtime modes
+## Android Runtime Modes
 
 One Android application and one Gateway protocol cover the complete lifecycle.
 The application chooses its starting state from configuration and protected
-device storage; it does not use a separate demo transport.
+device storage. It does not use a separate demo transport.
 
 | Application state | First connection | Later connections | Intended use |
 | --- | --- | --- | --- |
@@ -139,15 +135,15 @@ device storage; it does not use a separate demo transport.
 | Distribution configured | Present a `vifu_di_...` Distribution ID | Stored Device Token | The same published app installed on many devices |
 | Previously enrolled | Present the stored Device Token | Rotated Device Token | Normal restart and reconnect |
 
-A Runtime Distribution is a Server resource that names one project deployment,
-sets a maximum installation count, and can be revoked. Each installation keeps
+A Runtime Distribution is a Server resource that names one project deployment
+and sets a maximum installation count. An operator can revoke the Distribution.
+Each installation keeps
 its own Machine identity, Gateway row, and Device Token. Therefore one owner can
 monitor the same application across many phones without sharing a device
-credential between them. Distribution IDs select a project; they are not
+credential between them. Distribution IDs select a project. They are not
 monitor credentials and do not grant Dashboard or TUI access.
 
-Create a Distribution with a project key that has project write access, then
-put only the returned public ID and Server origin into the application build:
+Create a Distribution with a project key that has project write access:
 
 ```bash
 curl --fail-with-body \
@@ -159,7 +155,8 @@ curl --fail-with-body \
 ```
 
 The response field `distribution.publicId` is the `vifu_di_...` value. It is a
-public enrollment selector, not a secret. Revoke the Distribution without
+public enrollment selector, not a secret. Put only this ID and the Server origin
+in the application build. Revoke the Distribution without
 rebuilding the app by posting to
 `/v1/project/{slug}/runtime-distributions/{distributionId}/revoke` with the
 same project-write authority.
@@ -167,15 +164,17 @@ same project-write authority.
 The Android Runtime publishes its agent roster and performance trace stages.
 The public distribution path sends timing, stage status, model identity, and
 bounded errors. It does not upload conversation input or model output. A product
-that offers full-content debugging must expose that as a separate, explicit
-in-app consent setting and call the opt-in `start_with_monitor_io` API. The
+with full-content debugging must provide a separate in-app consent setting. The
+product must call the opt-in `start_with_monitor_io` API. The
 ordinary embedded Gateway `start` path keeps root invocation content on device.
 
-## Private MacBook-to-phone setup
+## Private MacBook-to-Phone Setup
 
-This path stays on infrastructure controlled by the user. Put the MacBook and
-phone on a network where they can reach each other, choose the MacBook's current
-LAN address, and configure:
+This path stays on infrastructure controlled by the user.
+
+1. Connect the MacBook and phone to a network where they can reach each other.
+2. Get the current LAN address of the MacBook.
+3. Add this address to the configuration:
 
 ```toml
 [server]
@@ -188,19 +187,19 @@ enabled = true
 address = "http://127.0.0.1:6790"
 ```
 
-Starting `vifu` recognizes the non-loopback local address, listens on the LAN,
-creates deployment secrets and a TLS certificate in the private Vifu config
-directory, and opens the TUI. Press `P`, open **Scan Vifu QR** in the Android
-app, and scan the terminal QR. The certificate fingerprint and one-time
-enrollment travel inside the direct QR, so the phone can authenticate and pin
-that private Server without using the Vifu website.
+Start `vifu`. It detects the non-loopback address and listens on the LAN. It also
+creates deployment secrets and a TLS certificate in the private Vifu directory.
+
+Press `P`. Then open **Scan Vifu QR** in the Android app and scan the terminal
+QR. The QR contains the certificate fingerprint and one-time enrollment token.
+The phone uses them to authenticate and pin the private Server.
 
 Changing Wi-Fi can change the MacBook address. Update `server.address` and scan
 a fresh enrollment QR for a new installation. Networks with client isolation
-may block direct device-to-laptop traffic; use a reachable self-hosted or hosted
+can block direct device-to-laptop traffic. Use a reachable self-hosted or cloud
 Server for that network shape.
 
-## Hosted first-use setup
+## Cloud First-Use Setup
 
 For the shortest public evaluation path, point the CLI at the hosted Server for
 that run. This leaves the user's default local configuration unchanged:
@@ -221,10 +220,10 @@ address = "https://api.vifu.ai"
 address = "http://127.0.0.1:6790"
 ```
 
-The hosted Server grants that Gateway a temporary Guest project. The TUI uses
+The cloud Server grants that Gateway a temporary Guest project. The TUI uses
 the returned project key in memory for the project-scoped monitor stream. Press
-`P` and scan the QR in the Android app; the phone joins the same project and its
-Runtime traces appear in that TUI. Claiming the project later preserves its
+`P` and scan the QR in the Android app. The phone joins the same project, and
+its Runtime traces appear in that TUI. Claiming the project later preserves its
 Gateway installations and trace history.
 
 ## Credential Boundaries

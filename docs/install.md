@@ -8,14 +8,14 @@ Download the archive for your platform from the
 - macOS and Linux archives use `.tar.gz`.
 - Windows archives use `.zip`.
 
-Extract the archive, then start Vifu:
+Extract the archive. Then start Vifu:
 
 ```bash
 ./vifu
 ```
 
-In an interactive terminal, Vifu opens the live Runtime TUI. Press `B` when you
-want to open the Dashboard served by the same process, normally at:
+In an interactive terminal, Vifu opens the Runtime TUI. Press `B` to open the
+Dashboard. The default address is:
 
 ```text
 http://127.0.0.1:6790
@@ -37,8 +37,8 @@ Use Cargo when you want to build from source.
 - CMake, a C/C++ compiler, and libclang
 - Bun and Node.js for the embedded Console bundle
 
-The default Vifu build includes llama.cpp and Local Whisper, so the native build
-tools are normal source-build dependencies. The Rust
+The default Vifu build includes llama.cpp and Local Whisper. These Providers
+require the native build tools. The Rust
 [bindgen requirements](https://rust-lang.github.io/rust-bindgen/requirements.html)
 explain why `libclang` is required and list the platform package names.
 
@@ -96,7 +96,7 @@ Open a new terminal after installation. If bindgen still cannot find LLVM, set
 )
 ```
 
-Verify the tools before compiling:
+Verify that the tools are available before you compile Vifu:
 
 ```bash
 cmake --version
@@ -111,17 +111,21 @@ bun install --frozen-lockfile
 cargo vifu
 ```
 
-The first run creates `~/.vifu/config.toml` and
-`~/.vifu/providers.json`. With the default configuration, one process runs the
-Server and Agent Gateway roles. Runtime and Gateway state is stored in
-`~/.vifu/runtime.sqlite`; local Server data is stored separately in
-`~/.vifu/vifu.sqlite`. In an interactive terminal it opens the Vifu TUI and
-keeps the runtime running while you inspect agents, traces, and device load.
-Press `B` to open the local Dashboard, or `q` to stop Vifu. An active
-comparison, active requests, or a session route override trigger confirmation.
-Provider credentials and model
-files are not required for this first launch. Add providers when you are ready
-to run a model; see [Agent Providers](../providers/README.md).
+The first run creates these files:
+
+- `~/.vifu/config.toml`
+- `~/.vifu/providers.json`
+- `~/.vifu/runtime.sqlite`
+- `~/.vifu/vifu.sqlite`
+
+The default process starts the Server and Agent Gateway. It also opens the Vifu
+TUI in an interactive terminal.
+
+Press `B` to open the local Dashboard. Press `q` to stop Vifu. Vifu asks for
+confirmation if requests, a comparison, or a route override is active.
+
+The first launch does not run a model. To add a model, read
+[Agent Providers](../providers/README.md).
 
 The generated configuration makes both network roles explicit:
 
@@ -136,38 +140,28 @@ enabled = true
 address = "http://127.0.0.1:6790"
 ```
 
-Each configured component has one address. A local `server.address` starts the
-Server in this process; a remote address connects the CLI to that Server. A
-local `gateway.address` starts the Agent Gateway in this process, and that
-Gateway connects outward to `server.address`. A remote `gateway.address`
-describes a Gateway running elsewhere, such as an iPhone, so the CLI does not
-start another local Gateway.
+The generated configuration starts both roles in the same process. The Server
+uses `server.address`. The Agent Gateway uses `gateway.address` and connects to
+the Server.
 
-The TUI always reads its agent roster and Runtime telemetry from the configured
-Server. When `server.address` is remote, provide a project-scoped monitor key
-through `VIFU_MONITOR_KEY` or `VIFU_MONITOR_KEY_FILE`; a local Gateway that is
-granted a Guest project can supply its own Guest project key after bootstrap.
-The default local first run obtains its project-scoped monitor credential from
-the local Guest bootstrap and does not show a pairing QR automatically. Press
-`P` when an embedded Runtime or mobile app is ready to scan. See
-[Runtime topology, monitoring, and Gateway enrollment](topology-and-pairing.md)
-for every placement combination and credential boundary.
+For remote Servers, separate Gateways, monitor keys, and device enrollment, read
+[Runtime topology, monitoring, and Gateway enrollment](topology-and-pairing.md).
 
 On Unix systems, Vifu restricts the `~/.vifu` directory to mode `0700` and its
 configuration and local database files to mode `0600`.
 
 `cargo vifu` builds the official Console and then runs the Vifu binary. Plain
 `cargo run -p vifu` embeds the assets already present in
-`target/vifu-console-assets/`; it does not invoke Bun automatically. Use
+`target/vifu-console-assets/`. It does not invoke Bun automatically. Use
 `cargo vifu` after changing the Console UI so the embedded bundle stays current.
 See [Embedded Console](embedded-console.md).
 
 ### Build Troubleshooting
 
-If the build reports `Unable to find libclang`, confirm that the operating
-system package above is installed. `LIBCLANG_PATH` must name the directory
-that contains `libclang.so`, `libclang.dylib`, or `libclang.dll`; it must
-not name the library file itself.
+If the build reports `Unable to find libclang`, verify that the operating
+system package is installed. `LIBCLANG_PATH` must name the directory that
+contains `libclang.so`, `libclang.dylib`, or `libclang.dll`. It must not name the
+library file.
 
 Errors from `llama-cpp-sys` or `whisper-rs-sys` normally mean that CMake, the
 C/C++ compiler, or libclang is missing. Run the three verification commands
@@ -183,7 +177,7 @@ rustup toolchain install 1.95.0 --profile minimal --component clippy --component
 
 If a command fails before Cargo starts with
 `bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted`, the host
-sandbox could not create its loopback network interface. Vifu code did not run.
+sandbox did not create its loopback network interface. Vifu code did not run.
 On Ubuntu 24.04, keep the user-namespace restriction enabled and load the
 AppArmor profile recommended by the
 [Codex sandbox prerequisites](https://developers.openai.com/codex/concepts/sandboxing#prerequisites):
@@ -197,9 +191,8 @@ sudo install -m 0644 \
 sudo apparmor_parser -r /etc/apparmor.d/bwrap-userns-restrict
 ```
 
-The last command loads the profile without a reboot. Other sandbox runners
-should be fixed through their own network-namespace policy rather than by
-changing Vifu.
+The last command loads the profile without a reboot. Other sandbox runners must
+use their own network-namespace policy. Do not change Vifu for this host error.
 
 ## Self-host
 
@@ -209,9 +202,10 @@ canonical [self-hosting guide](self-hosting.md) for those paths.
 
 ## Stop
 
-In the interactive TUI, press `q` or `Ctrl-C`; Vifu asks for confirmation when
-requests or a session route override are active. Stop the self-host Console
-stack while preserving its PostgreSQL volume with:
+In the interactive TUI, press `q` or `Ctrl-C`. Vifu asks for confirmation if a
+request or route override is active.
+
+To preserve the PostgreSQL volume, stop the self-host Console stack with:
 
 ```bash
 docker compose down

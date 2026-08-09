@@ -43,15 +43,14 @@ vifu binary -> /
 
 Rust does not render React. It embeds the generated HTML, JavaScript, CSS, and
 brand assets, serves the Console and API from the same configured Server
-listener, and proxies `/api/runtime/*` internally with server-side authority.
-Changing `server.address` changes the address for both surfaces; it does not
+listener. It proxies `/api/runtime/*` internally with server-side authority.
+Changing `server.address` changes the address for both surfaces. It does not
 start another Console listener.
 The browser executes the React bundle and calls the Runtime API through that
 same-origin proxy.
 
-This is the same deployment class as tools that compile a web GUI into a
-native server binary: the UI is ordinary HTML/CSS/JavaScript, but distribution
-is one executable.
+This deployment is similar to a web GUI inside a native server binary. The UI
+uses HTML, CSS, and JavaScript. Vifu distributes it as one executable.
 
 ## Navigation And Caching
 
@@ -110,22 +109,21 @@ than silently shipping the fallback page when those assets are unavailable.
 
 ## Development Boundaries
 
-Use `packages/console` for the host-neutral `@vifu/console` React views and contracts. The
-embedded Console supplies only the local host adapter: routing, branding,
-runtime API base, upload behavior, and refresh behavior.
+Use `packages/console` for the host-neutral `@vifu/console` React views and
+contracts. The embedded Console supplies only the local host adapter. This
+adapter defines routing, branding, the Runtime API base, uploads, and refreshes.
 
 The Dashboard host remains responsible for its server-side authority, sessions,
-and deployment policy. New shared views should live in the runtime console
-package when they are useful to another host, while host-specific behavior
-stays in the host adapter.
+and deployment policy. Put a shared view in the Console package if another host
+uses it. Keep host-specific behavior in the host adapter.
 
 Current limitations:
 
 - When no operations Dashboard is attached, the Server serves the embedded
   Console on `server.address`. Its administration proxy accepts only requests
-  originating on the Server host; other devices continue to use the public
+  originating on the Server host. Other devices continue to use the public
   Runtime and Gateway APIs.
-- It is a static browser app, so it should not depend on Next.js server
+- It is a static browser app. It must not depend on Next.js server
   features, server actions, or React Server Components.
 - Browser-visible code must not contain admin keys, provider credentials,
   deploy keys, or signing material.

@@ -17,7 +17,7 @@ host-selectable store.
 | Shape | Use it for | Contract |
 | --- | --- | --- |
 | Embedded Runtime | A Rust or Apple application that owns one project | The host calls `VifuRuntime` directly and registers provider implementations in process |
-| Vifu Server | A deployment that operates multiple projects | Applications call project HTTP/WebSocket endpoints; Server adds keys, database state, provider configuration, and traces |
+| Vifu Server | A deployment that operates multiple projects | Applications call project HTTP/WebSocket endpoints. Server adds keys, database state, provider configuration, and traces |
 | Server with Agent Gateway | Providers that run on another machine or network boundary | Gateway connects provider resources to Server over one authenticated multiplexed connection |
 
 Agent Gateway is a Server transport and connects to a running Vifu Server. An
@@ -46,7 +46,7 @@ The Swift source API is generated from the same UniFFI contract used by the
 Rust mobile adapter. The package downloads a checksum-verified XCFramework
 containing device, simulator, and macOS libraries. The mobile FFI artifact is
 built with the package's default provider features, including in-process llama
-and Local Whisper support; the application still decides which Providers to
+and Local Whisper support. The application still decides which Providers to
 register or expose.
 
 Open a SQLite-backed Runtime when project configuration and session state must
@@ -99,13 +99,13 @@ runtime.register_endpoint(EndpointDefinition {
 })?;
 ```
 
-A provider may expose several capabilities. Agents reference a provider by its
+A provider can expose several capabilities. Agents reference a provider by its
 runtime name, and endpoints give the application a stable name even when the
 provider or agent changes.
 
 `timeout_ms` limits provider inactivity rather than total generation time.
-Providers should emit activity while a long-running load or prefill stage is
-still working, and should stop promptly when their cancellation token fires.
+Providers must emit activity during a long load or prefill stage. They must stop
+promptly after their cancellation token fires.
 
 ## Invoke Asynchronously
 
@@ -159,7 +159,7 @@ Apple hosts use the equivalent `VifuEmbeddedRuntime` UniFFI object and implement
 `VifuAgentProvider` as a native callback. Android hosts use the generated Kotlin
 bindings and JNI library, which follow the same contract. The repository
 currently distributes Android as a buildable `arm64-v8a` Gradle source-set
-rather than a Maven artifact; see the
+rather than a Maven artifact. See the
 [`vifu-mobile-ffi` guide](../crates/vifu-mobile-ffi/README.md).
 
 ## Connect An Embedded Runtime To Vifu Server
@@ -173,7 +173,7 @@ Server deployment:
 3. Start `VifuEmbeddedGateway` with that identity and the enrollment token.
 
 Mobile camera flows scan the HTTPS URL returned by the enrollment API. The
-Vifu web bridge opens the standard `vifu://gateway/enroll` application link;
+Vifu web bridge opens the standard `vifu://gateway/enroll` application link.
 the app accepts only one-time `vifu_ge_...` enrollment tokens. It stores the
 resulting Device Token and reconnects to that Server on later launches. An app
 does not need an APK-specific Server address or a separate pairing protocol.
@@ -204,7 +204,7 @@ if let updated = try gateway.status().authorization {
 
 `start` sends the agent roster, timing stages, model identity, host metrics,
 terminal status, and bounded errors. It does not send root invocation input or
-output. A private debugging surface may send those bounded summaries only after
+output. A private debugging surface can send those bounded summaries only after
 the host application obtains explicit user consent:
 
 ```swift
@@ -216,8 +216,8 @@ try gateway.startWithMonitorIo(
 )
 ```
 
-Call one start method, not both. The application owns the consent UI and should
-return to the default `start` path when content sharing is disabled.
+Call one start method, not both. The application owns the consent UI. If content
+sharing is disabled, use the default `start` path.
 
 The enrollment token is consumed once. Later starts load the same Machine
 identity and server-specific Device Token from Keychain and omit the token.
@@ -250,10 +250,10 @@ Rust hosts use `start_with_monitor_io(..., true)` only after the same explicit
 consent decision. The ordinary `start` method is content-private by default.
 
 `start` requires applied Project Settings or an active release. It derives
-advertised Agent/provider descriptors from those settings and runs the
-reconnecting Gateway on its own worker thread. Custom Rust hosts must keep the
+advertised Agent/provider descriptors from those settings. It runs the Gateway
+connection on its own worker thread. Custom Rust hosts must keep the
 Machine private key and latest Device Token in their credential store. `status`
-reports the current connection lifecycle; `stop` cancels the network loop and
+reports the current connection lifecycle. `stop` cancels the network loop and
 joins the worker.
 
 The first connection to an empty deployment imports the active Project Settings
@@ -299,7 +299,7 @@ limit.
 ## Connect A Game Engine
 
 `RuntimeBridge` exposes the Runtime through transport-neutral `req`, `res`, and
-`event` frames. Engine integrations only move encoded frames; they do not
+`event` frames. Engine integrations only move encoded frames. They do not
 reimplement invocation, session, provider, or cancellation behavior.
 
 ```text
@@ -324,7 +324,7 @@ execution does not require rewriting game logic.
 The optional Apple adapter is the `VifuGodot` Swift package in
 `integrations/godot/apple/`. It connects `GlobalState` signals to
 `VifuInProcessBridgeTransport` and attaches to an already-started
-`GodotInstance`; the host application retains Godot's creation, rendering,
+`GodotInstance`. The host application retains Godot's creation, rendering,
 frame-loop, restart, and destruction lifecycle. Runtime routing belongs to
 `VifuRuntimeBridgeSession`, while application-specific message decoding stays
 in the host. The package stays outside `VifuMobileFFI.xcframework`, so native
@@ -344,7 +344,7 @@ For action selection and tool calls, the provider accepts either
 `responseFormat.type = "jsonSchema"` or OpenAI-compatible
 `response_format.type = "json_schema"`. Schemas are limited to 64 KiB and are
 compiled into a llama.cpp grammar before prompt inference. The completed text
-must also parse as JSON; truncated or invalid structured output returns a
+must also parse as JSON. Truncated or invalid structured output returns a
 provider error instead of an application action. Responses include native
 `text`, `message`, and `structured` values together with OpenAI-compatible
 `choices` and `usage`.
