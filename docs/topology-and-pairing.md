@@ -206,7 +206,7 @@ that run. This leaves the user's default local configuration unchanged:
 
 ```bash
 ./vifu \
-  -c server.address=https://api.vifu.ai \
+  -c server.address=https://api.vifu.dev \
   -c gateway.address=http://127.0.0.1:6790
 ```
 
@@ -214,7 +214,7 @@ The equivalent persistent configuration is:
 
 ```toml
 [server]
-address = "https://api.vifu.ai"
+address = "https://api.vifu.dev"
 
 [gateway]
 address = "http://127.0.0.1:6790"

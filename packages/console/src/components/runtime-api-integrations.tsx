@@ -14,6 +14,7 @@ import {
   X,
 } from "lucide-react";
 import { RuntimeLink, useRuntimeConsoleHost, useRuntimeConsoleRouter } from "../host";
+import { inferenceApiBaseUrl } from "../inference-url";
 import type {
   AgentProfile,
   ApiKeyAgentScope,
@@ -57,7 +58,7 @@ export function ApiIntegrationsView({
   const [apiKeyFilter, setApiKeyFilter] = useState<ApiKeyFilter>("active");
   const selectedProfile = agentOptions.find((profile) => profile.profileId === selectedProfileId)
     ?? agentOptions[0];
-  const projectBaseUrl = projectApiBaseUrl(project, browserApiBaseUrl);
+  const projectBaseUrl = inferenceApiBaseUrl(browserApiBaseUrl);
   const code = buildCodeExample(codeTab, projectBaseUrl, selectedProfile?.slug ?? "agent-id");
   const activeKeys = scopedKeys.filter((key) => !key.revokedAt);
   const revokedKeys = scopedKeys.filter((key) => key.revokedAt);
@@ -813,14 +814,6 @@ function buildCurlExample(baseUrl: string, model: string, apiKey?: string): stri
       messages: [{ role: "user", content: "Hello" }],
     }))}`,
   ].join("\n");
-}
-
-function projectApiBaseUrl(project: RuntimeProject, browserApiBaseUrl: string): string {
-  const url = new URL(browserApiBaseUrl);
-  const basePath = url.pathname.replace(/\/+$/, "");
-  url.pathname = `${basePath}/${encodeURIComponent(project.slug)}/v1`;
-  url.search = "";
-  return url.toString().replace(/\/$/, "");
 }
 
 function shellQuote(value: string): string {

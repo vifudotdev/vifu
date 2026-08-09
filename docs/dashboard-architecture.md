@@ -19,6 +19,12 @@ embedded in the `vifu` binary and can run beside a self-managed Vifu Server.
 provides its Runtime API base URL, credential source, navigation, branding, and
 refresh behavior while reusing the same views and HTTP contracts.
 
+The browser inference base and management transport have separate jobs. The
+inference base exposes fixed OpenAI-compatible routes such as
+`/v1/chat/completions`; the project key selects the project. Project CRUD,
+traces, keys, and deployment operations use the host's injected request adapter
+and retain their project-addressed management routes.
+
 The dependency direction stays one-way:
 
 ```text

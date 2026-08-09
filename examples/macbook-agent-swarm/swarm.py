@@ -439,7 +439,6 @@ def delete_project_key(client: VifuClient, project_slug: str, key_id: str) -> No
 def chat_request(
     client: VifuClient,
     *,
-    project_slug: str,
     model: str,
     sequence: int,
     max_tokens: int,
@@ -448,7 +447,7 @@ def chat_request(
     started = time.perf_counter()
     try:
         response, headers = client.request(
-            f"/{urllib.parse.quote(project_slug)}/v1/chat/completions",
+            "/v1/chat/completions",
             method="POST",
             body={
                 "model": model,
@@ -503,7 +502,6 @@ def run_agent(
     return [
         chat_request(
             client,
-            project_slug=route.project_slug,
             model=model,
             sequence=sequence,
             max_tokens=max_tokens,
@@ -526,7 +524,6 @@ def run_benchmark(
     for sequence in range(1, warmups + 1):
         warmup = chat_request(
             client,
-            project_slug=route.project_slug,
             model=route.models[0],
             sequence=-sequence,
             max_tokens=max_tokens,

@@ -575,14 +575,12 @@ def ensure_project_configuration(
     )
 
 
-def project_key_is_usable(server_url: str, project_slug: str, api_key: str) -> bool:
+def project_key_is_usable(server_url: str, api_key: str) -> bool:
     if not api_key:
         return False
     client = VifuClient(server_url, api_key, authorization_scheme="Bearer")
     try:
-        models = client.request(
-            f"/{urllib.parse.quote(project_slug)}/v1/models"
-        ).get("data", [])
+        models = client.request("/v1/models").get("data", [])
     except VifuApiError as error:
         if error.status in {401, 403}:
             return False
@@ -683,9 +681,7 @@ def bootstrap(args: argparse.Namespace) -> int:
             else configured.models[0]
         )
         project_api_key = existing.get(STARDOJO_API_KEY_ENV, "")
-        reused_key = project_key_is_usable(
-            server_url, configured.project_slug, project_api_key
-        )
+        reused_key = project_key_is_usable(server_url, project_api_key)
         if reused_key:
             ensure_project_key_permissions(
                 client, configured.project_slug, project_api_key
@@ -702,9 +698,7 @@ def bootstrap(args: argparse.Namespace) -> int:
                 },
             )["apiKey"]
             project_api_key = str(created["key"])
-            if not project_key_is_usable(
-                server_url, configured.project_slug, project_api_key
-            ):
+            if not project_key_is_usable(server_url, project_api_key):
                 raise RuntimeError("new Project API key could not authenticate")
         verify_project_embeddings(
             server_url,

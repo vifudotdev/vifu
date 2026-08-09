@@ -112,6 +112,8 @@ test("created selected-agent key keeps its scope in the row and edit dialog", as
   await expect(page.getByRole("heading", { name: "Loading console" })).toHaveCount(0);
   await expect(page.getByRole("heading", { name: "Overview" })).toBeVisible();
   await expect(page.getByRole("heading", { name: "API Integrations" })).toBeVisible();
+  await expect(page.getByText("http://127.0.0.1:4174/v1", { exact: true })).toBeVisible();
+  await expect(page.locator("body")).not.toContainText("/demo/v1/chat/completions");
   await page.getByRole("button", { name: "Create key" }).click();
   const createDialog = page.getByRole("dialog");
   await createDialog.getByRole("group", { name: "Agents permission" })

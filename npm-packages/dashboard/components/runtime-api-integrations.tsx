@@ -795,11 +795,12 @@ function buildCurlExample(baseUrl: string, model: string, apiKey?: string): stri
   ].join("\n");
 }
 
-function projectApiBaseUrl(project: RuntimeProject, browserApiBaseUrl: string): string {
+function projectApiBaseUrl(_project: RuntimeProject, browserApiBaseUrl: string): string {
   const url = new URL(browserApiBaseUrl);
   const basePath = url.pathname.replace(/\/+$/, "");
-  url.pathname = `${basePath}/${encodeURIComponent(project.slug)}/v1`;
+  url.pathname = `${basePath}/v1`;
   url.search = "";
+  url.hash = "";
   return url.toString().replace(/\/$/, "");
 }
 

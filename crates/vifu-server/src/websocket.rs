@@ -1884,6 +1884,16 @@ mod tests {
             "endpoint_access_denied",
         )
         .await;
+        let denied_root_models = app(state.clone())
+            .oneshot(root_models_request(denied_api_key))
+            .await
+            .unwrap();
+        assert_api_error(
+            denied_root_models,
+            StatusCode::FORBIDDEN,
+            "endpoint_access_denied",
+        )
+        .await;
         let denied_chat = app(state.clone())
             .oneshot(chat_completion_request(
                 &seeded.project_slug,
@@ -1925,6 +1935,16 @@ mod tests {
         assert_eq!(models_payload["data"].as_array().unwrap().len(), 1);
         assert_eq!(models_payload["data"][0]["id"], seeded.endpoint_slug);
 
+        let root_models = app(state.clone())
+            .oneshot(root_models_request(selected_api_key))
+            .await
+            .unwrap();
+        assert_eq!(root_models.status(), StatusCode::OK);
+        let root_models_body = to_bytes(root_models.into_body(), 64 * 1024).await.unwrap();
+        let root_models_payload: Value = serde_json::from_slice(&root_models_body).unwrap();
+        assert_eq!(root_models_payload["data"].as_array().unwrap().len(), 1);
+        assert_eq!(root_models_payload["data"][0]["id"], seeded.endpoint_slug);
+
         let selected_outside_scope = app(state.clone())
             .oneshot(chat_completion_request(
                 &seeded.project_slug,
@@ -1956,6 +1976,28 @@ mod tests {
         assert_eq!(selected_invoke["params"]["agentId"], "guide-agent");
         complete_invocation(&mut socket, &selected_invoke, "Hi from selected key").await;
         assert_eq!(selected_task.await.unwrap().status(), StatusCode::OK);
+
+        let root_request = root_chat_completion_request(&seeded.endpoint_slug, selected_api_key);
+        let root_state = state.clone();
+        let root_task = tokio::spawn(async move {
+            app(root_state)
+                .oneshot(root_request)
+                .await
+                .expect("root project-key chat response")
+        });
+        let root_invoke = receive_json_frame(&mut socket).await;
+        assert_eq!(root_invoke["params"]["agentId"], "guide-agent");
+        complete_invocation(&mut socket, &root_invoke, "Hi from root project API").await;
+        let root_response = root_task.await.unwrap();
+        assert_eq!(root_response.status(), StatusCode::OK);
+        let root_body = to_bytes(root_response.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let root_payload: Value = serde_json::from_slice(&root_body).unwrap();
+        assert_eq!(
+            root_payload["choices"][0]["message"]["content"],
+            "Hi from root project API"
+        );
 
         let revocation = app(state.clone())
             .oneshot(
@@ -2229,8 +2271,30 @@ mod tests {
             .unwrap()
     }
 
+    fn root_chat_completion_request(model: &str, raw_api_key: &str) -> Request<Body> {
+        Request::post("/v1/chat/completions")
+            .header(AUTHORIZATION, format!("Bearer {raw_api_key}"))
+            .header(CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                json!({
+                    "model": model,
+                    "messages": [{ "role": "user", "content": "Hello" }],
+                    "stream": false
+                })
+                .to_string(),
+            ))
+            .unwrap()
+    }
+
     fn project_models_request(project_slug: &str, raw_api_key: &str) -> Request<Body> {
         Request::get(format!("/{project_slug}/v1/models"))
+            .header(AUTHORIZATION, format!("Bearer {raw_api_key}"))
+            .body(Body::empty())
+            .unwrap()
+    }
+
+    fn root_models_request(raw_api_key: &str) -> Request<Body> {
+        Request::get("/v1/models")
             .header(AUTHORIZATION, format!("Bearer {raw_api_key}"))
             .body(Body::empty())
             .unwrap()

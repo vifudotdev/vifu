@@ -22,6 +22,7 @@ import type {
   RuntimeProject,
   ServerCapabilities,
 } from "../types";
+import { chatCompletionsUrl } from "../inference-url";
 import { RuntimeTraceWorkbench } from "./runtime-trace-workbench";
 import { ApiIntegrationsView } from "./runtime-api-integrations";
 import { AppLayout } from "./console-shell";
@@ -280,7 +281,7 @@ function HealthView({
         <dl className="health-summary-card">
           <div className="wide">
             <dt>HTTP URL</dt>
-            <dd><code>{projectChatCompletionsUrl(project, browserApiBaseUrl)}</code></dd>
+            <dd><code>{chatCompletionsUrl(browserApiBaseUrl)}</code></dd>
           </div>
           <div className="wide">
             <dt>WS URL</dt>
@@ -474,7 +475,7 @@ function SettingsView({
         <dl className="definition-grid">
           <div><dt>Name</dt><dd>{project.name}</dd></div>
           <div><dt>Slug</dt><dd>{project.slug}</dd></div>
-          <div><dt>Chat completions</dt><dd>{primaryEndpoint ? <code>{projectChatCompletionsUrl(project, browserApiBaseUrl)}</code> : "No endpoint yet"}</dd></div>
+          <div><dt>Chat completions</dt><dd>{primaryEndpoint ? <code>{chatCompletionsUrl(browserApiBaseUrl)}</code> : "No endpoint yet"}</dd></div>
           <div><dt>Model</dt><dd>{primaryEndpoint ? <code>{primaryEndpoint.slug}</code> : "No endpoint yet"}</dd></div>
           <div><dt>Status</dt><dd>{project.enabled ? "Enabled" : "Disabled"}</dd></div>
         </dl>
@@ -669,18 +670,6 @@ function runtimeStatusLabel(status: string): string {
 
 function gatewayCountLabel(count: number): string {
   return `${count} ${count === 1 ? "gateway" : "gateways"} online`;
-}
-
-function projectChatCompletionsUrl(project: RuntimeProject, browserApiBaseUrl: string): string {
-  return `${projectApiBaseUrl(project, browserApiBaseUrl)}/chat/completions`;
-}
-
-function projectApiBaseUrl(project: RuntimeProject, browserApiBaseUrl: string): string {
-  const url = new URL(browserApiBaseUrl);
-  const basePath = url.pathname.replace(/\/+$/, "");
-  url.pathname = `${basePath}/${encodeURIComponent(project.slug)}/v1`;
-  url.search = "";
-  return url.toString().replace(/\/$/, "");
 }
 
 function statusClassName(status: string): string {

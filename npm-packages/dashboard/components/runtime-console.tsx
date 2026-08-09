@@ -663,15 +663,12 @@ function gatewayCountLabel(count: number): string {
   return `${count} ${count === 1 ? "gateway" : "gateways"} online`;
 }
 
-function projectChatCompletionsUrl(project: RuntimeProject, browserApiBaseUrl: string): string {
-  return `${projectApiBaseUrl(project, browserApiBaseUrl)}/chat/completions`;
-}
-
-function projectApiBaseUrl(project: RuntimeProject, browserApiBaseUrl: string): string {
+function projectChatCompletionsUrl(_project: RuntimeProject, browserApiBaseUrl: string): string {
   const url = new URL(browserApiBaseUrl);
   const basePath = url.pathname.replace(/\/+$/, "");
-  url.pathname = `${basePath}/${encodeURIComponent(project.slug)}/v1`;
+  url.pathname = `${basePath}/v1/chat/completions`;
   url.search = "";
+  url.hash = "";
   return url.toString().replace(/\/$/, "");
 }
 

@@ -4222,11 +4222,31 @@ pub async fn list_openai_models(
     headers: HeaderMap,
 ) -> Result<Json<Value>, ApiError> {
     let authority = api_request_authority(&state, &headers).await?;
-    let endpoints = match authority {
-        ApiRequestAuthority::Admin => db::list_enabled_endpoints(&state.pool).await?,
-        ApiRequestAuthority::Key(_) => return Err(ApiError::Forbidden),
-    };
-    Ok(openai_models_response(endpoints))
+    match &authority {
+        ApiRequestAuthority::Admin => {
+            let endpoints = db::list_enabled_endpoints(&state.pool).await?;
+            Ok(openai_models_response(endpoints))
+        }
+        ApiRequestAuthority::Key(key) => {
+            if !key.permissions.chat_completions_allowed() {
+                return Err(ApiError::EndpointAccessDenied);
+            }
+            let allowed_profile_ids = match &key.agent_scope {
+                ApiKeyAgentScope::All => None,
+                ApiKeyAgentScope::Selected { profile_ids } => Some(profile_ids.as_slice()),
+            };
+            let agents =
+                db::list_public_agents(&state.pool, key.project_id, allowed_profile_ids).await?;
+            Ok(Json(json!({
+                "object": "list",
+                "data": agents.into_iter().map(|agent| json!({
+                    "id": agent.slug,
+                    "object": "model",
+                    "owned_by": "vifu",
+                })).collect::<Vec<_>>()
+            })))
+        }
+    }
 }
 
 pub async fn list_project_openai_models(
@@ -5679,9 +5699,12 @@ async fn create_chat_completion_for_project(
         object.insert("stream".to_string(), Value::Bool(false));
     }
 
-    let project = match project_slug.as_deref() {
-        Some(slug) => Some(db::get_project_by_slug(&state.pool, slug).await?),
-        None => None,
+    let project = match (project_slug.as_deref(), &authority) {
+        (Some(slug), _) => Some(db::get_project_by_slug(&state.pool, slug).await?),
+        (None, ApiRequestAuthority::Key(key)) => {
+            Some(db::get_project(&state.pool, key.project_id).await?)
+        }
+        (None, ApiRequestAuthority::Admin) => None,
     };
     if let Some(project) = project.as_ref() {
         return create_profile_chat_completion(

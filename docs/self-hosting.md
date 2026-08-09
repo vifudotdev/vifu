@@ -95,7 +95,7 @@ and the Gateway is local, so this process starts only the Gateway:
 
 ```toml
 [server]
-address = "https://api.vifu.ai"
+address = "https://api.vifu.dev"
 
 [gateway]
 address = "http://localhost:6790"
