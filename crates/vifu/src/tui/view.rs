@@ -1354,15 +1354,33 @@ fn render_io_lines(
 fn trace_summary_io_lines(trace: &TraceRecord, no_color: bool) -> Vec<Line<'static>> {
     let input_messages = trace.input.as_ref().map_or_else(Vec::new, chat_messages);
     let output_messages = trace.output.as_ref().map_or_else(Vec::new, chat_messages);
+    let transcription = (trace.capability == "transcription")
+        .then(|| trace.output.as_ref()?.get("text")?.as_str())
+        .flatten();
     let top_level_system = trace
         .input
         .as_ref()
         .and_then(|value| value.get("system"))
         .filter(|_| !chat_messages_include_role(&input_messages, "system"));
-    if top_level_system.is_none() && input_messages.is_empty() && output_messages.is_empty() {
+    if top_level_system.is_none()
+        && input_messages.is_empty()
+        && output_messages.is_empty()
+        && transcription.is_none()
+    {
         return Vec::new();
     }
-    let mut lines = vec![section_heading("CONVERSATION".to_string())];
+    let mut lines = Vec::new();
+    if let Some(text) = transcription {
+        lines.push(section_heading("TRANSCRIPTION".to_string()));
+        lines.push(Line::raw(text.to_string()));
+    }
+    if top_level_system.is_none() && input_messages.is_empty() && output_messages.is_empty() {
+        return lines;
+    }
+    if !lines.is_empty() {
+        lines.push(Line::raw(""));
+    }
+    lines.push(section_heading("CONVERSATION".to_string()));
     if let Some(system) = top_level_system {
         append_role_content(
             &mut lines,
@@ -3163,6 +3181,50 @@ mod tests {
         assert!(content.contains("Cut the next patch of grass."));
         assert!(content.contains("ASSISTANT"));
         assert!(content.contains("Moving east."));
+    }
+
+    #[test]
+    fn trace_summary_shows_transcription_text() {
+        let mut app = App::default();
+        let now = Instant::now();
+        let trace_id = Uuid::new_v4();
+        app.apply(
+            RuntimeEvent::InvocationStarted {
+                invocation_id: trace_id,
+                agent_id: "android-whisper".to_string(),
+                agent_name: "Android Local Listener".to_string(),
+                source_agent_id: "xiaomi".to_string(),
+                capability: "transcription".to_string(),
+                provider: "android-local-whisper".to_string(),
+                model: "Whisper base.en".to_string(),
+                started_unix_ms: 1,
+            },
+            now,
+        );
+        app.apply(
+            RuntimeEvent::IoCaptured {
+                invocation_id: trace_id,
+                input: None,
+                output: Some(json!({"text": "Vifu can transcribe this sentence."})),
+                truncated: false,
+            },
+            now,
+        );
+        app.view = View::Trace {
+            agent_key: "android-whisper\0".to_string(),
+            trace_id,
+            tab: TraceTab::Summary,
+            timeline: false,
+            observation_cursor: None,
+            selected_observation: None,
+        };
+
+        let content = rendered_content(&mut app, now, 180, 36);
+
+        assert!(
+            content.contains("TRANSCRIPTION")
+                && content.contains("Vifu can transcribe this sentence.")
+        );
     }
 
     #[test]
