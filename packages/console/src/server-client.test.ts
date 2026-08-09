@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { DeploymentClient } from "./deployment-client";
+import { DeploymentClient } from "./server-client";
 
 describe("DeploymentClient request timeout", () => {
   afterEach(() => {

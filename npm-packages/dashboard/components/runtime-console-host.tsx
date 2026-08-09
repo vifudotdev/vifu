@@ -10,7 +10,7 @@ import {
   type DashboardSection,
   type RuntimeConsoleHost,
   type RuntimeConsoleProps,
-} from "@vifu/runtime-console/react";
+} from "@vifu/console/react";
 
 export type { DashboardSection };
 

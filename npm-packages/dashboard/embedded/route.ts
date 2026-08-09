@@ -1,4 +1,4 @@
-import type { DashboardSection } from "@vifu/runtime-console/react";
+import type { DashboardSection } from "@vifu/console/react";
 
 const SECTION_IDS = new Set<DashboardSection>([
   "overview",

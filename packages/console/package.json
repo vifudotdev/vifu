@@ -1,41 +1,46 @@
 {
-  "name": "@vifu/runtime-console",
+  "name": "@vifu/console",
   "version": "0.1.0",
-  "description": "Host-neutral Vifu runtime console UI and browser contracts.",
+  "description": "Host-neutral Vifu Console UI and Runtime browser contracts.",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/vifudotdev/vifu.git",
+    "directory": "packages/console"
+  },
   "type": "module",
   "main": "./dist/index.js",
   "module": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "sideEffects": [
-    "./dist/styles.css",
-    "./src/styles.css"
+    "./dist/styles.css"
   ],
   "exports": {
     ".": {
-      "@vifu/source": "./src/index.ts",
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
     },
     "./react": {
-      "@vifu/source": "./src/react.ts",
       "types": "./dist/react.d.ts",
       "import": "./dist/react.js"
     },
     "./styles.css": {
-      "@vifu/source": "./src/styles.css",
       "default": "./dist/styles.css"
     },
     "./package.json": "./package.json"
   },
   "files": [
     "dist",
-    "src",
     "README.md"
   ],
   "scripts": {
     "build": "node scripts/build.mjs",
+    "prepack": "node scripts/build.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "vitest run --root ../.. packages/runtime-console"
+    "test": "vitest run --root ../.. packages/console"
+  },
+  "publishConfig": {
+    "access": "public"
   },
   "peerDependencies": {
     "react": ">=18.0.0",

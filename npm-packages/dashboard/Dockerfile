@@ -7,12 +7,12 @@ WORKDIR /app
 COPY package.json bun.lock tsconfig.base.json ./
 COPY npm-packages/dashboard/package.json npm-packages/dashboard/package.json
 COPY packages/protocol/package.json packages/protocol/package.json
-COPY packages/runtime-console/package.json packages/runtime-console/package.json
+COPY packages/console/package.json packages/console/package.json
 RUN bun install --frozen-lockfile
 
 FROM deps AS build
 COPY packages/protocol packages/protocol
-COPY packages/runtime-console packages/runtime-console
+COPY packages/console packages/console
 COPY npm-packages/dashboard npm-packages/dashboard
 RUN bun run build:packages
 RUN bun run --cwd npm-packages/dashboard build

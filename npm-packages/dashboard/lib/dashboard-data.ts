@@ -1,4 +1,4 @@
-import type { RuntimeConsoleData } from "@vifu/runtime-console";
+import type { RuntimeConsoleData } from "@vifu/console";
 import type { DashboardSection } from "../components/runtime-console-host";
 import { loadRuntimeSnapshot, resolveAuthority } from "./authority";
 import type {
@@ -7,7 +7,7 @@ import type {
   ProjectAgentCandidate,
   ProjectProvider,
   RuntimeSnapshot,
-} from "./runtime-types";
+} from "@vifu/console";
 
 export type DashboardData = RuntimeConsoleData & {
   runtime: RuntimeSnapshot;

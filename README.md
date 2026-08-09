@@ -69,6 +69,8 @@ transport, keys, and traces.
 
 ## Documentation
 
+- [Dashboard architecture](docs/dashboard-architecture.md)
+
 #### Use Vifu
 
 - [Install Vifu](docs/install.md)

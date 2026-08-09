@@ -1,8 +1,8 @@
 import { redirect } from "next/navigation";
 import { configuredAdminKey, configuredApiBaseUrl, dashboardLoginPath } from "./config";
-import { DeploymentClient } from "./deployment-client";
+import { DeploymentClient } from "@vifu/console";
 import { hasValidAdminSession } from "./admin-session";
-import type { DeploymentStatus, RuntimeSnapshot } from "./runtime-types";
+import type { DeploymentStatus, RuntimeSnapshot } from "@vifu/console";
 
 export type AuthorityAdapter = {
   kind: "self-hosted";

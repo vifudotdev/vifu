@@ -10,7 +10,7 @@ import {
   configuredApiBaseUrl,
   sanitizeReturnTo,
 } from "./config";
-import { DeploymentClient, VifuHttpError } from "./deployment-client";
+import { DeploymentClient, VifuHttpError } from "@vifu/console";
 import { isSameOriginRequest } from "./request-security";
 
 export async function handleAdminKeyLogin(request: Request): Promise<Response> {

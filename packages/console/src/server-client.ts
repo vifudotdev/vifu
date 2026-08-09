@@ -1,4 +1,3 @@
-import { appendApiPath } from "./config";
 import type {
   AgentBinding,
   AgentEndpoint,
@@ -16,7 +15,7 @@ import type {
   RuntimeStatus,
   RuntimeProject,
   RuntimeDeployment,
-} from "./runtime-types";
+} from "./types";
 
 export type VifuFetch = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
 
@@ -184,4 +183,15 @@ export function readErrorMessage(payload: unknown): string {
     if (typeof message === "string" && message.trim()) return message.trim();
   }
   return "Vifu API request failed.";
+}
+
+function appendApiPath(apiBaseUrl: string, requestPath: string): string {
+  const value = apiBaseUrl.trim();
+  if (!value) throw new Error("Vifu API base URL is not configured.");
+  const url = new URL(value);
+  if (url.protocol !== "http:" && url.protocol !== "https:") {
+    throw new Error("Vifu API base URL must use HTTP or HTTPS.");
+  }
+  const base = url.toString().replace(/\/$/, "");
+  return `${base}${requestPath.startsWith("/") ? requestPath : `/${requestPath}`}`;
 }

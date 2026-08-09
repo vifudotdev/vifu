@@ -23,7 +23,7 @@ deployment. See [Self-host with Docker](self-hosting.md) for that stack.
 The embedded Console is a static browser application served by the Rust server:
 
 ```text
-packages/runtime-console
+packages/console
         |
         v
 npm-packages/dashboard/embedded/main.tsx
@@ -110,14 +110,14 @@ than silently shipping the fallback page when those assets are unavailable.
 
 ## Development Boundaries
 
-Use `packages/runtime-console` for host-neutral React views and contracts. The
+Use `packages/console` for the host-neutral `@vifu/console` React views and contracts. The
 embedded Console supplies only the local host adapter: routing, branding,
 runtime API base, upload behavior, and refresh behavior.
 
-The Next.js dashboard host remains responsible for its own server-side
-authority, sessions, and deployment policy. New shared views should live in the
-runtime console package when they are useful to both hosts, and host-specific
-behavior should stay in the host adapter.
+The Dashboard host remains responsible for its server-side authority, sessions,
+and deployment policy. New shared views should live in the runtime console
+package when they are useful to another host, while host-specific behavior
+stays in the host adapter.
 
 Current limitations:
 

@@ -13,7 +13,7 @@ export type ServerCapabilities = {
 
 export type AuthCapability = {
   required: true;
-  mode: "admin-key";
+  mode: "admin-key" | "deployment-credential";
 };
 
 export type AuthStatus = AuthCapability | {

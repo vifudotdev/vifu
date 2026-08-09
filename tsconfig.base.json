@@ -20,9 +20,9 @@
     "paths": {
       "@vifu/protocol": ["./packages/protocol/src/index.ts"],
       "@vifu/protocol/*": ["./packages/protocol/src/*.ts"],
-      "@vifu/runtime-console": ["./packages/runtime-console/src/index.ts"],
-      "@vifu/runtime-console/react": ["./packages/runtime-console/src/react.ts"],
-      "@vifu/runtime-console/styles.css": ["./packages/runtime-console/src/styles.css"]
+      "@vifu/console": ["./packages/console/src/index.ts"],
+      "@vifu/console/react": ["./packages/console/src/react.ts"],
+      "@vifu/console/styles.css": ["./packages/console/src/styles.css"]
     }
   }
 }

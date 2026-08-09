@@ -5,7 +5,7 @@ import "@fontsource/ibm-plex-sans/400.css";
 import "@fontsource/ibm-plex-sans/500.css";
 import "@fontsource/ibm-plex-sans/600.css";
 import "@fontsource/ibm-plex-sans/700.css";
-import "@vifu/runtime-console/styles.css";
+import "@vifu/console/styles.css";
 import "./globals.css";
 import type { Metadata } from "next";
 import type { ReactNode } from "react";

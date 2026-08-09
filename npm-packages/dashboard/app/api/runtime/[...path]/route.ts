@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { AuthorityError, resolveAuthority } from "../../../../lib/authority";
-import { VifuHttpError } from "../../../../lib/deployment-client";
+import { VifuHttpError } from "@vifu/console";
 import { isSameOriginRequest } from "../../../../lib/request-security";
 import { forwardRuntimeResponse } from "../../../../lib/runtime-proxy";
 

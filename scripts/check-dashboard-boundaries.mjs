@@ -1,12 +1,10 @@
 import { access, readdir, readFile } from "node:fs/promises";
 import path from "node:path";
 
-const requiredDirectories = [
-  "npm-packages/dashboard",
-  "crates/vifu",
-  "crates/vifu-server",
-];
-const sourceRoots = ["npm-packages/dashboard", "crates/vifu", "crates/vifu-server"];
+const dashboardRoot = "npm-packages/dashboard";
+const runtimeConsoleRoot = "packages/console";
+const requiredDirectories = [dashboardRoot, runtimeConsoleRoot, "crates/vifu", "crates/vifu-server"];
+const sourceRoots = [...requiredDirectories];
 const cargoWorkspaceMembers = await readCargoWorkspaceMembers("Cargo.toml");
 const workspaceCrateDirectories = new Set(
   cargoWorkspaceMembers
@@ -14,15 +12,21 @@ const workspaceCrateDirectories = new Set(
     .map((member) => member.slice("crates/".length).split("/")[0])
     .filter(Boolean),
 );
-const ignoredDirectories = new Set(["node_modules", ".next", ".next-e2e", "target"]);
+const ignoredDirectories = new Set(["node_modules", ".next", ".next-e2e", "target", "dist"]);
 const violations = [];
 const dashboardForbiddenPatterns = [
   ["edge-provider runtime package", /@opennextjs\//],
   ["edge-provider request context", /get[A-Z][A-Za-z]+Context/],
-  ["private service binding", /\bAPI_GATEWAY\b/],
-  ["Dashboard database client", /from\s+["']postgres["']/],
-  ["Dashboard password hashing", /\bbcryptjs\b/],
-  ["legacy Dashboard auth environment", /\b(?:VIFU_AUTH_|AUTH_ENABLE_OIDC|AUTH_DISABLE_SIGNUP|AUTH_DISABLE_USERNAME_PASSWORD)\b/],
+  ["host-specific service binding", /\bAPI_GATEWAY\b/],
+  ["Dashboard database client", /from\s+["'](?:postgres|pg|@aws-sdk\/client-dynamodb)["']/],
+  ["Dashboard password hashing", /\b(?:bcryptjs|argon2)\b/],
+  ["hosted identity implementation", /(?:amazon-cognito|@aws-amplify\/auth|openidconnect)/],
+  ["browser-visible credential", /NEXT_PUBLIC_[A-Z0-9_]*(?:KEY|TOKEN|SECRET|CREDENTIAL)/],
+];
+const runtimeConsoleForbiddenPatterns = [
+  ["Dashboard host import", /npm-packages\/dashboard/],
+  ["identity provider implementation", /(?:amazon-cognito|@aws-amplify\/auth|openidconnect)/],
+  ["edge deployment implementation", /@opennextjs\//],
 ];
 const serverForbiddenAuthPatterns = [
   ["web authentication route", /\/v1\/auth\/(?!exchange\b)/],
@@ -48,18 +52,17 @@ await enforceDirectoryAllowlist("crates", workspaceCrateDirectories);
 for (const root of sourceRoots) {
   for (const file of await sourceFiles(root)) {
     const contents = await readFile(file, "utf8");
-    if (file.startsWith("npm-packages/dashboard/") && /process\.env\.VIFU_DEPLOYMENT_MODE/.test(contents)) {
-      violations.push(`${file}: runtime authority must come from server capabilities`);
-    }
-    if (file.startsWith("npm-packages/dashboard/")) {
-      for (const [label, pattern] of dashboardForbiddenPatterns) {
-        if (pattern.test(contents)) violations.push(`${file}: ${label} is outside the public HTTP contract`);
+    if (file.startsWith(`${dashboardRoot}/`)) {
+      enforcePatterns(file, contents, dashboardForbiddenPatterns);
+      if (/process\.env\.VIFU_DEPLOYMENT_MODE/.test(contents)) {
+        violations.push(`${file}: runtime authority must come from server capabilities`);
       }
+    }
+    if (file.startsWith(`${runtimeConsoleRoot}/`)) {
+      enforcePatterns(file, contents, runtimeConsoleForbiddenPatterns);
     }
     if (file.startsWith("crates/vifu-server/")) {
-      for (const [label, pattern] of serverForbiddenAuthPatterns) {
-        if (pattern.test(contents)) violations.push(`${file}: ${label} belongs to the Dashboard, not vifu-server`);
-      }
+      enforcePatterns(file, contents, serverForbiddenAuthPatterns);
     }
   }
 }
@@ -69,7 +72,13 @@ if (violations.length > 0) {
   process.exit(1);
 }
 
-console.log("One dashboard uses provider-neutral runtime adapters and deployment credentials.");
+console.log("The Dashboard depends on the host-neutral @vifu/console boundary.");
+
+function enforcePatterns(file, contents, patterns) {
+  for (const [label, pattern] of patterns) {
+    if (pattern.test(contents)) violations.push(`${file}: ${label} crosses the Dashboard boundary`);
+  }
+}
 
 async function enforceDirectoryAllowlist(root, allowed) {
   for (const entry of await readdir(root, { withFileTypes: true })) {
@@ -94,7 +103,6 @@ async function readCargoWorkspaceMembers(target) {
   let inWorkspace = false;
   let inMembers = false;
   let membersBlock = "";
-
   for (const line of lines) {
     if (/^\s*\[/.test(line)) {
       if (inWorkspace) break;
@@ -102,7 +110,6 @@ async function readCargoWorkspaceMembers(target) {
       continue;
     }
     if (!inWorkspace) continue;
-
     if (!inMembers) {
       const start = line.match(/^\s*members\s*=\s*\[(.*)$/);
       if (!start) continue;
@@ -111,11 +118,9 @@ async function readCargoWorkspaceMembers(target) {
       if (start[1].includes("]")) break;
       continue;
     }
-
     membersBlock += `${line}\n`;
     if (line.includes("]")) break;
   }
-
   return Array.from(membersBlock.matchAll(/"([^"]+)"/g), ([, member]) => member);
 }
 

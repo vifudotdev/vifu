@@ -42,6 +42,7 @@ const sourceFiles = git(["ls-files", "--cached", "--others", "--exclude-standard
 for (const file of sourceFiles) {
   const normalized = path.normalize(file);
   if (normalized === path.normalize("AGENTS.md") || normalized === scannerPath) continue;
+  if (generatedOutputPattern.test(file)) continue;
   const contents = await readFile(file, "utf8").catch(() => "");
   for (const [label, pattern] of checks) {
     if (pattern.test(contents)) violations.push(`${file}: ${label}`);

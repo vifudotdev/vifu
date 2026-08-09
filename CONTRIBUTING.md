@@ -11,9 +11,10 @@ Keep these ownership boundaries explicit:
   session, and public Agent Gateway protocol.
 - `crates/vifu-server` owns HTTP APIs, WebSocket multiplexing, runtime
   authorization, routing, traces, and PostgreSQL migrations.
-- `npm-packages/dashboard` is the only Dashboard application. Core views use a
-  `DeploymentClient`; local and self-host authority enter through the same
-  `AuthorityAdapter` path selected from server capabilities.
+- `packages/console` owns the host-neutral `@vifu/console` views and contracts.
+  `npm-packages/dashboard` composes them into the Dashboard used by the
+  embedded binary and self-managed deployments. Other web hosts can integrate
+  the same package through its HTTP client and host-adapter contracts.
 - `docker-compose.yml` owns the supported PostgreSQL, server, Agent Gateway,
   and standalone Dashboard deployment.
 

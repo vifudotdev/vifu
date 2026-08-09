@@ -1,1 +1,1 @@
-export { RuntimeTraceWorkbench } from "@vifu/runtime-console/react";
+export { RuntimeTraceWorkbench } from "@vifu/console/react";

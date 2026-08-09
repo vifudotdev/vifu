@@ -10,7 +10,7 @@ const nextConfig: NextConfig = {
   output: "standalone",
   outputFileTracingRoot: workspaceRoot,
   poweredByHeader: false,
-  transpilePackages: ["@vifu/runtime-console"],
+  transpilePackages: ["@vifu/console"],
 };
 
 export default nextConfig;
