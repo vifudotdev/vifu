@@ -2,10 +2,11 @@ import { describe, expect, test } from "vitest";
 
 import {
   MAX_APPLY_POLL_ATTEMPTS,
+  latestGatewaySession,
   runtimeApplyPollDelay,
   runtimeApplyTarget,
 } from "./runtime-deployments";
-import type { RuntimeDeployment } from "../types";
+import type { AgentGateway, RuntimeDeployment } from "../types";
 
 describe("runtime deployment apply polling", () => {
   test("uses bounded exponential backoff", () => {
@@ -40,5 +41,42 @@ describe("runtime deployment apply polling", () => {
           appliedAt: "2026-01-01T00:00:01Z",
         }],
       }]));
+  });
+});
+
+describe("deployment gateway status", () => {
+  test("prefers the connected session for a paired gateway", () => {
+    const session = (status: string, lastSeenAt: string): AgentGateway => ({
+      id: `${status}-${lastSeenAt}`,
+      gatewayId: "android-1",
+      sessionId: `${status}-session`,
+      status,
+      agents: [],
+      metadata: {},
+      connectedAt: "2026-01-01T00:00:00Z",
+      lastSeenAt,
+      disconnectedAt: status === "connected" ? null : lastSeenAt,
+    });
+
+    expect(latestGatewaySession("android-1", [
+      session("connected", "2026-01-01T00:00:01Z"),
+      session("disconnected", "2026-01-01T00:00:02Z"),
+    ])?.status).toBe("connected");
+  });
+
+  test("does not borrow another gateway session", () => {
+    const gateway: AgentGateway = {
+      id: "session-1",
+      gatewayId: "android-2",
+      sessionId: "session-1",
+      status: "connected",
+      agents: [],
+      metadata: {},
+      connectedAt: "2026-01-01T00:00:00Z",
+      lastSeenAt: "2026-01-01T00:00:00Z",
+      disconnectedAt: null,
+    };
+
+    expect(latestGatewaySession("android-1", [gateway])).toBeUndefined();
   });
 });

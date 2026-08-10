@@ -217,6 +217,7 @@ function ProjectSectionView({
         project={project}
         deployments={data.runtime.deployments}
         releases={data.runtime.releases}
+        agentGateways={data.runtime.agentGateways}
       />
     );
   }

@@ -16,6 +16,7 @@ import {
 import { useEffect, useMemo, useState, type ChangeEvent, type FormEvent } from "react";
 import { useRuntimeConsoleHost, useRuntimeConsoleRouter } from "../host";
 import type {
+  AgentGateway,
   ProjectSettings,
   ProjectRuntimeRelease,
   RuntimeDeployment,
@@ -23,6 +24,7 @@ import type {
 } from "../types";
 
 type Enrollment = {
+  enrollmentId: string;
   deployment: string;
   enrollmentToken: string;
   expiresAt: string;
@@ -36,6 +38,8 @@ type Enrollment = {
 };
 
 export const MAX_APPLY_POLL_ATTEMPTS = 6;
+export const ENROLLMENT_REFRESH_MS = 2_000;
+export const GATEWAY_STATUS_REFRESH_MS = 5_000;
 
 export function runtimeApplyPollDelay(attempt: number): number {
   return Math.min(2_000 * (2 ** Math.max(0, attempt)), 30_000);
@@ -53,14 +57,29 @@ export function runtimeApplyTarget(deployments: RuntimeDeployment[]): string {
   ].join("|")).sort().join(";");
 }
 
+export function latestGatewaySession(
+  gatewayId: string,
+  gateways: AgentGateway[],
+): AgentGateway | undefined {
+  return gateways
+    .filter((gateway) => gateway.gatewayId === gatewayId)
+    .sort((left, right) => {
+      const connectionOrder = Number(right.status === "connected") - Number(left.status === "connected");
+      if (connectionOrder !== 0) return connectionOrder;
+      return Date.parse(right.lastSeenAt) - Date.parse(left.lastSeenAt);
+    })[0];
+}
+
 export function RuntimeDeploymentsView({
   project,
   deployments,
   releases,
+  agentGateways,
 }: {
   project: RuntimeProject;
   deployments: RuntimeDeployment[];
   releases: ProjectRuntimeRelease[];
+  agentGateways: AgentGateway[];
 }) {
   const host = useRuntimeConsoleHost();
   const router = useRuntimeConsoleRouter();
@@ -84,6 +103,10 @@ export function RuntimeDeploymentsView({
   );
   const applyTarget = useMemo(() => runtimeApplyTarget(deployments), [deployments]);
   const [applyPoll, setApplyPoll] = useState({ target: applyTarget, attempt: 0 });
+  const hasAssignedGateways = deployments.some((deployment) => deployment.gatewayIds.length > 0);
+  const enrollmentIsActive = Boolean(
+    enrollment && Date.parse(enrollment.expiresAt) > Date.now(),
+  );
 
   useEffect(() => {
     if (!waitingForApply) {
@@ -105,6 +128,15 @@ export function RuntimeDeploymentsView({
     }, runtimeApplyPollDelay(applyPoll.attempt));
     return () => window.clearTimeout(timer);
   }, [router, waitingForApply, applyTarget, applyPoll]);
+
+  useEffect(() => {
+    if (!enrollmentIsActive && !hasAssignedGateways) return;
+    const timer = window.setInterval(
+      () => router.refresh(),
+      enrollmentIsActive ? ENROLLMENT_REFRESH_MS : GATEWAY_STATUS_REFRESH_MS,
+    );
+    return () => window.clearInterval(timer);
+  }, [enrollmentIsActive, hasAssignedGateways, router]);
 
   async function action<T>(key: string, work: () => Promise<T>, success: string): Promise<T | null> {
     setPending(key);
@@ -300,6 +332,7 @@ export function RuntimeDeploymentsView({
                 {deployment.gatewayIds.map((gatewayId) => (
                   <div key={gatewayId}>
                     <code>{gatewayId}</code>
+                    <GatewayConnectionStatus gateway={latestGatewaySession(gatewayId, agentGateways)} />
                     <GatewayApplyStatus deployment={deployment} gatewayId={gatewayId} />
                     <button className="icon-button" type="button" title="Detach from deployment" aria-label={`Detach ${gatewayId}`} onClick={() => detachGateway(deployment, gatewayId)} disabled={pending !== null}><Unplug aria-hidden="true" /></button>
                     <button className="icon-button danger" type="button" title="Revoke gateway" aria-label={`Revoke ${gatewayId}`} onClick={() => revokeGateway(gatewayId)} disabled={pending !== null}><ShieldOff aria-hidden="true" /></button>
@@ -352,6 +385,22 @@ export function RuntimeDeploymentsView({
         </div>
       </section>
     </div>
+  );
+}
+
+function GatewayConnectionStatus({ gateway }: { gateway?: AgentGateway }) {
+  const connected = gateway?.status === "connected";
+  return (
+    <span className={`deployment-gateway-connection ${connected ? "online" : "offline"}`}>
+      <strong><i aria-hidden="true" />{connected ? "Online" : "Offline"}</strong>
+      <small>
+        {gateway
+          ? connected
+            ? `${gateway.agents.length} ${gateway.agents.length === 1 ? "agent" : "agents"}`
+            : `Last seen ${formatDate(gateway.lastSeenAt)}`
+          : "No session yet"}
+      </small>
+    </span>
   );
 }
 

@@ -1606,6 +1606,47 @@ mod tests {
         let runtime_config: Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(runtime_config["deployments"].as_array().unwrap().len(), 1);
         assert_eq!(runtime_config["deployments"][0]["deployment"], "staging");
+        let project_gateways = owner_app
+            .clone()
+            .oneshot(
+                Request::get(format!("/v1/project/{slug}/agent-gateways"))
+                    .header("authorization", format!("Vifu {owner_credential}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(project_gateways.status(), StatusCode::OK);
+        let body = to_bytes(project_gateways.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let project_gateways: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            project_gateways["agentGateways"].as_array().unwrap().len(),
+            1
+        );
+        assert_eq!(
+            project_gateways["agentGateways"][0]["gatewayId"],
+            "gateway-account"
+        );
+
+        let project_agents = owner_app
+            .clone()
+            .oneshot(
+                Request::get(format!("/v1/project/{slug}/agents"))
+                    .header("authorization", format!("Vifu {owner_credential}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(project_agents.status(), StatusCode::OK);
+        let body = to_bytes(project_agents.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let project_agents: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(project_agents["agents"].as_array().unwrap().len(), 1);
+        assert_eq!(project_agents["agents"][0]["gatewayId"], "gateway-account");
         assert!(!crate::db::runtime_deployment_allows_remote_invocation(
             &storage,
             project_id,

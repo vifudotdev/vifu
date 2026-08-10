@@ -6492,9 +6492,45 @@ button:disabled {
 .deployment-gateways > div {
   min-width: 0;
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto 28px 28px;
+  grid-template-columns: minmax(0, 1fr) auto auto 28px 28px;
   align-items: center;
   gap: 4px;
+}
+
+.deployment-gateway-connection {
+  display: grid;
+  min-width: 92px;
+  gap: 1px;
+}
+
+.deployment-gateway-connection strong {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 600;
+}
+
+.deployment-gateway-connection i {
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: var(--muted);
+}
+
+.deployment-gateway-connection.online strong {
+  color: var(--success);
+}
+
+.deployment-gateway-connection.online i {
+  background: var(--success);
+}
+
+.deployment-gateway-connection small {
+  color: var(--muted);
+  font-size: 9px;
+  white-space: nowrap;
 }
 
 .deployment-gateways .icon-button {

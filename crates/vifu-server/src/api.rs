@@ -3912,10 +3912,11 @@ pub async fn list_project_agent_gateways(
     Path(slug): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
     let project = authorized_project_by_slug(&state, &headers, &slug, ProjectAccess::Read).await?;
+    let gateway_ids = project_runtime_gateway_ids(&state, &project).await?;
     let sessions = db::list_agent_gateway_sessions(&state.pool)
         .await?
         .into_iter()
-        .filter(|session| session.gateway_id == project.project.gateway_id)
+        .filter(|session| gateway_ids.contains(&session.gateway_id))
         .collect::<Vec<_>>();
     Ok(Json(json!({ "agentGateways": sessions })))
 }
@@ -3926,12 +3927,29 @@ pub async fn list_project_available_agents(
     Path(slug): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
     let project = authorized_project_by_slug(&state, &headers, &slug, ProjectAccess::Read).await?;
+    let gateway_ids = project_runtime_gateway_ids(&state, &project).await?;
     let agents = db::list_available_agents(&state.pool)
         .await?
         .into_iter()
-        .filter(|agent| agent.gateway_id == project.project.gateway_id)
+        .filter(|agent| gateway_ids.contains(&agent.gateway_id))
         .collect::<Vec<_>>();
     Ok(Json(json!({ "agents": agents })))
+}
+
+async fn project_runtime_gateway_ids(
+    state: &AppState,
+    project: &crate::models::ProjectWithBindings,
+) -> Result<HashSet<String>, ApiError> {
+    let deployments = db::list_runtime_deployments(&state.pool, project.project.id).await?;
+    let mut gateway_ids = HashSet::new();
+    for deployment in &deployments {
+        gateway_ids
+            .extend(db::list_runtime_deployment_gateway_ids(&state.pool, deployment.id).await?);
+    }
+    if deployments.is_empty() && !project.project.gateway_id.is_empty() {
+        gateway_ids.insert(project.project.gateway_id.clone());
+    }
+    Ok(gateway_ids)
 }
 
 pub async fn list_project_traces(
