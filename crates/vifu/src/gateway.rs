@@ -6,6 +6,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use tokio::sync::watch;
+use uuid::Uuid;
 
 use vifu_gateway::control::RuntimeControlClient;
 use vifu_gateway::optimization::SessionRouteOverrides;
@@ -75,6 +76,7 @@ impl GatewayControl {
 #[derive(Clone, Default)]
 pub(crate) struct DevicePairingController {
     current_guest: Arc<Mutex<Option<GuestPairingContext>>>,
+    gateway_credential: Arc<Mutex<Option<String>>>,
 }
 
 #[derive(Clone)]
@@ -83,12 +85,18 @@ struct GuestPairingContext {
     server_certificate_der: Option<Vec<u8>>,
     project_api_key: String,
     claim_token: String,
+    project_id: Uuid,
+    deployment_id: Uuid,
+    claimed: bool,
 }
 
 impl DevicePairingController {
     fn clear(&self) {
         if let Ok(mut current) = self.current_guest.lock() {
             *current = None;
+        }
+        if let Ok(mut credential) = self.gateway_credential.lock() {
+            *credential = None;
         }
     }
 
@@ -104,7 +112,27 @@ impl DevicePairingController {
                 server_certificate_der: server_certificate_der.map(<[u8]>::to_vec),
                 project_api_key: guest.api_key.clone(),
                 claim_token: guest.claim_token.clone(),
+                project_id: guest.project_id,
+                deployment_id: guest.deployment_id,
+                claimed: false,
             });
+        }
+    }
+
+    fn set_project_claimed(&self, project_id: Uuid, claimed: bool) {
+        if let Ok(mut current) = self.current_guest.lock() {
+            if let Some(context) = current
+                .as_mut()
+                .filter(|context| context.project_id == project_id)
+            {
+                context.claimed = claimed;
+            }
+        }
+    }
+
+    fn set_gateway_credential(&self, credential: &str) {
+        if let Ok(mut current) = self.gateway_credential.lock() {
+            *current = Some(credential.to_string());
         }
     }
 
@@ -120,6 +148,9 @@ impl DevicePairingController {
         let Some(context) = context else {
             return Ok(None);
         };
+        if context.claimed {
+            return Ok(None);
+        }
         if same_web_origin(&context.server_url, dashboard_url) {
             return Ok(None);
         }
@@ -137,6 +168,20 @@ impl DevicePairingController {
             .ok_or_else(|| {
                 "Waiting for the Agent Gateway to create its Guest project".to_string()
             })?;
+        let gateway_credential = self
+            .gateway_credential
+            .lock()
+            .map_err(|_| "Agent Gateway authorization state is unavailable".to_string())?
+            .clone();
+        if let Some(gateway_credential) = gateway_credential {
+            return RuntimeControlClient::create_peer_gateway_enrollment_with_server_certificate(
+                &context.server_url,
+                &gateway_credential,
+                context.deployment_id,
+                context.server_certificate_der.as_deref(),
+            )
+            .await;
+        }
         RuntimeControlClient::create_guest_gateway_enrollment_with_server_certificate(
             &context.server_url,
             &context.project_api_key,
@@ -883,12 +928,14 @@ pub async fn run(
         let authorization_observer = {
             let server_url = config.server_url.clone();
             let optimization = control.optimization.clone();
+            let device_pairing = control.device_pairing.clone();
             let monitor = monitor.clone();
             let runtime_roster_task = Arc::clone(&runtime_roster_task);
             Some(
                 Arc::new(move |summary: &relay::GatewayAuthorizationSummary| {
                     stop_runtime_roster_task(&runtime_roster_task);
                     mark_gateway_authorized(monitor.as_ref());
+                    device_pairing.set_gateway_credential(&summary.device_token);
                     if optimization
                         .configure_runtime_control(
                             &server_url,
@@ -909,13 +956,27 @@ pub async fn run(
                         return;
                     };
                     let gateway_id = summary.gateway_id.clone();
+                    let roster_device_pairing = device_pairing.clone();
                     let task = tokio::spawn(async move {
-                        if !publish_runtime_project_roster(&client, &gateway_id, &monitor).await {
+                        if !publish_runtime_project_roster(
+                            &client,
+                            &gateway_id,
+                            &monitor,
+                            &roster_device_pairing,
+                        )
+                        .await
+                        {
                             return;
                         }
                         loop {
                             tokio::time::sleep(RUNTIME_ROSTER_REFRESH_DELAY).await;
-                            if !publish_runtime_project_roster(&client, &gateway_id, &monitor).await
+                            if !publish_runtime_project_roster(
+                                &client,
+                                &gateway_id,
+                                &monitor,
+                                &roster_device_pairing,
+                            )
+                            .await
                             {
                                 return;
                             }
@@ -981,6 +1042,7 @@ async fn publish_runtime_project_roster(
     client: &RuntimeControlClient,
     gateway_id: &str,
     monitor: &RuntimeEventSender,
+    device_pairing: &DevicePairingController,
 ) -> bool {
     let Ok(Ok(configuration)) =
         tokio::time::timeout(Duration::from_secs(10), client.configuration()).await
@@ -1000,6 +1062,7 @@ async fn publish_runtime_project_roster(
     if primary.next().is_some() {
         return true;
     }
+    device_pairing.set_project_claimed(selected.project_id, selected.project_claimed);
     let _ = monitor.send(RuntimeEvent::IdentityChanged {
         project: Some(selected.project_slug.clone()),
         deployment: Some(selected.deployment.clone()),
@@ -1751,6 +1814,20 @@ mod tests {
                 .as_deref(),
             Some("https://dashboard.vifu.dev/pair#claim_token=synthetic-claim-token")
         );
+    }
+
+    #[test]
+    fn claimed_guest_opens_the_project_instead_of_reusing_the_claim_link() {
+        let controller = DevicePairingController::default();
+        let guest = guest_project();
+        restore_device_pairing(&controller, "https://api.vifu.dev", None, Some(&guest));
+
+        controller.set_project_claimed(guest.project_id, true);
+
+        assert!(controller
+            .external_guest_claim_url("https://dashboard.vifu.dev")
+            .unwrap()
+            .is_none());
     }
 
     #[test]

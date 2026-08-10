@@ -2257,6 +2257,7 @@ pub async fn get_agent_gateway_runtime_config(
             "projectId": project.project.id,
             "projectSlug": project.project.slug,
             "projectName": project.project.name,
+            "projectClaimed": project.project.owner_user_id.is_some(),
             "isPrimary": deployment.is_primary,
             "bindingIds": project.binding_ids,
             "policies": {
@@ -2725,6 +2726,29 @@ pub async fn create_guest_agent_gateway_enrollment(
         format!("guest:{}", key.project_id),
     )
     .await
+}
+
+pub async fn create_agent_gateway_peer_enrollment(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(deployment_id): Path<Uuid>,
+) -> Result<(StatusCode, Json<Value>), ApiError> {
+    let gateway_id = authenticated_agent_gateway(&state, &headers).await?;
+    let authorization = db::get_agent_gateway_authorization(&state.pool, &gateway_id).await?;
+    let deployment = db::list_runtime_deployments_for_gateway(&state.pool, &gateway_id)
+        .await?
+        .into_iter()
+        .find(|deployment| deployment.id == deployment_id)
+        .ok_or(ApiError::Forbidden)?;
+    let project = db::get_project(&state.pool, deployment.project_id).await?;
+    let owner_user_id = match project.project.owner_user_id.as_deref() {
+        Some(owner_user_id) if authorization.owner_user_id.as_deref() == Some(owner_user_id) => {
+            owner_user_id.to_string()
+        }
+        Some(_) => return Err(ApiError::Forbidden),
+        None => format!("guest:{}", project.project.id),
+    };
+    issue_agent_gateway_enrollment(&state, project, deployment, owner_user_id).await
 }
 
 pub async fn create_runtime_deployment_agent_gateway_enrollment(

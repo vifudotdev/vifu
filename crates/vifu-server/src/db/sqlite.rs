@@ -1001,7 +1001,7 @@ pub async fn claim_guest_project(
     owner_user_id: &str,
 ) -> Result<ProjectWithBindings, ApiError> {
     let mut transaction = pool.begin().await?;
-    let project_id = sqlx::query_scalar::<_, Uuid>(
+    let claimed_project_id = sqlx::query_scalar::<_, Uuid>(
         "UPDATE guest_projects
          SET claimed_by = $2, claimed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
          WHERE claim_token_hash = $1 AND claimed_at IS NULL
@@ -1011,8 +1011,28 @@ pub async fn claim_guest_project(
     .bind(claim_token_hash)
     .bind(owner_user_id)
     .fetch_optional(&mut *transaction)
-    .await?
-    .ok_or(ApiError::Unauthorized)?;
+    .await?;
+    let (project_id, newly_claimed) = match claimed_project_id {
+        Some(project_id) => (project_id, true),
+        None => {
+            let existing = sqlx::query_as::<_, (Uuid, Option<String>)>(
+                "SELECT project_id, claimed_by FROM guest_projects
+                 WHERE claim_token_hash = $1",
+            )
+            .bind(claim_token_hash)
+            .fetch_optional(&mut *transaction)
+            .await?
+            .ok_or(ApiError::Unauthorized)?;
+            if existing.1.as_deref() != Some(owner_user_id) {
+                return Err(ApiError::Unauthorized);
+            }
+            (existing.0, false)
+        }
+    };
+    if !newly_claimed {
+        transaction.commit().await?;
+        return get_project(pool, project_id).await;
+    }
     let updated = sqlx::query(
         "UPDATE projects
          SET owner_user_id = $2, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
@@ -1027,10 +1047,11 @@ pub async fn claim_guest_project(
             "guest project already has an owner".to_string(),
         ));
     }
+    let guest_owner_user_id = format!("guest:{project_id}");
     sqlx::query(
         "UPDATE agent_gateway_authorizations
          SET owner_user_id = $2
-         WHERE owner_user_id IS NULL
+         WHERE (owner_user_id IS NULL OR owner_user_id = $3)
            AND gateway_id IN (
              SELECT assignment.gateway_id
              FROM runtime_deployment_gateways AS assignment
@@ -1040,6 +1061,33 @@ pub async fn claim_guest_project(
     )
     .bind(project_id)
     .bind(owner_user_id)
+    .bind(&guest_owner_user_id)
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "UPDATE agent_gateway_credentials
+         SET owner_user_id = $2
+         WHERE owner_user_id = $3
+           AND gateway_id IN (
+             SELECT assignment.gateway_id
+             FROM runtime_deployment_gateways AS assignment
+             JOIN runtime_deployments AS deployment ON deployment.id = assignment.deployment_id
+             WHERE deployment.project_id = $1
+           )",
+    )
+    .bind(project_id)
+    .bind(owner_user_id)
+    .bind(&guest_owner_user_id)
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "UPDATE agent_gateway_enrollments
+         SET owner_user_id = $2
+         WHERE project_id = $1 AND owner_user_id = $3",
+    )
+    .bind(project_id)
+    .bind(owner_user_id)
+    .bind(&guest_owner_user_id)
     .execute(&mut *transaction)
     .await?;
     transaction.commit().await?;

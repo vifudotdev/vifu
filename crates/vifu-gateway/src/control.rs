@@ -129,6 +129,8 @@ pub struct RuntimeDeploymentConfiguration {
     pub project_id: Uuid,
     pub project_slug: String,
     pub project_name: String,
+    #[serde(default)]
+    pub project_claimed: bool,
     pub is_primary: bool,
     #[serde(default)]
     pub binding_ids: Vec<Uuid>,
@@ -349,6 +351,25 @@ impl RuntimeControlClient {
             .await
             .map_err(|error| format!("Guest device enrollment request failed: {error}"))?;
         decode_response(response, "Guest device enrollment").await
+    }
+
+    pub async fn create_peer_gateway_enrollment_with_server_certificate(
+        server_url: &str,
+        gateway_credential: &str,
+        deployment_id: Uuid,
+        server_certificate_der: Option<&[u8]>,
+    ) -> Result<GuestGatewayEnrollment, String> {
+        let url = server_endpoint_url(
+            server_url,
+            &format!("v1/agent-gateway/deployments/{deployment_id}/enrollments"),
+        )?;
+        let response = http_client(server_certificate_der)?
+            .post(url)
+            .bearer_auth(gateway_credential)
+            .send()
+            .await
+            .map_err(|error| format!("Gateway device enrollment request failed: {error}"))?;
+        decode_response(response, "Gateway device enrollment").await
     }
 
     pub async fn upload_traces(

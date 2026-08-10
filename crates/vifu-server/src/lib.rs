@@ -390,6 +390,10 @@ pub fn app(state: AppState) -> Router {
             "/v1/guest/agent-gateway-enrollments",
             post(api::create_guest_agent_gateway_enrollment),
         )
+        .route(
+            "/v1/agent-gateway/deployments/{deployment_id}/enrollments",
+            post(api::create_agent_gateway_peer_enrollment),
+        )
         .route("/v1/guest/claim", post(api::claim_guest_project))
         .route("/v1/admin/verify", get(api::verify_admin))
         .route(
@@ -1687,6 +1691,7 @@ mod tests {
         let created: Value = serde_json::from_slice(&body).unwrap();
         let project_id = created["project"]["id"].as_str().unwrap();
         let project_slug = created["project"]["slug"].as_str().unwrap();
+        let deployment_id = created["deployment"]["id"].as_str().unwrap();
         let api_key = created["apiKey"].as_str().unwrap();
         let claim_token = created["claimToken"].as_str().unwrap();
         assert!(api_key.starts_with("vifu_pk_"));
@@ -1733,11 +1738,27 @@ mod tests {
         assert_eq!(enrollment.status(), StatusCode::CREATED);
         let body = to_bytes(enrollment.into_body(), 64 * 1024).await.unwrap();
         let enrollment: Value = serde_json::from_slice(&body).unwrap();
-        assert!(enrollment["enrollmentToken"]
-            .as_str()
-            .unwrap()
-            .starts_with("vifu_ge_"));
+        let guest_enrollment_token = enrollment["enrollmentToken"].as_str().unwrap();
+        assert!(guest_enrollment_token.starts_with("vifu_ge_"));
         assert_eq!(enrollment["deployment"], "development");
+        let phone_gateway_credential =
+            "vifu_gw_dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
+        let guest_enrollment_hash =
+            crate::auth::hash_agent_gateway_enrollment(guest_enrollment_token, &api_key_pepper);
+        let phone_credential_hash =
+            crate::auth::hash_agent_gateway_credential(phone_gateway_credential, &api_key_pepper);
+        crate::db::consume_agent_gateway_enrollment(
+            &storage,
+            &guest_enrollment_hash,
+            "gateway-phone",
+            &phone_gateway_credential
+                .chars()
+                .take(20)
+                .collect::<String>(),
+            &phone_credential_hash,
+        )
+        .await
+        .unwrap();
 
         let runtime_config = guest_app
             .clone()
@@ -1791,6 +1812,43 @@ mod tests {
             .unwrap();
         assert_eq!(expired_guest_access.status(), StatusCode::FORBIDDEN);
 
+        let owned_enrollment = guest_app
+            .clone()
+            .oneshot(
+                Request::post(format!(
+                    "/v1/agent-gateway/deployments/{deployment_id}/enrollments"
+                ))
+                .header("authorization", format!("Bearer {gateway_credential}"))
+                .body(Body::empty())
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(owned_enrollment.status(), StatusCode::CREATED);
+        let body = to_bytes(owned_enrollment.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let owned_enrollment: Value = serde_json::from_slice(&body).unwrap();
+        let owned_enrollment_hash = crate::auth::hash_agent_gateway_enrollment(
+            owned_enrollment["enrollmentToken"].as_str().unwrap(),
+            &api_key_pepper,
+        );
+        assert_eq!(
+            crate::db::consume_agent_gateway_enrollment(
+                &storage,
+                &owned_enrollment_hash,
+                "gateway-phone",
+                &phone_gateway_credential
+                    .chars()
+                    .take(20)
+                    .collect::<String>(),
+                &phone_credential_hash,
+            )
+            .await
+            .unwrap(),
+            crate::db::AgentGatewayRegistration::Existing,
+        );
+
         let projects = guest_app
             .clone()
             .oneshot(
@@ -1807,6 +1865,7 @@ mod tests {
         assert_eq!(projects["projects"][0]["id"], project_id);
 
         let replayed = guest_app
+            .clone()
             .oneshot(
                 Request::post("/v1/guest/claim")
                     .header("authorization", format!("Vifu {owner_credential}"))
@@ -1816,7 +1875,13 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(replayed.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(replayed.status(), StatusCode::OK);
+
+        let claim_token_hash = crate::auth::hash_guest_claim_token(claim_token, &api_key_pepper);
+        assert!(matches!(
+            crate::db::claim_guest_project(&storage, &claim_token_hash, "different-owner").await,
+            Err(ApiError::Unauthorized)
+        ));
 
         match storage {
             Storage::Postgres(pool) => pool.close().await,
