@@ -165,7 +165,14 @@ pub(crate) async fn run(
                 } else {
                     match dashboard_url.as_deref() {
                         Some(url) => {
-                            let target = dashboard_target_url(url, &app);
+                            let target =
+                                match dashboard_open_target(url, &app, device_pairing.as_ref()) {
+                                    Ok(target) => target,
+                                    Err(error) => {
+                                        app.notice = Some(error);
+                                        continue;
+                                    }
+                                };
                             dashboard_opening = true;
                             let result_tx = dashboard_result_tx.clone();
                             std::mem::drop(tokio::spawn(async move {
@@ -240,6 +247,15 @@ pub(crate) async fn run(
         // the quit guard and header always reflect the routes actually in use.
         sync_override_state(&mut app, optimization.as_ref());
         app.project_dashboard_url = dashboard_url.as_deref().map(|base_url| {
+            if device_pairing.as_ref().is_some_and(|controller| {
+                controller
+                    .external_guest_claim_url(base_url)
+                    .ok()
+                    .flatten()
+                    .is_some()
+            }) {
+                return base_url.to_string();
+            }
             app.project.as_deref().map_or_else(
                 || base_url.to_string(),
                 |project| {
@@ -679,6 +695,21 @@ fn dashboard_target_url(base_url: &str, app: &App) -> String {
         .and_then(|project| dashboard_project_logs_url(base_url, project))
         .unwrap_or_else(|| base_url.to_string());
     append_invocation_query(&trace_base, trace_id, observation_id)
+}
+
+fn dashboard_open_target(
+    base_url: &str,
+    app: &App,
+    device_pairing: Option<&crate::gateway::DevicePairingController>,
+) -> Result<String, String> {
+    if let Some(claim_url) = device_pairing
+        .map(|controller| controller.external_guest_claim_url(base_url))
+        .transpose()?
+        .flatten()
+    {
+        return Ok(claim_url);
+    }
+    Ok(dashboard_target_url(base_url, app))
 }
 
 fn dashboard_project_url(base_url: &str, project: &str) -> Option<String> {

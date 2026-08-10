@@ -82,6 +82,7 @@ struct GuestPairingContext {
     server_url: String,
     server_certificate_der: Option<Vec<u8>>,
     project_api_key: String,
+    claim_token: String,
 }
 
 impl DevicePairingController {
@@ -102,8 +103,27 @@ impl DevicePairingController {
                 server_url: server_url.to_string(),
                 server_certificate_der: server_certificate_der.map(<[u8]>::to_vec),
                 project_api_key: guest.api_key.clone(),
+                claim_token: guest.claim_token.clone(),
             });
         }
+    }
+
+    pub(crate) fn external_guest_claim_url(
+        &self,
+        dashboard_url: &str,
+    ) -> Result<Option<String>, String> {
+        let context = self
+            .current_guest
+            .lock()
+            .map_err(|_| "Guest project state is unavailable".to_string())?
+            .clone();
+        let Some(context) = context else {
+            return Ok(None);
+        };
+        if same_web_origin(&context.server_url, dashboard_url) {
+            return Ok(None);
+        }
+        relay::guest_claim_url(dashboard_url, &context.claim_token).map(Some)
     }
 
     pub(crate) async fn create_enrollment(
@@ -124,6 +144,25 @@ impl DevicePairingController {
         )
         .await
     }
+}
+
+fn same_web_origin(left: &str, right: &str) -> bool {
+    fn origin(value: &str) -> Option<&str> {
+        let value = value.trim();
+        let scheme_end = value.find("://")?;
+        if !matches!(&value[..scheme_end], "http" | "https") {
+            return None;
+        }
+        let authority_start = scheme_end + 3;
+        let authority_end = value[authority_start..]
+            .find(['/', '?', '#'])
+            .map_or(value.len(), |offset| authority_start + offset);
+        (authority_end > authority_start).then_some(&value[..authority_end])
+    }
+
+    origin(left)
+        .zip(origin(right))
+        .is_some_and(|(left, right)| left.eq_ignore_ascii_case(right))
 }
 
 fn restore_device_pairing(
@@ -1657,10 +1696,8 @@ mod tests {
         )
     }
 
-    #[test]
-    fn persisted_guest_restores_device_pairing_context() {
-        let controller = DevicePairingController::default();
-        let guest = vifu_gateway::session::GuestProjectSummary {
+    fn guest_project() -> vifu_gateway::session::GuestProjectSummary {
+        vifu_gateway::session::GuestProjectSummary {
             project_id: Uuid::nil(),
             project_slug: "guest-test".to_string(),
             deployment_id: Uuid::nil(),
@@ -1669,7 +1706,13 @@ mod tests {
             api_key: "synthetic-project-key".to_string(),
             claim_token: "synthetic-claim-token".to_string(),
             expires_at: "2099-01-01T00:00:00Z".to_string(),
-        };
+        }
+    }
+
+    #[test]
+    fn persisted_guest_restores_device_pairing_context() {
+        let controller = DevicePairingController::default();
+        let guest = guest_project();
 
         restore_device_pairing(
             &controller,
@@ -1684,13 +1727,42 @@ mod tests {
                 current.server_url,
                 current.server_certificate_der,
                 current.project_api_key,
+                current.claim_token,
             ),
             (
                 "https://192.0.2.20:6790".to_string(),
                 Some(vec![1, 2, 3]),
                 "synthetic-project-key".to_string(),
+                "synthetic-claim-token".to_string(),
             )
         );
+    }
+
+    #[test]
+    fn external_dashboard_uses_the_guest_claim_link() {
+        let controller = DevicePairingController::default();
+        let guest = guest_project();
+        restore_device_pairing(&controller, "https://api.vifu.dev", None, Some(&guest));
+
+        assert_eq!(
+            controller
+                .external_guest_claim_url("https://dashboard.vifu.dev")
+                .unwrap()
+                .as_deref(),
+            Some("https://dashboard.vifu.dev/pair#claim_token=synthetic-claim-token")
+        );
+    }
+
+    #[test]
+    fn same_origin_dashboard_keeps_the_local_project_link() {
+        let controller = DevicePairingController::default();
+        let guest = guest_project();
+        restore_device_pairing(&controller, "https://192.0.2.20:6790", None, Some(&guest));
+
+        assert!(controller
+            .external_guest_claim_url("https://192.0.2.20:6790/console")
+            .unwrap()
+            .is_none());
     }
 
     #[test]

@@ -762,6 +762,7 @@ impl App {
                         !self.project_configured_sources.contains(*key)
                             && !lane.configured
                             && lane.active.is_empty()
+                            && lane.history.is_empty()
                     })
                     .map(|(key, _)| key.clone())
                     .collect::<Vec<_>>();
@@ -822,6 +823,7 @@ impl App {
                         !self.project_configured_sources.contains(*key)
                             && !self.configured_sources.contains(*key)
                             && lane.active.is_empty()
+                            && lane.history.is_empty()
                     })
                     .map(|(key, _)| key.clone())
                     .collect::<Vec<_>>();
@@ -3072,5 +3074,42 @@ mod tests {
 
         assert!(!app.lanes.contains_key("agent-000\0chat"));
         assert!(app.lanes.contains_key("agent-001\0chat"));
+    }
+
+    #[test]
+    fn inventory_refresh_preserves_completed_traces_for_disconnected_agents() {
+        let now = Instant::now();
+        let mut app = App::default();
+        let invocation_id = Uuid::new_v4();
+        app.apply(RuntimeEvent::AgentsRegistered(vec![registration(0)]), now);
+        app.apply(
+            RuntimeEvent::InvocationStarted {
+                invocation_id,
+                agent_id: "agent-000".to_string(),
+                agent_name: "Agent 000".to_string(),
+                source_agent_id: "agent-000".to_string(),
+                capability: "chat".to_string(),
+                provider: "local-qwen".to_string(),
+                model: "qwen2.5:2b".to_string(),
+                started_unix_ms: 1,
+            },
+            now,
+        );
+        app.apply(
+            RuntimeEvent::InvocationFinished {
+                invocation_id,
+                elapsed: Duration::from_secs(1),
+                error: None,
+                terminal: RuntimeTerminal::Delivered,
+            },
+            now,
+        );
+
+        app.apply(RuntimeEvent::AgentsRegistered(Vec::new()), now);
+
+        assert!(app
+            .lanes
+            .values()
+            .any(|lane| lane.trace(invocation_id).is_some()));
     }
 }
