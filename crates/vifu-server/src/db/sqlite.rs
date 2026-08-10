@@ -1029,23 +1029,21 @@ pub async fn claim_guest_project(
             (existing.0, false)
         }
     };
-    if !newly_claimed {
-        transaction.commit().await?;
-        return get_project(pool, project_id).await;
-    }
-    let updated = sqlx::query(
-        "UPDATE projects
-         SET owner_user_id = $2, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-         WHERE id = $1 AND owner_user_id IS NULL",
-    )
-    .bind(project_id)
-    .bind(owner_user_id)
-    .execute(&mut *transaction)
-    .await?;
-    if updated.rows_affected() != 1 {
-        return Err(ApiError::Conflict(
-            "guest project already has an owner".to_string(),
-        ));
+    if newly_claimed {
+        let updated = sqlx::query(
+            "UPDATE projects
+             SET owner_user_id = $2, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+             WHERE id = $1 AND owner_user_id IS NULL",
+        )
+        .bind(project_id)
+        .bind(owner_user_id)
+        .execute(&mut *transaction)
+        .await?;
+        if updated.rows_affected() != 1 {
+            return Err(ApiError::Conflict(
+                "guest project already has an owner".to_string(),
+            ));
+        }
     }
     let guest_owner_user_id = format!("guest:{project_id}");
     sqlx::query(

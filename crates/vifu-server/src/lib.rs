@@ -1864,6 +1864,33 @@ mod tests {
         assert_eq!(projects["projects"].as_array().unwrap().len(), 1);
         assert_eq!(projects["projects"][0]["id"], project_id);
 
+        let project_uuid = uuid::Uuid::parse_str(project_id).unwrap();
+        let legacy_guest_owner = format!("guest:{project_uuid}");
+        match &storage {
+            Storage::Postgres(pool) => {
+                sqlx::query(
+                    "UPDATE agent_gateway_credentials SET owner_user_id = $2
+                     WHERE gateway_id = $1",
+                )
+                .bind("gateway-phone")
+                .bind(&legacy_guest_owner)
+                .execute(pool)
+                .await
+                .unwrap();
+            }
+            Storage::Sqlite(pool) => {
+                sqlx::query(
+                    "UPDATE agent_gateway_credentials SET owner_user_id = $2
+                     WHERE gateway_id = $1",
+                )
+                .bind("gateway-phone")
+                .bind(&legacy_guest_owner)
+                .execute(pool)
+                .await
+                .unwrap();
+            }
+        }
+
         let replayed = guest_app
             .clone()
             .oneshot(
@@ -1876,6 +1903,23 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(replayed.status(), StatusCode::OK);
+        let repaired_owner = match &storage {
+            Storage::Postgres(pool) => sqlx::query_scalar::<_, Option<String>>(
+                "SELECT owner_user_id FROM agent_gateway_credentials WHERE gateway_id = $1",
+            )
+            .bind("gateway-phone")
+            .fetch_one(pool)
+            .await
+            .unwrap(),
+            Storage::Sqlite(pool) => sqlx::query_scalar::<_, Option<String>>(
+                "SELECT owner_user_id FROM agent_gateway_credentials WHERE gateway_id = $1",
+            )
+            .bind("gateway-phone")
+            .fetch_one(pool)
+            .await
+            .unwrap(),
+        };
+        assert_eq!(repaired_owner.as_deref(), Some("user-guest-owner"));
 
         let claim_token_hash = crate::auth::hash_guest_claim_token(claim_token, &api_key_pepper);
         assert!(matches!(
