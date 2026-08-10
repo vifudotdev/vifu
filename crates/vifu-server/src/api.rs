@@ -2741,8 +2741,21 @@ pub async fn create_agent_gateway_peer_enrollment(
         .find(|deployment| deployment.id == deployment_id)
         .ok_or(ApiError::Forbidden)?;
     let project = db::get_project(&state.pool, deployment.project_id).await?;
+    let guest_owner_user_id = format!("guest:{}", project.project.id);
     let owner_user_id = match project.project.owner_user_id.as_deref() {
         Some(owner_user_id) if authorization.owner_user_id.as_deref() == Some(owner_user_id) => {
+            owner_user_id.to_string()
+        }
+        Some(owner_user_id)
+            if authorization.owner_user_id.is_none()
+                || authorization.owner_user_id.as_deref() == Some(guest_owner_user_id.as_str()) =>
+        {
+            db::repair_guest_project_gateway_ownership(
+                &state.pool,
+                project.project.id,
+                owner_user_id,
+            )
+            .await?;
             owner_user_id.to_string()
         }
         Some(_) => return Err(ApiError::Forbidden),

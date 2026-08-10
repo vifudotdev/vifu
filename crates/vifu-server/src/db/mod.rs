@@ -187,6 +187,7 @@ dispatch! {
     pub async fn count_active_guest_projects(storage: &Storage) -> Result<i64, ApiError>;
     pub async fn prune_expired_guest_projects(storage: &Storage) -> Result<u64, ApiError>;
     pub async fn claim_guest_project(storage: &Storage, claim_token_hash: &[u8], owner_user_id: &str) -> Result<ProjectWithBindings, ApiError>;
+    pub async fn repair_guest_project_gateway_ownership(storage: &Storage, project_id: Uuid, owner_user_id: &str) -> Result<(), ApiError>;
     pub async fn get_project_runtime_extension(storage: &Storage, project_id: Uuid) -> Result<Option<ProjectRuntimeExtension>, ApiError>;
     pub async fn set_project_runtime_extension(storage: &Storage, project_id: Uuid, extension_id: &str, enabled: bool, active_release_ref: Option<&str>, metadata: &Value) -> Result<ProjectRuntimeExtension, ApiError>;
     pub async fn delete_project_runtime_extension(storage: &Storage, project_id: Uuid) -> Result<(), ApiError>;

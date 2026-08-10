@@ -1812,6 +1812,53 @@ mod tests {
             .unwrap();
         assert_eq!(expired_guest_access.status(), StatusCode::FORBIDDEN);
 
+        // Projects claimed before ownership migration shipped can still have
+        // unowned desktop authorization metadata and guest-owned phone
+        // credentials. Creating a peer enrollment must repair that state
+        // without requiring the user to replay the claim URL.
+        let project_uuid = uuid::Uuid::parse_str(project_id).unwrap();
+        let legacy_guest_owner = format!("guest:{project_uuid}");
+        match &storage {
+            Storage::Postgres(pool) => {
+                sqlx::query(
+                    "UPDATE agent_gateway_authorizations SET owner_user_id = NULL
+                     WHERE gateway_id = $1",
+                )
+                .bind("gateway-guest")
+                .execute(pool)
+                .await
+                .unwrap();
+                sqlx::query(
+                    "UPDATE agent_gateway_credentials SET owner_user_id = $2
+                     WHERE gateway_id = $1",
+                )
+                .bind("gateway-phone")
+                .bind(&legacy_guest_owner)
+                .execute(pool)
+                .await
+                .unwrap();
+            }
+            Storage::Sqlite(pool) => {
+                sqlx::query(
+                    "UPDATE agent_gateway_authorizations SET owner_user_id = NULL
+                     WHERE gateway_id = $1",
+                )
+                .bind("gateway-guest")
+                .execute(pool)
+                .await
+                .unwrap();
+                sqlx::query(
+                    "UPDATE agent_gateway_credentials SET owner_user_id = $2
+                     WHERE gateway_id = $1",
+                )
+                .bind("gateway-phone")
+                .bind(&legacy_guest_owner)
+                .execute(pool)
+                .await
+                .unwrap();
+            }
+        }
+
         let owned_enrollment = guest_app
             .clone()
             .oneshot(
@@ -1864,8 +1911,6 @@ mod tests {
         assert_eq!(projects["projects"].as_array().unwrap().len(), 1);
         assert_eq!(projects["projects"][0]["id"], project_id);
 
-        let project_uuid = uuid::Uuid::parse_str(project_id).unwrap();
-        let legacy_guest_owner = format!("guest:{project_uuid}");
         match &storage {
             Storage::Postgres(pool) => {
                 sqlx::query(

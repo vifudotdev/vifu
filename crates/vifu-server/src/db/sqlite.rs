@@ -1092,6 +1092,59 @@ pub async fn claim_guest_project(
     get_project(pool, project_id).await
 }
 
+pub async fn repair_guest_project_gateway_ownership(
+    pool: &SqlitePool,
+    project_id: Uuid,
+    owner_user_id: &str,
+) -> Result<(), ApiError> {
+    let mut transaction = pool.begin().await?;
+    let guest_owner_user_id = format!("guest:{project_id}");
+    sqlx::query(
+        "UPDATE agent_gateway_authorizations
+         SET owner_user_id = $2
+         WHERE (owner_user_id IS NULL OR owner_user_id = $3)
+           AND gateway_id IN (
+             SELECT assignment.gateway_id
+             FROM runtime_deployment_gateways AS assignment
+             JOIN runtime_deployments AS deployment ON deployment.id = assignment.deployment_id
+             WHERE deployment.project_id = $1
+           )",
+    )
+    .bind(project_id)
+    .bind(owner_user_id)
+    .bind(&guest_owner_user_id)
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "UPDATE agent_gateway_credentials
+         SET owner_user_id = $2
+         WHERE owner_user_id = $3
+           AND gateway_id IN (
+             SELECT assignment.gateway_id
+             FROM runtime_deployment_gateways AS assignment
+             JOIN runtime_deployments AS deployment ON deployment.id = assignment.deployment_id
+             WHERE deployment.project_id = $1
+           )",
+    )
+    .bind(project_id)
+    .bind(owner_user_id)
+    .bind(&guest_owner_user_id)
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "UPDATE agent_gateway_enrollments
+         SET owner_user_id = $2
+         WHERE project_id = $1 AND owner_user_id = $3",
+    )
+    .bind(project_id)
+    .bind(owner_user_id)
+    .bind(&guest_owner_user_id)
+    .execute(&mut *transaction)
+    .await?;
+    transaction.commit().await?;
+    Ok(())
+}
+
 pub async fn get_project_runtime_extension(
     pool: &SqlitePool,
     project_id: Uuid,
