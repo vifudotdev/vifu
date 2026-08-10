@@ -40,8 +40,8 @@ import {
   type TraceStatusGroup,
 } from "../trace-model";
 import { decodeTracePayload } from "../trace-payload";
+import { traceDateWindowChanged } from "../trace-window";
 import type { EndpointTrace, TraceScore, TraceSpan, TraceUsage } from "../types";
-import { RuntimeComparisonHistory } from "./runtime-comparison-history";
 
 const TRACE_PAGE_SIZE = 100;
 const ROW_HEIGHT = 42;
@@ -113,8 +113,13 @@ export function RuntimeTraceWorkbench({ projectId, projectSlug, traces: initialT
   const selectedTraceIdRef = useRef(selectedTraceId);
   const initialPageLoadedRef = useRef(false);
   const dateWindow = useMemo(() => localDateWindow(dateFrom, dateTo), [dateFrom, dateTo]);
+  const previousDateWindowRef = useRef(dateWindow);
 
   useEffect(() => {
+    const previousDateWindow = previousDateWindowRef.current;
+    previousDateWindowRef.current = dateWindow;
+    if (!traceDateWindowChanged(previousDateWindow, dateWindow)) return;
+
     tracesRef.current = [];
     pausedTracesRef.current = [];
     pausedRef.current = false;
@@ -568,8 +573,6 @@ export function RuntimeTraceWorkbench({ projectId, projectSlug, traces: initialT
           <div><dt>Unknown</dt><dd>{statusCounts.unknown}</dd></div>
         </dl>
       </header>
-
-      <RuntimeComparisonHistory projectId={projectId} projectSlug={projectSlug} />
 
       <div className="trace-explorer-toolbar">
         <label className="trace-explorer-search">
