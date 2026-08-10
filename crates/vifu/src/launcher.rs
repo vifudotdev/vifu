@@ -5,6 +5,7 @@ use std::time::Duration;
 
 use tokio::sync::watch;
 use tracing_subscriber::EnvFilter;
+use vifu_gateway::control::RuntimeControlClient;
 use vifu_server::config::Config as ServerConfig;
 
 use crate::cli::{help_text, Command, Options};
@@ -228,7 +229,7 @@ async fn run_remote_server_only(
     open_browser: bool,
 ) -> Result<(), String> {
     let server_address = config.server_address()?.to_string();
-    let dashboard_url = config.dashboard_url();
+    let dashboard_url = remote_dashboard_url(&config).await;
     if tui::should_run() {
         let (monitor_tx, monitor_rx) = runtime_event_channel();
         let credential = RemoteMonitorCredential::Static(remote_monitor_credential()?);
@@ -677,7 +678,7 @@ fn runtime_stage(stage: vifu_gateway::relay::ProviderStage) -> RuntimeStage {
 async fn run_gateway_only_tui(config: LoadedRuntimeConfig) -> Result<(), String> {
     let gateway_options = config.gateway_options()?;
     let server_address = gateway_options.server_url.clone();
-    let dashboard_url = config.dashboard_url();
+    let dashboard_url = remote_dashboard_url(&config).await;
     let credential = match configured_monitor_credential()? {
         Some(credential) => RemoteMonitorCredential::Static(credential),
         None => {
@@ -729,6 +730,15 @@ async fn run_gateway_only_tui(config: LoadedRuntimeConfig) -> Result<(), String>
             Err(format!("Vifu TUI failed: {error}"))
         }
         SingleRuntimeOutcome::Role(result) => join_result("Vifu Agent Gateway", result),
+    }
+}
+
+async fn remote_dashboard_url(config: &LoadedRuntimeConfig) -> Option<String> {
+    let fallback = config.dashboard_url();
+    let server_address = config.server_address().ok()?;
+    match RuntimeControlClient::discover_dashboard_url(server_address).await {
+        Ok(Some(url)) => Some(url),
+        Ok(None) | Err(_) => fallback,
     }
 }
 

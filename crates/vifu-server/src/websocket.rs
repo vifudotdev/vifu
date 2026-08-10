@@ -634,7 +634,10 @@ async fn authorize_gateway_machine(
                     enrollment_id: None,
                 });
             }
-        } else {
+        } else if !can_recover_missing_guest_token(
+            state.config.guest_bootstrap_enabled,
+            current.owner_user_id.as_deref(),
+        ) {
             return pending_pairing(state, machine_id).await;
         }
     }
@@ -656,6 +659,10 @@ async fn authorize_gateway_machine(
         device_token: Some(issued.raw),
         enrollment_id,
     })
+}
+
+fn can_recover_missing_guest_token(guest_bootstrap_enabled: bool, owner: Option<&str>) -> bool {
+    guest_bootstrap_enabled && owner.is_none()
 }
 
 fn is_runtime_distribution_id(value: &str) -> bool {
@@ -997,8 +1004,9 @@ mod tests {
     use vifu_gateway::session::SessionSummary;
 
     use super::{
-        authorize_gateway_machine, decode_command, discovered_provider_config, encode_command,
-        gateway_pairing_url, reconcile_project_agents, GatewayAuthorizationOutcome,
+        authorize_gateway_machine, can_recover_missing_guest_token, decode_command,
+        discovered_provider_config, encode_command, gateway_pairing_url, reconcile_project_agents,
+        GatewayAuthorizationOutcome,
     };
     use crate::auth::hash_api_key;
     use crate::config::Config;
@@ -1360,6 +1368,49 @@ mod tests {
                 .unwrap(),
             GatewayAuthorizationOutcome::Authorized {
                 device_token: None,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn only_unclaimed_guest_authorizations_can_recover_without_a_device_token() {
+        assert!(can_recover_missing_guest_token(true, None));
+        assert!(!can_recover_missing_guest_token(false, None));
+        assert!(!can_recover_missing_guest_token(
+            true,
+            Some("project-owner")
+        ));
+    }
+
+    #[tokio::test]
+    async fn unclaimed_guest_machine_recovers_a_missing_device_token() {
+        let Some(pool) = maybe_test_pool().await else {
+            return;
+        };
+        let mut config = Config::from_env().unwrap();
+        config.guest_bootstrap_enabled = true;
+        let state = state_with_storage(config, pool);
+        let machine = MachineIdentity::generate().unwrap();
+        db::upsert_agent_gateway_machine(&state.pool, &machine.machine_id, &machine.public_key)
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            authorize_gateway_machine(&state, &machine.machine_id, None, None)
+                .await
+                .unwrap(),
+            GatewayAuthorizationOutcome::Authorized {
+                device_token: Some(_),
+                ..
+            }
+        ));
+        assert!(matches!(
+            authorize_gateway_machine(&state, &machine.machine_id, None, None)
+                .await
+                .unwrap(),
+            GatewayAuthorizationOutcome::Authorized {
+                device_token: Some(_),
                 ..
             }
         ));

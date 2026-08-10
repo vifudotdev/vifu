@@ -69,9 +69,11 @@ access.
 A headless Gateway does not need a monitor key. A local Guest Gateway gives its
 project key to the TUI after bootstrap.
 
-`server.address` is the Server origin for the API and Dashboard. Press `B` to
-open this address. A local Server serves the embedded Console. A self-hosted or
-cloud Server can attach an authenticated Dashboard to the same origin.
+`server.address` is the Server API origin. Press `B` to open the Dashboard URL
+reported by that Server. A local Server serves the embedded Console from the
+same origin. A self-hosted or cloud Server can report a separate authenticated
+Dashboard origin. Older Servers that do not report one keep the same-origin
+behavior.
 
 ## Enroll a Gateway
 

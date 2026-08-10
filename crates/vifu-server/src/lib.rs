@@ -921,6 +921,9 @@ mod tests {
     async fn status_reports_the_configured_service_version() {
         let mut config = Config::from_env().unwrap();
         config.apply_service_version("0.1.7").unwrap();
+        config
+            .apply_public_dashboard_url("https://dashboard.example.com")
+            .unwrap();
         let (storage, path) = temp_sqlite_storage("status-version").await;
         let response = app(state_with_storage(config, storage.clone()))
             .oneshot(Request::get("/v1/status").body(Body::empty()).unwrap())
@@ -930,6 +933,7 @@ mod tests {
         close_temp_storage(storage, path).await;
 
         assert_eq!(payload["version"], "0.1.7");
+        assert_eq!(payload["dashboardUrl"], "https://dashboard.example.com");
     }
 
     #[test]

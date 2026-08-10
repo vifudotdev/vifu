@@ -473,6 +473,7 @@ mod tests {
             guest_project_ttl: Duration::from_secs(24 * 60 * 60),
             guest_project_limit: 8,
             server_url: Some(format!("http://{addr}")),
+            public_dashboard_url: None,
             dashboard_addr: None,
             tls: None,
         }

@@ -1158,6 +1158,15 @@ fn pairing_authorization_url(server_url: &str, authorization_url: &str) -> Resul
         .map_err(|_| "Gateway pairing URL is invalid".to_string())
 }
 
+fn gateway_protocol_error(command: &AgentGatewayCommand) -> Option<String> {
+    let AgentGatewayCommand::Error { code, message, .. } = command else {
+        return None;
+    };
+    Some(format!(
+        "server rejected the Agent Gateway ({code}): {message}"
+    ))
+}
+
 fn apply_guest_project(
     runtime: &AgentGatewayRuntime<'_>,
     session: &mut SessionSummary,
@@ -1972,6 +1981,9 @@ async fn run_connection(
             auth_url,
             retry_after: Duration::from_millis(retry_after_ms),
         });
+    }
+    if let Some(error) = gateway_protocol_error(&welcome) {
+        return Err(error.into());
     }
     let AgentGatewayCommand::Welcome {
         gateway_id,
@@ -3325,16 +3337,16 @@ mod tests {
     use super::{
         agent_gateway_error, agent_gateway_websocket_url, decode_command,
         dispatch_preflight_failure, embedded_runtime_telemetry_command, encode_command,
-        enqueue_telemetry_batch, expire_embedded_runtime_traces, guest_claim_url,
-        handle_telemetry_flush_result, observe_capture_dropped, pairing_authorization_url,
-        parse_proc_kib_value, queue_error, record_embedded_runtime_io, resolve_provider,
-        runtime_profile_name, safe_observer_error, safe_trace_telemetry, sanitize_error,
-        trigger_telemetry_flush, try_capture, write_terminal_line, AgentGatewayProvider,
-        EmbeddedRuntimeMonitor, GatewayCaptureEvent, GatewayInvocationTerminal,
-        GatewayOutputPolicy, GatewayRuntimeEvent, InProcessGatewayProvider, InvocationDelivery,
-        InvocationTelemetry, OpenClawGatewayProvider, PendingTelemetryBatch, RuntimeControlClient,
-        SessionRouteOverrides, TelemetryBacklogState, EMBEDDED_TRACE_RETENTION,
-        MAX_PENDING_TELEMETRY_BATCHES,
+        enqueue_telemetry_batch, expire_embedded_runtime_traces, gateway_protocol_error,
+        guest_claim_url, handle_telemetry_flush_result, observe_capture_dropped,
+        pairing_authorization_url, parse_proc_kib_value, queue_error, record_embedded_runtime_io,
+        resolve_provider, runtime_profile_name, safe_observer_error, safe_trace_telemetry,
+        sanitize_error, trigger_telemetry_flush, try_capture, write_terminal_line,
+        AgentGatewayProvider, EmbeddedRuntimeMonitor, GatewayCaptureEvent,
+        GatewayInvocationTerminal, GatewayOutputPolicy, GatewayRuntimeEvent,
+        InProcessGatewayProvider, InvocationDelivery, InvocationTelemetry, OpenClawGatewayProvider,
+        PendingTelemetryBatch, RuntimeControlClient, SessionRouteOverrides, TelemetryBacklogState,
+        EMBEDDED_TRACE_RETENTION, MAX_PENDING_TELEMETRY_BATCHES,
     };
     use crate::control::TraceObservationUploadError;
     use crate::gateway_frame;
@@ -4463,6 +4475,23 @@ mod tests {
         assert_eq!(
             agent_gateway_websocket_url("https://runtime.example.com/api/").unwrap(),
             "wss://runtime.example.com/api/v1/agent-gateway/connect"
+        );
+    }
+
+    #[test]
+    fn gateway_protocol_errors_keep_the_server_reason() {
+        let command = AgentGatewayCommand::Error {
+            request_id: None,
+            channel_id: None,
+            code: "PROTOCOL_ERROR".to_string(),
+            message: "signature audience does not match".to_string(),
+        };
+
+        let error = gateway_protocol_error(&command).unwrap();
+
+        assert_eq!(
+            error,
+            "server rejected the Agent Gateway (PROTOCOL_ERROR): signature audience does not match"
         );
     }
 

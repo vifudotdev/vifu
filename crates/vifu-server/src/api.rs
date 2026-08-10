@@ -71,6 +71,8 @@ struct StatusResponse {
     mode: DeploymentMode,
     capabilities: Capabilities,
     agent_gateways: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    dashboard_url: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -98,6 +100,7 @@ pub async fn status(State(state): State<AppState>) -> Result<Json<impl Serialize
         mode: state.config.deployment_mode,
         capabilities,
         agent_gateways: state.relay.connection_count().await,
+        dashboard_url: state.config.public_dashboard_url.clone(),
     }))
 }
 

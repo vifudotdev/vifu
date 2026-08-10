@@ -35,6 +35,7 @@ pub struct Config {
     pub guest_project_ttl: Duration,
     pub guest_project_limit: u32,
     pub server_url: Option<String>,
+    pub public_dashboard_url: Option<String>,
     pub dashboard_addr: Option<String>,
     pub tls: Option<ServerTlsConfig>,
 }
@@ -208,6 +209,30 @@ impl Config {
         Ok(())
     }
 
+    pub fn apply_public_dashboard_url(
+        &mut self,
+        dashboard_url: impl Into<String>,
+    ) -> Result<(), String> {
+        let dashboard_url = dashboard_url.into();
+        let url = reqwest::Url::parse(dashboard_url.trim())
+            .map_err(|error| format!("public Dashboard URL is invalid: {error}"))?;
+        if url.scheme() != "https"
+            || url.host_str().is_none()
+            || !url.username().is_empty()
+            || url.password().is_some()
+            || url.query().is_some()
+            || url.fragment().is_some()
+            || url.path() != "/"
+        {
+            return Err(
+                "public Dashboard URL must be an HTTPS origin without credentials, a path, query, or fragment"
+                    .to_string(),
+            );
+        }
+        self.public_dashboard_url = Some(dashboard_url.trim_end_matches('/').to_string());
+        Ok(())
+    }
+
     pub fn apply_dashboard_addr(&mut self, address: impl Into<String>) -> Result<(), String> {
         let address = address.into();
         let address = address.trim();
@@ -290,7 +315,8 @@ impl Config {
         );
         let access_token_authority = access_token_authority(&mut lookup)?;
 
-        Ok(Self {
+        let public_dashboard_url = configured_value(&mut lookup, "VIFU_PUBLIC_DASHBOARD_URL")?;
+        let mut config = Self {
             addr,
             deployment_mode,
             service_version: env!("CARGO_PKG_VERSION").to_string(),
@@ -335,9 +361,14 @@ impl Config {
             guest_project_ttl: Duration::from_secs(7 * 24 * 60 * 60),
             guest_project_limit: 10_000,
             server_url: None,
+            public_dashboard_url: None,
             dashboard_addr: None,
             tls: None,
-        })
+        };
+        if let Some(public_dashboard_url) = public_dashboard_url {
+            config.apply_public_dashboard_url(public_dashboard_url)?;
+        }
+        Ok(config)
     }
 }
 
@@ -543,6 +574,34 @@ mod tests {
             config.provider_secret_key
         );
         assert_ne!(config.api_key_pepper, config.provider_secret_key);
+        assert!(config.public_dashboard_url.is_none());
+    }
+
+    #[test]
+    fn reads_a_separate_public_dashboard_origin() {
+        let config = Config::from_lookup(|key| match key {
+            "VIFU_PUBLIC_DASHBOARD_URL" => Some("https://dashboard.example.com".to_string()),
+            _ => None,
+        })
+        .unwrap();
+
+        assert_eq!(
+            config.public_dashboard_url.as_deref(),
+            Some("https://dashboard.example.com")
+        );
+    }
+
+    #[test]
+    fn rejects_a_public_dashboard_url_with_a_path() {
+        let error = Config::from_lookup(|key| match key {
+            "VIFU_PUBLIC_DASHBOARD_URL" => {
+                Some("https://dashboard.example.com/project".to_string())
+            }
+            _ => None,
+        })
+        .unwrap_err();
+
+        assert!(error.contains("public Dashboard URL"));
     }
 
     #[test]

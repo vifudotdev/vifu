@@ -79,6 +79,13 @@ pub struct GatewayPairing {
     pub pairing_terminal_qr: Option<String>,
 }
 
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct ServerStatus {
+    #[serde(default)]
+    dashboard_url: Option<String>,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct GatewayRuntimeConfiguration {
@@ -205,6 +212,19 @@ pub struct RuntimeControlClient {
 }
 
 impl RuntimeControlClient {
+    pub async fn discover_dashboard_url(server_url: &str) -> Result<Option<String>, String> {
+        let url = server_endpoint_url(server_url, "v1/status")?;
+        let response = http_client(None)?
+            .get(url)
+            .send()
+            .await
+            .map_err(|error| format!("server status request failed: {error}"))?;
+        let dashboard_url = decode_response::<ServerStatus>(response, "server status")
+            .await?
+            .dashboard_url;
+        dashboard_url.map(validate_dashboard_url).transpose()
+    }
+
     pub fn new(server_url: &str, credential: impl Into<String>) -> Result<Self, String> {
         Self::new_with_server_certificate(server_url, credential, None)
     }
@@ -468,6 +488,21 @@ impl RuntimeControlClient {
     }
 }
 
+fn validate_dashboard_url(value: String) -> Result<String, String> {
+    let url = Url::parse(value.trim())
+        .map_err(|_| "server returned an invalid Dashboard URL".to_string())?;
+    if !matches!(url.scheme(), "http" | "https")
+        || url.host_str().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return Err("server returned an invalid Dashboard URL".to_string());
+    }
+    Ok(value.trim_end_matches('/').to_string())
+}
+
 fn http_client(server_certificate_der: Option<&[u8]>) -> Result<reqwest::Client, String> {
     let mut builder = reqwest::Client::builder();
     if let Some(der) = server_certificate_der {
@@ -543,6 +578,7 @@ fn server_endpoint_url(server_url: &str, endpoint: &str) -> Result<Url, String> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     #[test]
     fn builds_control_urls_beside_the_gateway_websocket() {
@@ -577,6 +613,55 @@ mod tests {
         .unwrap();
 
         assert_eq!(enrollment.enrollment_id, None);
+    }
+
+    #[test]
+    fn server_status_accepts_a_separate_dashboard_origin() {
+        let status: ServerStatus = serde_json::from_value(serde_json::json!({
+            "service": "vifu-server",
+            "status": "ok",
+            "dashboardUrl": "https://dashboard.example.com"
+        }))
+        .unwrap();
+
+        assert_eq!(
+            status.dashboard_url.as_deref(),
+            Some("https://dashboard.example.com")
+        );
+        assert_eq!(
+            validate_dashboard_url(status.dashboard_url.unwrap()).unwrap(),
+            "https://dashboard.example.com"
+        );
+    }
+
+    #[test]
+    fn dashboard_discovery_rejects_credentials() {
+        assert!(validate_dashboard_url("https://user@example.com".to_string()).is_err());
+    }
+
+    #[tokio::test]
+    async fn discovers_the_dashboard_from_server_status() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = vec![0; 2_048];
+            let size = socket.read(&mut request).await.unwrap();
+            assert!(String::from_utf8_lossy(&request[..size]).starts_with("GET /v1/status "));
+            let body = r#"{"dashboardUrl":"https://dashboard.example.com"}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+        });
+
+        let dashboard = RuntimeControlClient::discover_dashboard_url(&format!("http://{address}"))
+            .await
+            .unwrap();
+        server.await.unwrap();
+
+        assert_eq!(dashboard.as_deref(), Some("https://dashboard.example.com"));
     }
 
     #[test]
