@@ -87,7 +87,7 @@ struct ServerStatus {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
 pub struct GatewayRuntimeConfiguration {
     pub gateway_id: String,
     pub deployments: Vec<RuntimeDeploymentConfiguration>,
@@ -122,7 +122,7 @@ pub struct RuntimeProjectAgent {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
 pub struct RuntimeDeploymentConfiguration {
     pub deployment_id: Uuid,
     pub deployment: String,
@@ -139,7 +139,7 @@ pub struct RuntimeDeploymentConfiguration {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
 pub struct RuntimeDeploymentPolicies {
     pub config_sync: bool,
     pub trace_mode: String,
@@ -738,18 +738,23 @@ mod tests {
                     "projectId": Uuid::nil(),
                     "projectSlug": "moon-train",
                     "projectName": "Moon Train",
+                    "projectClaimed": true,
                     "isPrimary": true,
                     "bindingIds": [],
                     "policies": {
                         "configSync": true,
                         "traceMode": "summary",
-                        "remoteInvocation": false
+                        "remoteInvocation": false,
+                        "futurePolicyField": true
                     },
-                    "release": null
-                }]
+                    "release": null,
+                    "futureDeploymentField": "ignored"
+                }],
+                "futureConfigurationField": 1
             }))
             .unwrap();
         assert_eq!(configuration.deployments[0].project_slug, "moon-train");
+        assert!(configuration.deployments[0].project_claimed);
     }
 
     #[test]
