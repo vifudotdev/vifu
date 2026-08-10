@@ -113,12 +113,13 @@ export function RuntimeTraceWorkbench({ projectId, projectSlug, traces: initialT
   const selectedTraceIdRef = useRef(selectedTraceId);
   const initialPageLoadedRef = useRef(false);
   const dateWindow = useMemo(() => localDateWindow(dateFrom, dateTo), [dateFrom, dateTo]);
+  const previousProjectRef = useRef({ projectId, projectSlug });
   const previousDateWindowRef = useRef(dateWindow);
 
   useEffect(() => {
-    const previousDateWindow = previousDateWindowRef.current;
-    previousDateWindowRef.current = dateWindow;
-    if (!traceDateWindowChanged(previousDateWindow, dateWindow)) return;
+    const previousProject = previousProjectRef.current;
+    previousProjectRef.current = { projectId, projectSlug };
+    if (previousProject.projectId === projectId && previousProject.projectSlug === projectSlug) return;
 
     tracesRef.current = [];
     pausedTracesRef.current = [];
@@ -153,6 +154,10 @@ export function RuntimeTraceWorkbench({ projectId, projectSlug, traces: initialT
   }, [initialTraces, projectId]);
 
   useEffect(() => {
+    const previousDateWindow = previousDateWindowRef.current;
+    previousDateWindowRef.current = dateWindow;
+    if (!traceDateWindowChanged(previousDateWindow, dateWindow)) return;
+
     tracesRef.current = [];
     pausedTracesRef.current = [];
     initialPageLoadedRef.current = false;
