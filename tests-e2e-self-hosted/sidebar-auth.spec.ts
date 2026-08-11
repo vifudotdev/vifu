@@ -29,6 +29,8 @@ test("session remains valid across sidebar navigation on the bind address", asyn
   expect(await projectCards.count()).toBeGreaterThanOrEqual(2);
   await projectCards.first().click();
   await expect(page).toHaveURL(/\/project\/[^/]+(?:\/overview)?$/);
+  await expect(page.getByText("App ID", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Copy App ID" })).toBeVisible();
 
   await page.getByRole("link", { name: "Agents", exact: true }).click();
   await expect(page).toHaveURL(/\/project\/[^/]+\/agents$/);

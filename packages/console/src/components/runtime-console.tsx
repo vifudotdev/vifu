@@ -284,6 +284,10 @@ function HealthView({
       <HealthSection title="Summary" defaultOpen>
         <dl className="health-summary-card">
           <div className="wide">
+            <dt>App ID</dt>
+            <dd><AppIdValue value={project.appId} /></dd>
+          </div>
+          <div className="wide">
             <dt>HTTP URL</dt>
             <dd><code>{chatCompletionsUrl(browserApiBaseUrl)}</code></dd>
           </div>
