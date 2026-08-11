@@ -4,7 +4,7 @@ import { readFile } from "node:fs/promises";
 test("session remains valid across sidebar navigation on the bind address", async ({ context, page }) => {
   const adminKey = process.env.VIFU_SELF_HOSTED_E2E_ADMIN_KEY;
   expect(adminKey, "VIFU_SELF_HOSTED_E2E_ADMIN_KEY is required").toBeTruthy();
-  const keyName = `Playwright project key ${Date.now()}`;
+  const keyName = `Playwright App key ${Date.now()}`;
 
   await page.goto("/login");
   await page.getByLabel("Admin key").fill(adminKey!);
@@ -23,7 +23,7 @@ test("session remains valid across sidebar navigation on the bind address", asyn
   expect(session?.domain).toBe(new URL(page.url()).hostname);
   expect(session?.value).not.toContain(adminKey!);
   await expect(page).toHaveURL(/\/project$/);
-  await expect(page.getByRole("heading", { level: 1, name: "Projects" })).toBeVisible();
+  await expect(page.getByRole("heading", { level: 1, name: "Apps" })).toBeVisible();
   const projectCards = page.locator(".project-home-card");
   await expect(projectCards.first()).toBeVisible();
   expect(await projectCards.count()).toBeGreaterThanOrEqual(2);
@@ -34,13 +34,13 @@ test("session remains valid across sidebar navigation on the bind address", asyn
   await expect(page).toHaveURL(/\/project\/[^/]+\/agents$/);
   await expect(page.getByRole("heading", { level: 1, name: "Agents" })).toBeVisible();
   const projectSwitcher = page.locator(".project-switcher");
-  const projectSearch = projectSwitcher.getByLabel("Search projects");
+  const projectSearch = projectSwitcher.getByLabel("Search apps");
   if (!await projectSearch.isVisible()) {
     await projectSwitcher.locator("summary").click();
   }
   await expect(projectSearch).toBeVisible();
   await projectSearch.fill("no-project-has-this-name");
-  await expect(projectSwitcher.getByText("No matching projects", { exact: true })).toBeVisible();
+  await expect(projectSwitcher.getByText("No matching apps", { exact: true })).toBeVisible();
   await projectSearch.fill("");
   const projectLinks = projectSwitcher.locator(".project-menu-list a");
   await expect(projectLinks.first()).toBeVisible();
@@ -92,7 +92,7 @@ test("session remains valid across sidebar navigation on the bind address", asyn
   await page.getByRole("button", { name: "Create key" }).click();
   const keyDialog = page.getByRole("dialog");
   await expect(keyDialog.getByRole("heading", { name: "Create API key" })).toBeVisible();
-  await expect(keyDialog.getByLabel("Name")).toHaveValue(/^Project key - /);
+  await expect(keyDialog.getByLabel("Name")).toHaveValue(/^App key - /);
   await expect(keyDialog.getByRole("combobox")).toHaveCount(0);
   await expect(keyDialog.getByRole("button", { name: "All agents", exact: true })).toHaveAttribute("aria-pressed", "true");
   await expect(
@@ -120,7 +120,7 @@ test("session remains valid across sidebar navigation on the bind address", asyn
   await keyDialog.getByLabel("Name").fill(keyName);
   const createKeyResponsePromise = page.waitForResponse((response) => (
     response.request().method() === "POST"
-      && /^\/api\/runtime\/project\/[^/]+\/api-keys$/.test(new URL(response.url()).pathname)
+      && /^\/api\/runtime\/apps\/[^/]+\/api-keys$/.test(new URL(response.url()).pathname)
   ));
   await keyDialog.getByRole("button", { name: "Create key" }).click();
   const createKeyResponse = await createKeyResponsePromise;
@@ -156,16 +156,16 @@ test("session remains valid across sidebar navigation on the bind address", asyn
     editKeyDialog.getByRole("group", { name: "Agents permission" }).getByRole("button", { name: "Read", exact: true }),
   ).toHaveAttribute("aria-pressed", "true");
   await editKeyDialog.getByRole("button", { name: "All agents", exact: true }).click();
-  await editKeyDialog.getByRole("group", { name: "Project permission" }).getByRole("button", { name: "Write", exact: true }).click();
+  await editKeyDialog.getByRole("group", { name: "App permission" }).getByRole("button", { name: "Write", exact: true }).click();
   await editKeyDialog.getByRole("button", { name: "Save changes" }).click();
   const keyRow = page.getByRole("row").filter({ has: page.getByRole("cell", { name: keyName, exact: true }) });
   await expect(keyRow).toContainText("All agents");
-  await expect(keyRow).toContainText("Chat completions, Embeddings, Agents read, Project write");
+  await expect(keyRow).toContainText("Chat completions, Embeddings, Agents read, App write");
 
   page.once("dialog", (dialog) => dialog.accept());
   const revokeKeyResponsePromise = page.waitForResponse((response) => (
     response.request().method() === "POST"
-      && /^\/api\/runtime\/project\/[^/]+\/api-keys\/[^/]+\/revoke$/.test(new URL(response.url()).pathname)
+      && /^\/api\/runtime\/apps\/[^/]+\/api-keys\/[^/]+\/revoke$/.test(new URL(response.url()).pathname)
   ));
   await page.getByRole("button", { name: `Revoke ${keyName}` }).click();
   const revokeKeyResponse = await revokeKeyResponsePromise;
