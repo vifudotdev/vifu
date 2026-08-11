@@ -1188,6 +1188,7 @@ fn apply_guest_project(
 fn guest_project_summary(guest: &GuestProjectBootstrap) -> GuestProjectSummary {
     GuestProjectSummary {
         project_id: guest.project.id,
+        app_id: guest.project.app_id.clone(),
         project_slug: guest.project.slug.clone(),
         deployment_id: guest.deployment.id,
         deployment: guest.deployment.name.clone(),

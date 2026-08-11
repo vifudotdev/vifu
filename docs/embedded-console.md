@@ -70,9 +70,9 @@ Those files are served with long-lived cache headers. `index.html` is served
 with `no-store`, so a rebuilt or released binary can point browsers at the new
 asset hash.
 
-## Project State
+## App State
 
-The Console edits runtime project state through the Server API. Projects,
+The Console edits Runtime App state through the Server API. Apps,
 provider bindings, agents, endpoints, API keys, deployments, releases, and
 traces live in the configured database.
 
@@ -81,7 +81,7 @@ and embedded targets. Normal runtime reads come from the database, not from a
 project settings file. See [Project Settings](project-settings.md).
 
 Provider-local details such as model paths, URLs, and credentials stay with the
-Provider registry or host process. Project state binds provider keys to agents
+Provider registry or host process. App state binds provider keys to agents
 and endpoints.
 
 ## Build From Source

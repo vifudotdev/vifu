@@ -58,74 +58,74 @@ export class DeploymentClient {
     return this.request("/v1/admin/verify");
   }
 
-  async projects(): Promise<RuntimeProject[]> {
-    return (await this.request<{ projects: RuntimeProject[] }>("/v1/projects")).projects ?? [];
+  async apps(): Promise<RuntimeProject[]> {
+    return (await this.request<{ apps: RuntimeProject[] }>("/v1/apps")).apps ?? [];
   }
 
   async profiles(): Promise<AgentProfile[]> {
     return (await this.request<{ profiles: AgentProfile[] }>("/v1/profiles")).profiles ?? [];
   }
 
-  async projectProfiles(slug: string): Promise<AgentProfile[]> {
-    return (await this.request<{ profiles: AgentProfile[] }>(`/v1/project/${encodeURIComponent(slug)}/profiles`)).profiles ?? [];
+  async appProfiles(slug: string): Promise<AgentProfile[]> {
+    return (await this.request<{ profiles: AgentProfile[] }>(`/v1/apps/${encodeURIComponent(slug)}/profiles`)).profiles ?? [];
   }
 
-  async projectProfile(slug: string, profileId: string): Promise<AgentProfileDetail> {
+  async appProfile(slug: string, profileId: string): Promise<AgentProfileDetail> {
     return this.request<AgentProfileDetail>(
-      `/v1/project/${encodeURIComponent(slug)}/profiles/${encodeURIComponent(profileId)}`,
+      `/v1/apps/${encodeURIComponent(slug)}/profiles/${encodeURIComponent(profileId)}`,
     );
   }
 
-  async projectBindings(slug: string): Promise<AgentBinding[]> {
-    return (await this.request<{ bindings: AgentBinding[] }>(`/v1/project/${encodeURIComponent(slug)}/bindings`)).bindings ?? [];
+  async appBindings(slug: string): Promise<AgentBinding[]> {
+    return (await this.request<{ bindings: AgentBinding[] }>(`/v1/apps/${encodeURIComponent(slug)}/bindings`)).bindings ?? [];
   }
 
-  async projectEndpoints(slug: string): Promise<AgentEndpoint[]> {
-    return (await this.request<{ endpoints: AgentEndpoint[] }>(`/v1/project/${encodeURIComponent(slug)}/endpoints`)).endpoints ?? [];
+  async appEndpoints(slug: string): Promise<AgentEndpoint[]> {
+    return (await this.request<{ endpoints: AgentEndpoint[] }>(`/v1/apps/${encodeURIComponent(slug)}/endpoints`)).endpoints ?? [];
   }
 
-  async projectApiKeys(slug: string): Promise<ApiKeyRecord[]> {
-    return (await this.request<{ apiKeys: ApiKeyRecord[] }>(`/v1/project/${encodeURIComponent(slug)}/api-keys`)).apiKeys ?? [];
+  async appApiKeys(slug: string): Promise<ApiKeyRecord[]> {
+    return (await this.request<{ apiKeys: ApiKeyRecord[] }>(`/v1/apps/${encodeURIComponent(slug)}/api-keys`)).apiKeys ?? [];
   }
 
-  async projectAgentGateways(slug: string): Promise<AgentGateway[]> {
-    return (await this.request<{ agentGateways: AgentGateway[] }>(`/v1/project/${encodeURIComponent(slug)}/agent-gateways`)).agentGateways ?? [];
+  async appAgentGateways(slug: string): Promise<AgentGateway[]> {
+    return (await this.request<{ agentGateways: AgentGateway[] }>(`/v1/apps/${encodeURIComponent(slug)}/agent-gateways`)).agentGateways ?? [];
   }
 
-  async projectAvailableAgents(slug: string): Promise<AvailableAgent[]> {
-    return (await this.request<{ agents: AvailableAgent[] }>(`/v1/project/${encodeURIComponent(slug)}/agents`)).agents ?? [];
+  async appAvailableAgents(slug: string): Promise<AvailableAgent[]> {
+    return (await this.request<{ agents: AvailableAgent[] }>(`/v1/apps/${encodeURIComponent(slug)}/agents`)).agents ?? [];
   }
 
   async providerAdapters(): Promise<ProviderAdapter[]> {
     return (await this.request<{ providerAdapters: ProviderAdapter[] }>("/v1/provider-adapters")).providerAdapters ?? [];
   }
 
-  async projectProviderCatalog(slug: string): Promise<ProviderCatalog> {
-    const catalog = await this.request<Partial<ProviderCatalog>>(`/v1/project/${encodeURIComponent(slug)}/provider-catalog`);
+  async appProviderCatalog(slug: string): Promise<ProviderCatalog> {
+    const catalog = await this.request<Partial<ProviderCatalog>>(`/v1/apps/${encodeURIComponent(slug)}/provider-catalog`);
     return { registry: catalog.registry ?? [], custom: catalog.custom ?? [] };
   }
 
-  async projectProviders(slug: string): Promise<ProjectProvider[]> {
-    return (await this.request<{ providers: ProjectProvider[] }>(`/v1/project/${encodeURIComponent(slug)}/providers`)).providers ?? [];
+  async appProviders(slug: string): Promise<ProjectProvider[]> {
+    return (await this.request<{ providers: ProjectProvider[] }>(`/v1/apps/${encodeURIComponent(slug)}/providers`)).providers ?? [];
   }
 
-  async projectAgentCandidates(slug: string): Promise<ProjectAgentCandidate[]> {
-    return (await this.request<{ candidates: ProjectAgentCandidate[] }>(`/v1/project/${encodeURIComponent(slug)}/agent-candidates`)).candidates ?? [];
+  async appAgentCandidates(slug: string): Promise<ProjectAgentCandidate[]> {
+    return (await this.request<{ candidates: ProjectAgentCandidate[] }>(`/v1/apps/${encodeURIComponent(slug)}/agent-candidates`)).candidates ?? [];
   }
 
-  async projectTraces(slug: string): Promise<EndpointTrace[]> {
-    return (await this.request<{ traces: EndpointTrace[] }>(`/v1/project/${encodeURIComponent(slug)}/traces?limit=100`)).traces ?? [];
+  async appTraces(slug: string): Promise<EndpointTrace[]> {
+    return (await this.request<{ traces: EndpointTrace[] }>(`/v1/apps/${encodeURIComponent(slug)}/traces?limit=100`)).traces ?? [];
   }
 
-  async projectDeployments(slug: string): Promise<RuntimeDeployment[]> {
+  async appDeployments(slug: string): Promise<RuntimeDeployment[]> {
     return (await this.request<{ deployments: RuntimeDeployment[] }>(
-      `/v1/project/${encodeURIComponent(slug)}/deployments`,
+      `/v1/apps/${encodeURIComponent(slug)}/deployments`,
     )).deployments ?? [];
   }
 
-  async projectRuntimeReleases(slug: string): Promise<ProjectRuntimeRelease[]> {
+  async appRuntimeReleases(slug: string): Promise<ProjectRuntimeRelease[]> {
     return (await this.request<{ releases: ProjectRuntimeRelease[] }>(
-      `/v1/project/${encodeURIComponent(slug)}/runtime-releases`,
+      `/v1/apps/${encodeURIComponent(slug)}/runtime-releases`,
     )).releases ?? [];
   }
 

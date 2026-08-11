@@ -198,9 +198,9 @@ function AddAgentDialog({
     setError(null);
     try {
       if (selected.profileId) {
-        await runtimeRequest(`project/${project.slug}/agents/${selected.profileId}/restore`, "POST", {});
+        await runtimeRequest(`apps/${project.slug}/agents/${selected.profileId}/restore`, "POST", {});
       } else {
-        await runtimeRequest(`project/${project.slug}/agents/import`, "POST", {
+        await runtimeRequest(`apps/${project.slug}/agents/import`, "POST", {
           gatewayId: selected.gatewayId,
           agentId: selected.id,
           providerKey: selected.providerKey,
@@ -225,7 +225,7 @@ function AddAgentDialog({
     setPending(true);
     setError(null);
     try {
-      await runtimeRequest(`project/${project.slug}/profiles`, "POST", {
+      await runtimeRequest(`apps/${project.slug}/profiles`, "POST", {
         name,
         description: description || undefined,
         persona: { files: {} },

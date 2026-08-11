@@ -4,3 +4,5 @@ database_url = "postgres://vifu@127.0.0.1:5432/vifu"
 
 [gateway]
 address = "http://127.0.0.1:6790"
+# Set this when the Gateway should register with an existing App.
+# app_id = "vifu_app_<64 hex characters>"

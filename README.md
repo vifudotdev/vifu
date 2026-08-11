@@ -49,7 +49,7 @@ Vifu gives products stable endpoints for local and remote AI Agents. Product
 code owns the state, UI, safety rules, and allowed actions.
 
 Vifu manages the provider connections, Agents, endpoints, sessions, keys,
-routes, and traces for each project.
+routes, and traces for each App.
 
 - Connect local or external Providers to named endpoints.
 - Call endpoints through an OpenAI-compatible HTTP API.
@@ -77,6 +77,7 @@ routes, and traces for each project.
 #### Use Vifu
 
 - [Install Vifu](docs/install.md)
+- [Apps and App IDs](docs/apps-and-app-ids.md)
 - [Runtime topology and Gateway enrollment](docs/topology-and-pairing.md)
 - [Embedded Console](docs/embedded-console.md)
 - [ARM optimization TUI](docs/arm-optimization-tui.md)

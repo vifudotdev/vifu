@@ -37,7 +37,7 @@ export function RuntimeAgentsView(props: AgentsViewProps) {
         <header className="resource-page-heading agents-page-heading">
           <div className="resource-page-summary">
             <strong>{props.profiles.length} {props.profiles.length === 1 ? "agent" : "agents"}</strong>
-            <span>Characters and AI roles available to this project.</span>
+            <span>Characters and AI roles available to this app.</span>
           </div>
           <button className="primary-button compact" type="button" onClick={() => setAdding(true)}><Plus aria-hidden="true" />Add agent</button>
         </header>
@@ -199,9 +199,9 @@ function AddAgentDialog({
     setError(null);
     try {
       if (selected.profileId) {
-        await host.request(`project/${project.slug}/agents/${selected.profileId}/restore`, "POST", {});
+        await host.request(`apps/${project.slug}/agents/${selected.profileId}/restore`, "POST", {});
       } else {
-        await host.request(`project/${project.slug}/agents/import`, "POST", {
+        await host.request(`apps/${project.slug}/agents/import`, "POST", {
           gatewayId: selected.gatewayId,
           agentId: selected.id,
           providerKey: selected.providerKey,
@@ -226,7 +226,7 @@ function AddAgentDialog({
     setPending(true);
     setError(null);
     try {
-      await host.request(`project/${project.slug}/profiles`, "POST", {
+      await host.request(`apps/${project.slug}/profiles`, "POST", {
         name,
         description: description || undefined,
         persona: { files: {} },

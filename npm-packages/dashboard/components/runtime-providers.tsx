@@ -117,7 +117,7 @@ function ProjectProviderCard({
     setPending(true);
     setError(null);
     try {
-      await runtimeRequest(`project/${project.slug}/providers/${provider.providerKey}`, "DELETE");
+      await runtimeRequest(`apps/${project.slug}/providers/${provider.providerKey}`, "DELETE");
       router.refresh();
     } catch (nextError) {
       setError(errorMessage(nextError));
@@ -207,7 +207,7 @@ function ProviderDialog({
     setNotice(null);
     try {
       const result = await runtimeRequest<{ message?: string; addedAgents?: number }>(
-        provider ? `project/${project.slug}/providers/${provider.providerKey}` : `project/${project.slug}/providers`,
+        provider ? `apps/${project.slug}/providers/${provider.providerKey}` : `apps/${project.slug}/providers`,
         provider ? "PATCH" : "POST",
         body,
       );
@@ -229,7 +229,7 @@ function ProviderDialog({
     setNotice(null);
     try {
       const result = await runtimeRequest<{ message?: string; addedAgents?: number }>(
-        `project/${project.slug}/providers/${provider.providerKey}/test`,
+        `apps/${project.slug}/providers/${provider.providerKey}/test`,
         "POST",
         {},
       );

@@ -34,13 +34,13 @@ export function ProjectCreateForm({
     setCreatedSlug(null);
     const form = new FormData(event.currentTarget);
     try {
-      const payload = await runtimeRequest<{ project?: { slug?: string } }>("projects", "POST", {
+      const payload = await runtimeRequest<{ app?: { slug?: string; appId?: string } }>("apps", "POST", {
         name: value(form, "name"),
         description: optionalValue(form, "description"),
       });
-      const slug = payload.project?.slug ?? null;
+      const slug = payload.app?.slug ?? null;
       setCreatedSlug(slug);
-      setState({ tone: "success", message: "Project created." });
+      setState({ tone: "success", message: "project created." });
       if (isMenu && slug) router.push(`/project/${slug}`);
     } catch (error) {
       setState({ tone: "error", message: errorMessage(error) });
@@ -287,7 +287,7 @@ export function RevokeApiKeyButton({ projectSlug, id, name }: { projectSlug: str
     setPending(true);
     setError(null);
     try {
-      await runtimeRequest(`project/${projectSlug}/api-keys/${id}/revoke`, "POST");
+      await runtimeRequest(`apps/${projectSlug}/api-keys/${id}/revoke`, "POST");
       router.refresh();
     } catch (nextError) {
       setError(errorMessage(nextError));
@@ -316,7 +316,7 @@ export function DeleteApiKeyButton({ projectSlug, id, name }: { projectSlug: str
     setPending(true);
     setError(null);
     try {
-      await runtimeRequest(`project/${projectSlug}/api-keys/${id}`, "DELETE");
+      await runtimeRequest(`apps/${projectSlug}/api-keys/${id}`, "DELETE");
       router.refresh();
     } catch (nextError) {
       setError(errorMessage(nextError));

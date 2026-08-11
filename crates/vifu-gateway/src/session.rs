@@ -37,6 +37,7 @@ pub struct SessionSummary {
     pub resume_session_id: Option<Uuid>,
     pub created_at_unix: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "guestApp", alias = "guestProject")]
     pub guest_project: Option<GuestProjectSummary>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pairing: Option<PairingSummary>,
@@ -52,7 +53,11 @@ pub struct PairingSummary {
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct GuestProjectSummary {
+    #[serde(rename = "id", alias = "projectId")]
     pub project_id: Uuid,
+    #[serde(default)]
+    pub app_id: String,
+    #[serde(rename = "appSlug", alias = "projectSlug")]
     pub project_slug: String,
     pub deployment_id: Uuid,
     pub deployment: String,
@@ -214,13 +219,22 @@ pub(crate) fn validate_session(session: &SessionSummary) -> Result<(), String> {
 }
 
 fn validate_guest_project(guest: &GuestProjectSummary) -> Result<(), String> {
-    validate_identifier("guest project slug", &guest.project_slug)?;
+    if !guest.app_id.is_empty() {
+        let app_id = guest
+            .app_id
+            .strip_prefix("vifu_app_")
+            .ok_or_else(|| "invalid guest App ID".to_string())?;
+        if app_id.len() != 64 || !app_id.chars().all(|value| value.is_ascii_hexdigit()) {
+            return Err("invalid guest App ID".to_string());
+        }
+    }
+    validate_identifier("guest app slug", &guest.project_slug)?;
     validate_identifier("guest deployment", &guest.deployment)?;
     if !guest.endpoint_path.starts_with('/')
         || guest.endpoint_path.len() > 256
         || guest.endpoint_path.chars().any(char::is_control)
     {
-        return Err("invalid guest endpoint path".to_string());
+        return Err("invalid guest App endpoint path".to_string());
     }
     validate_prefixed_secret("guest API key", &guest.api_key, "vifu_pk_")?;
     validate_prefixed_secret("guest claim token", &guest.claim_token, "vifu_gc_")?;

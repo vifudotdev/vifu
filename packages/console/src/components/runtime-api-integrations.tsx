@@ -68,14 +68,14 @@ export function ApiIntegrationsView({
       <section className="api-integration-section api-endpoint-section">
         <div className="api-endpoint-heading">
           <div>
-            <span>Project endpoint</span>
-            <p>One URL for every enabled agent in this project.</p>
+            <span>App endpoint</span>
+            <p>One URL for every enabled agent in this app.</p>
           </div>
           <ApiReferenceDialog baseUrl={projectBaseUrl} />
         </div>
         <div className="api-endpoint-value">
           <code>{projectBaseUrl}</code>
-          <CopyButton value={projectBaseUrl} label="Copy project endpoint" />
+          <CopyButton value={projectBaseUrl} label="Copy app endpoint" />
         </div>
       </section>
 
@@ -114,7 +114,7 @@ export function ApiIntegrationsView({
             <pre className="api-code-surface"><code>{code}</code></pre>
             <div className="api-code-footnote">
               <Terminal aria-hidden="true" />
-              <span>The <code>model</code> value selects an agent inside this project.</span>
+              <span>The <code>model</code> value selects an agent inside this app.</span>
             </div>
           </section>
 
@@ -149,7 +149,7 @@ export function ApiIntegrationsView({
       <section className="api-integration-section api-keys-section">
           <IntegrationSectionHeading
             title="API keys"
-            description="Create and manage keys for this project."
+            description="Create and manage keys for this app."
             action={(
               <div className="api-key-heading-actions">
                 {scopedKeys.length > 0 ? (
@@ -267,7 +267,7 @@ function ApiSetupEmpty({ projectSlug }: { projectSlug: string }) {
   return (
     <section className="api-integration-section api-setup-empty">
       <Terminal aria-hidden="true" />
-      <div><strong>Add an agent to start</strong><span>Agents added to the project become models on this endpoint.</span></div>
+      <div><strong>Add an agent to start</strong><span>Agents added to the app become models on this endpoint.</span></div>
       <RuntimeLink className="secondary-button" href={host.projectSectionHref(projectSlug, "agents")}>Open Agents<ArrowRight aria-hidden="true" /></RuntimeLink>
     </section>
   );
@@ -304,13 +304,13 @@ function ApiReferenceDialog({ baseUrl }: { baseUrl: string }) {
       <dialog className="api-reference-dialog" ref={dialogRef}>
         <div className="api-dialog-shell">
           <header>
-            <div><span>Project API</span><h2>API reference</h2></div>
+            <div><span>App API</span><h2>API reference</h2></div>
             <form method="dialog"><button className="icon-button" type="submit" aria-label="Close API reference" title="Close"><X aria-hidden="true" /></button></form>
           </header>
           <div className="api-reference-content">
             <section>
               <h3>Authentication</h3>
-              <p>Send a key in the bearer authorization header. A project key can call agents in its project by changing <code>model</code>.</p>
+              <p>Send an App key in the bearer authorization header. It can call agents in this App by changing <code>model</code>.</p>
               <pre><code>Authorization: Bearer $VIFU_API_KEY</code></pre>
             </section>
             <section>
@@ -328,7 +328,7 @@ function ApiReferenceDialog({ baseUrl }: { baseUrl: string }) {
             </section>
             <section>
               <h3>Tracing</h3>
-              <p>Every accepted call creates a trace. Use the project Traces page to inspect its observations, input, output, latency, scores, and errors.</p>
+              <p>Every accepted call creates a trace. Use the app Traces page to inspect its observations, input, output, latency, scores, and errors.</p>
             </section>
           </div>
         </div>
@@ -372,7 +372,7 @@ function CreateApiKeyDialog({
     setPending(true);
     setError(null);
     try {
-      const payload = await host.request<{ apiKey?: ApiKeyRecord }>(`project/${project.slug}/api-keys`, "POST", {
+      const payload = await host.request<{ apiKey?: ApiKeyRecord }>(`apps/${project.slug}/api-keys`, "POST", {
         projectId: project.id,
         name: name.trim() || readableDefaultKeyName(),
         agentScope: agentScopePayload(scopeMode, selectedProfileIds),
@@ -419,7 +419,7 @@ function CreateApiKeyDialog({
         <div className="api-dialog-shell api-key-dialog-shell">
           <header>
             <div>
-              <span>{createdKey ? "Project key" : "Project access"}</span>
+              <span>{createdKey ? "App key" : "App access"}</span>
               <h2>{createdKey ? "Save your API key" : "Create API key"}</h2>
             </div>
             <form method="dialog"><button className="icon-button" type="submit" aria-label="Close API key dialog" title="Close"><X aria-hidden="true" /></button></form>
@@ -443,14 +443,14 @@ function CreateApiKeyDialog({
                     name="name"
                     maxLength={128}
                     value={name}
-                    placeholder="Project key"
+                    placeholder="App key"
                     onChange={(event) => setName(event.target.value)}
                     autoFocus
                   />
                 </label>
 
                 <div className="api-key-scope-note">
-                  <strong>Project key</strong>
+                  <strong>App key</strong>
                   <span>Each request must provide a <code>model</code> that resolves to an agent in <b>{project.name}</b>.</span>
                 </div>
                 <ApiKeyAgentScopeFields
@@ -514,7 +514,7 @@ function EditApiKeyDialog({
     setPending(true);
     setError(null);
     try {
-      await host.request(`project/${projectSlug}/api-keys/${apiKey.id}`, "PATCH", {
+      await host.request(`apps/${projectSlug}/api-keys/${apiKey.id}`, "PATCH", {
         name: name.trim(),
         agentScope: agentScopePayload(scopeMode, selectedProfileIds),
         permissions,
@@ -536,7 +536,7 @@ function EditApiKeyDialog({
       <dialog className="api-key-dialog" ref={dialogRef} onClose={reset}>
         <div className="api-dialog-shell api-key-dialog-shell">
           <header>
-            <div><span>Project access</span><h2>Edit API key</h2></div>
+            <div><span>App access</span><h2>Edit API key</h2></div>
             <form method="dialog"><button className="icon-button" type="submit" aria-label="Close API key dialog" title="Close"><X aria-hidden="true" /></button></form>
           </header>
           <form className="api-key-create-form" onSubmit={save}>
@@ -552,8 +552,8 @@ function EditApiKeyDialog({
                 />
               </label>
               <div className="api-key-scope-note">
-                <strong>Project key</strong>
-                <span>Choose whether this key follows every agent or only an explicit set in this project.</span>
+                <strong>App key</strong>
+                <span>Choose whether this key follows every agent or only an explicit set in this app.</span>
               </div>
               <ApiKeyAgentScopeFields
                 mode={scopeMode}
@@ -612,8 +612,8 @@ function ApiKeyAgentScopeFields({
       </div>
       <p className="api-key-agent-access-help">
         {mode === "all"
-          ? "Includes current agents and agents added later in this project."
-          : "Only the selected project bindings can be invoked with this key."}
+          ? "Includes current agents and agents added later in this app."
+          : "Only the selected App bindings can be invoked with this key."}
       </p>
       {mode === "selected" ? (
         <div className="api-key-agent-picker">
@@ -632,7 +632,7 @@ function ApiKeyAgentScopeFields({
                 />
                 <span><strong>{option.name}</strong><code>{option.slug}</code></span>
               </label>
-            )) : <p>{options.length > 0 ? "No matching agents." : "This project has no agent bindings yet."}</p>}
+            )) : <p>{options.length > 0 ? "No matching agents." : "This App has no agent bindings yet."}</p>}
           </div>
           <span className="api-key-agent-count">{selectedProfileIds.length} selected</span>
         </div>
@@ -697,7 +697,7 @@ function ApiKeyPermissionsFields({
         onChange={(realtime) => onChange({ ...permissions, realtime })}
       />
       <ApiKeyPermissionRow
-        label="Project Runtime"
+        label="App Runtime"
         value={permissions.runtime}
         options={[
           { value: "none", label: "No access" },
@@ -716,7 +716,7 @@ function ApiKeyPermissionsFields({
         onChange={(agents) => onChange({ ...permissions, agents })}
       />
       <ApiKeyPermissionRow
-        label="Project"
+        label="App"
         value={permissions.project}
         options={[
           { value: "none", label: "No access" },
@@ -826,7 +826,7 @@ function readableDefaultKeyName(): string {
     day: "numeric",
     year: "numeric",
   }).format(new Date());
-  return `Project key - ${date}`;
+  return `App key - ${date}`;
 }
 
 function agentScopePayload(mode: ApiKeyAgentScope["mode"], profileIds: string[]): ApiKeyAgentScope {
@@ -857,9 +857,9 @@ function formatPermissions(permissions: ApiKeyPermissions): string {
   if (permissions.speech === "access") enabled.push("Speech");
   if (permissions.transcriptions === "access") enabled.push("Transcriptions");
   if (permissions.realtime === "access") enabled.push("Realtime");
-  if (permissions.runtime === "access") enabled.push("Project runtime");
+  if (permissions.runtime === "access") enabled.push("App runtime");
   if (permissions.agents !== "none") enabled.push(`Agents ${permissions.agents}`);
-  if (permissions.project !== "none") enabled.push(`Project ${permissions.project}`);
+  if (permissions.project !== "none") enabled.push(`App ${permissions.project}`);
   return enabled.length > 0 ? enabled.join(", ") : "No access";
 }
 

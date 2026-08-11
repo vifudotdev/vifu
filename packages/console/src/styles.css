@@ -1601,6 +1601,20 @@ svg {
   white-space: normal;
 }
 
+.inline-code-action {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.inline-code-action code {
+  flex: 1;
+}
+
+.inline-code-action .secondary-button {
+  flex: none;
+}
+
 .compact-definition-grid {
   grid-template-columns: repeat(3, minmax(0, 1fr));
 }

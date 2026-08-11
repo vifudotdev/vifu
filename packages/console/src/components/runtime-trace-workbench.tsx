@@ -239,7 +239,7 @@ export function RuntimeTraceWorkbench({ projectId, projectSlug, traces: initialT
           candidate.projectId === projectId && candidate.id === traceId
         );
         if (!trace) {
-          setSelectionError("The requested trace is not available in this project.");
+          setSelectionError("The requested trace is not available in this app.");
           return;
         }
         selectedTraceIdRef.current = trace.id;
@@ -298,7 +298,7 @@ export function RuntimeTraceWorkbench({ projectId, projectSlug, traces: initialT
           candidate.projectId === projectId && candidate.requestId === invocationId
         );
         if (!trace) {
-          setSelectionError("The requested invocation is not available in this project.");
+          setSelectionError("The requested invocation is not available in this app.");
           return;
         }
         selectedTraceIdRef.current = trace.id;
@@ -451,7 +451,7 @@ export function RuntimeTraceWorkbench({ projectId, projectSlug, traces: initialT
       }, TRACE_REQUEST_TIMEOUT_MS);
       controller.signal.addEventListener("abort", abortRequest, { once: true });
       try {
-        const tracePath = `project/${encodeURIComponent(projectSlug)}/traces/${encodeURIComponent(selectedTraceId)}`;
+        const tracePath = `apps/${encodeURIComponent(projectSlug)}/traces/${encodeURIComponent(selectedTraceId)}`;
         const [spanPayload, scorePayload] = await Promise.all([
           request<RuntimeTraceSpansResponse>(`${tracePath}/spans`, "GET", undefined, requestController.signal),
           request<RuntimeTraceScoresResponse>(`${tracePath}/scores`, "GET", undefined, requestController.signal)

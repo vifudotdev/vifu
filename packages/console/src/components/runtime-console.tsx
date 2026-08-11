@@ -1,9 +1,12 @@
 "use client";
 
 import type { LucideIcon } from "lucide-react";
+import { useState } from "react";
 import {
   Bot,
   ChevronDown,
+  Check,
+  Copy,
   KeyRound,
   LayoutDashboard,
   LogOut,
@@ -160,7 +163,7 @@ function Navigation({ project, items, active, capabilities }: {
   const host = useRuntimeConsoleHost();
   const visible = items.filter((item) => !item.capability || capabilities[item.capability]);
   return (
-    <nav className="console-nav" aria-label="Project navigation">
+    <nav className="console-nav" aria-label="App navigation">
       {visible.map((item) => {
         const Icon = item.icon;
         const href = host.projectSectionHref(project.slug, item.id);
@@ -186,7 +189,7 @@ function ProjectSectionView({
   data: DashboardData;
   browserApiBaseUrl: string;
 }) {
-  const endpoints = projectEndpoints(project, data.runtime.endpoints);
+  const endpoints = appEndpoints(project, data.runtime.endpoints);
   if (section === "agents") {
     return (
       <RuntimeAgentsView
@@ -231,7 +234,7 @@ function ProjectSectionView({
       />
     );
   }
-  if (section === "logs") return <TracesView project={project} traces={projectTraces(data.runtime.traces, project)} />;
+  if (section === "logs") return <TracesView project={project} traces={appTraces(data.runtime.traces, project)} />;
   if (section === "settings") {
     return (
       <SettingsView
@@ -274,7 +277,7 @@ function HealthView({
     return data.projectProviders.some((provider) => provider.providerKey === providerKey && provider.status === "online");
   }).length;
   const agentTotal = data.runtime.profiles.length;
-  const traces = projectTraces(data.runtime.traces, project);
+  const traces = appTraces(data.runtime.traces, project);
   const traceSummary = summarizeTraces(traces);
   return (
     <div className="health-dashboard">
@@ -313,7 +316,7 @@ function HealthView({
       ) : null}
       <HealthSection title="Traces" count={`${traces.length} recent`} defaultOpen>
         <div className="trace-widget-grid">
-          <TraceMetricCard title="Requests" value={String(traces.length)} meta="Recent project traces">
+          <TraceMetricCard title="Requests" value={String(traces.length)} meta="Recent app traces">
             <MiniBarChart bars={traceSummary.requestBuckets} />
           </TraceMetricCard>
           <TraceMetricCard title="Failure rate" value={`${formatPercent(traceSummary.failureRate)}%`} meta={`${traceSummary.failures} failed / ${traces.length} total`}>
@@ -472,9 +475,10 @@ function SettingsView({
   return (
     <>
       <section className="content-section">
-        <SectionHeading title="Project settings" />
+        <SectionHeading title="App settings" />
         <dl className="definition-grid">
           <div><dt>Name</dt><dd>{project.name}</dd></div>
+          <div><dt>App ID</dt><dd><AppIdValue value={project.appId} /></dd></div>
           <div><dt>Slug</dt><dd>{project.slug}</dd></div>
           <div><dt>Chat completions</dt><dd>{primaryEndpoint ? <code>{chatCompletionsUrl(browserApiBaseUrl)}</code> : "No endpoint yet"}</dd></div>
           <div><dt>Model</dt><dd>{primaryEndpoint ? <code>{primaryEndpoint.slug}</code> : "No endpoint yet"}</dd></div>
@@ -485,10 +489,10 @@ function SettingsView({
         <SectionHeading title="Danger zone" />
         <div className="settings-danger-row">
           <div>
-            <strong>Delete project</strong>
-            <p>Remove this project from the dashboard. Detected gateway agents are not deleted.</p>
+            <strong>Delete app</strong>
+            <p>Remove this app from the dashboard. Detected gateway agents are not deleted.</p>
           </div>
-          <DeleteResourceButton path={`projects/${project.id}`} label={project.name} redirectTo={host.projectRootHref()} />
+          <DeleteResourceButton path={`apps/${project.id}`} label={project.name} redirectTo={host.projectRootHref()} />
         </div>
       </section>
     </>
@@ -515,15 +519,15 @@ function SetupRail({ project, providerCount, agentCount, callableCount, connecte
         ? "Add an agent"
         : !gatewayReady
           ? "Reconnect agent gateway"
-          : "Project is ready to call";
+          : "App is ready to call";
   return (
-    <section className="setup-rail project-setup-rail" aria-label="Project setup">
+    <section className="setup-rail project-setup-rail" aria-label="App setup">
       <div>
         <span>Next setup step</span>
         <strong>{nextStep}</strong>
       </div>
       <ol>
-        <li className="ready"><strong>Project</strong><small>{project.slug}</small></li>
+        <li className="ready"><strong>App</strong><small>{project.slug}</small></li>
         <li className={providerReady ? "ready" : "active"}><strong>Provider</strong><small>{providerReady ? `${providerCount} assigned` : "Assign one in Providers"}</small></li>
         <li className={agentsReady ? "ready" : providerReady ? "active" : undefined}><strong>Agents</strong><small>{agentsReady ? `${agentCount} available` : "Add or detect agents"}</small></li>
         <li className={endpointReady ? "ready" : agentsReady ? "active" : undefined}><strong>Endpoint</strong><small>{endpointReady ? `${callableCount} callable` : "Agents become callable when added"}</small></li>
@@ -537,10 +541,30 @@ function SetupRail({ project, providerCount, agentCount, callableCount, connecte
   );
 }
 
-function TraceTable({ traces, project: _project, detailed = false }: { traces: EndpointTrace[]; project: RuntimeProject; detailed?: boolean }) {
+function AppIdValue({ value }: { value: string }) {
+  const [copied, setCopied] = useState(false);
+
+  async function copy() {
+    await navigator.clipboard.writeText(value);
+    setCopied(true);
+    window.setTimeout(() => setCopied(false), 1_500);
+  }
+
+  return (
+    <span className="inline-code-action">
+      <code>{value}</code>
+      <button className="secondary-button compact" type="button" onClick={copy} aria-label="Copy App ID">
+        {copied ? <Check aria-hidden="true" /> : <Copy aria-hidden="true" />}
+        {copied ? "Copied" : "Copy"}
+      </button>
+    </span>
+  );
+}
+
+function TraceTable({ traces, project: _App, detailed = false }: { traces: EndpointTrace[]; project: RuntimeProject; detailed?: boolean }) {
   if (traces.length === 0) return <EmptyState>No traces yet.</EmptyState>;
   if (detailed) {
-    return <RuntimeTraceWorkbench projectId={_project.id} projectSlug={_project.slug} traces={traces} />;
+    return <RuntimeTraceWorkbench projectId={_App.id} projectSlug={_App.slug} traces={traces} />;
   }
   return (
     <div className="trace-compact-list">
@@ -599,12 +623,12 @@ function gatewayStatusRank(status: string): number {
   return status === "connected" ? 0 : status === "pending" ? 1 : 2;
 }
 
-function projectEndpoints(project: RuntimeProject, endpoints: AgentEndpoint[]): AgentEndpoint[] {
+function appEndpoints(project: RuntimeProject, endpoints: AgentEndpoint[]): AgentEndpoint[] {
   const bindingIds = new Set(project.bindingIds);
   return endpoints.filter((endpoint) => bindingIds.has(endpoint.bindingId));
 }
 
-function projectTraces(traces: EndpointTrace[], project: RuntimeProject): EndpointTrace[] {
+function appTraces(traces: EndpointTrace[], project: RuntimeProject): EndpointTrace[] {
   return traces.filter((trace) => trace.projectId === project.id);
 }
 

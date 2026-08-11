@@ -1068,7 +1068,7 @@ mod tests {
         let response = service
             .clone()
             .oneshot(
-                Request::get("/v1/project/arm-api/comparisons?limit=20")
+                Request::get("/v1/apps/arm-api/comparisons?limit=20")
                     .header("authorization", format!("Bearer {admin_key}"))
                     .body(Body::empty())
                     .unwrap(),

@@ -132,7 +132,7 @@ pub async fn bootstrap_guest_project(
         >= i64::from(state.config.guest_project_limit)
     {
         return Err(ApiError::Conflict(
-            "guest project capacity is temporarily unavailable".to_string(),
+            "guest app capacity is temporarily unavailable".to_string(),
         ));
     }
 
@@ -144,7 +144,7 @@ pub async fn bootstrap_guest_project(
             id: project_id,
             owner_user_id: None,
             slug: &slug,
-            name: "Guest project",
+            name: "Guest app",
             description: None,
             gateway_id: &gateway_id,
             binding_ids: &[],
@@ -193,7 +193,7 @@ pub async fn claim_guest_project(
     let claim_token = validate_guest_claim_token(&input.claim_token)?;
     let claim_token_hash = hash_guest_claim_token(claim_token, &state.config.api_key_pepper);
     let project = db::claim_guest_project(&state.pool, &claim_token_hash, &subject).await?;
-    Ok(Json(json!({ "project": project })))
+    Ok(Json(json!({ "app": project })))
 }
 
 async fn guest_project_response(
@@ -222,8 +222,9 @@ async fn guest_project_response(
         .await?;
     }
     Ok(json!({
-        "project": {
+        "app": {
             "id": project.project.id,
+            "appId": project.project.app_id,
             "slug": project.project.slug,
         },
         "deployment": {
@@ -316,7 +317,7 @@ pub async fn list_project_ownership(
             owner_user_id: project.project.owner_user_id,
         })
         .collect::<Vec<_>>();
-    Ok(Json(json!({ "projects": projects })))
+    Ok(Json(json!({ "apps": projects })))
 }
 
 pub async fn assign_project_owner(
@@ -329,7 +330,7 @@ pub async fn assign_project_owner(
     let owner_user_id = required_text("ownerUserId", &input.owner_user_id, 512)?;
     let project = db::set_project_owner_user_id(&state.pool, project_id, owner_user_id).await?;
     Ok(Json(json!({
-        "project": ProjectOwnership {
+        "app": ProjectOwnership {
             project_id: project.project.id,
             slug: project.project.slug,
             name: project.project.name,
@@ -349,7 +350,7 @@ pub async fn list_projects(
             db::list_projects_for_owner_user_id(&state.pool, &subject).await?
         }
     };
-    Ok(Json(json!({ "projects": projects })))
+    Ok(Json(json!({ "apps": projects })))
 }
 
 pub async fn create_project(
@@ -365,7 +366,6 @@ pub async fn create_project(
     let name = required_text("name", &input.name, 128)?;
     let slug = project_slug(input.slug.as_deref(), name)?;
     let description = optional_text("description", input.description.as_deref(), 4096)?;
-    let gateway_id = format!("project-{slug}");
     let project = db::create_project(
         &state.pool,
         NewProject {
@@ -374,12 +374,12 @@ pub async fn create_project(
             slug: &slug,
             name,
             description,
-            gateway_id: &gateway_id,
+            gateway_id: "",
             binding_ids: &[],
         },
     )
     .await?;
-    Ok((StatusCode::CREATED, Json(json!({ "project": project }))))
+    Ok((StatusCode::CREATED, Json(json!({ "app": project }))))
 }
 
 pub async fn get_project(
@@ -396,7 +396,7 @@ pub async fn get_project(
             project.project.owner_user_id.as_deref(),
         )
         .await?;
-    Ok(Json(json!({ "project": project })))
+    Ok(Json(json!({ "app": project })))
 }
 
 pub async fn update_project(
@@ -445,7 +445,7 @@ pub async fn update_project(
         },
     )
     .await?;
-    Ok(Json(json!({ "project": project })))
+    Ok(Json(json!({ "app": project })))
 }
 
 pub async fn delete_project(

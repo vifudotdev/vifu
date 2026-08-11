@@ -1,7 +1,7 @@
 export type DeploymentMode = "local" | "self-hosted" | "cloud";
 
 export type ServerCapabilities = {
-  projects: boolean;
+  apps: boolean;
   profiles: boolean;
   endpoints: boolean;
   bindings: boolean;

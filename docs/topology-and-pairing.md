@@ -4,7 +4,7 @@ Vifu uses four parts:
 
 - An embedded Runtime runs Agents and Providers inside a product.
 - An Agent Gateway connects a Runtime to a Server.
-- A Vifu Server stores projects, deployments, keys, and traces.
+- A Vifu Server stores Apps, deployments, keys, and traces.
 - A Vifu TUI reads the monitor stream from a Server.
 
 ```text
@@ -24,7 +24,7 @@ Application agents / embedded Runtime
 
 The Server is the source of operational state. Gateways send their Agent roster
 and Runtime telemetry to the Server. Each TUI reads the Server monitor stream.
-The Server resolves project profiles before it filters each device roster.
+The Server resolves App profiles before it filters each device roster.
 
 An application can also use an embedded Runtime without a Server. In this mode,
 the host calls `VifuRuntime` directly. A later Gateway connection does not
@@ -44,30 +44,29 @@ a role that runs elsewhere.
 | Remote | Remote or omitted | Neither network role | Remote Server monitor |
 
 The default first run uses the first row. It starts a local Server, a local
-Gateway, and the TUI. It also creates a temporary local Guest project.
+Gateway, and the TUI. It also creates a temporary local Guest App.
 
 Startup does not enroll another device. Press `P` to create an enrollment QR
 for another Runtime installation.
 
 ## Monitor a Server
 
-For a remote Server, give the TUI a project monitor key:
+For a remote Server, give the TUI an App monitor key:
 
 ```bash
 export VIFU_MONITOR_KEY='vifu_pk_...'
 ./vifu
 ```
 
-`VIFU_MONITOR_KEY_FILE` reads the key from a private file. The project key must
-have `project: read` or `project: write` access. Its monitor stream contains
-only that project.
+`VIFU_MONITOR_KEY_FILE` reads the key from a private file. The App key must
+have App read or write access. Its monitor stream contains only that App.
 
-An account credential can monitor projects owned by that account. A deployment
+An account credential can monitor Apps owned by that account. A deployment
 operator can use `VIFU_ADMIN_KEY` or `VIFU_ADMIN_KEY_FILE` for deployment-wide
 access.
 
 A headless Gateway does not need a monitor key. A local Guest Gateway gives its
-project key to the TUI after bootstrap.
+App key to the TUI after bootstrap.
 
 `server.address` is the Server API origin. Press `B` to open the Dashboard URL
 reported by that Server. A local Server serves the embedded Console from the
@@ -77,12 +76,12 @@ behavior.
 
 ## Enroll a Gateway
 
-Pairing authorizes one Gateway installation to one project deployment. It does
+Pairing authorizes one Gateway installation to one App deployment. It does
 not pair a phone to a TUI, and it does not identify two processes as the same
 user.
 
-1. In Dashboard, open **Project → Deployments → Pair gateway**, or press `P` in
-   a TUI whose Gateway owns a Guest project.
+1. In Dashboard, open **App → Deployments → Pair gateway**, or press `P` in
+   a TUI whose Gateway owns a Guest App.
 2. Server creates a `vifu_ge_...` enrollment token with a five-minute lifetime.
 3. A mobile application scans the HTTPS pairing QR, or a CLI reads the token
    through `VIFU_AGENT_GATEWAY_ENROLLMENT_TOKEN_FILE`.
@@ -114,16 +113,16 @@ mobile pairing parser.
 ## Guest Bootstrap
 
 Guest bootstrap is an explicit Server policy. When enabled, a Gateway that
-connects without an enrollment token can receive one independent temporary
-project, deployment, project API key, and claim token. Each Gateway Machine
-identity receives its own guest project. The returned project key has project
-read access, so it can authenticate a project-scoped monitor without receiving
+connects without an App ID or enrollment token can receive one independent
+temporary App, deployment, App API key, and claim token. Each Gateway Machine
+identity receives its own Guest App. The returned App key has read access, so
+it can authenticate an App-scoped monitor without receiving
 deployment-admin authority.
 
-A `vifu_ge_...` enrollment always selects its project deployment and never
-creates a Guest project. A managed `vifu_gb_...` credential never enters the
-Guest flow. Claiming a Guest project associates it with the signed-in owner but
-does not replace the Gateway identity.
+A `vifu_ge_...` enrollment always selects its App deployment and never creates
+a Guest App. A managed `vifu_gb_...` credential never enters the Guest flow.
+Claiming a Guest App associates it with the signed-in owner but does not replace
+its App ID, Gateway identity, or traces.
 
 ## Android Runtime Modes
 
@@ -133,38 +132,20 @@ device storage. It does not use a separate demo transport.
 
 | Application state | First connection | Later connections | Intended use |
 | --- | --- | --- | --- |
-| Unconfigured | Scan a one-time `vifu_ge_...` QR | Stored Device Token | Personal evaluation or an operator-selected project |
-| Distribution configured | Present a `vifu_di_...` Distribution ID | Stored Device Token | The same published app installed on many devices |
+| Unconfigured | Guest bootstrap or scan a one-time `vifu_ge_...` QR | Stored Device Token | Personal evaluation or an operator-selected App |
+| App configured | Present the editable `vifu_app_...` App ID | Stored Device Token | The same App installed on many devices |
 | Previously enrolled | Present the stored Device Token | Rotated Device Token | Normal restart and reconnect |
 
-A Runtime Distribution is a Server resource that names one project deployment
-and sets a maximum installation count. An operator can revoke the Distribution.
-Each installation keeps
-its own Machine identity, Gateway row, and Device Token. Therefore one owner can
-monitor the same application across many phones without sharing a device
-credential between them. Distribution IDs select a project. They are not
-monitor credentials and do not grant Dashboard or TUI access.
-
-Create a Distribution with a project key that has project write access:
-
-```bash
-curl --fail-with-body \
-  --request POST \
-  --header "Authorization: Bearer $VIFU_PROJECT_KEY" \
-  --header 'Content-Type: application/json' \
-  --data '{"name":"Android public demo","maxGateways":1000}' \
-  "$VIFU_SERVER/v1/project/$VIFU_PROJECT_SLUG/runtime-distributions"
-```
-
-The response field `distribution.publicId` is the `vifu_di_...` value. It is a
-public enrollment selector, not a secret. Put only this ID and the Server origin
-in the application build. Revoke the Distribution without
-rebuilding the app by posting to
-`/v1/project/{slug}/runtime-distributions/{distributionId}/revoke` with the
-same project-write authority.
+Every App has a stable App ID and primary development deployment. Store the
+Server origin and App ID as editable application configuration. Each
+installation keeps its own Machine identity, Gateway row, and Device Token, so
+one owner can monitor the same App across many phones without sharing a device
+credential. An App ID selects an App. It is not a monitor credential and does
+not grant Dashboard, TUI, trace, or Agent access. See
+[Apps and App IDs](apps-and-app-ids.md).
 
 The Android Runtime publishes its agent roster and performance trace stages.
-The public distribution path sends timing, stage status, model identity, and
+The App registration path sends timing, stage status, model identity, and
 bounded errors. It does not upload conversation input or model output. A product
 with full-content debugging must provide a separate in-app consent setting. The
 product must call the opt-in `start_with_monitor_io` API. The
@@ -222,26 +203,27 @@ address = "https://api.vifu.dev"
 address = "http://127.0.0.1:6790"
 ```
 
-The cloud Server grants that Gateway a temporary Guest project. The TUI uses
-the returned project key in memory for the project-scoped monitor stream. Press
-`P` and scan the QR in the Android app. The phone joins the same project, and
-its Runtime traces appear in that TUI. Claiming the project later preserves its
-Gateway installations and trace history.
+The cloud Server grants that Gateway a temporary Guest App. The TUI uses the
+returned App key in memory for the App-scoped monitor stream. Press `P` and scan
+the QR in the Android app. The phone joins the same App, and its Runtime traces
+appear in that TUI. Claiming the App later preserves its App ID, Gateway
+installations, and trace history.
 
 ## Credential Boundaries
 
 | Credential | Presented by | Purpose | Scope |
 | --- | --- | --- | --- |
-| `vifu_ge_...` | New external Gateway | One-time project deployment enrollment | One deployment, one use |
+| `vifu_app_...` | New App installation | Automatic App registration | One App; separate identity per installation |
+| `vifu_ge_...` | New external Gateway | One-time App deployment enrollment | One deployment, one use |
 | Device Token | Enrolled Gateway | Reconnect and configuration/telemetry transport | One Gateway installation |
-| `vifu_pk_...` with project read | TUI or project client | Project traces and monitor stream | One project |
-| Account deployment credential | Signed-in operator tooling | Owned project operations and monitoring | Owner's projects |
+| `vifu_pk_...` with App read | TUI or App client | App traces and monitor stream | One App |
+| Account deployment credential | Signed-in operator tooling | Owned App operations and monitoring | Owner's Apps |
 | Admin Key | Deployment operator | Server administration and full monitoring | Whole deployment |
 | `vifu_gb_...` | Managed internal Gateway | Deployment bootstrap | Internal deployment roles |
 
 Gateway transport and monitor transport intentionally use different
 credentials. Possession of a Gateway Device Token does not grant TUI access,
-and a project monitor key cannot enroll a new Gateway.
+and an App monitor key cannot enroll a new Gateway.
 
 The shared protocol boundaries can be exercised without a mobile UI using the
 [topology protocol live-test matrix](topology-live-testing.md).

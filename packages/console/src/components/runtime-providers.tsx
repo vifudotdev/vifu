@@ -54,7 +54,7 @@ export function RuntimeProvidersView({ project, catalog, providers, availableAge
       <header className="resource-page-heading">
         <div className="resource-page-summary">
           <strong>{providers.length} {providers.length === 1 ? "provider" : "providers"}</strong>
-          <span>Connections available to agents in this project.</span>
+          <span>Connections available to agents in this app.</span>
         </div>
         <button className="primary-button compact" type="button" onClick={() => setDialog({})}>
           <Plus aria-hidden="true" />Add provider
@@ -118,7 +118,7 @@ function ProjectProviderCard({
     setPending(true);
     setError(null);
     try {
-      await host.request(`project/${project.slug}/providers/${provider.providerKey}`, "DELETE");
+      await host.request(`apps/${project.slug}/providers/${provider.providerKey}`, "DELETE");
       router.refresh();
     } catch (nextError) {
       setError(errorMessage(nextError));
@@ -209,7 +209,7 @@ function ProviderDialog({
     try {
       const body = providerSettingsRequestBody(provider, choice, form);
       const result = await host.request<{ message?: string; addedAgents?: number }>(
-        provider ? `project/${project.slug}/providers/${provider.providerKey}` : `project/${project.slug}/providers`,
+        provider ? `apps/${project.slug}/providers/${provider.providerKey}` : `apps/${project.slug}/providers`,
         provider ? "PATCH" : "POST",
         body,
       );
@@ -231,7 +231,7 @@ function ProviderDialog({
     setNotice(null);
     try {
       const result = await host.request<{ message?: string; addedAgents?: number }>(
-        `project/${project.slug}/providers/${provider.providerKey}/test`,
+        `apps/${project.slug}/providers/${provider.providerKey}/test`,
         "POST",
         {},
       );
@@ -263,7 +263,7 @@ function ProviderDialog({
           <div className="resource-dialog-fields">
             <label><span>Name</span><input name="name" required maxLength={128} defaultValue={provider?.name ?? choice.name} autoFocus /></label>
             {!provider && choice.source.kind === "custom" ? (
-              <p>This provider is already available from the connected runtime. Adding it only makes it available to this project.</p>
+              <p>This provider is already available from the connected runtime. Adding it only makes it available to this app.</p>
             ) : choice.fields.map((field) => (
               <label key={field.key}><span>{field.label}</span>{field.kind === "json" ? (
                 <textarea

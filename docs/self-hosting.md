@@ -82,9 +82,11 @@ shared only between those managed roles.
 
 ## Connect A Remote Gateway
 
-A Gateway running outside the managed deployment enrolls into a project once:
+A Gateway running outside the managed deployment can register with an App by
+App ID, or pair with one App deployment:
 
-1. Open the project in the Console and select **Deployments**.
+1. Open the App in the Console and copy its App ID for automatic registration,
+   or select **Deployments** for one-time pairing.
 2. Create or select a deployment, then choose **Pair gateway**.
 3. Set that Server address in the Gateway's `~/.vifu/config.toml`.
 4. Provide the displayed one-time token on the Gateway's next start through
@@ -120,9 +122,9 @@ To use a second Vifu CLI as the remote TUI, configure its remote
 `server.address`. Omit `[gateway]` for monitor-only operation. Keep a local
 Gateway if this computer also hosts Agents.
 
-Provide a project API key through `VIFU_MONITOR_KEY` or
-`VIFU_MONITOR_KEY_FILE`. The key must have project read access. The Server
-filters the monitor stream to that project.
+Provide an App API key through `VIFU_MONITOR_KEY` or
+`VIFU_MONITOR_KEY_FILE`. The key must have App read access. The Server filters
+the monitor stream to that App.
 
 Deployment operators can use `VIFU_ADMIN_KEY` or `VIFU_ADMIN_KEY_FILE` for
 deployment-wide monitoring.
@@ -132,20 +134,20 @@ not authenticate the TUI. See
 [Runtime topology, monitoring, and Gateway enrollment](topology-and-pairing.md)
 for the four placement combinations and complete credential table.
 
-Each project starts with a `development` deployment. More deployments can use
-different Gateways and active Runtime Releases while keeping the same project
-contract. The primary deployment serves the existing project endpoint.
+Each App starts with a `development` deployment and an App ID. More deployments
+can use different Gateways and active Runtime Releases while keeping the same
+App contract. The primary deployment serves the existing App endpoint.
 
 Guest bootstrap is optional. If an operator enables it, an unpaired Gateway can
-receive a temporary project and deployment. It also receives a project key and
+receive a temporary Guest App and deployment. It also receives an App key and
 claim token.
 
-The Console can transfer the Guest project to a signed-in owner. This transfer
-does not replace the Gateway identity. Guest projects use the configured
+The Console can transfer the Guest App to a signed-in owner. This transfer does
+not replace the App ID or Gateway identity. Guest Apps use the configured
 lifetime.
 
-Project enrollment does not create a Guest project. The managed deployment
-bootstrap credential also does not create one.
+App ID registration and one-time enrollment do not create a Guest App. The
+managed deployment bootstrap credential also does not create one.
 
 Agent Gateway is a Server transport: it requires a reachable Vifu Server.
 Applications that embed `VifuRuntime` register their providers directly as
@@ -202,13 +204,13 @@ uses its deployment-managed internal port (6790 by default). The internal bind
 is not a second client address and does not belong in `config.toml`.
 
 Provider integrations are configured independently. Runtime-owned providers live
-in the `providers.json` loaded by the Agent Gateway, while project-local
-providers and project assignments live in the Server database. Start with
+in the `providers.json` loaded by the Agent Gateway, while App-local providers
+and App assignments live in the Server database. Start with
 [providers/README.md](../providers/README.md), then attach the available
-provider keys to each project from the Dashboard or API.
+provider keys to each App from the Dashboard or API.
 
 ## Network Boundary
 
 The default Compose ports bind to loopback. Add a TLS reverse proxy before you
 expose the Server and Console. Keep the Runtime Admin Key on the Console server.
-Application browser code must use project API keys instead.
+Application browser code must use App API keys instead.

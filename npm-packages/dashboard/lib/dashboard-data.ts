@@ -24,8 +24,8 @@ export async function loadDashboardData(
 ): Promise<DashboardData> {
   const authority = await resolveAuthority({ returnTo });
   if (section === "logs") {
-    const projects = authority.status.capabilities.projects
-      ? await authority.deployment.projects()
+    const projects = authority.status.capabilities.apps
+      ? await authority.deployment.apps()
       : [];
     return {
       authority: {
@@ -47,12 +47,12 @@ export async function loadDashboardData(
     agentCandidates,
   ] = await Promise.all([
     loadRuntimeSnapshot(authority, projectSlug),
-    projectSlug ? authority.deployment.projectProviders(projectSlug) : Promise.resolve([]),
-    projectSlug ? authority.deployment.projectProviderCatalog(projectSlug) : Promise.resolve({ registry: [], custom: [] }),
-    projectSlug ? authority.deployment.projectAgentCandidates(projectSlug) : Promise.resolve([]),
+    projectSlug ? authority.deployment.appProviders(projectSlug) : Promise.resolve([]),
+    projectSlug ? authority.deployment.appProviderCatalog(projectSlug) : Promise.resolve({ registry: [], custom: [] }),
+    projectSlug ? authority.deployment.appAgentCandidates(projectSlug) : Promise.resolve([]),
   ]);
   const profileDetails = projectSlug
-    ? await Promise.all(runtime.profiles.map((profile) => authority.deployment.projectProfile(projectSlug, profile.id)))
+    ? await Promise.all(runtime.profiles.map((profile) => authority.deployment.appProfile(projectSlug, profile.id)))
     : [];
   return {
     authority: {

@@ -1,6 +1,6 @@
 {
   "name": "@vifu/console",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Host-neutral Vifu Console UI and Runtime browser contracts.",
   "license": "Apache-2.0",
   "repository": {

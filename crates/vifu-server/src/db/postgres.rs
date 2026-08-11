@@ -84,7 +84,7 @@ pub async fn mark_agent_gateway_sessions_disconnected(pool: &PgPool) -> Result<(
 
 pub async fn list_projects(pool: &PgPool) -> Result<Vec<ProjectWithBindings>, ApiError> {
     let projects = sqlx::query_as::<_, Project>(
-        "SELECT id, owner_user_id, slug, name, description, gateway_id, enabled,
+        "SELECT id, app_id, owner_user_id, slug, name, description, gateway_id, enabled,
                 created_at, updated_at
          FROM projects ORDER BY created_at ASC",
     )
@@ -98,7 +98,7 @@ pub async fn list_projects_for_owner_user_id(
     owner_user_id: &str,
 ) -> Result<Vec<ProjectWithBindings>, ApiError> {
     let projects = sqlx::query_as::<_, Project>(
-        "SELECT id, owner_user_id, slug, name, description, gateway_id, enabled,
+        "SELECT id, app_id, owner_user_id, slug, name, description, gateway_id, enabled,
                 created_at, updated_at
          FROM projects
          WHERE owner_user_id = $1
@@ -112,7 +112,7 @@ pub async fn list_projects_for_owner_user_id(
 
 pub async fn get_project(pool: &PgPool, id: Uuid) -> Result<ProjectWithBindings, ApiError> {
     let project = sqlx::query_as::<_, Project>(
-        "SELECT id, owner_user_id, slug, name, description, gateway_id, enabled,
+        "SELECT id, app_id, owner_user_id, slug, name, description, gateway_id, enabled,
                 created_at, updated_at
          FROM projects WHERE id = $1",
     )
@@ -131,7 +131,7 @@ pub async fn get_project_by_slug(
     slug: &str,
 ) -> Result<ProjectWithBindings, ApiError> {
     let project = sqlx::query_as::<_, Project>(
-        "SELECT id, owner_user_id, slug, name, description, gateway_id, enabled,
+        "SELECT id, app_id, owner_user_id, slug, name, description, gateway_id, enabled,
                 created_at, updated_at
          FROM projects WHERE slug = $1",
     )
@@ -154,7 +154,7 @@ pub async fn set_project_owner_user_id(
         "UPDATE projects
          SET owner_user_id = $2, updated_at = NOW()
          WHERE id = $1
-         RETURNING id, owner_user_id, slug, name, description, gateway_id, enabled,
+         RETURNING id, app_id, owner_user_id, slug, name, description, gateway_id, enabled,
                    created_at, updated_at",
     )
     .bind(id)
@@ -1214,14 +1214,20 @@ pub async fn create_project(
 ) -> Result<ProjectWithBindings, ApiError> {
     validate_project_bindings(pool, project.gateway_id, project.binding_ids).await?;
     let mut transaction = pool.begin().await?;
+    let app_id = format!(
+        "vifu_app_{}{}",
+        Uuid::new_v4().simple(),
+        Uuid::new_v4().simple()
+    );
     let created = sqlx::query_as::<_, Project>(
         "INSERT INTO projects
-            (id, owner_user_id, slug, name, description, gateway_id)
-         VALUES ($1, $2, $3, $4, $5, $6)
-         RETURNING id, owner_user_id, slug, name, description, gateway_id, enabled,
+            (id, app_id, owner_user_id, slug, name, description, gateway_id)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)
+         RETURNING id, app_id, owner_user_id, slug, name, description, gateway_id, enabled,
                    created_at, updated_at",
     )
     .bind(project.id)
+    .bind(&app_id)
     .bind(project.owner_user_id)
     .bind(project.slug)
     .bind(project.name)
@@ -1239,6 +1245,17 @@ pub async fn create_project(
     )
     .bind(deployment_id)
     .bind(project.id)
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO runtime_distributions(
+            id, project_id, deployment_id, name, public_id, max_gateways
+         ) VALUES ($1, $2, $3, 'App registration', $4, 1000)",
+    )
+    .bind(Uuid::new_v4())
+    .bind(project.id)
+    .bind(deployment_id)
+    .bind(&app_id)
     .execute(&mut *transaction)
     .await?;
     if !project.gateway_id.is_empty() {
@@ -1287,7 +1304,7 @@ pub async fn update_project(
             enabled = COALESCE($7, enabled),
             updated_at = NOW()
          WHERE id = $1
-         RETURNING id, owner_user_id, slug, name, description, gateway_id, enabled,
+         RETURNING id, app_id, owner_user_id, slug, name, description, gateway_id, enabled,
                    created_at, updated_at",
     )
     .bind(id)

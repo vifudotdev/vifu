@@ -7,6 +7,7 @@ use uuid::Uuid;
 #[derive(Debug, Clone, Copy, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Capabilities {
+    #[serde(rename = "apps")]
     pub projects: bool,
     pub profiles: bool,
     pub endpoints: bool,
@@ -38,6 +39,7 @@ impl Capabilities {
 #[serde(rename_all = "camelCase")]
 pub struct Project {
     pub id: Uuid,
+    pub app_id: String,
     #[serde(skip_serializing)]
     pub owner_user_id: Option<String>,
     pub slug: String,

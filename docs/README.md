@@ -8,6 +8,7 @@ stable endpoints, Gateway transport, and traces.
 ## Start
 
 - [Install Vifu](install.md)
+- [Apps and App IDs](apps-and-app-ids.md)
 - [Runtime topology, monitoring, and Gateway enrollment](topology-and-pairing.md)
 - [Embedded Console](embedded-console.md)
 - [Self-host a full or headless deployment with Docker](self-hosting.md)

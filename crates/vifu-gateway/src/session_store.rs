@@ -47,6 +47,7 @@ struct StoredGatewaySession {
     resume_session_id: Option<uuid::Uuid>,
     created_at_unix: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "guestApp", alias = "guestProject")]
     guest_project: Option<GuestProjectSummary>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pairing: Option<PairingSummary>,

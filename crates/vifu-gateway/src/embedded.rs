@@ -1157,6 +1157,7 @@ mod tests {
         let guest_project = Mutex::new(None);
         let guest = crate::session::GuestProjectSummary {
             project_id: uuid::Uuid::new_v4(),
+            app_id: format!("vifu_app_{}", "a".repeat(64)),
             project_slug: "guest-demo".to_string(),
             deployment_id: uuid::Uuid::new_v4(),
             deployment: "development".to_string(),

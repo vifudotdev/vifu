@@ -1762,6 +1762,7 @@ mod tests {
     fn guest_project() -> vifu_gateway::session::GuestProjectSummary {
         vifu_gateway::session::GuestProjectSummary {
             project_id: Uuid::nil(),
+            app_id: String::new(),
             project_slug: "guest-test".to_string(),
             deployment_id: Uuid::nil(),
             deployment: "development".to_string(),

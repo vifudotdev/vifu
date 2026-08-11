@@ -18,7 +18,7 @@ export function ProjectHome({
 }) {
   const [query, setQuery] = useState("");
   const normalizedQuery = query.trim().toLocaleLowerCase();
-  const visibleProjects = useMemo(() => {
+  const visibleApps = useMemo(() => {
     if (!normalizedQuery) return projects;
     return projects.filter((project) => (
       project.name.toLocaleLowerCase().includes(normalizedQuery)
@@ -30,7 +30,7 @@ export function ProjectHome({
     <div className="console-content project-home-content">
       <header className="project-home-heading">
         <div>
-          <h1>Projects</h1>
+          <h1>projects</h1>
           <p>Open a project or create a new agent runtime.</p>
         </div>
         <ProjectCreateMenu />
@@ -48,9 +48,9 @@ export function ProjectHome({
               aria-label="Search projects"
             />
           </label>
-          {visibleProjects.length > 0 ? (
+          {visibleApps.length > 0 ? (
             <div className="project-home-grid">
-              {visibleProjects.map((project) => (
+              {visibleApps.map((project) => (
                 <Link
                   className="project-home-card"
                   href={`/project/${project.slug}`}

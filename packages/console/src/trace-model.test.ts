@@ -115,7 +115,7 @@ describe("trace list paths", () => {
     });
     const url = new URL(path, "http://vifu.invalid/");
 
-    expect(url.pathname).toBe("/project/stardew%20valley/traces");
+    expect(url.pathname).toBe("/apps/stardew%20valley/traces");
     expect(Object.fromEntries(url.searchParams)).toEqual({
       beforeCreatedAt: "2026-08-03T12:34:56.789Z",
       beforeTraceId: "trace/older",
@@ -307,9 +307,9 @@ describe("invocation deep links", () => {
 
   it("builds bounded exact lookup paths for invocation and stored trace ids", () => {
     expect(exactTraceLookupPath("demo/project", "requestId", "request/id"))
-      .toBe("project/demo%2Fproject/traces?requestId=request%2Fid&limit=1");
+      .toBe("apps/demo%2Fproject/traces?requestId=request%2Fid&limit=1");
     expect(exactTraceLookupPath("demo/project", "traceId", "trace/id"))
-      .toBe("project/demo%2Fproject/traces?traceId=trace%2Fid&limit=1");
+      .toBe("apps/demo%2Fproject/traces?traceId=trace%2Fid&limit=1");
   });
 });
 

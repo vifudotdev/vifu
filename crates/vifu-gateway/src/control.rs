@@ -37,6 +37,7 @@ impl fmt::Display for TraceObservationUploadError {
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct GuestProjectBootstrap {
+    #[serde(rename = "app", alias = "project")]
     pub project: GuestProject,
     pub deployment: GuestDeployment,
     pub endpoint_path: String,
@@ -49,6 +50,7 @@ pub struct GuestProjectBootstrap {
 #[serde(rename_all = "camelCase")]
 pub struct GuestProject {
     pub id: Uuid,
+    pub app_id: String,
     pub slug: String,
 }
 

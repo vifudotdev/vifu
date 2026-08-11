@@ -351,7 +351,7 @@ export function exactTraceLookupPath(
   field: "requestId" | "traceId",
   value: string,
 ): string {
-  return `project/${encodeURIComponent(projectSlug)}/traces?${field}=${encodeURIComponent(value)}&limit=1`;
+  return `apps/${encodeURIComponent(projectSlug)}/traces?${field}=${encodeURIComponent(value)}&limit=1`;
 }
 
 export function traceListPath(
@@ -367,7 +367,7 @@ export function traceListPath(
   }
   if (query.limit !== undefined) params.set("limit", String(query.limit));
   const suffix = params.toString();
-  return `project/${encodeURIComponent(projectSlug)}/traces${suffix ? `?${suffix}` : ""}`;
+  return `apps/${encodeURIComponent(projectSlug)}/traces${suffix ? `?${suffix}` : ""}`;
 }
 
 export function retainPinnedTrace<T extends { id: string }>(

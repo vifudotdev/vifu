@@ -6,7 +6,7 @@ import { forwardRuntimeResponse } from "../../../../lib/runtime-proxy";
 
 const ALLOWED_ROOTS = new Set([
   "chat",
-  "projects",
+  "apps",
   "profiles",
   "bindings",
   "endpoints",
@@ -14,7 +14,7 @@ const ALLOWED_ROOTS = new Set([
   "api-keys",
   "agent-gateways",
   "agent-gateway-pairings",
-  "project",
+  "apps",
   "provider-adapters",
   "provider-catalog",
   "runtime-extensions",
@@ -128,7 +128,7 @@ function isAllowedPath(path: string[]): boolean {
       || path.length === 2
       || (path.length === 3 && (path[2] === "approve" || path[2] === "reject"));
   }
-  if (path[0] === "project") {
+  if (path[0] === "apps") {
     if (path.length < 3) return false;
     if (path[2] === "providers") {
       return path.length === 3

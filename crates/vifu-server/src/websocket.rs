@@ -666,9 +666,14 @@ fn can_recover_missing_guest_token(guest_bootstrap_enabled: bool, owner: Option<
 }
 
 fn is_runtime_distribution_id(value: &str) -> bool {
-    value.len() == "vifu_di_".len() + 64
-        && value.starts_with("vifu_di_")
-        && value["vifu_di_".len()..]
+    let prefix = if value.starts_with("vifu_app_") {
+        "vifu_app_"
+    } else {
+        "vifu_di_"
+    };
+    value.len() == prefix.len() + 64
+        && value.starts_with(prefix)
+        && value[prefix.len()..]
             .chars()
             .all(|character| character.is_ascii_hexdigit())
 }
@@ -1484,6 +1489,50 @@ mod tests {
                 .unwrap()
                 .contains(&authorization.gateway_id)
         );
+    }
+
+    #[tokio::test]
+    async fn app_id_authorizes_a_new_installation_without_guest_bootstrap() {
+        let Some(pool) = maybe_test_pool().await else {
+            return;
+        };
+        let app = db::create_project(
+            &pool,
+            NewProject {
+                id: Uuid::new_v4(),
+                owner_user_id: Some("app-owner"),
+                slug: "automatic-app-enrollment",
+                name: "Automatic app enrollment",
+                description: None,
+                gateway_id: "",
+                binding_ids: &[],
+            },
+        )
+        .await
+        .unwrap();
+        let machine = MachineIdentity::generate().unwrap();
+        db::upsert_agent_gateway_machine(&pool, &machine.machine_id, &machine.public_key)
+            .await
+            .unwrap();
+        let state = state_with_storage(Config::from_env().unwrap(), pool);
+
+        let authorization = match authorize_gateway_machine(
+            &state,
+            &machine.machine_id,
+            None,
+            Some(&app.project.app_id),
+        )
+        .await
+        .unwrap()
+        {
+            GatewayAuthorizationOutcome::Authorized {
+                authorization,
+                device_token: Some(_),
+                ..
+            } => authorization,
+            _ => panic!("a valid App ID must authorize the installation"),
+        };
+        assert_eq!(authorization.owner_user_id.as_deref(), Some("app-owner"));
     }
 
     #[tokio::test]

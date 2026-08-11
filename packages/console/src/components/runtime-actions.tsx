@@ -35,13 +35,13 @@ export function ProjectCreateForm({
     setCreatedSlug(null);
     const form = new FormData(event.currentTarget);
     try {
-      const payload = await host.request<{ project?: { slug?: string } }>("projects", "POST", {
+      const payload = await host.request<{ app?: { slug?: string; appId?: string } }>("apps", "POST", {
         name: value(form, "name"),
         description: optionalValue(form, "description"),
       });
-      const slug = payload.project?.slug ?? null;
+      const slug = payload.app?.slug ?? null;
       setCreatedSlug(slug);
-      setState({ tone: "success", message: "Project created." });
+      setState({ tone: "success", message: "App created." });
       if (isMenu && slug) router.push(host.projectHref(slug));
     } catch (error) {
       setState({ tone: "error", message: errorMessage(error) });
@@ -66,8 +66,8 @@ export function ProjectCreateForm({
         {isMenu ? null : <Field label="Description" wide><input name="description" maxLength={4096} placeholder="Agent runtime for your game" /></Field>}
       </div>
       <div className="form-actions">
-        <button className="primary-button" type="submit" disabled={pending}><Plus aria-hidden="true" />{pending ? "Creating" : "Create project"}</button>
-        {createdSlug && !isMenu ? <button className="secondary-button" type="button" onClick={() => router.push(host.projectHref(createdSlug))}>Open project</button> : null}
+        <button className="primary-button" type="submit" disabled={pending}><Plus aria-hidden="true" />{pending ? "Creating" : "Create app"}</button>
+        {createdSlug && !isMenu ? <button className="secondary-button" type="button" onClick={() => router.push(host.projectHref(createdSlug))}>Open app</button> : null}
         <ActionMessage state={state} />
       </div>
     </form>
@@ -290,7 +290,7 @@ export function RevokeApiKeyButton({ projectSlug, id, name }: { projectSlug: str
     setPending(true);
     setError(null);
     try {
-      await host.request(`project/${projectSlug}/api-keys/${id}/revoke`, "POST");
+      await host.request(`apps/${projectSlug}/api-keys/${id}/revoke`, "POST");
       router.refresh();
     } catch (nextError) {
       setError(errorMessage(nextError));
@@ -320,7 +320,7 @@ export function DeleteApiKeyButton({ projectSlug, id, name }: { projectSlug: str
     setPending(true);
     setError(null);
     try {
-      await host.request(`project/${projectSlug}/api-keys/${id}`, "DELETE");
+      await host.request(`apps/${projectSlug}/api-keys/${id}`, "DELETE");
       router.refresh();
     } catch (nextError) {
       setError(errorMessage(nextError));

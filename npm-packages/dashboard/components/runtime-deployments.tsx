@@ -73,7 +73,7 @@ export function RuntimeDeploymentsView({
     const name = String(data.get("name") ?? "").trim();
     const created = await action(
       "create",
-      () => runtimeBrowserRequest(`project/${project.slug}/deployments`, "POST", {
+      () => runtimeBrowserRequest(`apps/${project.slug}/deployments`, "POST", {
         name,
         configSyncEnabled: true,
         traceMode: "summary",
@@ -89,17 +89,17 @@ export function RuntimeDeploymentsView({
     try {
       settings = JSON.parse(settingsSource) as ProjectSettings;
     } catch {
-      setMessage({ tone: "error", text: "Project settings JSON is not valid." });
+      setMessage({ tone: "error", text: "project settings JSON is not valid." });
       return;
     }
     const result = await action(
       "import-settings",
       () => runtimeBrowserRequest<{ release: ProjectRuntimeRelease }>(
-        `project/${project.slug}/runtime-releases`,
+        `apps/${project.slug}/runtime-releases`,
         "POST",
         { settings },
       ),
-      "Project settings imported.",
+      "project settings imported.",
     );
     if (result?.release) setSettingsSource(formatProjectSettings(result.release.manifest));
   }
@@ -119,7 +119,7 @@ export function RuntimeDeploymentsView({
     anchor.click();
     anchor.remove();
     window.setTimeout(() => URL.revokeObjectURL(url), 0);
-    setMessage({ tone: "success", text: "Project settings exported." });
+    setMessage({ tone: "success", text: "project settings exported." });
   }
 
   async function loadProjectSettingsFile(event: ChangeEvent<HTMLInputElement>) {
@@ -128,9 +128,9 @@ export function RuntimeDeploymentsView({
     if (!file) return;
     try {
       setSettingsSource(await file.text());
-      setMessage({ tone: "success", text: "Project settings file loaded." });
+      setMessage({ tone: "success", text: "project settings file loaded." });
     } catch {
-      setMessage({ tone: "error", text: "Project settings file could not be read." });
+      setMessage({ tone: "error", text: "project settings file could not be read." });
     }
   }
 
@@ -138,7 +138,7 @@ export function RuntimeDeploymentsView({
     const result = await action(
       `pair-${deployment.id}`,
       () => runtimeBrowserRequest<Enrollment>(
-        `project/${project.slug}/deployments/${deployment.name}/agent-gateway-enrollments`,
+        `apps/${project.slug}/deployments/${deployment.name}/agent-gateway-enrollments`,
         "POST",
       ),
       "Pairing token created.",
@@ -150,7 +150,7 @@ export function RuntimeDeploymentsView({
     await action(
       `activate-${deployment.id}-${version}`,
       () => runtimeBrowserRequest(
-        `project/${project.slug}/deployments/${deployment.name}/runtime-releases/${version}/activate`,
+        `apps/${project.slug}/deployments/${deployment.name}/runtime-releases/${version}/activate`,
         "POST",
       ),
       `${deployment.name} now uses settings version ${version}.`,
@@ -161,7 +161,7 @@ export function RuntimeDeploymentsView({
     await action(
       `detach-${deployment.id}-${gatewayId}`,
       () => runtimeBrowserRequest(
-        `project/${project.slug}/deployments/${deployment.name}/agent-gateways/${gatewayId}`,
+        `apps/${project.slug}/deployments/${deployment.name}/agent-gateways/${gatewayId}`,
         "DELETE",
       ),
       "Gateway detached from this deployment.",
@@ -183,7 +183,7 @@ export function RuntimeDeploymentsView({
     await action(
       `settings-${deployment.id}`,
       () => runtimeBrowserRequest(
-        `project/${project.slug}/deployments/${deployment.name}`,
+        `apps/${project.slug}/deployments/${deployment.name}`,
         "PATCH",
         {
           configSyncEnabled: data.get("configSyncEnabled") === "on",
@@ -199,7 +199,7 @@ export function RuntimeDeploymentsView({
     await action(
       `promote-${deployment.id}`,
       () => runtimeBrowserRequest(
-        `project/${project.slug}/deployments/${deployment.name}/promote`,
+        `apps/${project.slug}/deployments/${deployment.name}/promote`,
         "POST",
       ),
       `${deployment.name} is now the primary deployment.`,
@@ -268,7 +268,7 @@ export function RuntimeDeploymentsView({
 
       <section className="release-workbench">
         <header>
-          <div><h2>Project settings</h2><p>Database-backed provider, agent, and endpoint settings.</p></div>
+          <div><h2>project settings</h2><p>Database-backed provider, agent, and endpoint settings.</p></div>
           <div className="settings-artifact-actions">
             <label className="secondary-button settings-file-button">
               <CloudUpload aria-hidden="true" />Load JSON
@@ -278,7 +278,7 @@ export function RuntimeDeploymentsView({
             <button className="primary-button" type="button" onClick={importProjectSettings} disabled={pending === "import-settings"}><CloudUpload aria-hidden="true" />{pending === "import-settings" ? "Importing" : "Import"}</button>
           </div>
         </header>
-        <textarea value={settingsSource} onChange={(event) => setSettingsSource(event.target.value)} spellCheck={false} aria-label="Project settings JSON" />
+        <textarea value={settingsSource} onChange={(event) => setSettingsSource(event.target.value)} spellCheck={false} aria-label="project settings JSON" />
         <div className="release-list">
           {releases.length > 0 ? releases.map((release) => (
             <article key={release.id}>

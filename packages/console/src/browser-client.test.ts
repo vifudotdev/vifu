@@ -58,7 +58,7 @@ describe("runtimeBrowserRequest", () => {
     vi.useFakeTimers();
     vi.stubGlobal("fetch", abortablePendingFetch());
 
-    const request = runtimeBrowserRequest("projects", "POST", { name: "demo" });
+    const request = runtimeBrowserRequest("apps", "POST", { name: "demo" });
     const rejection = expect(request).rejects.toMatchObject({
       status: 408,
       message: "Runtime request timed out.",
@@ -72,7 +72,7 @@ describe("runtimeBrowserRequest", () => {
     vi.stubGlobal("fetch", abortablePendingFetch());
 
     const request = runtimeBrowserUpload(
-      "project/demo/extensions/runtime",
+      "apps/demo/extensions/runtime",
       new FormData(),
     );
     const rejection = expect(request).rejects.toMatchObject({
@@ -86,7 +86,7 @@ describe("runtimeBrowserRequest", () => {
   it("delegates only invocation paths to server deadlines", () => {
     expect(runtimeRequestUsesServerDeadline("chat/completions", "POST")).toBe(true);
     expect(runtimeRequestUsesServerDeadline("demo/v1/embeddings", "POST")).toBe(true);
-    expect(runtimeRequestUsesServerDeadline("projects", "POST")).toBe(false);
+    expect(runtimeRequestUsesServerDeadline("apps", "POST")).toBe(false);
     expect(runtimeRequestUsesServerDeadline("chat/completions", "PATCH")).toBe(false);
   });
 });

@@ -44,17 +44,17 @@ async function loadRuntimeStatus(apiBaseUrl: string): Promise<DeploymentStatus> 
 export async function loadRuntimeSnapshot(authority: AuthorityAdapter, projectSlug?: string): Promise<RuntimeSnapshot> {
   const { capabilities } = authority.status;
   const [projects, profiles, bindings, endpoints, apiKeys, agentGateways, availableAgents, providerAdapters, traces, deployments, releases] = await Promise.all([
-    capabilities.projects ? authority.deployment.projects() : Promise.resolve([]),
-    capabilities.profiles && projectSlug ? authority.deployment.projectProfiles(projectSlug) : Promise.resolve([]),
-    capabilities.bindings && projectSlug ? authority.deployment.projectBindings(projectSlug) : Promise.resolve([]),
-    capabilities.endpoints && projectSlug ? authority.deployment.projectEndpoints(projectSlug) : Promise.resolve([]),
-    capabilities.apiKeys && projectSlug ? authority.deployment.projectApiKeys(projectSlug) : Promise.resolve([]),
-    capabilities.agentGateways && projectSlug ? authority.deployment.projectAgentGateways(projectSlug) : Promise.resolve([]),
-    capabilities.agentGateways && projectSlug ? authority.deployment.projectAvailableAgents(projectSlug) : Promise.resolve([]),
+    capabilities.apps ? authority.deployment.apps() : Promise.resolve([]),
+    capabilities.profiles && projectSlug ? authority.deployment.appProfiles(projectSlug) : Promise.resolve([]),
+    capabilities.bindings && projectSlug ? authority.deployment.appBindings(projectSlug) : Promise.resolve([]),
+    capabilities.endpoints && projectSlug ? authority.deployment.appEndpoints(projectSlug) : Promise.resolve([]),
+    capabilities.apiKeys && projectSlug ? authority.deployment.appApiKeys(projectSlug) : Promise.resolve([]),
+    capabilities.agentGateways && projectSlug ? authority.deployment.appAgentGateways(projectSlug) : Promise.resolve([]),
+    capabilities.agentGateways && projectSlug ? authority.deployment.appAvailableAgents(projectSlug) : Promise.resolve([]),
     capabilities.providerConnections ? authority.deployment.providerAdapters() : Promise.resolve([]),
-    capabilities.traces && projectSlug ? authority.deployment.projectTraces(projectSlug) : Promise.resolve([]),
-    projectSlug ? authority.deployment.projectDeployments(projectSlug) : Promise.resolve([]),
-    projectSlug ? authority.deployment.projectRuntimeReleases(projectSlug) : Promise.resolve([]),
+    capabilities.traces && projectSlug ? authority.deployment.appTraces(projectSlug) : Promise.resolve([]),
+    projectSlug ? authority.deployment.appDeployments(projectSlug) : Promise.resolve([]),
+    projectSlug ? authority.deployment.appRuntimeReleases(projectSlug) : Promise.resolve([]),
   ]);
   return { projects, profiles, bindings, endpoints, apiKeys, agentGateways, availableAgents, providerAdapters, traces, deployments, releases };
 }

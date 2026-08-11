@@ -64,7 +64,7 @@ export function ApiIntegrationsView({
       <section className="api-integration-section api-endpoint-section">
         <div className="api-endpoint-heading">
           <div>
-            <span>Project endpoint</span>
+            <span>project endpoint</span>
             <p>One URL for every enabled agent in this project.</p>
           </div>
           <ApiReferenceDialog baseUrl={projectBaseUrl} />
@@ -293,7 +293,7 @@ function ApiReferenceDialog({ baseUrl }: { baseUrl: string }) {
       <dialog className="api-reference-dialog" ref={dialogRef}>
         <div className="api-dialog-shell">
           <header>
-            <div><span>Project API</span><h2>API reference</h2></div>
+            <div><span>project API</span><h2>API reference</h2></div>
             <form method="dialog"><button className="icon-button" type="submit" aria-label="Close API reference" title="Close"><X aria-hidden="true" /></button></form>
           </header>
           <div className="api-reference-content">
@@ -359,7 +359,7 @@ function CreateApiKeyDialog({
     setPending(true);
     setError(null);
     try {
-      const payload = await runtimeRequest<{ apiKey?: { key?: string } }>(`project/${project.slug}/api-keys`, "POST", {
+      const payload = await runtimeRequest<{ apiKey?: { key?: string } }>(`apps/${project.slug}/api-keys`, "POST", {
         projectId: project.id,
         name: name.trim() || readableDefaultKeyName(),
         agentScope: agentScopePayload(scopeMode, selectedProfileIds),
@@ -400,7 +400,7 @@ function CreateApiKeyDialog({
         <div className="api-dialog-shell api-key-dialog-shell">
           <header>
             <div>
-              <span>{createdKey ? "Project key" : "Project access"}</span>
+              <span>{createdKey ? "project key" : "project access"}</span>
               <h2>{createdKey ? "Save your API key" : "Create API key"}</h2>
             </div>
             <form method="dialog"><button className="icon-button" type="submit" aria-label="Close API key dialog" title="Close"><X aria-hidden="true" /></button></form>
@@ -424,14 +424,14 @@ function CreateApiKeyDialog({
                     name="name"
                     maxLength={128}
                     value={name}
-                    placeholder="Project key"
+                    placeholder="project key"
                     onChange={(event) => setName(event.target.value)}
                     autoFocus
                   />
                 </label>
 
                 <div className="api-key-scope-note">
-                  <strong>Project key</strong>
+                  <strong>project key</strong>
                   <span>Each request must provide a <code>model</code> that resolves to an agent in <b>{project.name}</b>.</span>
                 </div>
                 <ApiKeyAgentScopeFields
@@ -494,7 +494,7 @@ function EditApiKeyDialog({
     setPending(true);
     setError(null);
     try {
-      await runtimeRequest(`project/${projectSlug}/api-keys/${apiKey.id}`, "PATCH", {
+      await runtimeRequest(`apps/${projectSlug}/api-keys/${apiKey.id}`, "PATCH", {
         name: name.trim(),
         agentScope: agentScopePayload(scopeMode, selectedProfileIds),
         permissions,
@@ -516,7 +516,7 @@ function EditApiKeyDialog({
       <dialog className="api-key-dialog" ref={dialogRef} onClose={reset}>
         <div className="api-dialog-shell api-key-dialog-shell">
           <header>
-            <div><span>Project access</span><h2>Edit API key</h2></div>
+            <div><span>project access</span><h2>Edit API key</h2></div>
             <form method="dialog"><button className="icon-button" type="submit" aria-label="Close API key dialog" title="Close"><X aria-hidden="true" /></button></form>
           </header>
           <form className="api-key-create-form" onSubmit={save}>
@@ -532,7 +532,7 @@ function EditApiKeyDialog({
                 />
               </label>
               <div className="api-key-scope-note">
-                <strong>Project key</strong>
+                <strong>project key</strong>
                 <span>Choose whether this key follows every agent or only an explicit set in this project.</span>
               </div>
               <ApiKeyAgentScopeFields
@@ -676,7 +676,7 @@ function ApiKeyPermissionsFields({
         onChange={(realtime) => onChange({ ...permissions, realtime })}
       />
       <ApiKeyPermissionRow
-        label="Project Runtime"
+        label="project Runtime"
         value={permissions.runtime}
         options={[
           { value: "none", label: "No access" },
@@ -695,7 +695,7 @@ function ApiKeyPermissionsFields({
         onChange={(agents) => onChange({ ...permissions, agents })}
       />
       <ApiKeyPermissionRow
-        label="Project"
+        label="App"
         value={permissions.project}
         options={[
           { value: "none", label: "No access" },
@@ -814,7 +814,7 @@ function readableDefaultKeyName(): string {
     day: "numeric",
     year: "numeric",
   }).format(new Date());
-  return `Project key - ${date}`;
+  return `project key - ${date}`;
 }
 
 function agentScopePayload(mode: ApiKeyAgentScope["mode"], profileIds: string[]): ApiKeyAgentScope {
@@ -847,7 +847,7 @@ function formatPermissions(permissions: ApiKeyPermissions): string {
   if (permissions.realtime === "access") enabled.push("Realtime");
   if (permissions.runtime === "access") enabled.push("Project runtime");
   if (permissions.agents !== "none") enabled.push(`Agents ${permissions.agents}`);
-  if (permissions.project !== "none") enabled.push(`Project ${permissions.project}`);
+  if (permissions.project !== "none") enabled.push(`App ${permissions.project}`);
   return enabled.length > 0 ? enabled.join(", ") : "No access";
 }
 

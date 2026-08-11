@@ -238,8 +238,8 @@ async function loadEmbeddedDashboardData(
     status: { ...status, auth: { required: false, mode: "none" } } satisfies DeploymentStatus,
   };
   if (section === "logs") {
-    const projects = status.capabilities.projects
-      ? await requestList<RuntimeProject>("projects", "projects", signal)
+    const projects = status.capabilities.apps
+      ? await requestList<RuntimeProject>("apps", "apps", signal)
       : [];
     return {
       authority,
@@ -253,14 +253,14 @@ async function loadEmbeddedDashboardData(
   const runtime = await loadRuntimeSnapshot(authority.status, projectSlug, signal);
   const [projectProviders, providerCatalog, agentCandidates] = projectSlug
     ? await Promise.all([
-      requestList<ProjectProvider>(`project/${encodeURIComponent(projectSlug)}/providers`, "providers", signal),
+      requestList<ProjectProvider>(`apps/${encodeURIComponent(projectSlug)}/providers`, "providers", signal),
       requestCatalog(projectSlug, signal),
-      requestList<ProjectAgentCandidate>(`project/${encodeURIComponent(projectSlug)}/agent-candidates`, "candidates", signal),
+      requestList<ProjectAgentCandidate>(`apps/${encodeURIComponent(projectSlug)}/agent-candidates`, "candidates", signal),
     ])
     : [[], { registry: [], custom: [] } satisfies ProviderCatalog, []];
   const profileDetails = projectSlug
     ? await Promise.all(runtime.profiles.map((profile) => runtimeBrowserRequest<AgentProfileDetail>(
-      `project/${encodeURIComponent(projectSlug)}/profiles/${encodeURIComponent(profile.id)}`,
+      `apps/${encodeURIComponent(projectSlug)}/profiles/${encodeURIComponent(profile.id)}`,
       "GET",
       undefined,
       signal,
@@ -312,17 +312,17 @@ async function loadRuntimeSnapshot(
     deployments,
     releases,
   ] = await Promise.all([
-    capabilities.projects ? requestList<RuntimeProject>("projects", "projects", signal) : Promise.resolve([]),
-    capabilities.profiles && projectSlug ? requestList<AgentProfile>(`project/${encodeURIComponent(projectSlug)}/profiles`, "profiles", signal) : Promise.resolve([]),
-    capabilities.bindings && projectSlug ? requestList<AgentBinding>(`project/${encodeURIComponent(projectSlug)}/bindings`, "bindings", signal) : Promise.resolve([]),
-    capabilities.endpoints && projectSlug ? requestList<AgentEndpoint>(`project/${encodeURIComponent(projectSlug)}/endpoints`, "endpoints", signal) : Promise.resolve([]),
-    capabilities.apiKeys && projectSlug ? requestList<ApiKeyRecord>(`project/${encodeURIComponent(projectSlug)}/api-keys`, "apiKeys", signal) : Promise.resolve([]),
-    capabilities.agentGateways && projectSlug ? requestList<AgentGateway>(`project/${encodeURIComponent(projectSlug)}/agent-gateways`, "agentGateways", signal) : Promise.resolve([]),
-    capabilities.agentGateways && projectSlug ? requestList<AvailableAgent>(`project/${encodeURIComponent(projectSlug)}/agents`, "agents", signal) : Promise.resolve([]),
+    capabilities.apps ? requestList<RuntimeProject>("apps", "apps", signal) : Promise.resolve([]),
+    capabilities.profiles && projectSlug ? requestList<AgentProfile>(`apps/${encodeURIComponent(projectSlug)}/profiles`, "profiles", signal) : Promise.resolve([]),
+    capabilities.bindings && projectSlug ? requestList<AgentBinding>(`apps/${encodeURIComponent(projectSlug)}/bindings`, "bindings", signal) : Promise.resolve([]),
+    capabilities.endpoints && projectSlug ? requestList<AgentEndpoint>(`apps/${encodeURIComponent(projectSlug)}/endpoints`, "endpoints", signal) : Promise.resolve([]),
+    capabilities.apiKeys && projectSlug ? requestList<ApiKeyRecord>(`apps/${encodeURIComponent(projectSlug)}/api-keys`, "apiKeys", signal) : Promise.resolve([]),
+    capabilities.agentGateways && projectSlug ? requestList<AgentGateway>(`apps/${encodeURIComponent(projectSlug)}/agent-gateways`, "agentGateways", signal) : Promise.resolve([]),
+    capabilities.agentGateways && projectSlug ? requestList<AvailableAgent>(`apps/${encodeURIComponent(projectSlug)}/agents`, "agents", signal) : Promise.resolve([]),
     capabilities.providerConnections ? requestList<ProviderAdapter>("provider-adapters", "providerAdapters", signal) : Promise.resolve([]),
-    capabilities.traces && projectSlug ? requestList<EndpointTrace>(`project/${encodeURIComponent(projectSlug)}/traces?limit=100`, "traces", signal) : Promise.resolve([]),
-    projectSlug ? requestList<RuntimeDeployment>(`project/${encodeURIComponent(projectSlug)}/deployments`, "deployments", signal) : Promise.resolve([]),
-    projectSlug ? requestList<ProjectRuntimeRelease>(`project/${encodeURIComponent(projectSlug)}/runtime-releases`, "releases", signal) : Promise.resolve([]),
+    capabilities.traces && projectSlug ? requestList<EndpointTrace>(`apps/${encodeURIComponent(projectSlug)}/traces?limit=100`, "traces", signal) : Promise.resolve([]),
+    projectSlug ? requestList<RuntimeDeployment>(`apps/${encodeURIComponent(projectSlug)}/deployments`, "deployments", signal) : Promise.resolve([]),
+    projectSlug ? requestList<ProjectRuntimeRelease>(`apps/${encodeURIComponent(projectSlug)}/runtime-releases`, "releases", signal) : Promise.resolve([]),
   ]);
 
   return {
@@ -342,7 +342,7 @@ async function loadRuntimeSnapshot(
 
 async function requestCatalog(projectSlug: string, signal: AbortSignal): Promise<ProviderCatalog> {
   const catalog = await runtimeBrowserRequest<Partial<ProviderCatalog>>(
-    `project/${encodeURIComponent(projectSlug)}/provider-catalog`,
+    `apps/${encodeURIComponent(projectSlug)}/provider-catalog`,
     "GET",
     undefined,
     signal,

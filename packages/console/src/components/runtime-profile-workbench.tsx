@@ -116,7 +116,7 @@ export function RuntimeProfileWorkbench({
     setMessage(null);
     try {
       const next = await request<AgentProfileDetail>(
-        `project/${project.slug}/profiles/${profile.id}`,
+        `apps/${project.slug}/profiles/${profile.id}`,
         "GET",
       );
       setDetail(next);
@@ -149,7 +149,7 @@ export function RuntimeProfileWorkbench({
     setMessage(null);
     try {
       const payload = await request<ProfileVersionWithCapabilities>(
-        `project/${project.slug}/profiles/${profile.id}/versions`,
+        `apps/${project.slug}/profiles/${profile.id}/versions`,
         "POST",
         { ...draft, changeSummary: changeSummary.trim() || undefined },
       );
@@ -170,7 +170,7 @@ export function RuntimeProfileWorkbench({
     setMessage(null);
     try {
       const payload = await request<{ version?: ProfileVersionWithCapabilities }>(
-        `project/${project.slug}/profiles/${profile.id}/source/sync`,
+        `apps/${project.slug}/profiles/${profile.id}/source/sync`,
         "POST",
         { changeSummary: "Synced from provider" },
       );
@@ -191,7 +191,7 @@ export function RuntimeProfileWorkbench({
     setMessage(null);
     try {
       await request(
-        `project/${project.slug}/profiles/${profile.id}/versions/${versionId}/activate`,
+        `apps/${project.slug}/profiles/${profile.id}/versions/${versionId}/activate`,
         "POST",
         {},
       );
@@ -210,7 +210,7 @@ export function RuntimeProfileWorkbench({
     setMessage(null);
     try {
       await request(
-        `project/${project.slug}/profiles/${profile.id}/versions/${versionId}/archive`,
+        `apps/${project.slug}/profiles/${profile.id}/versions/${versionId}/archive`,
         "POST",
         {},
       );
@@ -234,7 +234,7 @@ export function RuntimeProfileWorkbench({
     setMessage(null);
     try {
       await request(
-        `project/${project.slug}/profiles/${profile.id}`,
+        `apps/${project.slug}/profiles/${profile.id}`,
         "PATCH",
         { name: name.trim(), description: description.trim() },
       );
@@ -252,7 +252,7 @@ export function RuntimeProfileWorkbench({
     setPending("delete-profile");
     setMessage(null);
     try {
-      await request(`project/${project.slug}/profiles/${profile.id}`, "DELETE");
+      await request(`apps/${project.slug}/profiles/${profile.id}`, "DELETE");
       router.refresh();
       onClose();
     } catch (error) {
@@ -510,17 +510,17 @@ function OverviewPanel({
   return (
     <div className="profile-panel-stack">
       <section className="profile-overview-status">
-        <div><span>Project access</span><strong><i className="ready" />Available</strong></div>
+        <div><span>App access</span><strong><i className="ready" />Available</strong></div>
         <div><span>Live version</span><strong>{activeVersion ? `v${activeVersion.version.versionNumber}` : "Not set"}</strong></div>
         <div><span>Runs on</span><strong>{sourceName}</strong></div>
       </section>
       <section className="profile-definition-list">
-        <div className="profile-section-heading"><h3>Agent details</h3><p>The name and role used while building this project.</p></div>
+        <div className="profile-section-heading"><h3>Agent details</h3><p>The name and role used while building this app.</p></div>
         <div className="profile-identity-fields">
           <label><span>Agent name</span><input value={name} maxLength={128} onChange={(event) => setName(event.target.value)} /></label>
           <label><span>Role in your game</span><textarea value={description} maxLength={4096} onChange={(event) => setDescription(event.target.value)} placeholder="Welcomes players and helps them explore the world" /></label>
         </div>
-        <dl><div><dt>Agent ID</dt><dd><code>{detail.profile.slug}</code></dd></div><div><dt>Game project</dt><dd>{project.name}</dd></div></dl>
+        <dl><div><dt>Agent ID</dt><dd><code>{detail.profile.slug}</code></dd></div><div><dt>App</dt><dd>{project.name}</dd></div></dl>
         <button className="secondary-button" type="button" disabled={!metadataDirty || !name.trim() || pending !== null} onClick={() => onUpdateProfile(name, description)}>{pending === "profile" ? "Saving" : "Save agent details"}</button>
       </section>
       <GameIdentityPanel presentation={presentation} onChange={onPresentationChange} />
@@ -536,7 +536,7 @@ function OverviewPanel({
         </div>
       </details>
       <section className="profile-game-access">
-        <div><strong>Available through the project API</strong><span>Requests can select this agent using its Agent ID.</span></div>
+        <div><strong>Available through the app API</strong><span>Requests can select this agent using its Agent ID.</span></div>
         <button className="danger-text-button" type="button" disabled={pending !== null} onClick={onRemove}><Trash2 aria-hidden="true" />Remove agent</button>
       </section>
     </div>
@@ -846,7 +846,7 @@ function TestPanel({
       ? [versionId, compareVersionId]
       : [versionId];
     const settled = await Promise.allSettled(versionIds.map((targetVersionId) => request<TestResult>(
-      `project/${project.slug}/profiles/${profile.id}/test`,
+      `apps/${project.slug}/profiles/${profile.id}/test`,
       "POST",
       {
         versionId: targetVersionId,

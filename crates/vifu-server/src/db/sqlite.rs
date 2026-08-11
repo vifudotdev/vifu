@@ -193,7 +193,7 @@ pub async fn mark_agent_gateway_sessions_disconnected(pool: &SqlitePool) -> Resu
 
 pub async fn list_projects(pool: &SqlitePool) -> Result<Vec<ProjectWithBindings>, ApiError> {
     let projects = sqlx::query_as::<_, Project>(
-        "SELECT id, owner_user_id, slug, name, description, gateway_id, enabled,
+        "SELECT id, app_id, owner_user_id, slug, name, description, gateway_id, enabled,
                 created_at, updated_at
          FROM projects ORDER BY created_at ASC",
     )
@@ -207,7 +207,7 @@ pub async fn list_projects_for_owner_user_id(
     owner_user_id: &str,
 ) -> Result<Vec<ProjectWithBindings>, ApiError> {
     let projects = sqlx::query_as::<_, Project>(
-        "SELECT id, owner_user_id, slug, name, description, gateway_id, enabled,
+        "SELECT id, app_id, owner_user_id, slug, name, description, gateway_id, enabled,
                 created_at, updated_at
          FROM projects
          WHERE owner_user_id = $1
@@ -221,7 +221,7 @@ pub async fn list_projects_for_owner_user_id(
 
 pub async fn get_project(pool: &SqlitePool, id: Uuid) -> Result<ProjectWithBindings, ApiError> {
     let project = sqlx::query_as::<_, Project>(
-        "SELECT id, owner_user_id, slug, name, description, gateway_id, enabled,
+        "SELECT id, app_id, owner_user_id, slug, name, description, gateway_id, enabled,
                 created_at, updated_at
          FROM projects WHERE id = $1",
     )
@@ -240,7 +240,7 @@ pub async fn get_project_by_slug(
     slug: &str,
 ) -> Result<ProjectWithBindings, ApiError> {
     let project = sqlx::query_as::<_, Project>(
-        "SELECT id, owner_user_id, slug, name, description, gateway_id, enabled,
+        "SELECT id, app_id, owner_user_id, slug, name, description, gateway_id, enabled,
                 created_at, updated_at
          FROM projects WHERE slug = $1",
     )
@@ -263,7 +263,7 @@ pub async fn set_project_owner_user_id(
         "UPDATE projects
          SET owner_user_id = $2, updated_at = CURRENT_TIMESTAMP
          WHERE id = $1
-         RETURNING id, owner_user_id, slug, name, description, gateway_id, enabled,
+         RETURNING id, app_id, owner_user_id, slug, name, description, gateway_id, enabled,
                    created_at, updated_at",
     )
     .bind(id)
@@ -1339,14 +1339,20 @@ pub async fn create_project(
 ) -> Result<ProjectWithBindings, ApiError> {
     validate_project_bindings(pool, project.gateway_id, project.binding_ids).await?;
     let mut transaction = pool.begin().await?;
+    let app_id = format!(
+        "vifu_app_{}{}",
+        Uuid::new_v4().simple(),
+        Uuid::new_v4().simple()
+    );
     let created = sqlx::query_as::<_, Project>(
         "INSERT INTO projects
-            (id, owner_user_id, slug, name, description, gateway_id)
-         VALUES ($1, $2, $3, $4, $5, $6)
-         RETURNING id, owner_user_id, slug, name, description, gateway_id, enabled,
+            (id, app_id, owner_user_id, slug, name, description, gateway_id)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)
+         RETURNING id, app_id, owner_user_id, slug, name, description, gateway_id, enabled,
                    created_at, updated_at",
     )
     .bind(project.id)
+    .bind(&app_id)
     .bind(project.owner_user_id)
     .bind(project.slug)
     .bind(project.name)
@@ -1364,6 +1370,17 @@ pub async fn create_project(
     )
     .bind(deployment_id)
     .bind(project.id)
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO runtime_distributions(
+            id, project_id, deployment_id, name, public_id, max_gateways
+         ) VALUES ($1, $2, $3, 'App registration', $4, 1000)",
+    )
+    .bind(Uuid::new_v4())
+    .bind(project.id)
+    .bind(deployment_id)
+    .bind(&app_id)
     .execute(&mut *transaction)
     .await?;
     if !project.gateway_id.is_empty() {
@@ -1412,7 +1429,7 @@ pub async fn update_project(
             enabled = COALESCE($7, enabled),
             updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
          WHERE id = $1
-         RETURNING id, owner_user_id, slug, name, description, gateway_id, enabled,
+         RETURNING id, app_id, owner_user_id, slug, name, description, gateway_id, enabled,
                    created_at, updated_at",
     )
     .bind(id)
@@ -5120,6 +5137,72 @@ mod tests {
 
         pool.close().await;
         std::fs::remove_file(path).expect("SQLite migration fixture should be removable");
+    }
+
+    #[tokio::test]
+    async fn app_id_migration_backfills_existing_apps() {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("SQLite migration fixture should connect");
+        sqlx::raw_sql(
+            r#"CREATE TABLE projects (id TEXT PRIMARY KEY);
+               CREATE TABLE runtime_deployments (
+                   id BLOB PRIMARY KEY,
+                   project_id TEXT NOT NULL,
+                   is_primary INTEGER NOT NULL
+               );
+               CREATE TABLE runtime_distributions (
+                   id TEXT PRIMARY KEY,
+                   project_id TEXT NOT NULL,
+                   deployment_id TEXT NOT NULL,
+                   name TEXT NOT NULL,
+                   public_id TEXT NOT NULL UNIQUE,
+                   status TEXT NOT NULL DEFAULT 'active',
+                   max_gateways INTEGER NOT NULL,
+                   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                   revoked_at TEXT
+               );"#,
+        )
+        .execute(&pool)
+        .await
+        .expect("published pre-App schema should be created");
+        let app_uuid = Uuid::new_v4();
+        let deployment_id = Uuid::new_v4();
+        sqlx::query("INSERT INTO projects(id) VALUES ($1)")
+            .bind(app_uuid)
+            .execute(&pool)
+            .await
+            .expect("App fixture should be inserted");
+        sqlx::query(
+            "INSERT INTO runtime_deployments(id, project_id, is_primary) VALUES ($1, $2, 1)",
+        )
+        .bind(deployment_id)
+        .bind(app_uuid)
+        .execute(&pool)
+        .await
+        .expect("deployment fixture should be inserted");
+
+        sqlx::raw_sql(include_str!("../../migrations-sqlite/0042_app_ids.sql"))
+            .execute(&pool)
+            .await
+            .expect("App ID migration should run");
+
+        let app_id: String = sqlx::query_scalar("SELECT app_id FROM projects WHERE id = $1")
+            .bind(app_uuid)
+            .fetch_one(&pool)
+            .await
+            .expect("App ID should be backfilled");
+        let distribution_id: String =
+            sqlx::query_scalar("SELECT public_id FROM runtime_distributions WHERE project_id = $1")
+                .bind(app_uuid)
+                .fetch_one(&pool)
+                .await
+                .expect("App registration should be backfilled");
+
+        assert_eq!(app_id, format!("vifu_app_{0}{0}", app_uuid.simple()));
+        assert_eq!(distribution_id, app_id);
     }
 
     #[test]

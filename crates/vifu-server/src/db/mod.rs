@@ -1397,6 +1397,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn sqlite_app_id_automatically_enrolls_a_gateway_in_the_primary_deployment() {
+        let (storage, path) = sqlite_storage().await;
+        let project_id = Uuid::new_v4();
+        let app = create_project(
+            &storage,
+            NewProject {
+                id: project_id,
+                owner_user_id: Some("app-owner"),
+                slug: "automatic-app",
+                name: "Automatic app",
+                description: None,
+                gateway_id: "",
+                binding_ids: &[],
+            },
+        )
+        .await
+        .expect("app should be created");
+        assert!(app.project.app_id.starts_with("vifu_app_"));
+        assert_eq!(app.project.app_id.len(), "vifu_app_".len() + 64);
+
+        let assignment = authorize_runtime_distribution_gateway(
+            &storage,
+            &app.project.app_id,
+            "app-machine",
+            "app-gateway",
+        )
+        .await
+        .expect("App ID should enroll the installation");
+        assert_eq!(assignment.gateway_id, "app-gateway");
+        assert_eq!(assignment.owner_user_id.as_deref(), Some("app-owner"));
+
+        let deployment_id = primary_deployment_id(&storage, project_id).await;
+        assert_eq!(
+            list_runtime_deployment_gateway_ids(&storage, deployment_id)
+                .await
+                .unwrap(),
+            vec!["app-gateway".to_string()]
+        );
+        close_and_remove(storage, &path).await;
+    }
+
+    #[tokio::test]
     async fn sqlite_consumes_gateway_enrollment_once_and_assigns_the_project() {
         let (storage, path) = sqlite_storage().await;
         let project_id = Uuid::new_v4();

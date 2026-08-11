@@ -17,7 +17,7 @@ export function ProjectHome({
   const [query, setQuery] = useState("");
   const host = useRuntimeConsoleHost();
   const normalizedQuery = query.trim().toLocaleLowerCase();
-  const visibleProjects = useMemo(() => {
+  const visibleApps = useMemo(() => {
     if (!normalizedQuery) return projects;
     return projects.filter((project) => (
       project.name.toLocaleLowerCase().includes(normalizedQuery)
@@ -29,8 +29,8 @@ export function ProjectHome({
     <div className="console-content project-home-content">
       <header className="project-home-heading">
         <div>
-          <h1>Projects</h1>
-          <p>Open a project or create a new agent runtime.</p>
+          <h1>Apps</h1>
+          <p>Open an app or create a new agent runtime.</p>
         </div>
         <ProjectCreateMenu />
       </header>
@@ -43,13 +43,13 @@ export function ProjectHome({
               type="search"
               value={query}
               onChange={(event) => setQuery(event.target.value)}
-              placeholder="Search projects"
-              aria-label="Search projects"
+              placeholder="Search apps"
+              aria-label="Search apps"
             />
           </label>
-          {visibleProjects.length > 0 ? (
+          {visibleApps.length > 0 ? (
             <div className="project-home-grid">
-              {visibleProjects.map((project) => (
+              {visibleApps.map((project) => (
                 <RuntimeLink
                   className="project-home-card"
                   href={host.projectHref(project.slug)}
@@ -71,16 +71,16 @@ export function ProjectHome({
           ) : (
             <div className="project-home-no-results">
               <Search aria-hidden="true" />
-              <strong>No matching projects</strong>
-              <span>Try a project name or slug.</span>
+              <strong>No matching apps</strong>
+              <span>Try an app name or slug.</span>
             </div>
           )}
         </>
       ) : (
         <section className="project-home-empty">
           <span className="project-home-empty-icon"><FolderKanban aria-hidden="true" /></span>
-          <h2>Create your first project</h2>
-          <p>A project keeps its agents, endpoints, providers, and logs together.</p>
+          <h2>Create your first app</h2>
+          <p>An app keeps its agents, endpoints, providers, and logs together.</p>
           <ProjectCreateForm />
         </section>
       )}
@@ -105,7 +105,7 @@ function GuestProjectClaim() {
       setClaimToken("");
       router.refresh();
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : "Could not claim the project.");
+      setMessage(error instanceof Error ? error.message : "Could not claim the app.");
     } finally {
       setPending(false);
     }
@@ -114,7 +114,7 @@ function GuestProjectClaim() {
   return (
     <section className="guest-project-claim">
       <span className="project-home-card-icon"><Link2 aria-hidden="true" /></span>
-      <div><strong>Claim a local project</strong><p>Attach a project created by the Vifu CLI to this account.</p></div>
+      <div><strong>Claim a local app</strong><p>Attach an app created by the Vifu CLI to this account.</p></div>
       <form onSubmit={claim}>
         <input value={claimToken} onChange={(event) => setClaimToken(event.target.value)} required placeholder="Claim token" aria-label="Claim token" />
         <button className="secondary-button" disabled={pending} type="submit">{pending ? "Claiming" : "Claim"}</button>
@@ -127,10 +127,10 @@ function GuestProjectClaim() {
 function ProjectCreateMenu() {
   return (
     <DismissibleDetails className="project-home-create">
-      <summary className="primary-button"><Plus aria-hidden="true" />Create project</summary>
+      <summary className="primary-button"><Plus aria-hidden="true" />Create app</summary>
       <div className="project-home-create-popover">
         <header>
-          <strong>Create project</strong>
+          <strong>Create app</strong>
           <span>Name the runtime you want to operate.</span>
         </header>
         <ProjectCreateForm variant="menu" />

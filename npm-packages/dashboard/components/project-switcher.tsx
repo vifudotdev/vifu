@@ -19,7 +19,7 @@ export function ProjectSwitcher({
 }) {
   const [query, setQuery] = useState("");
   const normalizedQuery = query.trim().toLocaleLowerCase();
-  const visibleProjects = normalizedQuery
+  const visibleApps = normalizedQuery
     ? projects.filter((project) => project.name.toLocaleLowerCase().includes(normalizedQuery))
     : projects;
 
@@ -42,9 +42,9 @@ export function ProjectSwitcher({
               aria-label="Search projects"
             />
           </label>
-          <span>Projects</span>
+          <span>projects</span>
           <div className="project-menu-list">
-            {visibleProjects.length > 0 ? visibleProjects.map((project) => (
+            {visibleApps.length > 0 ? visibleApps.map((project) => (
               <Link key={project.id} href={`/project/${project.slug}/${activeSection}`} prefetch={false} title={project.name}>
                 <strong>{project.name}</strong>
               </Link>

@@ -153,7 +153,7 @@ function Navigation({ project, items, active, capabilities }: {
 }) {
   const visible = items.filter((item) => !item.capability || capabilities[item.capability]);
   return (
-    <nav className="console-nav" aria-label="Project navigation">
+    <nav className="console-nav" aria-label="project navigation">
       {visible.map((item) => {
         const Icon = item.icon;
         const href = `/project/${project.slug}/${item.id}`;
@@ -179,7 +179,7 @@ function ProjectSectionView({
   data: DashboardData;
   browserApiBaseUrl: string;
 }) {
-  const endpoints = projectEndpoints(project, data.runtime.endpoints);
+  const endpoints = appEndpoints(project, data.runtime.endpoints);
   if (section === "agents") {
     return (
       <RuntimeAgentsView
@@ -223,7 +223,7 @@ function ProjectSectionView({
       />
     );
   }
-  if (section === "logs") return <LogsView project={project} traces={projectTraces(data.runtime.traces, project)} />;
+  if (section === "logs") return <LogsView project={project} traces={appTraces(data.runtime.traces, project)} />;
   if (section === "settings") {
     return (
       <SettingsView
@@ -266,7 +266,7 @@ function HealthView({
     return data.projectProviders.some((provider) => provider.providerKey === providerKey && provider.status === "online");
   }).length;
   const agentTotal = data.runtime.profiles.length;
-  const traces = projectTraces(data.runtime.traces, project);
+  const traces = appTraces(data.runtime.traces, project);
   const traceSummary = summarizeTraces(traces);
   return (
     <div className="health-dashboard">
@@ -463,7 +463,7 @@ function SettingsView({
   return (
     <>
       <section className="content-section">
-        <SectionHeading title="Project settings" />
+        <SectionHeading title="project settings" />
         <dl className="definition-grid">
           <div><dt>Name</dt><dd>{project.name}</dd></div>
           <div><dt>Slug</dt><dd>{project.slug}</dd></div>
@@ -479,7 +479,7 @@ function SettingsView({
             <strong>Delete project</strong>
             <p>Remove this project from the dashboard. Detected gateway agents are not deleted.</p>
           </div>
-          <DeleteResourceButton path={`projects/${project.id}`} label={project.name} redirectTo="/project" />
+          <DeleteResourceButton path={`apps/${project.id}`} label={project.name} redirectTo="/project" />
         </div>
       </section>
     </>
@@ -505,15 +505,15 @@ function SetupRail({ project, providerCount, agentCount, callableCount, connecte
         ? "Add an agent"
         : !gatewayReady
           ? "Reconnect agent gateway"
-          : "Project is ready to call";
+          : "project is ready to call";
   return (
-    <section className="setup-rail project-setup-rail" aria-label="Project setup">
+    <section className="setup-rail project-setup-rail" aria-label="project setup">
       <div>
         <span>Next setup step</span>
         <strong>{nextStep}</strong>
       </div>
       <ol>
-        <li className="ready"><strong>Project</strong><small>{project.slug}</small></li>
+        <li className="ready"><strong>project</strong><small>{project.slug}</small></li>
         <li className={providerReady ? "ready" : "active"}><strong>Provider</strong><small>{providerReady ? `${providerCount} assigned` : "Assign one in Providers"}</small></li>
         <li className={agentsReady ? "ready" : providerReady ? "active" : undefined}><strong>Agents</strong><small>{agentsReady ? `${agentCount} available` : "Add or detect agents"}</small></li>
         <li className={endpointReady ? "ready" : agentsReady ? "active" : undefined}><strong>Endpoint</strong><small>{endpointReady ? `${callableCount} callable` : "Agents become callable when added"}</small></li>
@@ -527,10 +527,10 @@ function SetupRail({ project, providerCount, agentCount, callableCount, connecte
   );
 }
 
-function TraceTable({ traces, project: _project, detailed = false }: { traces: EndpointTrace[]; project: RuntimeProject; detailed?: boolean }) {
+function TraceTable({ traces, project: _App, detailed = false }: { traces: EndpointTrace[]; project: RuntimeProject; detailed?: boolean }) {
   if (traces.length === 0) return <EmptyState>No logs yet.</EmptyState>;
   if (detailed) {
-    return <RuntimeTraceWorkbench projectId={_project.id} projectSlug={_project.slug} traces={traces} />;
+    return <RuntimeTraceWorkbench projectId={_App.id} projectSlug={_App.slug} traces={traces} />;
   }
   return (
     <div className="trace-compact-list">
@@ -589,12 +589,12 @@ function gatewayStatusRank(status: string): number {
   return status === "connected" ? 0 : status === "pending" ? 1 : 2;
 }
 
-function projectEndpoints(project: RuntimeProject, endpoints: AgentEndpoint[]): AgentEndpoint[] {
+function appEndpoints(project: RuntimeProject, endpoints: AgentEndpoint[]): AgentEndpoint[] {
   const bindingIds = new Set(project.bindingIds);
   return endpoints.filter((endpoint) => bindingIds.has(endpoint.bindingId));
 }
 
-function projectTraces(traces: EndpointTrace[], project: RuntimeProject): EndpointTrace[] {
+function appTraces(traces: EndpointTrace[], project: RuntimeProject): EndpointTrace[] {
   return traces.filter((trace) => trace.projectId === project.id);
 }
 

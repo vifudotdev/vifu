@@ -83,6 +83,8 @@ pub struct AccessTokenAuthorityConfig {
 pub struct GatewayRuntimeConfig {
     pub address: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub guest_bootstrap: Option<bool>,
 }
 
@@ -131,11 +133,23 @@ impl LoadedRuntimeConfig {
             .guest_bootstrap
             .as_ref()
             .is_some_and(|guest| guest.enabled);
-        let allow_guest_bootstrap = gateway.guest_bootstrap.unwrap_or(if local_server {
-            local_guest_enabled
+        let app_id = gateway
+            .app_id
+            .clone()
+            .or_else(|| std::env::var("VIFU_APP_ID").ok())
+            .filter(|value| !value.trim().is_empty());
+        if let Some(app_id) = app_id.as_deref() {
+            validate_app_id(app_id)?;
+        }
+        let allow_guest_bootstrap = if app_id.is_some() {
+            false
         } else {
-            true
-        });
+            gateway.guest_bootstrap.unwrap_or(if local_server {
+                local_guest_enabled
+            } else {
+                true
+            })
+        };
         if local_server && allow_guest_bootstrap && !local_guest_enabled {
             return Err(
                 "gateway.guest_bootstrap requires server.guest_bootstrap.enabled for a local Server"
@@ -146,11 +160,18 @@ impl LoadedRuntimeConfig {
             server_url,
             server_certificate_der: None,
             allow_guest_bootstrap,
-            enrollment_token: None,
-            session_scope: self
-                .profile
-                .clone()
-                .unwrap_or_else(|| "default".to_string()),
+            enrollment_token: app_id.clone(),
+            session_scope: match app_id {
+                Some(app_id) => format!(
+                    "{}:app:{}",
+                    self.profile.as_deref().unwrap_or("default"),
+                    app_id
+                ),
+                None => self
+                    .profile
+                    .clone()
+                    .unwrap_or_else(|| "default".to_string()),
+            },
         })
     }
 
@@ -289,6 +310,7 @@ impl RuntimeConfig {
             }),
             gateway: Some(GatewayRuntimeConfig {
                 address: vifu_gateway::config::DEFAULT_SERVER_URL.to_string(),
+                app_id: None,
                 guest_bootstrap: None,
             }),
         })
@@ -671,6 +693,9 @@ impl GatewayRuntimeConfig {
     fn validate(&self) -> Result<(), String> {
         vifu_gateway::relay::agent_gateway_websocket_url(&self.address)
             .map_err(|error| format!("gateway.address is invalid: {error}"))?;
+        if let Some(app_id) = self.app_id.as_deref() {
+            validate_app_id(app_id)?;
+        }
         Ok(())
     }
 
@@ -678,6 +703,20 @@ impl GatewayRuntimeConfig {
         self.validate()?;
         vifu_gateway::config::local_component_socket_addr(&self.address)
     }
+}
+
+fn validate_app_id(value: &str) -> Result<(), String> {
+    let suffix = value
+        .strip_prefix("vifu_app_")
+        .ok_or_else(|| "gateway.app_id must start with vifu_app_".to_string())?;
+    if suffix.len() != 64
+        || !suffix
+            .chars()
+            .all(|character| character.is_ascii_hexdigit())
+    {
+        return Err("gateway.app_id is invalid".to_string());
+    }
+    Ok(())
 }
 
 impl AccessTokenAuthorityConfig {
@@ -885,6 +924,51 @@ address = "http://localhost:6790"
         .unwrap();
         assert!(config.server.is_some());
         assert!(config.gateway.is_some());
+    }
+
+    #[test]
+    fn app_id_becomes_the_gateway_enrollment_token_and_session_scope() {
+        let app_id = format!("vifu_app_{}", "a".repeat(64));
+        let config = RuntimeConfig::parse(
+            Path::new("/tmp/app.toml"),
+            &format!(
+                r#"
+[server]
+address = "https://api.example.com"
+
+[gateway]
+address = "https://api.example.com"
+app_id = "{app_id}"
+"#,
+            ),
+        )
+        .unwrap();
+        let loaded = LoadedRuntimeConfig {
+            path: Path::new("/tmp/app.toml").to_path_buf(),
+            profile: None,
+            config,
+        };
+        let options = loaded.gateway_options().unwrap();
+        assert_eq!(options.enrollment_token.as_deref(), Some(app_id.as_str()));
+        assert_eq!(options.session_scope, format!("default:app:{app_id}"));
+        assert!(!options.allow_guest_bootstrap);
+    }
+
+    #[test]
+    fn rejects_invalid_app_id() {
+        let error = RuntimeConfig::parse(
+            Path::new("/tmp/app.toml"),
+            r#"
+[server]
+address = "https://api.example.com"
+
+[gateway]
+address = "https://api.example.com"
+app_id = "app-demo"
+"#,
+        )
+        .unwrap_err();
+        assert!(error.contains("gateway.app_id"));
     }
 
     #[test]

@@ -8,6 +8,6 @@ runtime API behavior through a React provider. It does not own deployment auth
 or server-side proxy policy.
 
 `browserApiBaseUrl` is the inference service base. The Console presents the
-fixed OpenAI-compatible `/v1` routes below that base. A project key selects the
-project, and the request `model` selects an Agent in that project. Management
+fixed OpenAI-compatible `/v1` routes below that base. An App key selects the
+App, and the request `model` selects an Agent in that App. Management
 requests continue through the host-provided request adapter.

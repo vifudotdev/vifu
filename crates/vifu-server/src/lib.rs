@@ -396,56 +396,53 @@ pub fn app(state: AppState) -> Router {
         )
         .route("/v1/guest/claim", post(api::claim_guest_project))
         .route("/v1/admin/verify", get(api::verify_admin))
+        .route("/v1/admin/app-ownership", get(api::list_project_ownership))
         .route(
-            "/v1/admin/project-ownership",
-            get(api::list_project_ownership),
-        )
-        .route(
-            "/v1/admin/project-ownership/{project_id}",
+            "/v1/admin/app-ownership/{project_id}",
             axum::routing::patch(api::assign_project_owner),
         )
         .route(
-            "/v1/projects",
+            "/v1/apps",
             get(api::list_projects).post(api::create_project),
         )
         .route(
-            "/v1/projects/{id}",
+            "/v1/apps/{id}",
             get(api::get_project)
                 .patch(api::update_project)
                 .delete(api::delete_project),
         )
         .route(
-            "/v1/project/{slug}/deployments",
+            "/v1/apps/{slug}/deployments",
             get(api::list_project_runtime_deployments).post(api::create_project_runtime_deployment),
         )
         .route(
-            "/v1/project/{slug}/deployments/{deployment}",
+            "/v1/apps/{slug}/deployments/{deployment}",
             patch(api::update_project_runtime_deployment)
                 .delete(api::delete_project_runtime_deployment),
         )
         .route(
-            "/v1/project/{slug}/deployments/{deployment}/promote",
+            "/v1/apps/{slug}/deployments/{deployment}/promote",
             post(api::promote_project_runtime_deployment),
         )
         .route(
-            "/v1/project/{slug}/deployments/{deployment}/agent-gateway-enrollments",
+            "/v1/apps/{slug}/deployments/{deployment}/agent-gateway-enrollments",
             post(api::create_runtime_deployment_agent_gateway_enrollment),
         )
         .route(
-            "/v1/project/{slug}/deployments/{deployment}/agent-gateways/{gateway_id}",
+            "/v1/apps/{slug}/deployments/{deployment}/agent-gateways/{gateway_id}",
             post(api::assign_runtime_deployment_agent_gateway)
                 .delete(api::unassign_runtime_deployment_agent_gateway),
         )
         .route(
-            "/v1/project/{slug}/runtime-releases",
+            "/v1/apps/{slug}/runtime-releases",
             get(api::list_project_runtime_releases).post(api::publish_project_runtime_release),
         )
         .route(
-            "/v1/project/{slug}/runtime-releases/{version}",
+            "/v1/apps/{slug}/runtime-releases/{version}",
             get(api::get_project_runtime_release),
         )
         .route(
-            "/v1/project/{slug}/deployments/{deployment}/runtime-releases/{version}/activate",
+            "/v1/apps/{slug}/deployments/{deployment}/runtime-releases/{version}/activate",
             post(api::activate_project_runtime_release),
         )
         .route(
@@ -457,56 +454,56 @@ pub fn app(state: AppState) -> Router {
             post(runtime_extensions::invoke_project_profile_for_extension),
         )
         .route(
-            "/v1/project/{slug}/extensions/runtime",
+            "/v1/apps/{slug}/extensions/runtime",
             get(runtime_extensions::get_project_runtime_extension)
                 .put(runtime_extensions::set_project_runtime_extension)
                 .delete(runtime_extensions::delete_project_runtime_extension),
         )
         .route(
-            "/v1/project/{slug}/runtime-channels",
+            "/v1/apps/{slug}/runtime-channels",
             get(runtime_extensions::list_project_runtime_channels)
                 .post(runtime_extensions::create_project_runtime_channel),
         )
         .route(
-            "/v1/project/{slug}/runtime-channels/{channel_id}",
+            "/v1/apps/{slug}/runtime-channels/{channel_id}",
             axum::routing::delete(runtime_extensions::delete_project_runtime_channel),
         )
         .route("/v1/provider-adapters", get(api::list_provider_adapters))
         .route("/v1/provider-catalog", get(api::list_provider_catalog))
         .route(
-            "/v1/project/{slug}/provider-catalog",
+            "/v1/apps/{slug}/provider-catalog",
             get(api::list_project_provider_catalog),
         )
         .route(
-            "/v1/project/{slug}/providers",
+            "/v1/apps/{slug}/providers",
             get(api::list_project_providers).post(api::create_project_provider),
         )
         .route(
-            "/v1/project/{slug}/providers/import",
+            "/v1/apps/{slug}/providers/import",
             post(api::import_project_provider),
         )
         .route(
-            "/v1/project/{slug}/providers/{provider_key}",
+            "/v1/apps/{slug}/providers/{provider_key}",
             patch(api::update_project_provider).delete(api::delete_project_provider),
         )
         .route(
-            "/v1/project/{slug}/providers/{provider_key}/test",
+            "/v1/apps/{slug}/providers/{provider_key}/test",
             post(api::test_project_provider),
         )
         .route(
-            "/v1/project/{slug}/provider-adapters",
+            "/v1/apps/{slug}/provider-adapters",
             get(api::list_project_provider_adapters),
         )
         .route(
-            "/v1/project/{slug}/agent-candidates",
+            "/v1/apps/{slug}/agent-candidates",
             get(api::list_project_agent_candidates),
         )
         .route(
-            "/v1/project/{slug}/agents/import",
+            "/v1/apps/{slug}/agents/import",
             post(api::import_project_agent),
         )
         .route(
-            "/v1/project/{slug}/agents/{profile_id}/restore",
+            "/v1/apps/{slug}/agents/{profile_id}/restore",
             post(api::restore_project_agent),
         )
         .route(
@@ -520,94 +517,94 @@ pub fn app(state: AppState) -> Router {
                 .delete(api::delete_profile),
         )
         .route(
-            "/v1/project/{slug}/profiles",
+            "/v1/apps/{slug}/profiles",
             get(api::list_project_profiles).post(api::create_project_profile),
         )
         .route(
-            "/v1/project/{slug}/profiles/import",
+            "/v1/apps/{slug}/profiles/import",
             post(api::import_project_profile),
         )
         .route(
-            "/v1/project/{slug}/profiles/{id}",
+            "/v1/apps/{slug}/profiles/{id}",
             get(api::get_project_profile)
                 .patch(api::update_project_profile)
                 .delete(api::archive_project_profile),
         )
         .route(
-            "/v1/project/{slug}/profiles/{id}/versions",
+            "/v1/apps/{slug}/profiles/{id}/versions",
             post(api::create_project_profile_version),
         )
         .route(
-            "/v1/project/{slug}/profiles/{id}/source/sync",
+            "/v1/apps/{slug}/profiles/{id}/source/sync",
             post(api::sync_project_profile_source),
         )
         .route(
-            "/v1/project/{slug}/profiles/{id}/versions/{version_id}/activate",
+            "/v1/apps/{slug}/profiles/{id}/versions/{version_id}/activate",
             post(api::activate_project_profile_version),
         )
         .route(
-            "/v1/project/{slug}/profiles/{id}/versions/{version_id}/archive",
+            "/v1/apps/{slug}/profiles/{id}/versions/{version_id}/archive",
             post(api::archive_project_profile_version),
         )
         .route(
-            "/v1/project/{slug}/profiles/{id}/rollout",
+            "/v1/apps/{slug}/profiles/{id}/rollout",
             put(api::set_project_profile_rollout),
         )
         .route(
-            "/v1/project/{slug}/profiles/{id}/test",
+            "/v1/apps/{slug}/profiles/{id}/test",
             post(api::test_project_profile),
         )
         .route(
-            "/v1/project/{slug}/bindings",
+            "/v1/apps/{slug}/bindings",
             get(api::list_project_bindings).post(api::create_project_binding),
         )
         .route(
-            "/v1/project/{slug}/bindings/{id}",
+            "/v1/apps/{slug}/bindings/{id}",
             get(api::get_project_binding)
                 .patch(api::update_project_binding)
                 .delete(api::delete_project_binding),
         )
         .route(
-            "/v1/project/{slug}/endpoints",
+            "/v1/apps/{slug}/endpoints",
             get(api::list_project_endpoints).post(api::create_project_endpoint),
         )
         .route(
-            "/v1/project/{slug}/endpoints/{id}",
+            "/v1/apps/{slug}/endpoints/{id}",
             get(api::get_project_endpoint)
                 .patch(api::update_project_endpoint)
                 .delete(api::delete_project_endpoint),
         )
         .route(
-            "/v1/project/{slug}/api-keys",
+            "/v1/apps/{slug}/api-keys",
             get(api::list_project_api_keys).post(api::create_project_api_key),
         )
         .route(
-            "/v1/project/{slug}/api-keys/{id}",
+            "/v1/apps/{slug}/api-keys/{id}",
             patch(api::update_project_api_key).delete(api::delete_project_api_key),
         )
         .route(
-            "/v1/project/{slug}/api-keys/{id}/revoke",
+            "/v1/apps/{slug}/api-keys/{id}/revoke",
             post(api::revoke_project_api_key),
         )
         .route(
-            "/v1/project/{slug}/agent-gateways",
+            "/v1/apps/{slug}/agent-gateways",
             get(api::list_project_agent_gateways),
         )
         .route(
-            "/v1/project/{slug}/comparisons",
+            "/v1/apps/{slug}/comparisons",
             get(comparisons::list_project_runtime_comparisons),
         )
         .route(
-            "/v1/project/{slug}/agents",
+            "/v1/apps/{slug}/agents",
             get(api::list_project_available_agents),
         )
-        .route("/v1/project/{slug}/traces", get(api::list_project_traces))
+        .route("/v1/apps/{slug}/traces", get(api::list_project_traces))
         .route(
-            "/v1/project/{slug}/traces/{id}/spans",
+            "/v1/apps/{slug}/traces/{id}/spans",
             get(api::list_project_trace_spans),
         )
         .route(
-            "/v1/project/{slug}/traces/{id}/scores",
+            "/v1/apps/{slug}/traces/{id}/scores",
             get(api::list_project_trace_scores),
         )
         .route(
@@ -731,16 +728,16 @@ pub fn app(state: AppState) -> Router {
             post(api::report_agent_gateway_runtime_release_applied),
         )
         .route(
-            "/v1/project/{slug}/agent-gateway-enrollments",
+            "/v1/apps/{slug}/agent-gateway-enrollments",
             post(api::create_project_agent_gateway_enrollment),
         )
         .route(
-            "/v1/project/{slug}/runtime-distributions",
+            "/v1/apps/{slug}/runtime-distributions",
             get(api::list_project_runtime_distributions)
                 .post(api::create_project_runtime_distribution),
         )
         .route(
-            "/v1/project/{slug}/runtime-distributions/{distribution_id}/revoke",
+            "/v1/apps/{slug}/runtime-distributions/{distribution_id}/revoke",
             post(api::revoke_project_runtime_distribution),
         )
         .route(
@@ -1122,7 +1119,7 @@ mod tests {
             state_with_access_token_auth(config, pool, vec![Operation::ProjectRead]).await;
         let response = app(state)
             .oneshot(
-                Request::post("/v1/projects")
+                Request::post("/v1/apps")
                     .header("authorization", format!("Vifu {credential}"))
                     .header("content-type", "application/json")
                     .body(Body::from(r#"{"name":"Denied project"}"#))
@@ -1157,7 +1154,7 @@ mod tests {
         let created = owner_app
             .clone()
             .oneshot(
-                Request::post("/v1/projects")
+                Request::post("/v1/apps")
                     .header("authorization", format!("Vifu {owner_credential}"))
                     .header("content-type", "application/json")
                     .body(Body::from(r#"{"name":"Owned project"}"#))
@@ -1168,12 +1165,12 @@ mod tests {
         assert_eq!(created.status(), StatusCode::CREATED);
         let body = to_bytes(created.into_body(), 64 * 1024).await.unwrap();
         let payload: Value = serde_json::from_slice(&body).unwrap();
-        let project_id = payload["project"]["id"].as_str().unwrap();
-        assert!(payload["project"].get("ownerUserId").is_none());
+        let project_id = payload["app"]["id"].as_str().unwrap();
+        assert!(payload["app"].get("ownerUserId").is_none());
 
         let owner_list = owner_app
             .oneshot(
-                Request::get("/v1/projects")
+                Request::get("/v1/apps")
                     .header("authorization", format!("Vifu {owner_credential}"))
                     .body(Body::empty())
                     .unwrap(),
@@ -1182,7 +1179,7 @@ mod tests {
             .unwrap();
         let body = to_bytes(owner_list.into_body(), 64 * 1024).await.unwrap();
         let payload: Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(payload["projects"].as_array().unwrap().len(), 1);
+        assert_eq!(payload["apps"].as_array().unwrap().len(), 1);
 
         let (other_state, other_credential) = state_with_storage_access_token_auth(
             config,
@@ -1195,7 +1192,7 @@ mod tests {
         let other_list = other_app
             .clone()
             .oneshot(
-                Request::get("/v1/projects")
+                Request::get("/v1/apps")
                     .header("authorization", format!("Vifu {other_credential}"))
                     .body(Body::empty())
                     .unwrap(),
@@ -1204,10 +1201,10 @@ mod tests {
             .unwrap();
         let body = to_bytes(other_list.into_body(), 64 * 1024).await.unwrap();
         let payload: Value = serde_json::from_slice(&body).unwrap();
-        assert!(payload["projects"].as_array().unwrap().is_empty());
+        assert!(payload["apps"].as_array().unwrap().is_empty());
         let forbidden = other_app
             .oneshot(
-                Request::get(format!("/v1/projects/{project_id}"))
+                Request::get(format!("/v1/apps/{project_id}"))
                     .header("authorization", format!("Vifu {other_credential}"))
                     .body(Body::empty())
                     .unwrap(),
@@ -1246,7 +1243,7 @@ mod tests {
         let created = owner_app
             .clone()
             .oneshot(
-                Request::post("/v1/projects")
+                Request::post("/v1/apps")
                     .header("authorization", format!("Vifu {owner_credential}"))
                     .header("content-type", "application/json")
                     .body(Body::from(r#"{"name":"Gateway project"}"#))
@@ -1256,12 +1253,12 @@ mod tests {
             .unwrap();
         let body = to_bytes(created.into_body(), 64 * 1024).await.unwrap();
         let project: Value = serde_json::from_slice(&body).unwrap();
-        let slug = project["project"]["slug"].as_str().unwrap();
+        let slug = project["app"]["slug"].as_str().unwrap();
 
         let enrollment = owner_app
             .clone()
             .oneshot(
-                Request::post(format!("/v1/project/{slug}/agent-gateway-enrollments"))
+                Request::post(format!("/v1/apps/{slug}/agent-gateway-enrollments"))
                     .header("authorization", format!("Vifu {owner_credential}"))
                     .body(Body::empty())
                     .unwrap(),
@@ -1353,7 +1350,7 @@ mod tests {
         let enabled_remote_invocation = owner_app
             .clone()
             .oneshot(
-                Request::patch(format!("/v1/project/{slug}/deployments/development"))
+                Request::patch(format!("/v1/apps/{slug}/deployments/development"))
                     .header("authorization", format!("Vifu {owner_credential}"))
                     .header("content-type", "application/json")
                     .body(Body::from(r#"{"remoteInvocationEnabled":true}"#))
@@ -1508,7 +1505,7 @@ mod tests {
         let candidates = owner_app
             .clone()
             .oneshot(
-                Request::get(format!("/v1/project/{slug}/agent-candidates"))
+                Request::get(format!("/v1/apps/{slug}/agent-candidates"))
                     .header("authorization", format!("Vifu {owner_credential}"))
                     .body(Body::empty())
                     .unwrap(),
@@ -1524,7 +1521,7 @@ mod tests {
         let imported = owner_app
             .clone()
             .oneshot(
-                Request::post(format!("/v1/project/{slug}/agents/import"))
+                Request::post(format!("/v1/apps/{slug}/agents/import"))
                     .header("authorization", format!("Vifu {owner_credential}"))
                     .header("content-type", "application/json")
                     .body(Body::from(
@@ -1552,7 +1549,7 @@ mod tests {
         let staging = owner_app
             .clone()
             .oneshot(
-                Request::post(format!("/v1/project/{slug}/deployments"))
+                Request::post(format!("/v1/apps/{slug}/deployments"))
                     .header("authorization", format!("Vifu {owner_credential}"))
                     .header("content-type", "application/json")
                     .body(Body::from(r#"{"name":"staging"}"#))
@@ -1565,7 +1562,7 @@ mod tests {
             .clone()
             .oneshot(
                 Request::post(format!(
-                    "/v1/project/{slug}/deployments/staging/agent-gateway-enrollments"
+                    "/v1/apps/{slug}/deployments/staging/agent-gateway-enrollments"
                 ))
                 .header("authorization", format!("Vifu {owner_credential}"))
                 .body(Body::empty())
@@ -1609,7 +1606,7 @@ mod tests {
         let project_gateways = owner_app
             .clone()
             .oneshot(
-                Request::get(format!("/v1/project/{slug}/agent-gateways"))
+                Request::get(format!("/v1/apps/{slug}/agent-gateways"))
                     .header("authorization", format!("Vifu {owner_credential}"))
                     .body(Body::empty())
                     .unwrap(),
@@ -1633,7 +1630,7 @@ mod tests {
         let project_agents = owner_app
             .clone()
             .oneshot(
-                Request::get(format!("/v1/project/{slug}/agents"))
+                Request::get(format!("/v1/apps/{slug}/agents"))
                     .header("authorization", format!("Vifu {owner_credential}"))
                     .body(Body::empty())
                     .unwrap(),
@@ -1730,8 +1727,8 @@ mod tests {
         assert_eq!(created.status(), StatusCode::CREATED);
         let body = to_bytes(created.into_body(), 64 * 1024).await.unwrap();
         let created: Value = serde_json::from_slice(&body).unwrap();
-        let project_id = created["project"]["id"].as_str().unwrap();
-        let project_slug = created["project"]["slug"].as_str().unwrap();
+        let project_id = created["app"]["id"].as_str().unwrap();
+        let project_slug = created["app"]["slug"].as_str().unwrap();
         let deployment_id = created["deployment"]["id"].as_str().unwrap();
         let api_key = created["apiKey"].as_str().unwrap();
         let claim_token = created["claimToken"].as_str().unwrap();
@@ -1745,7 +1742,7 @@ mod tests {
             guest_key.permissions.project,
             crate::models::ResourcePermission::Read
         );
-        assert_eq!(created["project"].as_object().unwrap().len(), 2);
+        assert_eq!(created["app"].as_object().unwrap().len(), 3);
         assert_eq!(created["deployment"].as_object().unwrap().len(), 2);
         assert_eq!(created["deployment"]["name"], "development");
 
@@ -1762,7 +1759,7 @@ mod tests {
         assert_eq!(repeated.status(), StatusCode::OK);
         let body = to_bytes(repeated.into_body(), 64 * 1024).await.unwrap();
         let repeated: Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(repeated["project"]["id"], project_id);
+        assert_eq!(repeated["app"]["id"], project_id);
         assert_eq!(repeated["apiKey"], api_key);
         assert_eq!(repeated["claimToken"], claim_token);
 
@@ -1940,7 +1937,7 @@ mod tests {
         let projects = guest_app
             .clone()
             .oneshot(
-                Request::get("/v1/projects")
+                Request::get("/v1/apps")
                     .header("authorization", format!("Vifu {owner_credential}"))
                     .body(Body::empty())
                     .unwrap(),
@@ -1949,8 +1946,8 @@ mod tests {
             .unwrap();
         let body = to_bytes(projects.into_body(), 64 * 1024).await.unwrap();
         let projects: Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(projects["projects"].as_array().unwrap().len(), 1);
-        assert_eq!(projects["projects"][0]["id"], project_id);
+        assert_eq!(projects["apps"].as_array().unwrap().len(), 1);
+        assert_eq!(projects["apps"][0]["id"], project_id);
 
         match &storage {
             Storage::Postgres(pool) => {
@@ -2059,7 +2056,7 @@ mod tests {
         let denied = account_app
             .clone()
             .oneshot(
-                Request::patch(format!("/v1/admin/project-ownership/{project_id}"))
+                Request::patch(format!("/v1/admin/app-ownership/{project_id}"))
                     .header("authorization", format!("Vifu {account_credential}"))
                     .header("content-type", "application/json")
                     .body(Body::from(r#"{"ownerUserId":"user-123"}"#))
@@ -2073,7 +2070,7 @@ mod tests {
         let ownership = admin_app
             .clone()
             .oneshot(
-                Request::get("/v1/admin/project-ownership")
+                Request::get("/v1/admin/app-ownership")
                     .header("authorization", format!("Bearer {admin_key}"))
                     .body(Body::empty())
                     .unwrap(),
@@ -2083,11 +2080,11 @@ mod tests {
         assert_eq!(ownership.status(), StatusCode::OK);
         let body = to_bytes(ownership.into_body(), 64 * 1024).await.unwrap();
         let payload: Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(payload["projects"][0]["ownerUserId"], Value::Null);
+        assert_eq!(payload["apps"][0]["ownerUserId"], Value::Null);
 
         let assigned = admin_app
             .oneshot(
-                Request::patch(format!("/v1/admin/project-ownership/{project_id}"))
+                Request::patch(format!("/v1/admin/app-ownership/{project_id}"))
                     .header("authorization", format!("Bearer {admin_key}"))
                     .header("content-type", "application/json")
                     .body(Body::from(r#"{"ownerUserId":"user-123"}"#))
@@ -2099,7 +2096,7 @@ mod tests {
 
         let visible = account_app
             .oneshot(
-                Request::get("/v1/projects")
+                Request::get("/v1/apps")
                     .header("authorization", format!("Vifu {account_credential}"))
                     .body(Body::empty())
                     .unwrap(),
@@ -2108,9 +2105,9 @@ mod tests {
             .unwrap();
         let body = to_bytes(visible.into_body(), 64 * 1024).await.unwrap();
         let payload: Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(payload["projects"].as_array().unwrap().len(), 1);
-        assert_eq!(payload["projects"][0]["slug"], "legacy-project");
-        assert!(payload["projects"][0].get("ownerUserId").is_none());
+        assert_eq!(payload["apps"].as_array().unwrap().len(), 1);
+        assert_eq!(payload["apps"][0]["slug"], "legacy-project");
+        assert!(payload["apps"][0].get("ownerUserId").is_none());
 
         match storage {
             Storage::Postgres(pool) => pool.close().await,
@@ -2208,7 +2205,7 @@ mod tests {
         let created = router
             .clone()
             .oneshot(
-                Request::post("/v1/project/selected-scope/api-keys")
+                Request::post("/v1/apps/selected-scope/api-keys")
                     .header("authorization", format!("Bearer {admin_key}"))
                     .header("content-type", "application/json")
                     .body(Body::from(
@@ -2236,7 +2233,7 @@ mod tests {
 
         let listed = router
             .oneshot(
-                Request::get("/v1/project/selected-scope/api-keys")
+                Request::get("/v1/apps/selected-scope/api-keys")
                     .header("authorization", format!("Bearer {admin_key}"))
                     .body(Body::empty())
                     .unwrap(),
@@ -2263,7 +2260,7 @@ mod tests {
         let profile_id = uuid::Uuid::new_v4();
         let response = app(state(config, pool))
             .oneshot(
-                Request::delete(format!("/v1/project/test/profiles/{profile_id}"))
+                Request::delete(format!("/v1/apps/test/profiles/{profile_id}"))
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -2443,7 +2440,7 @@ mod tests {
         let selected_list = runtime_app
             .clone()
             .oneshot(
-                Request::get("/v1/project/trace-auth/traces")
+                Request::get("/v1/apps/trace-auth/traces")
                     .header("authorization", format!("Bearer {raw_key}"))
                     .body(Body::empty())
                     .unwrap(),
@@ -2460,7 +2457,7 @@ mod tests {
             .clone()
             .oneshot(
                 Request::get(format!(
-                    "/v1/project/trace-auth/traces?requestId={}&limit=1",
+                    "/v1/apps/trace-auth/traces?requestId={}&limit=1",
                     trace_ids[0].1
                 ))
                 .header("authorization", format!("Bearer {raw_key}"))
@@ -2481,7 +2478,7 @@ mod tests {
             .clone()
             .oneshot(
                 Request::get(format!(
-                    "/v1/project/trace-auth/traces?requestId={}&limit=1",
+                    "/v1/apps/trace-auth/traces?requestId={}&limit=1",
                     trace_ids[1].1
                 ))
                 .header("authorization", format!("Bearer {raw_key}"))
@@ -2500,7 +2497,7 @@ mod tests {
             .clone()
             .oneshot(
                 Request::get(format!(
-                    "/v1/project/trace-auth/traces?traceId={}&limit=1",
+                    "/v1/apps/trace-auth/traces?traceId={}&limit=1",
                     trace_ids[0].0
                 ))
                 .header("authorization", format!("Bearer {raw_key}"))
@@ -2518,7 +2515,7 @@ mod tests {
             .clone()
             .oneshot(
                 Request::get(format!(
-                    "/v1/project/trace-auth/traces?traceId={}&limit=1",
+                    "/v1/apps/trace-auth/traces?traceId={}&limit=1",
                     trace_ids[1].0
                 ))
                 .header("authorization", format!("Bearer {raw_key}"))
@@ -2538,7 +2535,7 @@ mod tests {
                 .clone()
                 .oneshot(
                     Request::get(format!(
-                        "/v1/project/trace-auth/traces/{}/{suffix}",
+                        "/v1/apps/trace-auth/traces/{}/{suffix}",
                         trace_ids[0].0
                     ))
                     .header("authorization", format!("Bearer {raw_key}"))
@@ -2552,7 +2549,7 @@ mod tests {
                 let hidden = runtime_app
                     .clone()
                     .oneshot(
-                        Request::get(format!("/v1/project/trace-auth/traces/{trace_id}/{suffix}"))
+                        Request::get(format!("/v1/apps/trace-auth/traces/{trace_id}/{suffix}"))
                             .header("authorization", format!("Bearer {raw_key}"))
                             .body(Body::empty())
                             .unwrap(),
@@ -2601,7 +2598,7 @@ mod tests {
         let admin_list = runtime_app
             .clone()
             .oneshot(
-                Request::get("/v1/project/trace-auth/traces")
+                Request::get("/v1/apps/trace-auth/traces")
                     .header("authorization", admin_authorization(&config))
                     .body(Body::empty())
                     .unwrap(),
@@ -2631,10 +2628,10 @@ mod tests {
             Request::get("/v1/provider-catalog")
                 .body(Body::empty())
                 .unwrap(),
-            Request::get("/v1/project/test/providers")
+            Request::get("/v1/apps/test/providers")
                 .body(Body::empty())
                 .unwrap(),
-            Request::post("/v1/project/test/providers/import")
+            Request::post("/v1/apps/test/providers/import")
                 .header("content-type", "application/json")
                 .body(Body::from(
                     r#"{
@@ -2645,23 +2642,23 @@ mod tests {
                     }"#,
                 ))
                 .unwrap(),
-            Request::get("/v1/project/test/agent-candidates")
+            Request::get("/v1/apps/test/agent-candidates")
                 .body(Body::empty())
                 .unwrap(),
-            Request::post("/v1/project/test/agents/import")
+            Request::post("/v1/apps/test/agents/import")
                 .header("content-type", "application/json")
                 .body(Body::from(
                     r#"{"gatewayId":"gateway","agentId":"guide","providerKey":"openclaw"}"#,
                 ))
                 .unwrap(),
             Request::post(format!(
-                "/v1/project/test/agents/{}/restore",
+                "/v1/apps/test/agents/{}/restore",
                 uuid::Uuid::new_v4()
             ))
             .header("content-type", "application/json")
             .body(Body::from("{}"))
             .unwrap(),
-            Request::post("/v1/project/test/profiles/import")
+            Request::post("/v1/apps/test/profiles/import")
                 .header("content-type", "application/json")
                 .body(Body::from(
                     r#"{
@@ -2714,7 +2711,7 @@ mod tests {
         let runtime_app = app(state_with_storage(config, storage.clone()));
         let response = runtime_app
             .oneshot(
-                Request::get("/v1/project/provider-catalog-project/provider-catalog")
+                Request::get("/v1/apps/provider-catalog-project/provider-catalog")
                     .header("authorization", admin)
                     .body(Body::empty())
                     .unwrap(),
@@ -2760,7 +2757,7 @@ mod tests {
         let response = runtime_app
             .clone()
             .oneshot(
-                Request::post("/v1/project/provider-assign-project/providers")
+                Request::post("/v1/apps/provider-assign-project/providers")
                     .header("authorization", admin.clone())
                     .header("content-type", "application/json")
                     .body(Body::from(
@@ -2811,7 +2808,7 @@ mod tests {
         let assigned = runtime_app
             .clone()
             .oneshot(
-                Request::post("/v1/project/provider-runtime-sync/providers")
+                Request::post("/v1/apps/provider-runtime-sync/providers")
                     .header("authorization", admin.clone())
                     .header("content-type", "application/json")
                     .body(Body::from(
@@ -2826,7 +2823,7 @@ mod tests {
         let published = runtime_app
             .clone()
             .oneshot(
-                Request::post("/v1/project/provider-runtime-sync/runtime-releases")
+                Request::post("/v1/apps/provider-runtime-sync/runtime-releases")
                     .header("authorization", admin.clone())
                     .header("content-type", "application/json")
                     .body(Body::from(
@@ -2864,7 +2861,7 @@ mod tests {
             .clone()
             .oneshot(
                 Request::post(
-                    "/v1/project/provider-runtime-sync/deployments/development/runtime-releases/1/activate",
+                    "/v1/apps/provider-runtime-sync/deployments/development/runtime-releases/1/activate",
                 )
                 .header("authorization", admin.clone())
                 .body(Body::empty())
@@ -2876,7 +2873,7 @@ mod tests {
 
         let updated = runtime_app
             .oneshot(
-                Request::patch("/v1/project/provider-runtime-sync/providers/local-llama")
+                Request::patch("/v1/apps/provider-runtime-sync/providers/local-llama")
                     .header("authorization", admin)
                     .header("content-type", "application/json")
                     .body(Body::from(
@@ -2926,7 +2923,7 @@ mod tests {
 
         let response = runtime_app
             .oneshot(
-                Request::post("/v1/project/project-local-openai/providers")
+                Request::post("/v1/apps/project-local-openai/providers")
                     .header("authorization", admin)
                     .header("content-type", "application/json")
                     .body(Body::from(format!(
@@ -2981,7 +2978,7 @@ mod tests {
         let assigned = runtime_app
             .clone()
             .oneshot(
-                Request::post("/v1/project/provider-offline-project/providers")
+                Request::post("/v1/apps/provider-offline-project/providers")
                     .header("authorization", admin.clone())
                     .header("content-type", "application/json")
                     .body(Body::from(
@@ -3001,7 +2998,7 @@ mod tests {
             .unwrap();
         let tested = runtime_app
             .oneshot(
-                Request::post("/v1/project/provider-offline-project/providers/local-openai/test")
+                Request::post("/v1/apps/provider-offline-project/providers/local-openai/test")
                     .header("authorization", admin)
                     .header("content-type", "application/json")
                     .body(Body::from("{}"))
@@ -3028,7 +3025,7 @@ mod tests {
             .unwrap();
         let response = app(state(config, pool))
             .oneshot(
-                Request::get("/v1/project/test/provider-connections")
+                Request::get("/v1/apps/test/provider-connections")
                     .body(Body::empty())
                     .unwrap(),
             )
