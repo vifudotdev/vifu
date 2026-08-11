@@ -726,10 +726,11 @@ pub async fn run(
             if verbose {
                 print_openai_compatible_report(&provider, &probe);
             }
-            if !should_register_openai_compatible(&provider, &probe) {
+            let Some((runtime_provider, agent)) =
+                load_available_openai_compatible_provider(provider, &probe)
+            else {
                 continue;
-            }
-            let (runtime_provider, agent) = load_openai_compatible_provider(provider)?;
+            };
             runtime_providers.push(runtime_provider);
             agents.push(agent);
         }
@@ -1299,6 +1300,30 @@ fn should_register_openai_compatible(
     probe.is_ok() || (!explicitly_remote && config::is_local_provider_url(&provider.url))
 }
 
+fn load_available_openai_compatible_provider(
+    provider: AgentProviderConfig,
+    probe: &Result<(), String>,
+) -> Option<(
+    Arc<dyn relay::AgentGatewayProvider>,
+    vifu_gateway::protocol::AgentDescriptor,
+)> {
+    if !should_register_openai_compatible(&provider, probe) {
+        return None;
+    }
+    let provider_id = provider.id.clone();
+    match load_openai_compatible_provider(provider) {
+        Ok(provider) => Some(provider),
+        Err(error) => {
+            tracing::warn!(
+                provider_id = %provider_id,
+                error = %safe_error_message(&error),
+                "OpenAI-compatible provider configuration is unavailable"
+            );
+            None
+        }
+    }
+}
+
 fn provider_config_text(config: &serde_json::Value, field: &str) -> Option<String> {
     config
         .get(field)
@@ -1742,10 +1767,10 @@ mod tests {
     #[cfg(feature = "local-whisper")]
     use super::load_local_whisper_provider;
     use super::{
-        format_terminal_link, gateway_runtime_observer, load_openai_compatible_provider,
-        mark_gateway_authorized, project_profile_registrations, restore_device_pairing,
-        run_capture_worker, runtime_backends, should_register_openai_compatible,
-        AgentProviderConfig, DevicePairingController,
+        format_terminal_link, gateway_runtime_observer, load_available_openai_compatible_provider,
+        load_openai_compatible_provider, mark_gateway_authorized, project_profile_registrations,
+        restore_device_pairing, run_capture_worker, runtime_backends,
+        should_register_openai_compatible, AgentProviderConfig, DevicePairingController,
     };
     use crate::monitor::{RuntimeEvent, RuntimeHealth, RuntimeStage, StageStatus};
     use serde_json::json;
@@ -2186,6 +2211,20 @@ mod tests {
         assert_eq!(agent.metadata["executionLocation"], "remote");
         assert_eq!(agent.metadata["capabilities"], json!(["chat", "embedding"]));
         assert_eq!(agent.metadata["inputModalities"], json!(["text", "image"]));
+    }
+
+    #[test]
+    fn invalid_openai_compatible_provider_does_not_stop_the_gateway() {
+        let provider = AgentProviderConfig {
+            id: "incomplete-openai-compatible".to_string(),
+            name: None,
+            provider_type: "openai-compatible".to_string(),
+            url: "https://provider.example.com/v1".to_string(),
+            token: None,
+            config: json!({}),
+        };
+
+        assert!(load_available_openai_compatible_provider(provider, &Ok(())).is_none());
     }
 
     #[test]
