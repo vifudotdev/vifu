@@ -808,10 +808,11 @@ mod tests {
         let project_id = Uuid::new_v4();
         let deployment_id = Uuid::new_v4();
         let bootstrap = serde_json::from_value::<GuestProjectBootstrap>(serde_json::json!({
-            "project": {
+            "app": {
                 "id": project_id,
+                "appId": format!("vifu_app_{}", "a".repeat(64)),
                 "slug": "guest-example",
-                "name": "Guest project",
+                "name": "Guest app",
                 "gatewayId": "gateway-example",
                 "bindings": []
             },

@@ -1,14 +1,16 @@
 import { expect, test, type Route } from "@playwright/test";
 
 const projectId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+const appId = `vifu_app_${"a".repeat(64)}`;
 const profileId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
 const keyId = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
 const now = "2026-08-06T00:00:00Z";
 
 const project = {
   id: projectId,
+  appId,
   slug: "demo",
-  name: "Demo project",
+  name: "Demo app",
   description: null,
   gatewayId: "project-demo",
   enabled: true,
@@ -46,7 +48,7 @@ test("created selected-agent key keeps its scope in the row and edit dialog", as
   await page.route("**/api/runtime/**", async (route) => {
     const request = route.request();
     const path = new URL(request.url()).pathname.replace(/^\/api\/runtime\/?/, "");
-    if (request.method() === "POST" && path === "project/demo/api-keys") {
+    if (request.method() === "POST" && path === "apps/demo/api-keys") {
       createBody = request.postDataJSON() as Record<string, unknown>;
       createdRecord = {
         id: keyId,
@@ -73,7 +75,7 @@ test("created selected-agent key keeps its scope in the row and edit dialog", as
         version: "0.1.10",
         mode: "local",
         capabilities: {
-          projects: true,
+          apps: true,
           profiles: true,
           endpoints: false,
           bindings: false,
@@ -85,27 +87,27 @@ test("created selected-agent key keeps its scope in the row and edit dialog", as
         agentGateways: 0,
       });
     }
-    if (path === "projects") return json(route, 200, { projects: [project] });
-    if (path === "project/demo/profiles") return json(route, 200, { profiles: [profile] });
-    if (path === `project/demo/profiles/${profileId}`) {
+    if (path === "apps") return json(route, 200, { apps: [project] });
+    if (path === "apps/demo/profiles") return json(route, 200, { profiles: [profile] });
+    if (path === `apps/demo/profiles/${profileId}`) {
       return json(route, 200, { profile, versions: [], rollout: [] });
     }
-    if (path === "project/demo/api-keys") {
+    if (path === "apps/demo/api-keys") {
       apiKeyListReads += 1;
       if (createdRecord) await new Promise((resolve) => setTimeout(resolve, 250));
       const record = createdRecord ? { ...createdRecord, key: undefined } : null;
       return json(route, 200, { apiKeys: record ? [record] : [] });
     }
-    if (path === "project/demo/provider-catalog") return json(route, 200, { registry: [], custom: [] });
-    if (path === "project/demo/providers") return json(route, 200, { providers: [] });
-    if (path === "project/demo/agent-candidates") return json(route, 200, { candidates: [] });
-    if (path === "project/demo/deployments") return json(route, 200, { deployments: [] });
-    if (path === "project/demo/runtime-releases") return json(route, 200, { releases: [] });
+    if (path === "apps/demo/provider-catalog") return json(route, 200, { registry: [], custom: [] });
+    if (path === "apps/demo/providers") return json(route, 200, { providers: [] });
+    if (path === "apps/demo/agent-candidates") return json(route, 200, { candidates: [] });
+    if (path === "apps/demo/deployments") return json(route, 200, { deployments: [] });
+    if (path === "apps/demo/runtime-releases") return json(route, 200, { releases: [] });
     return json(route, 404, { error: `unexpected path: ${path}` });
   });
 
   await page.goto("/index.html");
-  await page.getByRole("link", { name: "Demo project" }).click();
+  await page.getByRole("link", { name: "Demo app" }).click();
   await expect(page.getByRole("heading", { name: "Overview" })).toBeVisible();
   delayNextStatusRead = true;
   await page.getByRole("link", { name: "API", exact: true }).click();
