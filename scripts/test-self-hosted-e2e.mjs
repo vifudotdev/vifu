@@ -59,7 +59,7 @@ async function setup() {
   });
   assert(dashboardAfterSignup.ok, "Dashboard did not accept the Admin Key session cookie");
   const dashboardHtml = await dashboardAfterSignup.text();
-  assert(dashboardHtml.includes("Create your first project"), "Dashboard did not render after Admin Key authentication");
+  assert(dashboardHtml.includes("Create your first app"), "Dashboard did not render after Admin Key authentication");
   assert(!dashboardHtml.includes(adminKey), "Dashboard HTML exposed the bootstrap admin key");
   const getLogoutResponse = await fetch(`${dashboardBaseUrl}/auth/logout`, {
     headers: { cookie: `vifu_admin_session=${initialCookie.cookieValue}` },
@@ -443,23 +443,23 @@ async function verify() {
     headers: { cookie: `vifu_admin_session=${state.authCookieValue}` },
   });
   assert(dashboardSession.ok, "Dashboard web session did not survive restart");
-  const [projects, profiles, bindings, endpoints, agentGateways, traces] = await Promise.all([
-    request("/v1/projects"),
+  const [apps, profiles, bindings, endpoints, agentGateways, traces] = await Promise.all([
+    request("/v1/apps"),
     request("/v1/profiles"),
     request("/v1/bindings"),
     request("/v1/endpoints"),
     request("/v1/agent-gateways"),
     request("/v1/traces?limit=500"),
   ]);
-  assert(projects.projects.some((item) => item.id === state.projectId), "Project was not persisted");
-  assert(projects.projects.some((item) => item.id === state.scopeTargetProjectId), "API key target project was not persisted");
+  assert(apps.apps.some((item) => item.id === state.projectId), "App was not persisted");
+  assert(apps.apps.some((item) => item.id === state.scopeTargetProjectId), "API key target App was not persisted");
   assert(state.profileIds.every((id) => profiles.profiles.some((item) => item.id === id)), "Profiles were not persisted");
   assert(state.bindingIds.every((id) => bindings.bindings.some((item) => item.id === id)), "Bindings were not persisted");
   assert(state.endpointIds.every((id) => endpoints.endpoints.some((item) => item.id === id)), "Endpoints were not persisted");
   assert(state.requestIds.every((id) => traces.traces.some((item) => item.requestId === id)), "Traces were not persisted");
   assert(traces.traces.some((item) => item.projectId === state.projectId), "Project endpoint traces were not persisted");
   if (state.openAiProviderKey) {
-    const providers = (await request(`/v1/project/${state.projectSlug}/providers`)).providers ?? [];
+    const providers = (await request(`/v1/apps/${state.projectSlug}/providers`)).providers ?? [];
     assert(
       providers.some((item) => item.providerKey === state.openAiProviderKey && item.status === "online"),
       "Project OpenAI-compatible provider was not persisted as online",
@@ -600,8 +600,8 @@ async function cleanup() {
   const state = JSON.parse(await readFile(statePath, "utf8"));
   runtimeCredential = adminKey;
   await Promise.all(state.endpointIds.map((id) => request(`/v1/endpoints/${id}`, { method: "DELETE" })));
-  await request(`/v1/projects/${state.projectId}`, { method: "DELETE" });
-  await request(`/v1/projects/${state.scopeTargetProjectId}`, { method: "DELETE" });
+  await request(`/v1/apps/${state.projectId}`, { method: "DELETE" });
+  await request(`/v1/apps/${state.scopeTargetProjectId}`, { method: "DELETE" });
   await fetch(`${dashboardBaseUrl}/auth/logout`, {
     method: "POST",
     headers: {
@@ -614,15 +614,15 @@ async function cleanup() {
 }
 
 async function createProjectWithProvider({ name, slug, gatewayId, providerKey, minimumAgents }) {
-  const created = (await request("/v1/projects", {
+  const created = (await request("/v1/apps", {
     method: "POST",
     body: { name, slug },
-  })).project;
-  await request(`/v1/projects/${created.id}`, {
+  })).app;
+  await request(`/v1/apps/${created.id}`, {
     method: "PATCH",
     body: { gatewayId },
   });
-  const provider = await request(`/v1/project/${slug}/providers`, {
+  const provider = await request(`/v1/apps/${slug}/providers`, {
     method: "POST",
     body: {
       source: { kind: "custom", key: providerKey },
@@ -632,12 +632,12 @@ async function createProjectWithProvider({ name, slug, gatewayId, providerKey, m
     provider.addedAgents >= minimumAgents,
     `Provider setup added ${provider.addedAgents ?? 0} agents; expected at least ${minimumAgents}`,
   );
-  return (await request(`/v1/projects/${created.id}`)).project;
+  return (await request(`/v1/apps/${created.id}`)).app;
 }
 
 async function exerciseOpenAiCompatibleProjectFlow({ project, projectKey, suffix }) {
   assert(openAiProviderBaseUrl, "VIFU_E2E_OPENAI_PROVIDER_BASE_URL is required for OpenAI-compatible E2E");
-  const projectCatalog = await request(`/v1/project/${project.slug}/provider-catalog`);
+  const projectCatalog = await request(`/v1/apps/${project.slug}/provider-catalog`);
   const availableOpenAi = projectCatalog.custom?.find((provider) => provider.providerKey === "openai-compatible-e2e");
   const availableOpenAiAlt = projectCatalog.custom?.find((provider) => provider.providerKey === "openai-compatible-e2e-alt");
   assert(availableOpenAi, "Project provider catalog did not include the providers.json OpenAI-compatible provider");
@@ -653,9 +653,9 @@ async function exerciseOpenAiCompatibleProjectFlow({ project, projectKey, suffix
     "providers.json OpenAI-compatible provider did not report chat and embedding capabilities",
   );
 
-  const profilesBeforeAttach = new Set(((await request(`/v1/project/${project.slug}/profiles`)).profiles ?? [])
+  const profilesBeforeAttach = new Set(((await request(`/v1/apps/${project.slug}/profiles`)).profiles ?? [])
     .map((profile) => profile.id));
-  const attachedAvailable = await request(`/v1/project/${project.slug}/providers`, {
+  const attachedAvailable = await request(`/v1/apps/${project.slug}/providers`, {
     method: "POST",
     body: {
       source: { kind: "custom", key: "openai-compatible-e2e" },
@@ -665,10 +665,10 @@ async function exerciseOpenAiCompatibleProjectFlow({ project, projectKey, suffix
   assert(attachedAvailable.provider?.sourceKey === "openai-compatible-e2e", "Available provider attach used the wrong source key");
   assert(attachedAvailable.provider?.status === "online", "Available providers.json provider was not online after attach");
   assert(attachedAvailable.addedAgents >= 1, "Available providers.json provider did not add its discovered agent");
-  const profilesAfterAttach = ((await request(`/v1/project/${project.slug}/profiles`)).profiles ?? [])
+  const profilesAfterAttach = ((await request(`/v1/apps/${project.slug}/profiles`)).profiles ?? [])
     .filter((profile) => !profilesBeforeAttach.has(profile.id));
 
-  const offlineProvider = await request(`/v1/project/${project.slug}/providers`, {
+  const offlineProvider = await request(`/v1/apps/${project.slug}/providers`, {
     method: "POST",
     body: {
       source: { kind: "registry", key: "openai-compatible" },
@@ -680,9 +680,9 @@ async function exerciseOpenAiCompatibleProjectFlow({ project, projectKey, suffix
   });
   assert(offlineProvider.provider?.status === "offline", "Unreachable OpenAI-compatible provider was not marked offline");
   assert(offlineProvider.message, "Unreachable OpenAI-compatible provider did not return a health message");
-  await request(`/v1/project/${project.slug}/providers/${offlineProvider.provider.providerKey}`, { method: "DELETE" });
+  await request(`/v1/apps/${project.slug}/providers/${offlineProvider.provider.providerKey}`, { method: "DELETE" });
 
-  const projectProvider = await request(`/v1/project/${project.slug}/providers`, {
+  const projectProvider = await request(`/v1/apps/${project.slug}/providers`, {
     method: "POST",
     body: {
       source: { kind: "registry", key: "openai-compatible" },
@@ -702,7 +702,7 @@ async function exerciseOpenAiCompatibleProjectFlow({ project, projectKey, suffix
     );
   }
   const testedProvider = await request(
-    `/v1/project/${project.slug}/providers/${projectProvider.provider.providerKey}/test`,
+    `/v1/apps/${project.slug}/providers/${projectProvider.provider.providerKey}/test`,
     { method: "POST", body: {} },
   );
   assert(testedProvider.provider?.status === "online", "Project OpenAI-compatible provider test did not report online");
