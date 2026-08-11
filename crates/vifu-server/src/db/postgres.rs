@@ -1673,7 +1673,7 @@ pub async fn find_project_profile_by_provider_resource(
     .map_err(ApiError::from)
 }
 
-pub async fn refresh_discovered_binding(
+pub async fn refresh_discovered_binding_record(
     pool: &PgPool,
     binding_id: Uuid,
     gateway_id: &str,

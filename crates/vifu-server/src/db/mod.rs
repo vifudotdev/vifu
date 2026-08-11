@@ -212,7 +212,7 @@ dispatch! {
     pub async fn list_archived_project_agent_sources(storage: &Storage, project_id: Uuid) -> Result<Vec<ArchivedProjectAgentSource>, ApiError>;
     pub async fn restore_project_profile(storage: &Storage, project_id: Uuid, profile_id: Uuid) -> Result<AgentProfile, ApiError>;
     pub async fn find_project_profile_by_provider_resource(storage: &Storage, project_id: Uuid, provider_key: &str, agent_id: &str) -> Result<Option<(Uuid, bool, Uuid)>, ApiError>;
-    pub async fn refresh_discovered_binding(storage: &Storage, binding_id: Uuid, gateway_id: &str, agent_name: &str) -> Result<(), ApiError>;
+    pub async fn refresh_discovered_binding_record(storage: &Storage, binding_id: Uuid, gateway_id: &str, agent_name: &str) -> Result<(), ApiError>;
     pub async fn unassign_project_provider(storage: &Storage, project_id: Uuid, provider_key: &str) -> Result<(), ApiError>;
     pub async fn assign_project_binding(storage: &Storage, project_id: Uuid, binding_id: Uuid) -> Result<(), ApiError>;
     pub async fn attach_project_binding(storage: &Storage, project_id: Uuid, binding_id: Uuid) -> Result<(), ApiError>;
@@ -307,6 +307,110 @@ dispatch! {
     pub async fn trace_feedback_target(storage: &Storage, project_id: Uuid, request_id: Uuid) -> Result<TraceFeedbackTarget, ApiError>;
 }
 
+pub async fn refresh_discovered_binding(
+    storage: &Storage,
+    binding_id: Uuid,
+    gateway_id: &str,
+    agent_name: &str,
+) -> Result<(), ApiError> {
+    refresh_discovered_binding_record(storage, binding_id, gateway_id, agent_name).await?;
+
+    let binding = get_binding(storage, binding_id).await?;
+    let discovered_source = binding
+        .config
+        .get("source")
+        .and_then(Value::as_str)
+        .is_some_and(|source| source.ends_with("-discovery"));
+    if !discovered_source {
+        return Ok(());
+    }
+
+    let profile = get_profile(storage, binding.profile_id).await?;
+    let Some(active_version_id) = profile.active_version_id else {
+        return Ok(());
+    };
+    let active_version = get_profile_version(storage, profile.id, active_version_id).await?;
+    let provider_key = binding
+        .config
+        .get("providerKey")
+        .and_then(Value::as_str)
+        .unwrap_or(&binding.provider);
+    let managed_source_matches = active_version
+        .source
+        .get("managed")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+        && active_version
+            .source
+            .get("providerKey")
+            .and_then(Value::as_str)
+            == Some(provider_key)
+        && active_version
+            .source
+            .get("resourceId")
+            .and_then(Value::as_str)
+            == Some(binding.agent_id.as_str());
+    if !managed_source_matches {
+        return Ok(());
+    }
+
+    let mut source = active_version.source.clone();
+    let mut changed = source.get("gatewayId").and_then(Value::as_str) != Some(gateway_id);
+    if changed {
+        source.as_object_mut().ok_or(ApiError::Internal)?.insert(
+            "gatewayId".to_string(),
+            Value::String(gateway_id.to_string()),
+        );
+    }
+
+    let capabilities = list_profile_capabilities(storage, active_version_id).await?;
+    let capability_drafts = capabilities
+        .into_iter()
+        .map(|capability| {
+            let mut config = capability.config;
+            let matches_binding = capability.provider_key == provider_key
+                && capability.resource_id.as_deref() == Some(binding.agent_id.as_str());
+            if matches_binding
+                && config.get("gatewayId").and_then(Value::as_str) != Some(gateway_id)
+            {
+                config.as_object_mut().ok_or(ApiError::Internal)?.insert(
+                    "gatewayId".to_string(),
+                    Value::String(gateway_id.to_string()),
+                );
+                changed = true;
+            }
+            Ok(ProfileCapabilityDraft {
+                kind: capability.kind,
+                provider_type: capability.provider_type,
+                provider_key: capability.provider_key,
+                resource_id: capability.resource_id,
+                config,
+                input_schema: capability.input_schema,
+                output_schema: capability.output_schema,
+            })
+        })
+        .collect::<Result<Vec<_>, ApiError>>()?;
+    if !changed {
+        return Ok(());
+    }
+
+    let version = create_profile_version(
+        storage,
+        profile.id,
+        NewProfileVersion {
+            persona: &active_version.persona,
+            runtime: &active_version.runtime,
+            presentation: &active_version.presentation,
+            source: &source,
+            capabilities: &capability_drafts,
+            change_summary: Some("Reconnected discovered agent"),
+        },
+    )
+    .await?;
+    set_profile_rollout(storage, profile.id, &[(version.id, 10_000)]).await?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use chrono::Duration as ChronoDuration;
@@ -370,6 +474,86 @@ mod tests {
             .find(|deployment| deployment.is_primary)
             .expect("project should have a primary deployment")
             .id
+    }
+
+    #[tokio::test]
+    async fn sqlite_refresh_discovered_binding_moves_profile_route_to_new_gateway() {
+        let (storage, path) = sqlite_storage().await;
+        let project_id = Uuid::new_v4();
+        create_project(
+            &storage,
+            NewProject {
+                id: project_id,
+                owner_user_id: None,
+                slug: "discovered-agent-reconnect",
+                name: "Discovered agent reconnect",
+                description: None,
+                gateway_id: "gateway-old",
+                binding_ids: &[],
+            },
+        )
+        .await
+        .expect("project should be created");
+        let binding_id = ensure_discovered_binding(
+            &storage,
+            project_id,
+            "gateway-old",
+            "companion-demo",
+            "Android Local Companion",
+            "android-local-model",
+            "vifu-runtime",
+        )
+        .await
+        .expect("discovered binding should be created");
+        let profile = get_profile(
+            &storage,
+            get_binding(&storage, binding_id)
+                .await
+                .expect("binding should exist")
+                .profile_id,
+        )
+        .await
+        .expect("profile should exist");
+
+        refresh_discovered_binding(
+            &storage,
+            binding_id,
+            "gateway-new",
+            "Android Local Companion",
+        )
+        .await
+        .expect("discovered binding should refresh");
+        refresh_discovered_binding(
+            &storage,
+            binding_id,
+            "gateway-new",
+            "Android Local Companion",
+        )
+        .await
+        .expect("repeated refresh should be idempotent");
+
+        let route = resolve_profile_route(&storage, project_id, &profile.slug, "chat", None, None)
+            .await
+            .expect("profile route should resolve");
+        assert_eq!(
+            (
+                route.source.get("gatewayId").and_then(Value::as_str),
+                route
+                    .capability_config
+                    .get("gatewayId")
+                    .and_then(Value::as_str),
+            ),
+            (Some("gateway-new"), Some("gateway-new"))
+        );
+        assert_eq!(
+            list_profile_versions(&storage, profile.id)
+                .await
+                .expect("profile versions should list")
+                .len(),
+            2
+        );
+
+        close_and_remove(storage, &path).await;
     }
 
     #[tokio::test]
