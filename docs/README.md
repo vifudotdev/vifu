@@ -30,11 +30,14 @@ stable endpoints, Gateway transport, and traces.
 - [Gateway crate](../crates/vifu-gateway/README.md)
 - [VifuGodot for Apple hosts](../integrations/godot/apple/README.md)
 - [Mobile FFI for Apple and Android hosts](../crates/vifu-mobile-ffi/README.md)
-- [Ten-minute Android starter](../examples/android-starter/README.md)
+- [Mobile Starter for Android and iOS](../examples/mobile-starter/README.md)
+- [Android Starter](../examples/android-starter/README.md)
+- [iOS Starter](../examples/ios-embedding/README.md)
 - [Android AAR reference](../integrations/android/README.md)
 
 ## Reference
 
 - [Runtime configuration example](../config/runtime.example.toml)
+- [Release binaries and mobile signing](releases.md)
 - [Positioning and related projects](comparison.md)
 - [Build and test](../BUILD.md)

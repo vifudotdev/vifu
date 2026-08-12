@@ -95,13 +95,16 @@ from another Gateway does not close it.
 The QR keeps its exact terminal dimensions. If the window is too small, the TUI
 shows the required size.
 
-A Dashboard QR can contain an `https://vifu.ai/pair#...` bridge URL. A camera
-app opens this URL. The bridge passes the URL fragment to the installed app as
-a `vifu://gateway/enroll?...` link.
+A Dashboard QR can contain an `https://vifu.ai/pair#...` bridge URL. A configured
+application-link bridge passes its URL fragment to the installed app as a
+`vifu://gateway/enroll?...` link.
 
-The TUI shows the direct `vifu://` payload for its in-app scanner. For a private
-Server, this payload includes the generated certificate fingerprint. The app
-verifies the fingerprint and pins the certificate for later connections.
+The Dashboard's **Copy pairing code** action copies the complete native
+`vifu://` payload, including the generated certificate and fingerprint for a
+local Server. Android and iOS Starters validate that pair and pin the
+certificate for later connections. The compact TUI QR carries the fingerprint
+instead of the larger certificate and is intended for a scanner that resolves
+that trust anchor before enrollment.
 
 Only the selected Server validates and consumes the enrollment token.
 
@@ -173,9 +176,10 @@ address = "http://127.0.0.1:6790"
 Start `vifu`. It detects the non-loopback address and listens on the LAN. It also
 creates deployment secrets and a TLS certificate in the private Vifu directory.
 
-Press `P`. Then open **Scan Vifu QR** in the Android app and scan the terminal
-QR. The QR contains the certificate fingerprint and one-time enrollment token.
-The phone uses them to authenticate and pin the private Server.
+Press `P` and scan the terminal QR. Android can open the `vifu://` link from the
+system camera; the iOS Starter can scan it from the Gateway sheet. The QR
+contains the certificate fingerprint and one-time enrollment token. The phone
+uses them to authenticate and pin the private Server.
 
 Changing Wi-Fi can change the MacBook address. Update `server.address` and scan
 a fresh enrollment QR for a new installation. Networks with client isolation
@@ -205,7 +209,7 @@ address = "http://127.0.0.1:6790"
 
 The cloud Server grants that Gateway a temporary Guest App. The TUI uses the
 returned App key in memory for the App-scoped monitor stream. Press `P` and scan
-the QR in the Android app. The phone joins the same App, and its Runtime traces
+the QR with the Mobile Starter. The phone joins the same App, and its Runtime traces
 appear in that TUI. Claiming the App later preserves its App ID, Gateway
 installations, and trace history.
 

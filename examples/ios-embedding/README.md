@@ -1,12 +1,12 @@
-# Vifu iOS Embedding
+# Vifu iOS Starter
 
-This example runs a Vifu Runtime and a GGUF language model inside a native
+Vifu iOS Starter runs a Vifu Runtime and a GGUF language model inside a native
 SwiftUI application. It streams replies, speaks completed responses with the
-system voice, and optionally connects its embedded Gateway to Vifu Server for
-live monitoring and Runtime release delivery.
+system voice, and connects its embedded Gateway to Vifu for live tracing and
+Runtime release delivery.
 
 ```text
-iPhone
+iPhone or iPad
 SwiftUI host
         |
         v
@@ -16,38 +16,65 @@ VifuEmbeddedRuntime -> local llama.cpp provider
 embedded Gateway === HTTPS/WSS === Vifu Server === TUI and Dashboard
 ```
 
-The app stores one Vifu Server URL. HTTP control calls and the Agent Gateway
-WebSocket are derived from that address. Pairing pins Vifu's generated local
-certificate; deployments using a publicly trusted certificate use the iOS
-system trust store.
+The Android and iOS Starters use the same pairing protocol and trace model.
+The iOS implementation stores the machine identity, server certificate pin,
+and server authorization in Keychain, then reconnects on later launches.
 
-The Runtime and its active release remain in the app's Application Support
-database. Closing Vifu Server stops monitoring and settings delivery, but the
-embedded Runtime continues using its last applied release. The embedded Gateway
-reconnects when the paired server becomes available again.
+## Install and run
 
-The first launch offers two model setup paths:
+If a Vifu iOS Starter beta has been shared with your testing group, install it
+through TestFlight, open it, and choose **Download model (469 MiB)**. You can
+also import a GGUF already stored on the device. The source-build path below is
+available when no beta is active.
 
-- download the pinned Qwen3 1.7B Q4_K_M model and verify its SHA-256 digest;
-- import a `.gguf` model already stored on the device.
+The Starter downloads and verifies this default model:
+
+```text
+Repository: Qwen/Qwen2.5-0.5B-Instruct-GGUF
+Revision:   df5bf01389a39c743ab467d734bf501681e041c5
+File:       qwen2.5-0.5b-instruct-q4_k_m.gguf
+Size:       491,400,032 bytes
+SHA-256:    74a4da8c9fdbcd15bd1f6d01d621410d31c6fc00986f5eb687824e7b93d7a9db
+```
 
 Downloaded and imported models remain in the app's Application Support
-directory. Model weights are not stored in this repository.
+directory. Review a model repository and its license before redistributing
+weights with another application.
 
-## Requirements
+## Pair and inspect
 
-- Xcode 26 or newer
-- iOS 17 or newer
-- an Apple Silicon iPhone or iPad for practical local inference
+Connect the iPhone or iPad and developer computer to the same local network.
+Start the downloaded Vifu binary with a Server address that the device can
+reach:
 
-The example has no external game-engine checkout or generated resource pack.
-Its presentation is native SwiftUI so the Runtime, model, pairing, monitoring,
-and profile-delivery path can be reproduced independently.
+```bash
+./vifu \
+  -c server.address=https://<computer-lan-address>:6790 \
+  -c server.guest_bootstrap.enabled=true \
+  -c gateway.address=http://127.0.0.1:6790
+```
 
-## Build and run
+Press `B`, open the project and its primary deployment in the Dashboard, then
+choose **Pair gateway** and **Copy pairing code**. In the Starter, open the
+Gateway sheet and paste the code. The Dashboard QR remains available for the
+native scanner when the application-link bridge is configured.
 
-From the repository root, build the local Vifu Apple artifact used by the Swift
-package:
+The code contains Vifu's Server address, a one-time enrollment token, and the
+local certificate pin. After successful pairing, agent activity appears in the
+TUI and Dashboard. Making an Agent Profile version live creates an immutable
+Runtime release for the primary deployment; the app applies it to its local
+database and reports the active version.
+
+The model executes inside the app. Closing the Vifu process stops live
+monitoring and settings delivery. The embedded Runtime continues with its last
+applied release and reconnects when the paired Server becomes available.
+
+## Build from source
+
+The source project is the advanced path. It requires Xcode 26 or newer, iOS 17
+or newer, and an Apple Silicon iPhone or iPad for practical local inference.
+
+Build the local Vifu Apple artifact from the repository root:
 
 ```bash
 VIFU_APPLE_DIST_DIR="$PWD/Frameworks" \
@@ -55,7 +82,7 @@ VIFU_APPLE_DIST_DIR="$PWD/Frameworks" \
 ```
 
 Open `examples/ios-embedding/IOSEmbeddingDemo.xcodeproj`, select the
-`IOSEmbeddingDemo` scheme, and run it on a physical iOS device.
+`IOSEmbeddingDemo` scheme, and run it on a physical device.
 
 For an unsigned command-line build check:
 
@@ -70,77 +97,14 @@ xcodebuild \
   build
 ```
 
-## Pair with Vifu Server
-
-Copy the server-only profile and replace `your-macbook.local` with a hostname
-or address that the iPhone can reach:
-
-```bash
-mkdir -p ~/.vifu
-cp examples/ios-embedding/vifu-server.example.toml \
-  ~/.vifu/ios-embedding.toml
-```
-
-For self-hosted mode, create persistent independent secrets:
-
-```bash
-export VIFU_DEMO_SECRETS="$HOME/.vifu/ios-embedding-secrets"
-mkdir -p "$VIFU_DEMO_SECRETS"
-chmod 700 "$VIFU_DEMO_SECRETS"
-openssl rand -hex 32 > "$VIFU_DEMO_SECRETS/admin"
-openssl rand -hex 32 > "$VIFU_DEMO_SECRETS/gateway"
-openssl rand -hex 32 > "$VIFU_DEMO_SECRETS/api-key-pepper"
-openssl rand -hex 32 > "$VIFU_DEMO_SECRETS/provider-secret"
-chmod 600 "$VIFU_DEMO_SECRETS"/*
-export VIFU_DEPLOYMENT_MODE=self-hosted
-export VIFU_ADMIN_KEY_FILE="$VIFU_DEMO_SECRETS/admin"
-export VIFU_AGENT_GATEWAY_BOOTSTRAP_TOKEN_FILE="$VIFU_DEMO_SECRETS/gateway"
-export VIFU_API_KEY_PEPPER_FILE="$VIFU_DEMO_SECRETS/api-key-pepper"
-export VIFU_PROVIDER_SECRET_KEY_FILE="$VIFU_DEMO_SECRETS/provider-secret"
-vifu --profile ios-embedding
-```
-
-The one `server.address` value is the origin used by the app, Dashboard,
-enrollment API, Runtime configuration API, telemetry, and Agent Gateway
-WebSocket. Vifu generates and retains a pairing certificate for a local HTTPS
-address. A reverse proxy, tunnel, or hosted ingress can provide the same origin
-with a publicly trusted certificate.
-
-In the Dashboard:
-
-1. Create or open the project with slug `ios-embedding`.
-2. Open its primary deployment and choose **Pair gateway**.
-3. Open the Gateway sheet in the iOS app and scan the pairing code.
-
-The project slug must match the embedded Runtime project ID. After successful
-pairing, the app keeps its machine identity, server binding, optional
-certificate pin, and server authorization in Keychain and reconnects on later
-launches.
-
-Press `B` in the Vifu TUI to open the Dashboard. Agent activity from the iPhone
-appears in the live TUI. Making an Agent Profile version live creates an
-immutable Runtime release for the primary deployment; the app applies it to its
-local database and reports the applied version.
-
-## Model
-
-The default setup downloads and verifies:
-
-```text
-Repository: ggml-org/Qwen3-1.7B-GGUF
-Revision:   daeb8e2d528a760970442092f6bf1e55c3b659eb
-File:       Qwen3-1.7B-Q4_K_M.gguf
-Size:       1,282,439,264 bytes
-SHA-256:    d2387ca2dbfee2ffabce7120d3770dadca0b293052bc2f0e138fdc940d9bc7b5
-```
-
-Review the model repository and license before redistributing a downloaded
-model with an application.
+Apple device builds use the Vifu Swift package and an Apple signing team.
+Release installation uses TestFlight because iOS device packages require Apple
+distribution signing and provisioning. The GitHub release continues to carry
+the reusable `VifuMobileFFI.xcframework.zip` for application developers.
 
 ## Scope
 
-This example validates the native iOS Runtime path: local model loading,
-streaming invocation, durable Runtime releases, pairing, reconnect, monitoring,
-and profile delivery. Godot embedding is intentionally kept in a separate
-integration surface so it can be reviewed and reproduced with its own engine
-and resource requirements.
+This Starter covers local model setup, streaming invocation, system speech,
+durable Runtime releases, pairing, reconnect, monitoring, and profile delivery.
+Godot embedding remains a separate integration surface so its engine and
+resource requirements can be verified independently.

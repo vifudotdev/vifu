@@ -33,8 +33,8 @@ Press `B` to open the Dashboard. The default Dashboard address is
 `http://127.0.0.1:6790`. Vifu continues to serve requests until you stop the
 TUI.
 
-To connect an on-device Android agent and inspect its inference stages on the
-same LAN, continue with the [ten-minute Android starter](examples/android-starter/README.md).
+To run an on-device agent and inspect its inference stages on the same local
+network, continue with the [Mobile Starter](examples/mobile-starter/README.md).
 
 To run from a source checkout:
 
@@ -70,8 +70,9 @@ routes, and traces for each App.
 | Agent Providers | Built-in and configurable adapters | [Provider integrations](providers/README.md) |
 | Rust embedding | crates.io package | [Embed the Runtime](docs/runtime-embedding.md) |
 | Swift on iOS/macOS | SwiftPM package | [Apple application guide](docs/runtime-embedding.md#add-vifu-to-an-apple-application) |
+| Mobile Starter | Android release APK and iOS source/TestFlight path | [Run the Mobile Starter](examples/mobile-starter/README.md) |
 | Godot in an Apple host | VifuGodot SwiftPM package | [VifuGodot guide](integrations/godot/apple/README.md) |
-| Kotlin/Android | Modular Core, llama, and Whisper ARM64 Maven AARs | [Ten-minute Android starter](examples/android-starter/README.md) |
+| Kotlin/Android | Modular Core, llama, and Whisper ARM64 Maven AARs | [Android Starter](examples/android-starter/README.md) |
 
 ## Documentation
 
@@ -97,7 +98,9 @@ routes, and traces for each App.
 - [vifu-gateway](crates/vifu-gateway/README.md)
 - [VifuGodot for Apple hosts](integrations/godot/apple/README.md)
 - [Mobile FFI for Apple and Android hosts](crates/vifu-mobile-ffi/README.md)
-- [Ten-minute Android starter](examples/android-starter/README.md)
+- [Mobile Starter for Android and iOS](examples/mobile-starter/README.md)
+- [Android Starter](examples/android-starter/README.md)
+- [iOS Starter](examples/ios-embedding/README.md)
 - [Android AAR reference](integrations/android/README.md)
 
 #### Development

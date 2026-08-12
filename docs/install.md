@@ -27,6 +27,22 @@ On Windows:
 .\vifu.exe
 ```
 
+## Install the Mobile Starter
+
+Use the release applications to verify an embedded mobile agent before opening
+the source projects:
+
+- Android: install
+  [vifu-android-starter.apk](https://github.com/vifudotdev/vifu/releases/latest/download/vifu-android-starter.apk).
+  A baseline compatibility APK is available in the same release.
+- iPhone and iPad: install the Vifu iOS Starter if a beta has been shared with
+  your TestFlight testing group, or use the advanced Xcode build path.
+
+Both Starters can download the verified Qwen2.5 0.5B model, run chat locally,
+pair with the Vifu TUI, and upload performance traces to the developer
+computer. Follow the [Mobile Starter guide](../examples/mobile-starter/README.md)
+for pairing and the advanced source-build paths.
+
 ## Build From Source
 
 Use Cargo when you want to build from source.

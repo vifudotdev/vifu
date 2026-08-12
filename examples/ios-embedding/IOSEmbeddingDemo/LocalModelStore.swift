@@ -5,12 +5,13 @@ import Observation
 @MainActor
 @Observable
 final class LocalModelStore {
-    nonisolated static let modelName = "Qwen3-1.7B-Q4_K_M.gguf"
-    nonisolated static let expectedByteCount: Int64 = 1_282_439_264
-    nonisolated static let expectedSHA256 = "d2387ca2dbfee2ffabce7120d3770dadca0b293052bc2f0e138fdc940d9bc7b5"
+    nonisolated static let modelName = "qwen2.5-0.5b-instruct-q4_k_m.gguf"
+    nonisolated static let expectedByteCount: Int64 = 491_400_032
+    nonisolated static let expectedSHA256 = "74a4da8c9fdbcd15bd1f6d01d621410d31c6fc00986f5eb687824e7b93d7a9db"
     nonisolated static let modelURL = URL(string:
-        "https://huggingface.co/ggml-org/Qwen3-1.7B-GGUF/resolve/" +
-        "daeb8e2d528a760970442092f6bf1e55c3b659eb/Qwen3-1.7B-Q4_K_M.gguf"
+        "https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF/resolve/" +
+        "df5bf01389a39c743ab467d734bf501681e041c5/" +
+        "qwen2.5-0.5b-instruct-q4_k_m.gguf"
     )!
     nonisolated private static let selectedModelKey = "selectedModelFilename"
 

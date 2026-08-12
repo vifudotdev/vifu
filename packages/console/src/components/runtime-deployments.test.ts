@@ -3,10 +3,24 @@ import { describe, expect, test } from "vitest";
 import {
   MAX_APPLY_POLL_ATTEMPTS,
   latestGatewaySession,
+  nativeGatewayPairingCode,
   runtimeApplyPollDelay,
   runtimeApplyTarget,
 } from "./runtime-deployments";
 import type { AgentGateway, RuntimeDeployment } from "../types";
+
+describe("gateway pairing", () => {
+  test("copies the complete native code instead of the compact QR bridge", () => {
+    expect(nativeGatewayPairingCode({
+      serverUrl: "https://macbook.local:6790",
+      certificateDer: "AQID",
+      certificateSha256: "sha256:synthetic",
+      pairingUri: "https://vifu.ai/pair#server=compact",
+      pairingDeepLink: "vifu://gateway/enroll?server=complete&certificate=AQID",
+      pairingQrSvg: null,
+    })).toBe("vifu://gateway/enroll?server=complete&certificate=AQID");
+  });
+});
 
 describe("runtime deployment apply polling", () => {
   test("uses bounded exponential backoff", () => {

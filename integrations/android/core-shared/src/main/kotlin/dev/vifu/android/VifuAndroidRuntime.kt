@@ -49,6 +49,8 @@ class VifuAndroidRuntime private constructor(
     private var gatewayStarted = false
     @Volatile
     private var lastDeviceToken: String? = identity?.deviceToken
+    @Volatile
+    private var pendingEnrollmentToken: String? = connection?.enrollmentToken
     private val statusJob: Job? = gateway?.let { scope.launch { monitorGateway(it) } }
 
     /** Starts monitoring after the desired provider modules have been attached. */
@@ -154,10 +156,14 @@ class VifuAndroidRuntime private constructor(
         val currentGateway = gateway ?: return
         val currentIdentity = identity ?: error("Vifu Gateway identity is unavailable")
         val currentConnection = connection ?: error("Vifu Gateway configuration is unavailable")
+        val enrollment = gatewayEnrollmentToken(
+            connection = currentConnection,
+            pendingEnrollmentToken = pendingEnrollmentToken,
+        )
         currentGateway.startWithMonitorIo(
             currentIdentity.privateKey,
             lastDeviceToken,
-            currentConnection.appId,
+            enrollment,
             currentConnection.captureTraceContent,
         )
         gatewayStarted = true
@@ -168,14 +174,15 @@ class VifuAndroidRuntime private constructor(
         while (scope.isActive) {
             runCatching { gateway.status() }
                 .onSuccess { status ->
-                    status.authorization?.deviceToken
-                        ?.takeIf { it != lastDeviceToken }
-                        ?.let {
+                    status.authorization?.let { authorization ->
+                        authorization.deviceToken.takeIf { it != lastDeviceToken }?.let {
                             val credentialStore = requireNotNull(store)
                             val storedIdentity = requireNotNull(identity)
                             credentialStore.save(storedIdentity.copy(deviceToken = it))
                             lastDeviceToken = it
                         }
+                        pendingEnrollmentToken = null
+                    }
                     mutableConnectionState.value = when (status.state) {
                         RawGatewayState.STOPPED -> VifuConnectionState.Stopped
                         RawGatewayState.CONNECTING -> VifuConnectionState.Connecting
@@ -260,3 +267,8 @@ class VifuAndroidRuntime private constructor(
         private const val GATEWAY_POLL_INTERVAL_MS = 500L
     }
 }
+
+internal fun gatewayEnrollmentToken(
+    connection: VifuConnectionConfig,
+    pendingEnrollmentToken: String?,
+): String? = connection.appId ?: pendingEnrollmentToken

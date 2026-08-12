@@ -89,4 +89,6 @@ scripts/build-android-package.sh --module whisper --bindings-only
 ```
 
 See [`integrations/android`](../../integrations/android/README.md) for the
-high-level lifecycle API and artifact builds.
+high-level lifecycle API and artifact builds. See the
+[`Mobile Starter`](../../examples/mobile-starter/README.md) for the prebuilt
+Android app and the corresponding iOS path.

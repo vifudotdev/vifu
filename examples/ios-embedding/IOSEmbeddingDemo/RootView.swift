@@ -29,7 +29,7 @@ private struct ModelSetupView: View {
                 .frame(width: 72, height: 72)
 
             VStack(alignment: .leading, spacing: 10) {
-                Text("Run Vifu on iOS")
+                Text("Vifu iOS Starter")
                     .font(.system(size: 34, weight: .bold, design: .rounded))
                 Text("An embedded Vifu Runtime powered by a language model that runs on this device.")
                     .font(.system(size: 17, weight: .regular))
@@ -67,7 +67,7 @@ private struct ModelSetupView: View {
                 Button {
                     Task { await modelStore.downloadDefaultModel() }
                 } label: {
-                    Label("Download model (1.2 GB)", systemImage: "arrow.down.circle.fill")
+                    Label("Download model (469 MiB)", systemImage: "arrow.down.circle.fill")
                         .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(PrimaryButtonStyle())

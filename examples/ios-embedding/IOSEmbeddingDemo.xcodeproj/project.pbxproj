@@ -199,7 +199,7 @@
 				DEVELOPMENT_TEAM = H4W93DR88M;
 				"EXCLUDED_ARCHS[sdk=macosx*]" = x86_64;
 				GENERATE_INFOPLIST_FILE = YES;
-				INFOPLIST_KEY_CFBundleDisplayName = "Vifu iOS Embedding";
+				INFOPLIST_KEY_CFBundleDisplayName = "Vifu iOS Starter";
 				INFOPLIST_KEY_NSCameraUsageDescription = "Scan a one-time Vifu Gateway pairing code shown on your computer.";
 				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "Connect to your paired Vifu Server on this Mac to receive agent settings and report runtime activity.";
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.entertainment";
@@ -241,7 +241,7 @@
 				DEVELOPMENT_TEAM = H4W93DR88M;
 				"EXCLUDED_ARCHS[sdk=macosx*]" = x86_64;
 				GENERATE_INFOPLIST_FILE = YES;
-				INFOPLIST_KEY_CFBundleDisplayName = "Vifu iOS Embedding";
+				INFOPLIST_KEY_CFBundleDisplayName = "Vifu iOS Starter";
 				INFOPLIST_KEY_NSCameraUsageDescription = "Scan a one-time Vifu Gateway pairing code shown on your computer.";
 				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "Connect to your paired Vifu Server on this Mac to receive agent settings and report runtime activity.";
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.entertainment";

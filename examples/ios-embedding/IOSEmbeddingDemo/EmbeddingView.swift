@@ -70,7 +70,7 @@ private struct EmbeddingHeader: View {
     var body: some View {
         HStack(spacing: 12) {
             VStack(alignment: .leading, spacing: 2) {
-                Text("Vifu iOS Embedding")
+                Text("Vifu iOS Starter")
                     .font(.system(size: 20, weight: .bold, design: .rounded))
                 HStack(spacing: 6) {
                     Circle()

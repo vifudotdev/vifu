@@ -17,6 +17,12 @@ val vifuArtifact = when (vifuBackend) {
 }
 val vifuWhisper = providers.gradleProperty("vifuWhisper").orNull?.toBooleanStrictOrNull() ?: false
 val vifuVersion = providers.gradleProperty("vifuVersion").orNull ?: libs.versions.vifu.get()
+val starterVersionName = providers.gradleProperty("starterVersionName").orNull ?: "0.1.0"
+val starterVersionCode = providers.gradleProperty("starterVersionCode").orNull?.toIntOrNull() ?: 1
+val releaseKeystoreFile = providers.environmentVariable("VIFU_ANDROID_STARTER_KEYSTORE").orNull
+val releaseKeystorePassword = providers.environmentVariable("VIFU_ANDROID_STARTER_KEYSTORE_PASSWORD").orNull
+val releaseKeyAlias = providers.environmentVariable("VIFU_ANDROID_STARTER_KEY_ALIAS").orNull
+val releaseKeyPassword = providers.environmentVariable("VIFU_ANDROID_STARTER_KEY_PASSWORD").orNull
 
 fun buildConfigString(value: String): String =
     "\"${value.replace("\\", "\\\\").replace("\"", "\\\"")}\""
@@ -31,8 +37,8 @@ android {
         minSdk = 33
         targetSdk = providers.gradleProperty("VIFU_ANDROID_TARGET_SDK").map(String::toInt).getOrElse(36)
 
-        versionCode = 1
-        versionName = "1.0"
+        versionCode = starterVersionCode
+        versionName = starterVersionName
 
         ndk { abiFilters += "arm64-v8a" }
 
@@ -50,6 +56,22 @@ android {
         )
     }
 
+    signingConfigs {
+        if (
+            releaseKeystoreFile != null &&
+            releaseKeystorePassword != null &&
+            releaseKeyAlias != null &&
+            releaseKeyPassword != null
+        ) {
+            create("vifuRelease") {
+                storeFile = file(releaseKeystoreFile)
+                storePassword = releaseKeystorePassword
+                keyAlias = releaseKeyAlias
+                keyPassword = releaseKeyPassword
+            }
+        }
+    }
+
     buildTypes {
         debug {
             isMinifyEnabled = false
@@ -58,6 +80,7 @@ android {
         release {
             isMinifyEnabled = true
             isShrinkResources = true
+            signingConfig = signingConfigs.findByName("vifuRelease")
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"

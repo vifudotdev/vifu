@@ -90,7 +90,16 @@ attached again later.
 
 ## Gateway monitoring
 
-Pass a connection to Core, attach the desired providers, then start the
+For an installable app, parse the one-time pairing code created by the Vifu TUI
+or Dashboard. The parser validates the HTTPS origin, enrollment token, and
+optional certificate fingerprint:
+
+```kotlin
+val pairing = VifuGatewayPairingCode(pairingCode)
+val connection = pairing.connectionConfig()
+```
+
+Pass the connection to Core, attach the desired providers, then start the
 Gateway. Starting it after registration ensures the first published manifest
 contains the active agents:
 
@@ -109,10 +118,11 @@ runtime.startGateway()
 
 Core restarts an active Gateway connection when providers are attached or
 detached so the remote manifest stays current. The machine private key and
-device token are encrypted with Android Keystore. Core keeps the App ID in each
-resume handshake, which makes configuration and trace routing deterministic
-even when one installation has connected to more than one App. App code does
-not manage runtime IDs.
+device token are encrypted with Android Keystore. A one-time enrollment token
+is sent only until the Server issues the device token. Later starts use the
+same Server binding and stored device token. Build-time App ID configuration is
+still available for managed application builds. App code does not manage
+runtime IDs.
 
 ## Model-load diagnostics
 
@@ -175,4 +185,5 @@ sample at commit `e5a10d0bbb990becf75167a691afd1359a30651e`. It preserves the
 small choose-a-GGUF-and-chat interaction while replacing the inference adapter
 with the split Vifu modules. Pass `-PvifuBackend=baseline` to exercise the
 fallback llama artifact or `-PvifuWhisper=true` to verify both providers in one
-APK.
+APK. Vifu GitHub releases include signed optimized and baseline Starter APKs;
+the source project is the advanced customization path.

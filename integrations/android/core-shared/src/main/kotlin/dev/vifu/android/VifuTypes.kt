@@ -4,12 +4,21 @@ import java.net.URI
 
 data class VifuConnectionConfig(
     val serverUrl: String,
-    val appId: String,
+    val appId: String? = null,
     val serverCertificateDer: ByteArray? = null,
     val captureTraceContent: Boolean = false,
+    val enrollmentToken: String? = null,
 ) {
     init {
-        require(APP_ID.matches(appId)) { "appId must use the vifu_app_<64 hex characters> format" }
+        require(appId == null || APP_ID.matches(appId)) {
+            "appId must use the vifu_app_<64 hex characters> format"
+        }
+        require(enrollmentToken == null || ENROLLMENT_TOKEN.matches(enrollmentToken)) {
+            "enrollmentToken must use the vifu_ge_<64 hex characters> format"
+        }
+        require(appId == null || enrollmentToken == null) {
+            "appId and enrollmentToken cannot both be set"
+        }
         val uri = runCatching { URI(serverUrl) }.getOrNull()
         require(uri?.host != null && (uri.scheme == "https" || isLoopbackHttp(uri))) {
             "serverUrl must use HTTPS; HTTP is allowed only for a loopback address"
@@ -21,6 +30,7 @@ data class VifuConnectionConfig(
 
     private companion object {
         val APP_ID = Regex("^vifu_app_[0-9a-fA-F]{64}$")
+        val ENROLLMENT_TOKEN = Regex("^vifu_ge_[0-9a-fA-F]{64}$")
     }
 }
 

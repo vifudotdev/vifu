@@ -157,10 +157,10 @@ runtime.cancel_invocation(&handle)?;
 
 Apple hosts use the equivalent `VifuEmbeddedRuntime` UniFFI object and implement
 `VifuAgentProvider` as a native callback. Android hosts use the generated Kotlin
-bindings and JNI library, which follow the same contract. The repository
-currently distributes Android as a buildable `arm64-v8a` Gradle source-set
-rather than a Maven artifact. See the
-[`vifu-mobile-ffi` guide](../crates/vifu-mobile-ffi/README.md).
+bindings and JNI library, which follow the same contract. Android Core, llama,
+baseline llama, and Whisper are published as modular ARM64 Maven AARs. See the
+[`Vifu Android guide`](../integrations/android/README.md) and the
+[`Mobile Starter`](../examples/mobile-starter/README.md).
 
 ## Connect An Embedded Runtime To Vifu Server
 
@@ -172,9 +172,9 @@ Server deployment:
 2. Generate a device identity and keep it in the Apple Keychain.
 3. Start `VifuEmbeddedGateway` with that identity and the enrollment token.
 
-Mobile camera flows scan the HTTPS URL returned by the enrollment API. The
-Vifu web bridge opens the standard `vifu://gateway/enroll` application link.
-the app accepts only one-time `vifu_ge_...` enrollment tokens. It stores the
+Mobile camera flows scan the code returned by the enrollment API. The code uses
+the standard `vifu://gateway/enroll` application link. The app accepts only
+one-time `vifu_ge_...` enrollment tokens. It stores the
 resulting Device Token and reconnects to that Server on later launches. An app
 does not need an APK-specific Server address or a separate pairing protocol.
 

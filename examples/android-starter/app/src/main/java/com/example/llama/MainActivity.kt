@@ -1,7 +1,9 @@
 package com.example.llama
 
+import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
+import android.text.InputType
 import android.util.Base64
 import android.util.Log
 import android.widget.EditText
@@ -9,12 +11,14 @@ import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.lifecycle.lifecycleScope
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import dev.vifu.android.VifuConnectionConfig
 import dev.vifu.android.VifuConnectionState
+import dev.vifu.android.VifuGatewayPairingCode
 import dev.vifu.android.VifuLlamaAgent
 import dev.vifu.android.VifuLlamaConfig
 import com.google.android.material.floatingactionbutton.FloatingActionButton
@@ -26,8 +30,11 @@ import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.FileOutputStream
 import java.io.InputStream
+import java.net.HttpURLConnection
+import java.net.URL
 import java.nio.file.Files
 import java.nio.file.StandardCopyOption
+import java.security.MessageDigest
 import java.util.UUID
 
 class MainActivity : AppCompatActivity() {
@@ -41,6 +48,9 @@ class MainActivity : AppCompatActivity() {
 
     private var vifuAgent: VifuLlamaAgent? = null
     private var gatewayStatusJob: Job? = null
+    private var activeModelFile: File? = null
+    private var pendingPairing: VifuGatewayPairingCode? = null
+    private var isRestoringModel = false
 
     // Conversation states
     private var isModelReady = false
@@ -61,6 +71,7 @@ class MainActivity : AppCompatActivity() {
         messagesRv.adapter = messageAdapter
         userInputEt = findViewById(R.id.user_input)
         userActionFab = findViewById(R.id.fab)
+        vifuStatusTv.setOnClickListener { showGatewayDialog() }
 
         // Upon CTA button tapped
         userActionFab.setOnClickListener {
@@ -68,8 +79,7 @@ class MainActivity : AppCompatActivity() {
                 // If model is ready, validate input and send to engine
                 handleUserInput()
             } else {
-                // Otherwise, prompt user to select a GGUF metadata on the device
-                getContent.launch(arrayOf("*/*"))
+                showModelSetupDialog()
             }
         }
 
@@ -77,6 +87,19 @@ class MainActivity : AppCompatActivity() {
             .listFiles { file -> file.isFile && file.extension.equals("gguf", ignoreCase = true) }
             ?.maxByOrNull(File::lastModified)
             ?.let(::loadModelFile)
+        handlePairingIntent(intent)
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        handlePairingIntent(intent)
+    }
+
+    private fun handlePairingIntent(intent: Intent) {
+        if (intent.action != Intent.ACTION_VIEW) return
+        val code = intent.data?.toString() ?: return
+        pairGateway(code)
     }
 
     private val getContent = registerForActivityResult(
@@ -84,6 +107,74 @@ class MainActivity : AppCompatActivity() {
     ) { uri ->
         Log.i(TAG, "Model file selected")
         uri?.let { handleSelectedModel(it) }
+    }
+
+    private fun showModelSetupDialog() {
+        AlertDialog.Builder(this)
+            .setTitle("Set up a local model")
+            .setMessage("Download the verified Starter model or import a GGUF already on this phone.")
+            .setPositiveButton("Download 469 MiB") { _, _ -> downloadDefaultModel() }
+            .setNegativeButton("Import GGUF") { _, _ -> getContent.launch(arrayOf("*/*")) }
+            .setNeutralButton("Cancel", null)
+            .show()
+    }
+
+    private fun downloadDefaultModel() {
+        userActionFab.isEnabled = false
+        userInputEt.hint = "Preparing model download..."
+        ggufTv.text = "Downloading the verified Starter model"
+        lifecycleScope.launch(Dispatchers.IO) {
+            val destination = File(ensureModelsDirectory(), DEFAULT_MODEL_NAME)
+            val partial = File(destination.parentFile, "${destination.name}.downloading")
+            var connection: HttpURLConnection? = null
+            try {
+                connection = URL(DEFAULT_MODEL_URL).openConnection() as HttpURLConnection
+                connection.connectTimeout = 30_000
+                connection.readTimeout = 60_000
+                connection.instanceFollowRedirects = true
+                connection.setRequestProperty("User-Agent", "Vifu-Android-Starter/${BuildConfig.VERSION_NAME}")
+                connection.connect()
+                check(connection.responseCode in 200..299) {
+                    "Model download returned HTTP ${connection.responseCode}"
+                }
+                var downloaded = 0L
+                var lastPercent = -1
+                connection.inputStream.use { input ->
+                    FileOutputStream(partial, false).use { output ->
+                        val buffer = ByteArray(MODEL_BUFFER_SIZE)
+                        while (true) {
+                            val count = input.read(buffer)
+                            if (count < 0) break
+                            output.write(buffer, 0, count)
+                            downloaded += count
+                            val percent = ((downloaded * 100) / DEFAULT_MODEL_SIZE).toInt().coerceAtMost(100)
+                            if (percent != lastPercent) {
+                                lastPercent = percent
+                                withContext(Dispatchers.Main) {
+                                    userInputEt.hint = "Downloading model: $percent%"
+                                }
+                            }
+                        }
+                    }
+                }
+                check(downloaded == DEFAULT_MODEL_SIZE) { "The downloaded model has an unexpected size" }
+                check(sha256(partial) == DEFAULT_MODEL_SHA256) {
+                    "The downloaded model failed verification"
+                }
+                Files.move(
+                    partial.toPath(),
+                    destination.toPath(),
+                    StandardCopyOption.ATOMIC_MOVE,
+                    StandardCopyOption.REPLACE_EXISTING,
+                )
+                finishLoadingModel(destination, DEFAULT_MODEL_NAME)
+            } catch (error: Throwable) {
+                partial.delete()
+                showModelLoadError(error)
+            } finally {
+                connection?.disconnect()
+            }
+        }
     }
 
     /**
@@ -112,6 +203,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun loadModelFile(modelFile: File) {
+        isRestoringModel = true
         userActionFab.isEnabled = false
         userInputEt.hint = "Loading saved GGUF..."
         ggufTv.text = "Loading saved model: ${modelFile.name}"
@@ -125,8 +217,10 @@ class MainActivity : AppCompatActivity() {
     }
 
     private suspend fun finishLoadingModel(modelFile: File, modelName: String) {
+        activeModelFile = modelFile
         connectVifu(modelFile)
         withContext(Dispatchers.Main) {
+            isRestoringModel = false
             ggufTv.text = "Model: $modelName"
             isModelReady = true
             userInputEt.hint = "Type and send a message!"
@@ -140,6 +234,7 @@ class MainActivity : AppCompatActivity() {
         Log.e(TAG, "Could not load GGUF", error)
         val detail = error.message ?: "Unknown model load error"
         withContext(Dispatchers.Main) {
+            isRestoringModel = false
             ggufTv.text = "Could not load this GGUF:\n$detail"
             isModelReady = false
             userInputEt.hint = "Choose another GGUF model."
@@ -186,38 +281,173 @@ class MainActivity : AppCompatActivity() {
     /**
      * Load the model file from the app private storage
      */
-    private suspend fun connectVifu(modelFile: File) = withContext(Dispatchers.Default) {
+    private suspend fun connectVifu(
+        modelFile: File,
+        allowGateway: Boolean = true,
+    ) = withContext(Dispatchers.Default) {
         withContext(Dispatchers.Main) { userInputEt.hint = "Loading model..." }
         gatewayStatusJob?.cancel()
         gatewayStatusJob = null
         vifuAgent?.close()
         vifuAgent = null
         val model = VifuLlamaConfig(modelPath = modelFile.absolutePath)
-        val hasGatewayConfig =
-            BuildConfig.VIFU_SERVER_URL.isNotBlank() && BuildConfig.VIFU_APP_ID.isNotBlank()
-        vifuAgent = if (hasGatewayConfig) {
-            VifuLlamaAgent.open(
-                context = applicationContext,
-                connection = VifuConnectionConfig(
-                    serverUrl = BuildConfig.VIFU_SERVER_URL,
-                    appId = BuildConfig.VIFU_APP_ID,
-                    serverCertificateDer = BuildConfig.VIFU_SERVER_CERTIFICATE_DER_BASE64
-                        .takeIf(String::isNotBlank)
-                        ?.let { Base64.decode(it, Base64.DEFAULT) },
-                ),
-                model = model,
-            ).also { agent ->
-                gatewayStatusJob = lifecycleScope.launch {
-                    agent.connectionState.collect { state ->
-                        vifuStatusTv.text = "Vifu: ${state.label()}"
+        val connection = if (allowGateway) {
+            pendingPairing?.connectionConfig()
+                ?: loadGatewayBinding()?.connectionConfig()
+                ?: buildTimeConnection()
+        } else {
+            null
+        }
+        vifuAgent = if (connection != null) {
+            try {
+                VifuLlamaAgent.open(
+                    context = applicationContext,
+                    connection = connection,
+                    model = model,
+                ).also { agent ->
+                    gatewayStatusJob = lifecycleScope.launch {
+                        agent.connectionState.collect { state ->
+                            if (state == VifuConnectionState.Connected) {
+                                pendingPairing?.let(::saveGatewayBinding)
+                                pendingPairing = null
+                            }
+                            vifuStatusTv.text = "Vifu: ${state.label()} · tap to pair"
+                        }
                     }
                 }
+            } catch (error: Throwable) {
+                Log.e(TAG, "Vifu Gateway setup failed; keeping the local agent available", error)
+                withContext(Dispatchers.Main) {
+                    vifuStatusTv.text = "Vifu: pairing failed · local · tap to retry"
+                }
+                VifuLlamaAgent.open(applicationContext, model)
             }
         } else {
             VifuLlamaAgent.open(applicationContext, model).also {
-                withContext(Dispatchers.Main) { vifuStatusTv.text = "Vifu: local" }
+                withContext(Dispatchers.Main) {
+                    vifuStatusTv.text = "Vifu: local · tap to pair"
+                }
             }
         }
+    }
+
+    private fun showGatewayDialog() {
+        val input = EditText(this).apply {
+            hint = "vifu://gateway/enroll?..."
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
+            setSingleLine(false)
+            minLines = 3
+        }
+        AlertDialog.Builder(this)
+            .setTitle("Pair with Vifu")
+            .setMessage("In the Vifu Dashboard, choose Pair gateway and copy the pairing code.")
+            .setView(input)
+            .setPositiveButton("Pair") { _, _ -> pairGateway(input.text.toString()) }
+            .setNegativeButton("Cancel", null)
+            .setNeutralButton("Use local only") { _, _ -> disconnectGateway() }
+            .show()
+    }
+
+    private fun pairGateway(code: String) {
+        val pairing = runCatching { VifuGatewayPairingCode(code) }
+            .getOrElse { error ->
+                Toast.makeText(
+                    this,
+                    error.message ?: "This Vifu pairing code is invalid.",
+                    Toast.LENGTH_LONG,
+                ).show()
+                return
+            }
+        pendingPairing = pairing
+        val modelFile = activeModelFile
+        if (modelFile == null) {
+            if (isRestoringModel) {
+                vifuStatusTv.text = "Vifu: pairing after saved model loads"
+            } else {
+                pendingPairing = null
+                vifuStatusTv.text = "Vifu: set up the model, then pair"
+                Toast.makeText(
+                    this,
+                    "Set up the local model, then scan a fresh Vifu pairing code.",
+                    Toast.LENGTH_LONG,
+                ).show()
+            }
+            return
+        }
+        lifecycleScope.launch(Dispatchers.Default) {
+            runCatching { connectVifu(modelFile) }
+                .onFailure { error ->
+                    Log.e(TAG, "Could not pair Vifu Gateway", error)
+                    withContext(Dispatchers.Main) {
+                        vifuStatusTv.text = "Vifu: pairing failed · tap to retry"
+                        Toast.makeText(
+                            this@MainActivity,
+                            error.message ?: "Vifu pairing failed.",
+                            Toast.LENGTH_LONG,
+                        ).show()
+                    }
+                }
+        }
+    }
+
+    private fun disconnectGateway() {
+        gatewayPreferences().edit().clear().apply()
+        pendingPairing = null
+        val modelFile = activeModelFile
+        if (modelFile == null) {
+            vifuStatusTv.text = "Vifu: local · tap to pair"
+            return
+        }
+        lifecycleScope.launch(Dispatchers.Default) { connectVifu(modelFile, allowGateway = false) }
+    }
+
+    private fun saveGatewayBinding(pairing: VifuGatewayPairingCode) {
+        gatewayPreferences().edit()
+            .putString(GATEWAY_SERVER_URL, pairing.serverUrl)
+            .putString(
+                GATEWAY_CERTIFICATE,
+                pairing.serverCertificateDer?.let { Base64.encodeToString(it, Base64.NO_WRAP) },
+            )
+            .apply()
+    }
+
+    private fun loadGatewayBinding(): StarterGatewayBinding? {
+        val preferences = gatewayPreferences()
+        val serverUrl = preferences.getString(GATEWAY_SERVER_URL, null) ?: return null
+        val certificate = preferences.getString(GATEWAY_CERTIFICATE, null)
+            ?.let { Base64.decode(it, Base64.DEFAULT) }
+        return runCatching { StarterGatewayBinding(serverUrl, certificate) }
+            .onFailure {
+                Log.w(TAG, "Ignoring invalid stored Vifu Gateway binding", it)
+                preferences.edit().clear().apply()
+            }
+            .getOrNull()
+    }
+
+    private fun buildTimeConnection(): VifuConnectionConfig? {
+        if (BuildConfig.VIFU_SERVER_URL.isBlank() || BuildConfig.VIFU_APP_ID.isBlank()) return null
+        return VifuConnectionConfig(
+            serverUrl = BuildConfig.VIFU_SERVER_URL,
+            appId = BuildConfig.VIFU_APP_ID,
+            serverCertificateDer = BuildConfig.VIFU_SERVER_CERTIFICATE_DER_BASE64
+                .takeIf(String::isNotBlank)
+                ?.let { Base64.decode(it, Base64.DEFAULT) },
+        )
+    }
+
+    private fun gatewayPreferences() = getSharedPreferences(GATEWAY_PREFERENCES, MODE_PRIVATE)
+
+    private fun sha256(file: File): String {
+        val digest = MessageDigest.getInstance("SHA-256")
+        file.inputStream().use { input ->
+            val buffer = ByteArray(MODEL_BUFFER_SIZE)
+            while (true) {
+                val count = input.read(buffer)
+                if (count < 0) break
+                digest.update(buffer, 0, count)
+            }
+        }
+        return digest.digest().joinToString("") { "%02x".format(it) }
     }
 
     /**
@@ -237,27 +467,35 @@ class MainActivity : AppCompatActivity() {
                 messages.add(Message(UUID.randomUUID().toString(), lastAssistantMsg.toString(), false))
 
                 lifecycleScope.launch(Dispatchers.Default) {
-                    requireNotNull(vifuAgent) { "Vifu is not connected" }
-                        .send(userMessage)
-                        .onCompletion { error ->
-                            withContext(Dispatchers.Main) {
-                                userActionFab.isEnabled = true
-                                error?.message?.let {
-                                    Toast.makeText(this@MainActivity, it, Toast.LENGTH_LONG).show()
+                    try {
+                        requireNotNull(vifuAgent) { "The local agent is not ready" }
+                            .send(userMessage)
+                            .onCompletion { error ->
+                                error?.let { Log.w(TAG, "Local chat turn stopped", it) }
+                            }.collect { token ->
+                                val messageCount = messages.size
+                                check(messageCount > 0 && !messages[messageCount - 1].isUser)
+
+                                messages.removeAt(messageCount - 1).copy(
+                                    content = lastAssistantMsg.append(token).toString()
+                                ).let { messages.add(it) }
+
+                                withContext(Dispatchers.Main) {
+                                    messageAdapter.notifyItemChanged(messages.size - 1)
                                 }
                             }
-                        }.collect { token ->
-                            val messageCount = messages.size
-                            check(messageCount > 0 && !messages[messageCount - 1].isUser)
-
-                            messages.removeAt(messageCount - 1).copy(
-                                content = lastAssistantMsg.append(token).toString()
-                            ).let { messages.add(it) }
-
-                            withContext(Dispatchers.Main) {
-                                messageAdapter.notifyItemChanged(messages.size - 1)
-                            }
+                    } catch (error: Throwable) {
+                        Log.e(TAG, "Local chat turn failed", error)
+                        withContext(Dispatchers.Main) {
+                            Toast.makeText(
+                                this@MainActivity,
+                                error.message ?: "The local chat turn failed.",
+                                Toast.LENGTH_LONG,
+                            ).show()
                         }
+                    } finally {
+                        withContext(Dispatchers.Main) { userActionFab.isEnabled = true }
+                    }
                 }
             }
         }
@@ -287,8 +525,30 @@ class MainActivity : AppCompatActivity() {
 
         private const val DIRECTORY_MODELS = "models"
         private const val FILE_EXTENSION_GGUF = ".gguf"
+        private const val GATEWAY_PREFERENCES = "vifu_gateway_binding"
+        private const val GATEWAY_SERVER_URL = "server_url"
+        private const val GATEWAY_CERTIFICATE = "server_certificate"
+        private const val DEFAULT_MODEL_NAME = "qwen2.5-0.5b-instruct-q4_k_m.gguf"
+        private const val DEFAULT_MODEL_SIZE = 491_400_032L
+        private const val MODEL_BUFFER_SIZE = 1024 * 1024
+        private const val DEFAULT_MODEL_SHA256 =
+            "74a4da8c9fdbcd15bd1f6d01d621410d31c6fc00986f5eb687824e7b93d7a9db"
+        private const val DEFAULT_MODEL_URL =
+            "https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF/resolve/" +
+                "df5bf01389a39c743ab467d734bf501681e041c5/" +
+                "qwen2.5-0.5b-instruct-q4_k_m.gguf"
 
     }
+}
+
+private data class StarterGatewayBinding(
+    val serverUrl: String,
+    val serverCertificateDer: ByteArray?,
+) {
+    fun connectionConfig() = VifuConnectionConfig(
+        serverUrl = serverUrl,
+        serverCertificateDer = serverCertificateDer,
+    )
 }
 
 internal fun modelLoadGuidance(message: String, backend: String): String = when {

@@ -23,23 +23,30 @@ import type {
   RuntimeProject,
 } from "../types";
 
+export type GatewayPairing = {
+  serverUrl: string;
+  certificateDer?: string | null;
+  certificateSha256?: string | null;
+  pairingUri: string;
+  pairingDeepLink: string;
+  pairingQrSvg?: string | null;
+};
+
 type Enrollment = {
   enrollmentId: string;
   deployment: string;
   enrollmentToken: string;
   expiresAt: string;
-  pairing?: {
-    serverUrl: string;
-    certificateDer?: string | null;
-    certificateSha256?: string | null;
-    pairingUri: string;
-    pairingQrSvg?: string | null;
-  } | null;
+  pairing?: GatewayPairing | null;
 };
 
 export const MAX_APPLY_POLL_ATTEMPTS = 6;
 export const ENROLLMENT_REFRESH_MS = 2_000;
 export const GATEWAY_STATUS_REFRESH_MS = 5_000;
+
+export function nativeGatewayPairingCode(pairing: GatewayPairing): string {
+  return pairing.pairingDeepLink;
+}
 
 export function runtimeApplyPollDelay(attempt: number): number {
   return Math.min(2_000 * (2 ** Math.max(0, attempt)), 30_000);
@@ -430,7 +437,7 @@ function EnrollmentPanel({ enrollment, onClose }: { enrollment: Enrollment; onCl
   async function copyPairingCode() {
     if (!enrollment.pairing) return;
     try {
-      await navigator.clipboard.writeText(enrollment.pairing.pairingUri);
+      await navigator.clipboard.writeText(nativeGatewayPairingCode(enrollment.pairing));
       setCopied(true);
       setCopyFailed(false);
     } catch {
@@ -442,9 +449,9 @@ function EnrollmentPanel({ enrollment, onClose }: { enrollment: Enrollment; onCl
     : null;
   return (
     <section className={`enrollment-panel${qrSource ? " has-qr" : ""}`} role="status">
-      <div><strong>Pair with {enrollment.deployment}</strong><p>Scan or copy this one-time pairing code within five minutes.</p></div>
+      <div><strong>Pair with {enrollment.deployment}</strong><p>Copy this one-time code into the mobile Starter within five minutes. The QR supports configured application-link bridges.</p></div>
       {qrSource ? <img className="enrollment-qr" src={qrSource} alt="Vifu Server pairing code" /> : null}
-      <code>{enrollment.pairing?.pairingUri ?? enrollment.enrollmentToken}</code>
+      <code>{enrollment.pairing ? nativeGatewayPairingCode(enrollment.pairing) : enrollment.enrollmentToken}</code>
       <div><button className="secondary-button" type="button" onClick={enrollment.pairing ? copyPairingCode : copyToken}>{copied ? <Check aria-hidden="true" /> : <Clipboard aria-hidden="true" />}{copied ? "Copied" : enrollment.pairing ? "Copy pairing code" : "Copy token"}</button><button className="quiet-button" type="button" onClick={onClose}>Done</button></div>
       {enrollment.pairing?.certificateSha256 ? <p className="enrollment-fingerprint">TLS {enrollment.pairing.certificateSha256}</p> : enrollment.pairing ? <p>HTTPS uses the device system trust store.</p> : <p>Enter this token together with the Vifu Server URL.</p>}
       {copyFailed ? <p role="alert">Copy failed. Select the token above and copy it manually.</p> : null}

@@ -51,13 +51,13 @@ jobs:
                 apple=true
                 android=true
                 ;;
-              Package.swift|apple/*|integrations/godot/apple/*|scripts/build-apple-package.sh)
+              Package.swift|apple/*|examples/ios-embedding/*|integrations/godot/apple/*|scripts/build-apple-package.sh)
                 apple=true
                 ;;
               crates/vifu-llama-ffi/*|crates/vifu-whisper-ffi/*|examples/android-starter/*|integrations/android/*|scripts/build-android-package.sh|scripts/cmake/*)
                 android=true
                 ;;
-              .github/workflows/ci.yml)
+              .github/workflows/ci.yml|.github/workflows/release-binaries.yml)
                 apple=true
                 android=true
                 ;;
@@ -205,6 +205,15 @@ jobs:
               -derivedDataPath "$RUNNER_TEMP/vifu-swift-ios-derived" \
               CODE_SIGNING_ALLOWED=NO \
               build
+          VIFU_SWIFT_LOCAL_ARTIFACT=target/vifu-apple-ci/VifuMobileFFI.xcframework \
+            xcodebuild \
+              -project examples/ios-embedding/IOSEmbeddingDemo.xcodeproj \
+              -scheme IOSEmbeddingDemo \
+              -destination "generic/platform=iOS" \
+              -derivedDataPath "$RUNNER_TEMP/vifu-ios-starter-derived" \
+              CODE_SIGNING_ALLOWED=NO \
+              ONLY_ACTIVE_ARCH=YES \
+              build
       - uses: actions/upload-artifact@v7
         with:
           name: mobile-ffi-apple-framework
@@ -283,6 +292,7 @@ jobs:
         env:
           VIFU_ANDROID_TEMP_DIR: ${{ runner.temp }}
         run: |
+          ./gradlew :vifu-android-core:testDebugUnitTest
           ./gradlew publishToMavenLocal \
             -PVERSION_NAME=0.1.12-CI
           core_aar="$HOME/.m2/repository/dev/vifu/vifu-android-core/0.1.12-CI/vifu-android-core-0.1.12-CI.aar"

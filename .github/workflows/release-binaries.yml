@@ -204,6 +204,47 @@ jobs:
           sdkmanager "platforms;android-36" "build-tools;36.0.0"
           test -n "${ANDROID_NDK_LATEST_HOME:-}"
           echo "ANDROID_NDK_HOME=$ANDROID_NDK_LATEST_HOME" >> "$GITHUB_ENV"
+      - name: Build signed Android Starter APK
+        working-directory: examples/android-starter
+        env:
+          VIFU_ANDROID_STARTER_KEYSTORE_BASE64: ${{ secrets.VIFU_ANDROID_STARTER_KEYSTORE_BASE64 }}
+          VIFU_ANDROID_STARTER_KEYSTORE_PASSWORD: ${{ secrets.VIFU_ANDROID_STARTER_KEYSTORE_PASSWORD }}
+          VIFU_ANDROID_STARTER_KEY_ALIAS: ${{ secrets.VIFU_ANDROID_STARTER_KEY_ALIAS }}
+          VIFU_ANDROID_STARTER_KEY_PASSWORD: ${{ secrets.VIFU_ANDROID_STARTER_KEY_PASSWORD }}
+          VIFU_ANDROID_TEMP_DIR: ${{ runner.temp }}
+        run: |
+          version="${RELEASE_TAG#v}"
+          optimized_version_code=$((GITHUB_RUN_NUMBER * 2))
+          baseline_version_code=$((optimized_version_code + 1))
+          test -n "$version"
+          test -n "$VIFU_ANDROID_STARTER_KEYSTORE_BASE64"
+          test -n "$VIFU_ANDROID_STARTER_KEYSTORE_PASSWORD"
+          test -n "$VIFU_ANDROID_STARTER_KEY_ALIAS"
+          test -n "$VIFU_ANDROID_STARTER_KEY_PASSWORD"
+          export VIFU_ANDROID_STARTER_KEYSTORE="$RUNNER_TEMP/vifu-android-starter.jks"
+          printf '%s' "$VIFU_ANDROID_STARTER_KEYSTORE_BASE64" | base64 --decode > "$VIFU_ANDROID_STARTER_KEYSTORE"
+          chmod 600 "$VIFU_ANDROID_STARTER_KEYSTORE"
+          ./gradlew assembleRelease \
+            -PvifuUseLocalCheckout=true \
+            -PvifuVersion="$version" \
+            -PstarterVersionName="$version" \
+            -PstarterVersionCode="$optimized_version_code"
+          apksigner verify --verbose app/build/outputs/apk/release/app-release.apk
+          mkdir -p "$GITHUB_WORKSPACE/release-assets"
+          cp app/build/outputs/apk/release/app-release.apk \
+            "$GITHUB_WORKSPACE/release-assets/vifu-android-starter.apk"
+          ./gradlew clean assembleRelease \
+            -PvifuUseLocalCheckout=true \
+            -PvifuBackend=baseline \
+            -PvifuVersion="$version" \
+            -PstarterVersionName="$version" \
+            -PstarterVersionCode="$baseline_version_code"
+          apksigner verify --verbose app/build/outputs/apk/release/app-release.apk
+          cp app/build/outputs/apk/release/app-release.apk \
+            "$GITHUB_WORKSPACE/release-assets/vifu-android-starter-baseline.apk"
+          cd "$GITHUB_WORKSPACE/release-assets"
+          sha256sum vifu-android-starter*.apk > \
+            "vifu-android-starter-checksums.sha256"
       - name: Build, sign, and publish Android packages
         working-directory: integrations/android
         env:
@@ -228,6 +269,13 @@ jobs:
             integrations/android/vifu-android-llama/build/outputs/aar/*.aar
             integrations/android/vifu-android-llama-baseline/build/outputs/aar/*.aar
             integrations/android/vifu-android-whisper/build/outputs/aar/*.aar
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v7
+        with:
+          name: android-starter-apk
+          path: |
+            release-assets/*.apk
+            release-assets/*.sha256
           if-no-files-found: error
 
   publish:
@@ -254,6 +302,8 @@ jobs:
           dist/*.tar.gz.sha256
           dist/*.zip
           dist/*.zip.sha256
+          dist/*.apk
+          dist/vifu-android-starter-checksums.sha256
           --repo "$GITHUB_REPOSITORY"
           --verify-tag
           --generate-notes
