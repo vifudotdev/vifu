@@ -47,10 +47,8 @@ final class LocalModelStore {
         guard !isWorking else { return }
         beginWork("Preparing download")
         let delegate = ModelDownloadDelegate { [weak self] progress in
-            Task { @MainActor in
-                self?.progress = progress
-                self?.statusText = "Downloading \(Int(progress * 100))%"
-            }
+            self?.progress = progress
+            self?.statusText = "Downloading \(Int(progress * 100))%"
         }
 
         do {
@@ -200,11 +198,11 @@ private enum ModelStoreError: LocalizedError {
 }
 
 private final class ModelDownloadDelegate: NSObject, URLSessionDownloadDelegate, @unchecked Sendable {
-    private let progressHandler: @Sendable (Double) -> Void
+    private let progressHandler: @MainActor @Sendable (Double) -> Void
     private var continuation: CheckedContinuation<URL, Error>?
     private var session: URLSession?
 
-    init(progressHandler: @escaping @Sendable (Double) -> Void) {
+    init(progressHandler: @escaping @MainActor @Sendable (Double) -> Void) {
         self.progressHandler = progressHandler
     }
 
@@ -231,7 +229,10 @@ private final class ModelDownloadDelegate: NSObject, URLSessionDownloadDelegate,
         totalBytesExpectedToWrite: Int64
     ) {
         guard totalBytesExpectedToWrite > 0 else { return }
-        progressHandler(Double(totalBytesWritten) / Double(totalBytesExpectedToWrite))
+        let progress = Double(totalBytesWritten) / Double(totalBytesExpectedToWrite)
+        Task { @MainActor [progressHandler] in
+            progressHandler(progress)
+        }
     }
 
     func urlSession(
