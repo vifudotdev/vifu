@@ -174,12 +174,7 @@ jobs:
 
   mobile-ffi-apple:
     name: Mobile FFI (Apple)
-    needs:
-      - mobile-changes
-      - rust
-      - rust-packages
-      - dashboard
-      - self-hosted-docker
+    needs: mobile-changes
     if: needs.mobile-changes.outputs.apple == 'true'
     runs-on: macos-14
     timeout-minutes: 60
@@ -275,12 +270,7 @@ jobs:
 
   mobile-ffi-android:
     name: Mobile FFI (Android)
-    needs:
-      - mobile-changes
-      - rust
-      - rust-packages
-      - dashboard
-      - self-hosted-docker
+    needs: mobile-changes
     if: needs.mobile-changes.outputs.android == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 45

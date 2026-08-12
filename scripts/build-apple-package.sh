@@ -21,7 +21,7 @@ Usage: scripts/build-apple-package.sh [--update-bindings] [--macos-only] [--ci]
 Builds VifuMobileFFI.xcframework for iOS, iOS Simulator, and macOS.
 The optional flag refreshes the tracked UniFFI Swift wrapper.
 Use --macos-only for a smaller local macOS development artifact.
-Use --ci for an arm64 macOS and iOS Simulator verification artifact.
+Use --ci for an arm64 iOS, iOS Simulator, and macOS verification artifact.
 EOF
 }
 
@@ -56,7 +56,11 @@ fi
 if [[ "$MACOS_ONLY" == "true" ]]; then
     required_targets=(aarch64-apple-darwin)
 elif [[ "$CI_ONLY" == "true" ]]; then
-    required_targets=(aarch64-apple-ios-sim aarch64-apple-darwin)
+    required_targets=(
+        aarch64-apple-ios
+        aarch64-apple-ios-sim
+        aarch64-apple-darwin
+    )
 else
     required_targets=(
         aarch64-apple-ios
@@ -149,8 +153,12 @@ if [[ "$MACOS_ONLY" == "true" ]]; then
         "$TARGET_DIR/aarch64-apple-darwin/release/$FFI_LIBRARY" \
         "$macos_dir/libVifuMobileFFI.a"
 elif [[ "$CI_ONLY" == "true" ]]; then
+    device_dir="$work_dir/ios-device"
     simulator_dir="$work_dir/ios-simulator"
-    mkdir -p "$simulator_dir"
+    mkdir -p "$device_dir" "$simulator_dir"
+    cp \
+        "$TARGET_DIR/aarch64-apple-ios/release/$FFI_LIBRARY" \
+        "$device_dir/libVifuMobileFFI.a"
     cp \
         "$TARGET_DIR/aarch64-apple-ios-sim/release/$FFI_LIBRARY" \
         "$simulator_dir/libVifuMobileFFI.a"
@@ -183,6 +191,7 @@ if [[ "$MACOS_ONLY" == "true" ]]; then
         -output "$xcframework"
 elif [[ "$CI_ONLY" == "true" ]]; then
     xcodebuild -create-xcframework \
+        -library "$device_dir/libVifuMobileFFI.a" -headers "$headers_dir" \
         -library "$simulator_dir/libVifuMobileFFI.a" -headers "$headers_dir" \
         -library "$macos_dir/libVifuMobileFFI.a" -headers "$headers_dir" \
         -output "$xcframework"
@@ -283,6 +292,7 @@ verify_architectures() {
 if [[ "$MACOS_ONLY" == "true" ]]; then
     verify_architectures "$macos_dir/libVifuMobileFFI.a" arm64
 elif [[ "$CI_ONLY" == "true" ]]; then
+    verify_architectures "$device_dir/libVifuMobileFFI.a" arm64
     verify_architectures "$simulator_dir/libVifuMobileFFI.a" arm64
     verify_architectures "$macos_dir/libVifuMobileFFI.a" arm64
 else
