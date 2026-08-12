@@ -43,16 +43,6 @@ beside the optimized APK. Pair both applications with the same Vifu project to
 compare their traces on one device. Use a new one-time pairing code for each
 application. For iOS and other integrations, use the [examples guide](examples/README.md).
 
-To run from a source checkout:
-
-1. Install the workspace dependencies.
-2. Build the Console and start Vifu:
-
-```bash
-bun install --frozen-lockfile
-cargo vifu
-```
-
 ## Description
 
 Vifu gives products stable endpoints for local and remote AI Agents. Product
