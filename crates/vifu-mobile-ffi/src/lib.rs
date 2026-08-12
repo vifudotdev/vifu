@@ -11,13 +11,13 @@ use vifu_gateway::identity::MachineIdentity;
 use vifu_gateway::relay;
 use vifu_gateway::{config, openclaw};
 #[cfg(feature = "local-llama")]
-use vifu_provider_llama::{LlamaProvider, LlamaProviderConfig};
+use vifu_provider_llama::{LlamaProvider, LlamaProviderConfig, LlamaProviderError};
 use vifu_runtime::{
     AgentDefinition, AgentProvider, CancellationToken, EndpointDefinition, InvocationData,
     InvocationEvent, InvocationEventKind, InvocationHandle, InvocationInput, InvocationOutput,
     InvocationStatus, LocalProviderBinding, ProviderFuture, ProviderRequest, ProviderRequirement,
-    ProviderResponse, RuntimeBridge, RuntimeBridgeError, RuntimeError, RuntimeManifest,
-    RuntimeRelease, SqliteRuntimeStore, VifuRuntime,
+    ProviderResponse, ProviderStage, RuntimeBridge, RuntimeBridgeError, RuntimeError,
+    RuntimeManifest, RuntimeRelease, SqliteRuntimeStore, VifuRuntime,
 };
 
 #[derive(Debug, Clone, uniffi::Record)]
@@ -73,6 +73,23 @@ impl From<RuntimeBridgeError> for VifuRuntimeError {
     fn from(error: RuntimeBridgeError) -> Self {
         Self::Runtime {
             message: error.to_string(),
+        }
+    }
+}
+
+#[cfg(feature = "local-llama")]
+impl From<LlamaProviderError> for VifuRuntimeError {
+    fn from(error: LlamaProviderError) -> Self {
+        let message = error.to_string();
+        match error {
+            LlamaProviderError::ModelNotFound
+            | LlamaProviderError::InvalidContextSize
+            | LlamaProviderError::InvalidConfig(_)
+            | LlamaProviderError::ProjectorNotFound => Self::InvalidConfig { message },
+            LlamaProviderError::Backend(_)
+            | LlamaProviderError::BackendDiscovery(_)
+            | LlamaProviderError::Model(_)
+            | LlamaProviderError::Multimodal(_) => Self::Runtime { message },
         }
     }
 }
@@ -145,7 +162,11 @@ pub struct VifuProviderRequest {
     pub project_id: String,
     pub endpoint: String,
     pub session_id: String,
+    pub provider_id: String,
     pub agent_id: String,
+    pub agent_name: String,
+    pub agent_capabilities: Vec<String>,
+    pub agent_metadata_json: String,
     pub capability: String,
     pub data: VifuInvocationData,
     pub metadata_json: String,
@@ -182,9 +203,160 @@ pub trait VifuAgentProvider: Send + Sync {
     ) -> Result<VifuProviderResponse, VifuRuntimeError>;
 }
 
+#[derive(Clone, uniffi::Enum)]
+pub enum VifuProviderStage {
+    Queue,
+    Load,
+    Tokenize,
+    Prefill,
+    FirstToken,
+    Decode,
+    Validate,
+}
+
+impl From<VifuProviderStage> for ProviderStage {
+    fn from(stage: VifuProviderStage) -> Self {
+        match stage {
+            VifuProviderStage::Queue => Self::Queue,
+            VifuProviderStage::Load => Self::Load,
+            VifuProviderStage::Tokenize => Self::Tokenize,
+            VifuProviderStage::Prefill => Self::Prefill,
+            VifuProviderStage::FirstToken => Self::FirstToken,
+            VifuProviderStage::Decode => Self::Decode,
+            VifuProviderStage::Validate => Self::Validate,
+        }
+    }
+}
+
+#[derive(uniffi::Object)]
+pub struct VifuProviderInvocation {
+    cancellation: CancellationToken,
+    events: vifu_runtime::ProviderEventSink,
+}
+
+#[uniffi::export]
+impl VifuProviderInvocation {
+    pub fn is_cancelled(&self) -> bool {
+        self.cancellation.is_cancelled()
+    }
+
+    pub fn output_delta(&self, data: VifuInvocationData) -> Result<(), VifuRuntimeError> {
+        self.events.output_delta(data.try_into()?);
+        Ok(())
+    }
+
+    pub fn activity(&self) {
+        self.events.activity();
+    }
+
+    pub fn stage_started(
+        &self,
+        stage: VifuProviderStage,
+        metadata_json: String,
+    ) -> Result<(), VifuRuntimeError> {
+        self.events.stage_started(
+            stage.into(),
+            parse_json(&metadata_json, "provider stage metadata")?,
+        );
+        Ok(())
+    }
+
+    pub fn stage_completed(
+        &self,
+        stage: VifuProviderStage,
+        elapsed_ms: u64,
+        metadata_json: String,
+    ) -> Result<(), VifuRuntimeError> {
+        self.events.stage_completed(
+            stage.into(),
+            elapsed_ms,
+            parse_json(&metadata_json, "provider stage metadata")?,
+        );
+        Ok(())
+    }
+
+    pub fn stage_failed(
+        &self,
+        stage: VifuProviderStage,
+        elapsed_ms: u64,
+        error: String,
+        metadata_json: String,
+    ) -> Result<(), VifuRuntimeError> {
+        self.events.stage_failed(
+            stage.into(),
+            elapsed_ms,
+            error,
+            parse_json(&metadata_json, "provider stage metadata")?,
+        );
+        Ok(())
+    }
+}
+
+#[uniffi::export(callback_interface)]
+pub trait VifuStreamingAgentProvider: Send + Sync {
+    fn invoke(
+        &self,
+        request: VifuProviderRequest,
+        invocation: Arc<VifuProviderInvocation>,
+    ) -> Result<VifuProviderResponse, VifuRuntimeError>;
+}
+
 struct FfiAgentProvider {
     id: String,
     inner: Arc<dyn VifuAgentProvider>,
+}
+
+struct FfiStreamingAgentProvider {
+    id: String,
+    inner: Arc<dyn VifuStreamingAgentProvider>,
+}
+
+impl AgentProvider for FfiStreamingAgentProvider {
+    fn supports(&self, _capability: &str) -> bool {
+        true
+    }
+
+    fn invoke<'a>(
+        &'a self,
+        request: ProviderRequest,
+        cancellation: CancellationToken,
+    ) -> ProviderFuture<'a> {
+        self.invoke_with_events(
+            request,
+            cancellation,
+            vifu_runtime::ProviderEventSink::discard(),
+        )
+    }
+
+    fn invoke_with_events<'a>(
+        &'a self,
+        request: ProviderRequest,
+        cancellation: CancellationToken,
+        events: vifu_runtime::ProviderEventSink,
+    ) -> ProviderFuture<'a> {
+        let provider_id = self.id.clone();
+        let inner = Arc::clone(&self.inner);
+        Box::pin(async move {
+            let ffi_request = provider_request_to_ffi(request)?;
+            let invocation = Arc::new(VifuProviderInvocation {
+                cancellation: cancellation.clone(),
+                events,
+            });
+            let callback =
+                tokio::task::spawn_blocking(move || inner.invoke(ffi_request, invocation));
+            let response = tokio::select! {
+                _ = cancellation.cancelled() => return Err(RuntimeError::Cancelled),
+                result = callback => result
+                    .map_err(|_error| {
+                        RuntimeError::provider(&provider_id, "native streaming provider callback stopped")
+                    })?
+                    .map_err(|error| {
+                        RuntimeError::provider(&provider_id, error.to_string())
+                    })?,
+            };
+            provider_response_from_ffi(response)
+        })
+    }
 }
 
 impl AgentProvider for FfiAgentProvider {
@@ -200,17 +372,7 @@ impl AgentProvider for FfiAgentProvider {
         let provider_id = self.id.clone();
         let inner = Arc::clone(&self.inner);
         Box::pin(async move {
-            let ffi_request = VifuProviderRequest {
-                project_id: request.project_id,
-                endpoint: request.endpoint,
-                session_id: request.session_id,
-                agent_id: request.agent.id,
-                capability: request.capability,
-                data: request.data.into(),
-                metadata_json: encode_json(&request.metadata)?,
-                state_json: encode_json(&request.snapshot.state)?,
-                state_revision: request.snapshot.revision,
-            };
+            let ffi_request = provider_request_to_ffi(request)?;
             let callback = tokio::task::spawn_blocking(move || inner.invoke(ffi_request));
             let response = tokio::select! {
                 _ = cancellation.cancelled() => return Err(RuntimeError::Cancelled),
@@ -222,15 +384,7 @@ impl AgentProvider for FfiAgentProvider {
                         RuntimeError::provider(&provider_id, "native provider callback failed")
                     })?,
             };
-            Ok(ProviderResponse {
-                data: response.data.try_into()?,
-                metadata: parse_json(&response.metadata_json, "provider metadata")?,
-                state: response
-                    .state_json
-                    .as_deref()
-                    .map(|state| parse_json(state, "provider state"))
-                    .transpose()?,
-            })
+            provider_response_from_ffi(response)
         })
     }
 }
@@ -388,6 +542,50 @@ impl VifuEmbeddedRuntime {
         Ok(())
     }
 
+    pub fn register_streaming_provider(
+        &self,
+        provider_id: String,
+        provider_type: String,
+        provider: Box<dyn VifuStreamingAgentProvider>,
+    ) -> Result<(), VifuRuntimeError> {
+        let provider_type = provider_type.trim();
+        if provider_type.is_empty() {
+            return Err(VifuRuntimeError::InvalidConfig {
+                message: "provider type is required".to_string(),
+            });
+        }
+        self.runtime.register_provider(
+            provider_id.clone(),
+            Arc::new(FfiStreamingAgentProvider {
+                id: provider_id.clone(),
+                inner: Arc::from(provider),
+            }),
+        )?;
+        self.remember_provider_type(provider_id, provider_type)?;
+        Ok(())
+    }
+
+    pub fn unregister_provider(&self, provider_id: String) -> Result<bool, VifuRuntimeError> {
+        let removed = self.runtime.unregister_provider(&provider_id)?;
+        if removed {
+            self.provider_types
+                .write()
+                .map_err(|_| VifuRuntimeError::Runtime {
+                    message: "embedded provider registry is unavailable".to_string(),
+                })?
+                .remove(&provider_id);
+        }
+        Ok(removed)
+    }
+
+    pub fn unregister_agent(&self, agent_id: String) -> Result<bool, VifuRuntimeError> {
+        self.runtime.unregister_agent(&agent_id).map_err(Into::into)
+    }
+
+    pub fn unregister_endpoint(&self, name: String) -> Result<bool, VifuRuntimeError> {
+        self.runtime.unregister_endpoint(&name).map_err(Into::into)
+    }
+
     pub fn register_llama_provider(
         &self,
         provider_id: String,
@@ -402,9 +600,7 @@ impl VifuEmbeddedRuntime {
                 default_max_tokens: config.default_max_tokens,
                 max_concurrency: 1,
             })
-            .map_err(|error| VifuRuntimeError::InvalidConfig {
-                message: error.to_string(),
-            })?;
+            .map_err(VifuRuntimeError::from)?;
             self.runtime
                 .register_provider(provider_id.clone(), Arc::new(provider))?;
             self.remember_provider_type(provider_id, "llama")?;
@@ -414,7 +610,40 @@ impl VifuEmbeddedRuntime {
         {
             let _ = (provider_id, config);
             Err(VifuRuntimeError::InvalidConfig {
-                message: "this Vifu build does not include the local llama provider".to_string(),
+                message: "local llama is provided by the separate Android llama module".to_string(),
+            })
+        }
+    }
+
+    pub fn register_llama_provider_with_backends(
+        &self,
+        provider_id: String,
+        config: VifuLlamaProviderConfig,
+        backend_library_directory: String,
+    ) -> Result<(), VifuRuntimeError> {
+        #[cfg(feature = "local-llama")]
+        {
+            let provider = LlamaProvider::load_with_backend_directory(
+                LlamaProviderConfig {
+                    model_path: config.model_path.into(),
+                    context_size: config.context_size,
+                    gpu_layers: config.gpu_layers,
+                    default_max_tokens: config.default_max_tokens,
+                    max_concurrency: 1,
+                },
+                std::path::Path::new(&backend_library_directory),
+            )
+            .map_err(VifuRuntimeError::from)?;
+            self.runtime
+                .register_provider(provider_id.clone(), Arc::new(provider))?;
+            self.remember_provider_type(provider_id, "llama")?;
+            Ok(())
+        }
+        #[cfg(not(feature = "local-llama"))]
+        {
+            let _ = (provider_id, config, backend_library_directory);
+            Err(VifuRuntimeError::InvalidConfig {
+                message: "local llama is provided by the separate Android llama module".to_string(),
             })
         }
     }
@@ -440,7 +669,8 @@ impl VifuEmbeddedRuntime {
         {
             let _ = (provider_id, config);
             Err(VifuRuntimeError::InvalidConfig {
-                message: "this Vifu build does not include the local Whisper provider".to_string(),
+                message: "local Whisper is provided by the separate Android Whisper module"
+                    .to_string(),
             })
         }
     }
@@ -900,6 +1130,48 @@ impl TryFrom<VifuInvocationData> for InvocationData {
     }
 }
 
+fn provider_request_to_ffi(request: ProviderRequest) -> Result<VifuProviderRequest, RuntimeError> {
+    let ProviderRequest {
+        project_id,
+        endpoint,
+        session_id,
+        agent,
+        capability,
+        data,
+        metadata,
+        snapshot,
+    } = request;
+    Ok(VifuProviderRequest {
+        project_id,
+        endpoint,
+        session_id,
+        provider_id: agent.provider,
+        agent_id: agent.id,
+        agent_name: agent.name,
+        agent_capabilities: agent.capabilities,
+        agent_metadata_json: encode_json(&agent.metadata)?,
+        capability,
+        data: data.into(),
+        metadata_json: encode_json(&metadata)?,
+        state_json: encode_json(&snapshot.state)?,
+        state_revision: snapshot.revision,
+    })
+}
+
+fn provider_response_from_ffi(
+    response: VifuProviderResponse,
+) -> Result<ProviderResponse, RuntimeError> {
+    Ok(ProviderResponse {
+        data: response.data.try_into()?,
+        metadata: parse_json(&response.metadata_json, "provider metadata")?,
+        state: response
+            .state_json
+            .as_deref()
+            .map(|state| parse_json(state, "provider state"))
+            .transpose()?,
+    })
+}
+
 fn parse_json(json: &str, kind: &str) -> Result<Value, RuntimeError> {
     serde_json::from_str(json)
         .map_err(|error| RuntimeError::InvalidDefinition(format!("{kind} is invalid: {error}")))
@@ -916,6 +1188,23 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::*;
+
+    #[cfg(feature = "local-llama")]
+    #[test]
+    fn llama_setup_errors_keep_configuration_and_runtime_failures_distinct() {
+        assert!(matches!(
+            VifuRuntimeError::from(LlamaProviderError::InvalidContextSize),
+            VifuRuntimeError::InvalidConfig { .. }
+        ));
+        assert!(matches!(
+            VifuRuntimeError::from(LlamaProviderError::BackendDiscovery("missing".to_string())),
+            VifuRuntimeError::Runtime { .. }
+        ));
+        assert!(matches!(
+            VifuRuntimeError::from(LlamaProviderError::Model("rejected".to_string())),
+            VifuRuntimeError::Runtime { .. }
+        ));
+    }
 
     struct EchoProvider;
 
@@ -943,6 +1232,29 @@ mod tests {
             Ok(VifuProviderResponse {
                 data: request.data,
                 metadata_json: "{}".to_string(),
+                state_json: None,
+            })
+        }
+    }
+
+    struct StreamingEchoProvider;
+
+    impl VifuStreamingAgentProvider for StreamingEchoProvider {
+        fn invoke(
+            &self,
+            request: VifuProviderRequest,
+            invocation: Arc<VifuProviderInvocation>,
+        ) -> Result<VifuProviderResponse, VifuRuntimeError> {
+            invocation.stage_started(VifuProviderStage::Load, "{}".to_string())?;
+            invocation.output_delta(request.data.clone())?;
+            invocation.stage_completed(
+                VifuProviderStage::Load,
+                1,
+                r#"{"model":"test"}"#.to_string(),
+            )?;
+            Ok(VifuProviderResponse {
+                data: request.data,
+                metadata_json: r#"{"contentType":"application/json"}"#.to_string(),
                 state_json: None,
             })
         }
@@ -1026,6 +1338,74 @@ mod tests {
         assert_eq!(manifest.providers[0].provider_type, "native");
         assert_eq!(manifest.agents[0].id, "guide");
         assert_eq!(manifest.endpoints[0].name, "guide");
+    }
+
+    #[test]
+    fn streaming_provider_can_emit_events_and_be_unloaded() {
+        let runtime = VifuEmbeddedRuntime::new("streaming-provider".to_string()).unwrap();
+        runtime
+            .register_streaming_provider(
+                "optional-llama".to_string(),
+                "llama".to_string(),
+                Box::new(StreamingEchoProvider),
+            )
+            .unwrap();
+        runtime
+            .register_agent(
+                "guide".to_string(),
+                "Guide".to_string(),
+                "optional-llama".to_string(),
+                vec!["chat".to_string()],
+                "{}".to_string(),
+            )
+            .unwrap();
+        runtime
+            .register_endpoint(
+                "guide".to_string(),
+                "guide".to_string(),
+                "chat".to_string(),
+                500,
+            )
+            .unwrap();
+
+        let manifest = runtime.prepare_gateway_release().unwrap();
+        assert_eq!(manifest.providers[0].provider_type, "llama");
+
+        let handle = runtime
+            .start_invoke(
+                "guide".to_string(),
+                "player-one".to_string(),
+                VifuInvocationData::Json {
+                    json: r#"{"message":"hello"}"#.to_string(),
+                },
+                "{}".to_string(),
+            )
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(1);
+        loop {
+            let poll = runtime.poll_invocation(handle.clone()).unwrap();
+            if matches!(poll.state, VifuInvocationState::Completed) {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "streaming callback did not finish"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let events = runtime.drain_invocation_events(handle).unwrap();
+        assert!(events
+            .iter()
+            .any(|event| matches!(event.kind, VifuInvocationEventKind::OutputDelta)));
+
+        assert!(runtime.unregister_endpoint("guide".to_string()).unwrap());
+        assert!(runtime.unregister_agent("guide".to_string()).unwrap());
+        assert!(runtime
+            .unregister_provider("optional-llama".to_string())
+            .unwrap());
+        assert!(!runtime
+            .unregister_provider("optional-llama".to_string())
+            .unwrap());
     }
 
     #[test]

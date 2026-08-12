@@ -129,6 +129,7 @@ pub struct RuntimeDeploymentConfiguration {
     pub deployment_id: Uuid,
     pub deployment: String,
     pub project_id: Uuid,
+    pub app_id: String,
     pub project_slug: String,
     pub project_name: String,
     #[serde(default)]
@@ -738,6 +739,7 @@ mod tests {
                     "deploymentId": Uuid::nil(),
                     "deployment": "development",
                     "projectId": Uuid::nil(),
+                    "appId": format!("vifu_app_{}", "a".repeat(64)),
                     "projectSlug": "moon-train",
                     "projectName": "Moon Train",
                     "projectClaimed": true,

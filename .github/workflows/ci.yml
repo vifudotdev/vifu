@@ -54,7 +54,7 @@ jobs:
               Package.swift|apple/*|integrations/godot/apple/*|scripts/build-apple-package.sh)
                 apple=true
                 ;;
-              scripts/build-android-package.sh)
+              crates/vifu-llama-ffi/*|crates/vifu-whisper-ffi/*|examples/android-starter/*|integrations/android/*|scripts/build-android-package.sh|scripts/cmake/*)
                 android=true
                 ;;
               .github/workflows/ci.yml)
@@ -257,7 +257,7 @@ jobs:
       - self-hosted-docker
     if: needs.mobile-changes.outputs.android == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7
         with:
@@ -268,46 +268,48 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: mobile-ffi-android
-      - name: Detect Android NDK
-        id: android-ndk
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+      - name: Install Android SDK 36
         run: |
-          case "$(uname -s)" in
-            Darwin) ndk_host="darwin-x86_64" ;;
-            Linux) ndk_host="linux-x86_64" ;;
-            *) ndk_host="" ;;
-          esac
-          ndk_bin="${ANDROID_NDK_LATEST_HOME:-}/toolchains/llvm/prebuilt/$ndk_host/bin"
-          if [ -n "${ANDROID_NDK_LATEST_HOME:-}" ] \
-            && [ -n "$ndk_host" ] \
-            && [ -x "$ndk_bin/aarch64-linux-android24-clang" ] \
-            && [ -x "$ndk_bin/aarch64-linux-android24-clang++" ]; then
-            echo "available=true" >> "$GITHUB_OUTPUT"
-            echo "ndk_bin=$ndk_bin" >> "$GITHUB_OUTPUT"
-          else
-            echo "available=false" >> "$GITHUB_OUTPUT"
-            echo "Android NDK was not found on this runner; skipping Android FFI artifact build."
-          fi
-      - name: Configure Android linker
-        if: steps.android-ndk.outputs.available == 'true'
-        run: |
-          ndk_bin="${{ steps.android-ndk.outputs.ndk_bin }}"
-          echo "CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=$ndk_bin/aarch64-linux-android24-clang" >> "$GITHUB_ENV"
-          echo "CC_aarch64_linux_android=$ndk_bin/aarch64-linux-android24-clang" >> "$GITHUB_ENV"
-          echo "CXX_aarch64_linux_android=$ndk_bin/aarch64-linux-android24-clang++" >> "$GITHUB_ENV"
-          echo "AR_aarch64_linux_android=$ndk_bin/llvm-ar" >> "$GITHUB_ENV"
+          yes | sdkmanager --licenses >/dev/null
+          sdkmanager "platforms;android-36" "build-tools;36.0.0"
+          test -n "${ANDROID_NDK_LATEST_HOME:-}"
           echo "ANDROID_NDK_HOME=$ANDROID_NDK_LATEST_HOME" >> "$GITHUB_ENV"
-      - name: Build Android package sources
-        if: steps.android-ndk.outputs.available == 'true'
+      - name: Build and inspect Android Maven artifacts
+        working-directory: integrations/android
         env:
-          VIFU_ANDROID_DIST_DIR: ${{ runner.temp }}/vifu-android-dist
-          VIFU_ANDROID_FFI_FEATURES: local-llama,local-whisper
+          VIFU_ANDROID_TEMP_DIR: ${{ runner.temp }}
         run: |
-          scripts/build-android-package.sh
-          test -s "$VIFU_ANDROID_DIST_DIR/src/main/kotlin/dev/vifu/runtime/vifu_mobile_ffi.kt"
-          test -s "$VIFU_ANDROID_DIST_DIR/src/main/jniLibs/arm64-v8a/libvifu_mobile_ffi.so"
-      - name: Skip Android library
-        if: steps.android-ndk.outputs.available != 'true'
-        run: echo "Android FFI build skipped because this runner does not provide Android NDK."
+          ./gradlew publishToMavenLocal \
+            -PVERSION_NAME=0.1.12-CI
+          core_aar="$HOME/.m2/repository/dev/vifu/vifu-android-core/0.1.12-CI/vifu-android-core-0.1.12-CI.aar"
+          optimized_aar="$HOME/.m2/repository/dev/vifu/vifu-android-llama/0.1.12-CI/vifu-android-llama-0.1.12-CI.aar"
+          baseline_aar="$HOME/.m2/repository/dev/vifu/vifu-android-llama-baseline/0.1.12-CI/vifu-android-llama-baseline-0.1.12-CI.aar"
+          whisper_aar="$HOME/.m2/repository/dev/vifu/vifu-android-whisper/0.1.12-CI/vifu-android-whisper-0.1.12-CI.aar"
+          test -s "$core_aar"
+          unzip -l "$core_aar" | grep -F "jni/arm64-v8a/libvifu_mobile_ffi.so"
+          unzip -l "$core_aar" | grep -F "jni/arm64-v8a/libc++_shared.so"
+          test -s "$baseline_aar"
+          test -s "$optimized_aar"
+          unzip -l "$optimized_aar" | grep -F "jni/arm64-v8a/libvifu_llama_ffi.so"
+          unzip -l "$optimized_aar" | grep -F "jni/arm64-v8a/libggml-cpu-"
+          unzip -l "$baseline_aar" | grep -F "jni/arm64-v8a/libvifu_llama_ffi.so"
+          if unzip -l "$baseline_aar" | grep -F "jni/arm64-v8a/libggml-cpu-"; then
+            echo "baseline AAR unexpectedly contains dynamic CPU backends" >&2
+            exit 1
+          fi
+          test -s "$whisper_aar"
+          unzip -l "$whisper_aar" | grep -F "jni/arm64-v8a/libvifu_whisper_ffi.so"
+      - name: Build Android starter with all local modules
+        working-directory: examples/android-starter
+        run: |
+          ./gradlew testDebugUnitTest assembleDebug \
+            -PvifuUseMavenLocal=true \
+            -PvifuVersion=0.1.12-CI \
+            -PvifuWhisper=true
 
   dashboard:
     name: Dashboard and JavaScript packages

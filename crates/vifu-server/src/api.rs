@@ -2255,6 +2255,7 @@ pub async fn get_agent_gateway_runtime_config(
             "deploymentId": deployment.id,
             "deployment": deployment.name,
             "projectId": project.project.id,
+            "appId": project.project.app_id,
             "projectSlug": project.project.slug,
             "projectName": project.project.name,
             "projectClaimed": project.project.owner_user_id.is_some(),

@@ -1819,6 +1819,47 @@ impl VifuRuntime {
         Ok(())
     }
 
+    /// Removes a provider from the runtime registry.
+    ///
+    /// An invocation that already acquired the provider keeps its own `Arc`
+    /// until that invocation finishes. New invocations fail normally until a
+    /// provider with the same name is registered again.
+    pub fn unregister_provider(&self, name: &str) -> Result<bool, RuntimeError> {
+        validate_identifier("provider", name)?;
+        Ok(self
+            .core
+            .registry
+            .write()
+            .map_err(|_| RuntimeError::Internal)?
+            .providers
+            .remove(name)
+            .is_some())
+    }
+
+    pub fn unregister_agent(&self, id: &str) -> Result<bool, RuntimeError> {
+        validate_identifier("agent", id)?;
+        Ok(self
+            .core
+            .registry
+            .write()
+            .map_err(|_| RuntimeError::Internal)?
+            .agents
+            .remove(id)
+            .is_some())
+    }
+
+    pub fn unregister_endpoint(&self, name: &str) -> Result<bool, RuntimeError> {
+        validate_identifier("endpoint", name)?;
+        Ok(self
+            .core
+            .registry
+            .write()
+            .map_err(|_| RuntimeError::Internal)?
+            .endpoints
+            .remove(name)
+            .is_some())
+    }
+
     pub fn register_agent(&self, mut agent: AgentDefinition) -> Result<(), RuntimeError> {
         validate_identifier("agent", &agent.id)?;
         validate_identifier("provider", &agent.provider)?;

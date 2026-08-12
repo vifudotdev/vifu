@@ -1,0 +1,25 @@
+[package]
+name = "vifu-whisper-ffi"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Optional whisper.cpp UniFFI provider module for Vifu Android."
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+name = "vifu_whisper_ffi"
+
+[dependencies]
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { version = "1", features = ["rt", "time"] }
+uniffi.workspace = true
+vifu-runtime = { path = "../vifu-runtime", default-features = false, features = ["local-whisper"] }
+
+[build-dependencies]
+uniffi = { workspace = true, features = ["build"] }

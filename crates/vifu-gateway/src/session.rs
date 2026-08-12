@@ -192,7 +192,11 @@ pub(crate) fn validate_session(session: &SessionSummary) -> Result<(), String> {
     }
     if let Some(device_token) = session.device_token.as_deref() {
         validate_device_token(device_token)?;
-        if session.gateway_id.is_none() || session.token_generation.is_none() {
+        let has_authorization_metadata =
+            session.gateway_id.is_some() || session.token_generation.is_some();
+        if has_authorization_metadata
+            && (session.gateway_id.is_none() || session.token_generation.is_none())
+        {
             return Err("Device Token is missing Gateway authorization metadata".to_string());
         }
     } else if session.token_generation.is_some() || session.token_expires_at.is_some() {

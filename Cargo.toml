@@ -4,6 +4,8 @@ members = [
   "crates/vifu-provider-llama",
   "crates/vifu-gateway",
   "crates/vifu-mobile-ffi",
+  "crates/vifu-llama-ffi",
+  "crates/vifu-whisper-ffi",
   "crates/vifu",
   "crates/vifu-server",
   "scripts/xtask",

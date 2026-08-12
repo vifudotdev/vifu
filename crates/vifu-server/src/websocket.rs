@@ -87,6 +87,7 @@ async fn run_socket(
     else {
         return Err("agent gateway must send hello first".to_string());
     };
+    let presented_device_token = auth.device_token.clone();
 
     vifu_gateway::identity::validate_signed_at(unix_time_ms()?, machine.signed_at)?;
     let signature_payload = protocol::gateway_signature_payload(
@@ -184,11 +185,13 @@ async fn run_socket(
             .try_into()
             .unwrap_or(60_000),
         resumed,
-        auth: device_token.map(|token| protocol::GatewayWelcomeAuth {
-            device_token: token,
-            generation: u64::try_from(authorization.token_generation).unwrap_or(1),
-            expires_at: authorization.token_expires_at.to_rfc3339(),
-        }),
+        auth: device_token
+            .or(presented_device_token)
+            .map(|token| protocol::GatewayWelcomeAuth {
+                device_token: token,
+                generation: u64::try_from(authorization.token_generation).unwrap_or(1),
+                expires_at: authorization.token_expires_at.to_rfc3339(),
+            }),
     };
     send_command(socket, &welcome).await?;
     state.monitor.publish(ServerMonitorEvent::GatewayConnected {
@@ -1795,6 +1798,12 @@ mod tests {
         assert_eq!(welcome["ok"], true);
         assert_eq!(welcome["payload"]["gatewayId"], seeded.gateway_id);
         assert!(welcome["payload"]["sessionId"].is_string());
+        assert_eq!(
+            welcome["payload"]["auth"]["deviceToken"],
+            gateway_credential
+        );
+        assert_eq!(welcome["payload"]["auth"]["generation"], 1);
+        assert!(welcome["payload"]["auth"]["expiresAt"].is_string());
         assert!(welcome.get("type").is_some());
         assert!(welcome.get("method").is_none());
 

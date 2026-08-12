@@ -4094,6 +4094,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "vifu-llama-ffi"
+version = "0.1.11"
+dependencies = [
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "uniffi",
+ "vifu-provider-llama",
+ "vifu-runtime",
+]
+
+[[package]]
 name = "vifu-mobile-ffi"
 version = "0.1.11"
 dependencies = [
@@ -4166,6 +4178,17 @@ dependencies = [
  "tracing-subscriber",
  "uuid",
  "vifu-gateway",
+ "vifu-runtime",
+]
+
+[[package]]
+name = "vifu-whisper-ffi"
+version = "0.1.11"
+dependencies = [
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "uniffi",
  "vifu-runtime",
 ]
 

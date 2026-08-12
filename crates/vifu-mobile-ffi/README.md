@@ -1,31 +1,30 @@
 # Vifu Mobile FFI
 
-This crate is the native mobile adapter for embedding Vifu in iOS and Android
-applications. It exposes the self-contained Runtime and the existing Gateway
-configuration and probe utilities through UniFFI.
+This crate is the native Core adapter for embedding Vifu in iOS and Android
+applications. It exposes the self-contained Agent Runtime and Gateway through
+UniFFI.
 
 `VifuEmbeddedRuntime` provides:
 
-- dynamic native `VifuAgentProvider` callbacks;
-- provider, agent, and named endpoint registration;
-- non-blocking start, poll, take, and cancel operations for application loops;
+- dynamic native and streaming provider callbacks;
+- provider, agent, and named endpoint registration and removal;
+- non-blocking start, poll, take, and cancel operations;
 - JSON and binary invocation data;
 - project snapshot export and restore.
 
-The embedded Runtime executes in the application process. Native provider
-callbacks connect it to the host's local or remote agent implementations.
-Provider callbacks run outside the Runtime executor so a blocking native call
-cannot stall invocation timeouts or unrelated Runtime work. Cancellation
-returns control to the Runtime immediately; native providers should still
-cooperate with their platform cancellation APIs when they can.
-Agent capabilities are declared when the host registers an agent, so capability
-checks do not require a synchronous native callback.
+The embedded Runtime executes in the application process. Provider callbacks
+run outside the Runtime executor, so a blocking native call cannot stall
+invocation timeouts or unrelated Runtime work. Cancellation returns control to
+the Runtime immediately; providers also receive the cancellation signal and
+streaming event sink.
 
 `VifuEmbeddedGateway.start` publishes performance telemetry but keeps root
 invocation input and output on the device. Hosts that provide an explicit
 content-sharing consent control can instead call `startWithMonitorIo` /
 `start_with_monitor_io` with `captureMonitorIo = true` for a private debugging
 session.
+
+## Apple package
 
 Apple application developers can add `https://github.com/vifudotdev/vifu` as a
 Swift Package and select the `Vifu` product. The release package contains the
@@ -49,37 +48,45 @@ Refresh the tracked Swift wrapper after changing the UniFFI surface:
 scripts/build-apple-package.sh --update-bindings
 ```
 
-Build the Android `arm64-v8a` package sources from the repository root:
+## Android modules
+
+Android packages Core and the local providers as separate AARs and native
+entry points:
+
+```kotlin
+implementation("dev.vifu:vifu-android-core:0.1.12")
+implementation("dev.vifu:vifu-android-llama:0.1.12")
+implementation("dev.vifu:vifu-android-whisper:0.1.12")
+```
+
+Provider artifacts depend on Core, so applications normally declare only the
+providers they use. The baseline llama coordinate is
+`dev.vifu:vifu-android-llama-baseline:0.1.12`.
+
+Build one Android `arm64-v8a` source set at a time from the repository root:
 
 ```bash
 rustup target add aarch64-linux-android
-ANDROID_NDK_HOME=/path/to/android-ndk scripts/build-android-package.sh
+ANDROID_NDK_HOME=/path/to/android-ndk \
+  scripts/build-android-package.sh --module core
+ANDROID_NDK_HOME=/path/to/android-ndk \
+  scripts/build-android-package.sh --module llama --profile optimized
+ANDROID_NDK_HOME=/path/to/android-ndk \
+  scripts/build-android-package.sh --module whisper
 ```
 
-The generated Gradle source-set layout is under
-`target/vifu-android-dist/src/main/`: Kotlin bindings are in `kotlin/` and the
-native library is in `jniLibs/arm64-v8a/`. The default mobile artifact keeps
-the Runtime and Gateway but omits optional on-device model providers. Set
-`VIFU_ANDROID_FFI_FEATURES=local-llama,local-whisper` when the Android host
-intentionally ships those providers.
+Set `VIFU_ANDROID_DIST_DIR` to choose the generated Gradle source-set output.
+Kotlin bindings are written under `src/main/kotlin/` and native libraries under
+`src/main/jniLibs/arm64-v8a/`.
 
-Generate only the Kotlin bindings when validating the interface on a machine
-without the Rust Android target:
+Generate only a module's Kotlin bindings when validating the interface on a
+machine without the Rust Android target:
 
 ```bash
-scripts/build-android-package.sh --bindings-only
+scripts/build-android-package.sh --module core --bindings-only
+scripts/build-android-package.sh --module llama --bindings-only
+scripts/build-android-package.sh --module whisper --bindings-only
 ```
 
-Generate bindings with the crate-local UniFFI bindgen binary and
-`crates/vifu-mobile-ffi/uniffi.toml`:
-
-```bash
-cargo build -p vifu-mobile-ffi
-cargo build -p vifu-mobile-ffi --bin uniffi-bindgen
-target/debug/uniffi-bindgen generate \
-  --library target/debug/libvifu_mobile_ffi.dylib \
-  --language swift \
-  --language kotlin \
-  --out-dir target/vifu-mobile-bindings \
-  --config crates/vifu-mobile-ffi/uniffi.toml
-```
+See [`integrations/android`](../../integrations/android/README.md) for the
+high-level lifecycle API and artifact builds.

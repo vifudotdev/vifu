@@ -179,11 +179,63 @@ jobs:
             ${{ runner.temp }}/dist/VifuMobileFFI.xcframework.zip.sha256
           if-no-files-found: error
 
+  android:
+    name: Android Maven packages
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          ref: ${{ inputs.release_tag || github.ref }}
+      - uses: dtolnay/rust-toolchain@1.95.0
+        with:
+          targets: aarch64-linux-android
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: android-maven-release
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+      - name: Install Android SDK 36
+        run: |
+          yes | sdkmanager --licenses >/dev/null
+          sdkmanager "platforms;android-36" "build-tools;36.0.0"
+          test -n "${ANDROID_NDK_LATEST_HOME:-}"
+          echo "ANDROID_NDK_HOME=$ANDROID_NDK_LATEST_HOME" >> "$GITHUB_ENV"
+      - name: Build, sign, and publish Android packages
+        working-directory: integrations/android
+        env:
+          ORG_GRADLE_PROJECT_mavenCentralUsername: ${{ secrets.MAVEN_CENTRAL_USERNAME }}
+          ORG_GRADLE_PROJECT_mavenCentralPassword: ${{ secrets.MAVEN_CENTRAL_PASSWORD }}
+          ORG_GRADLE_PROJECT_signingInMemoryKey: ${{ secrets.MAVEN_SIGNING_KEY }}
+          ORG_GRADLE_PROJECT_signingInMemoryKeyPassword: ${{ secrets.MAVEN_SIGNING_PASSWORD }}
+          VIFU_ANDROID_TEMP_DIR: ${{ runner.temp }}
+        run: |
+          version="${RELEASE_TAG#v}"
+          test -n "$version"
+          test -n "$ORG_GRADLE_PROJECT_mavenCentralUsername"
+          test -n "$ORG_GRADLE_PROJECT_mavenCentralPassword"
+          test -n "$ORG_GRADLE_PROJECT_signingInMemoryKey"
+          test -n "$ORG_GRADLE_PROJECT_signingInMemoryKeyPassword"
+          ./gradlew publishToMavenCentral -PVERSION_NAME="$version"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: android-maven-packages
+          path: |
+            integrations/android/vifu-android-core/build/outputs/aar/*.aar
+            integrations/android/vifu-android-llama/build/outputs/aar/*.aar
+            integrations/android/vifu-android-llama-baseline/build/outputs/aar/*.aar
+            integrations/android/vifu-android-whisper/build/outputs/aar/*.aar
+          if-no-files-found: error
+
   publish:
     if: startsWith(github.ref, 'refs/tags/') || inputs.release_tag != ''
     needs:
       - build
       - apple
+      - android
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:

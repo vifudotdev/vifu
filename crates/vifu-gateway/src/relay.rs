@@ -38,10 +38,11 @@ use vifu_runtime::{
 };
 pub use vifu_runtime::{CancellationToken, ProviderEvent, ProviderEventSink, ProviderStage};
 #[cfg(feature = "sqlite")]
-use vifu_runtime::{RuntimeStore, SqliteRuntimeStore};
+use vifu_runtime::{RuntimeStore, RuntimeTraceRecord, SqliteRuntimeStore};
 
 const MAX_CONCURRENT_CALLS: usize = 64;
 const OUTBOUND_QUEUE_CAPACITY: usize = 128;
+const WEBSOCKET_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 const MAX_RECONNECT_DELAY: Duration = Duration::from_secs(30);
 const MAX_PENDING_TELEMETRY_BATCHES: usize = 512;
 const MAX_CONCURRENT_TELEMETRY_UPLOADS: usize = 4;
@@ -1883,10 +1884,17 @@ async fn run_connection(
         .map(pinned_websocket_connector)
         .transpose()
         .map_err(AgentGatewayConnectionError::Failed)?;
-    let (mut socket, _) =
-        connect_async_tls_with_config(request, Some(websocket_config), false, connector)
-            .await
-            .map_err(|error| AgentGatewayConnectionError::Failed(error.to_string()))?;
+    let (mut socket, _) = tokio::time::timeout(
+        WEBSOCKET_CONNECT_TIMEOUT,
+        connect_async_tls_with_config(request, Some(websocket_config), false, connector),
+    )
+    .await
+    .map_err(|_| {
+        AgentGatewayConnectionError::Failed(
+            "Agent Gateway WebSocket connection timed out".to_string(),
+        )
+    })?
+    .map_err(|error| AgentGatewayConnectionError::Failed(error.to_string()))?;
 
     let challenge = tokio::time::timeout(Duration::from_secs(10), receive_command(&mut socket))
         .await
@@ -3033,17 +3041,27 @@ async fn sync_runtime_state(
     let store = SqliteRuntimeStore::open(runtime.runtime_database_path)
         .map_err(|error| error.to_string())?;
     let deployments = configuration.deployments;
+    let requested_app_id = runtime
+        .enrollment_token
+        .as_deref()
+        .filter(|value| value.starts_with("vifu_app_"));
     let embedded_deployment = runtime.embedded_runtime.and_then(|embedded| {
-        deployments
-            .iter()
-            .find(|deployment| embedded.project_id() == deployment.project_slug)
-            .or_else(|| (deployments.len() == 1).then(|| &deployments[0]))
+        select_embedded_deployment(&deployments, embedded.project_id(), requested_app_id)
     });
     if let (Some(deployment), Some(monitor)) =
         (embedded_deployment, runtime.embedded_monitor.as_ref())
     {
         monitor.set_deployment(deployment.deployment_id, deployment.project_slug.clone());
     }
+    let embedded_trace_target = embedded_deployment.and_then(|deployment| {
+        runtime.embedded_runtime.map(|embedded| {
+            (
+                embedded.project_id().to_string(),
+                deployment.deployment_id,
+                deployment.project_slug.clone(),
+            )
+        })
+    });
     for mut deployment in deployments {
         if deployment.policies.config_sync {
             if deployment.release.is_none() {
@@ -3094,7 +3112,14 @@ async fn sync_runtime_state(
             .pending_traces(1_000)
             .map_err(|error| error.to_string())?
             .into_iter()
-            .filter(|trace| trace.project_id == deployment.project_slug)
+            .filter_map(|trace| {
+                runtime_trace_for_deployment(
+                    &trace,
+                    deployment.deployment_id,
+                    &deployment.project_slug,
+                    embedded_trace_target.as_ref(),
+                )
+            })
             .collect::<Vec<_>>();
         for batch in traces.chunks(100) {
             let acknowledged = client
@@ -3106,6 +3131,45 @@ async fn sync_runtime_state(
         }
     }
     Ok(())
+}
+
+#[cfg(feature = "sqlite")]
+fn select_embedded_deployment<'a>(
+    deployments: &'a [crate::control::RuntimeDeploymentConfiguration],
+    embedded_project_id: &str,
+    requested_app_id: Option<&str>,
+) -> Option<&'a crate::control::RuntimeDeploymentConfiguration> {
+    deployments
+        .iter()
+        .find(|deployment| embedded_project_id == deployment.project_slug)
+        .or_else(|| {
+            requested_app_id.and_then(|app_id| {
+                deployments
+                    .iter()
+                    .find(|deployment| deployment.app_id == app_id)
+            })
+        })
+        .or_else(|| (deployments.len() == 1).then(|| &deployments[0]))
+}
+
+#[cfg(feature = "sqlite")]
+fn runtime_trace_for_deployment(
+    trace: &RuntimeTraceRecord,
+    deployment_id: Uuid,
+    project_slug: &str,
+    embedded_trace_target: Option<&(String, Uuid, String)>,
+) -> Option<RuntimeTraceRecord> {
+    if trace.project_id == project_slug {
+        return Some(trace.clone());
+    }
+    let (embedded_project_id, embedded_deployment_id, embedded_project_slug) =
+        embedded_trace_target?;
+    if trace.project_id != *embedded_project_id || deployment_id != *embedded_deployment_id {
+        return None;
+    }
+    let mut mapped = trace.clone();
+    mapped.project_id.clone_from(embedded_project_slug);
+    Some(mapped)
 }
 
 fn unix_time_ms() -> Result<u64, String> {
@@ -3341,10 +3405,10 @@ mod tests {
         enqueue_telemetry_batch, expire_embedded_runtime_traces, gateway_protocol_error,
         guest_claim_url, handle_telemetry_flush_result, observe_capture_dropped,
         pairing_authorization_url, parse_proc_kib_value, queue_error, record_embedded_runtime_io,
-        resolve_provider, runtime_profile_name, safe_observer_error, safe_trace_telemetry,
-        sanitize_error, trigger_telemetry_flush, try_capture, write_terminal_line,
-        AgentGatewayProvider, EmbeddedRuntimeMonitor, GatewayCaptureEvent,
-        GatewayInvocationTerminal, GatewayOutputPolicy, GatewayRuntimeEvent,
+        resolve_provider, runtime_profile_name, runtime_trace_for_deployment, safe_observer_error,
+        safe_trace_telemetry, sanitize_error, select_embedded_deployment, trigger_telemetry_flush,
+        try_capture, write_terminal_line, AgentGatewayProvider, EmbeddedRuntimeMonitor,
+        GatewayCaptureEvent, GatewayInvocationTerminal, GatewayOutputPolicy, GatewayRuntimeEvent,
         InProcessGatewayProvider, InvocationDelivery, InvocationTelemetry, OpenClawGatewayProvider,
         PendingTelemetryBatch, RuntimeControlClient, SessionRouteOverrides, TelemetryBacklogState,
         EMBEDDED_TRACE_RETENTION, MAX_PENDING_TELEMETRY_BATCHES,
@@ -3360,8 +3424,94 @@ mod tests {
     use vifu_runtime::{
         AgentProvider, CancellationToken, InvocationData, ProviderEvent, ProviderEventSink,
         ProviderFuture, ProviderRequest, ProviderResponse, ProviderStage, RuntimeMonitorEvent,
-        RuntimeMonitorStageStatus,
+        RuntimeMonitorStageStatus, RuntimeTraceRecord,
     };
+
+    fn deployment(
+        app_id: &str,
+        project_slug: &str,
+    ) -> crate::control::RuntimeDeploymentConfiguration {
+        crate::control::RuntimeDeploymentConfiguration {
+            deployment_id: Uuid::new_v4(),
+            deployment: "development".to_string(),
+            project_id: Uuid::new_v4(),
+            app_id: app_id.to_string(),
+            project_slug: project_slug.to_string(),
+            project_name: project_slug.to_string(),
+            project_claimed: false,
+            is_primary: true,
+            binding_ids: Vec::new(),
+            policies: crate::control::RuntimeDeploymentPolicies {
+                config_sync: true,
+                trace_mode: "summary".to_string(),
+                remote_invocation: true,
+            },
+            release: None,
+        }
+    }
+
+    #[test]
+    fn app_id_selects_the_requested_embedded_deployment_after_token_resume() {
+        let old = deployment("vifu_app_old", "old-app");
+        let requested = deployment("vifu_app_requested", "requested-app");
+        let deployments = vec![old, requested.clone()];
+
+        assert_eq!(
+            select_embedded_deployment(&deployments, "android-app", Some("vifu_app_requested"),)
+                .map(|deployment| deployment.deployment_id),
+            Some(requested.deployment_id)
+        );
+    }
+
+    fn runtime_trace(project_id: &str) -> RuntimeTraceRecord {
+        RuntimeTraceRecord {
+            id: "trace-1".to_string(),
+            project_id: project_id.to_string(),
+            invocation_id: "invocation-1".to_string(),
+            endpoint: "chat".to_string(),
+            agent: Some("android-chat".to_string()),
+            provider: Some("android-llama".to_string()),
+            capability: Some("chat".to_string()),
+            status: "completed".to_string(),
+            duration_ms: 42,
+            created_at_ms: 1,
+        }
+    }
+
+    #[test]
+    fn single_embedded_deployment_maps_local_project_id_for_trace_upload() {
+        let deployment_id = Uuid::new_v4();
+        let trace = runtime_trace("android-app");
+        let target = (
+            "android-app".to_string(),
+            deployment_id,
+            "guest-project".to_string(),
+        );
+
+        let mapped =
+            runtime_trace_for_deployment(&trace, deployment_id, "guest-project", Some(&target))
+                .expect("the selected embedded deployment should receive the local trace");
+
+        assert_eq!(mapped.project_id, "guest-project");
+        assert_eq!(mapped.id, trace.id);
+        assert!(runtime_trace_for_deployment(
+            &trace,
+            Uuid::new_v4(),
+            "another-project",
+            Some(&target),
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn exact_runtime_trace_project_remains_unchanged() {
+        let trace = runtime_trace("claimed-project");
+
+        assert_eq!(
+            runtime_trace_for_deployment(&trace, Uuid::new_v4(), "claimed-project", None,),
+            Some(trace)
+        );
+    }
 
     fn embedded_monitor(dropped: u32) -> (EmbeddedRuntimeMonitor, Arc<AtomicU32>) {
         let (_sender, receiver) = tokio::sync::mpsc::channel(1);

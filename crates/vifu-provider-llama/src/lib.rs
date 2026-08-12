@@ -1,5 +1,7 @@
 //! Local llama.cpp provider for the embedded Vifu runtime.
 
+#[cfg(target_os = "android")]
+use std::ffi::{c_char, c_int, c_void};
 use std::fmt;
 use std::num::NonZeroU32;
 use std::ops::Range;
@@ -10,6 +12,7 @@ use std::time::Instant;
 use llama_cpp_2::context::params::{LlamaContextParams, LlamaPoolingType};
 use llama_cpp_2::context::LlamaContext;
 use llama_cpp_2::json_schema_to_grammar;
+use llama_cpp_2::list_llama_ggml_backend_devices;
 use llama_cpp_2::llama_backend::LlamaBackend;
 use llama_cpp_2::llama_batch::LlamaBatch;
 use llama_cpp_2::model::params::LlamaModelParams;
@@ -19,6 +22,7 @@ use llama_cpp_2::mtmd::{
 };
 use llama_cpp_2::sampling::LlamaSampler;
 use llama_cpp_2::token::LlamaToken;
+#[cfg(not(target_os = "android"))]
 use llama_cpp_2::{send_logs_to_tracing, LogOptions};
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
@@ -46,6 +50,54 @@ const THINK_OPEN_TAG: &str = "<think>";
 const THINK_CLOSE_TAG: &str = "</think>";
 
 static LLAMA_BACKEND: OnceLock<Result<Arc<LlamaBackend>, String>> = OnceLock::new();
+
+#[cfg(target_os = "android")]
+#[link(name = "log")]
+unsafe extern "C" {
+    fn __android_log_write(priority: c_int, tag: *const c_char, text: *const c_char) -> c_int;
+}
+
+#[cfg(target_os = "android")]
+unsafe extern "C" {
+    fn llama_log_set(
+        callback: Option<unsafe extern "C" fn(c_int, *const c_char, *mut c_void)>,
+        user_data: *mut c_void,
+    );
+}
+
+#[cfg(target_os = "android")]
+unsafe extern "C" fn android_llama_log(level: c_int, text: *const c_char, _user_data: *mut c_void) {
+    if text.is_null() {
+        return;
+    }
+    let priority = match level {
+        1 => 3,
+        2 => 4,
+        3 => 5,
+        4 => 6,
+        _ => 3,
+    };
+    const TAG: &[u8] = b"vifu-llama\0";
+    // SAFETY: llama.cpp supplies a NUL-terminated message for the duration of
+    // the callback and Android copies it before returning.
+    unsafe {
+        __android_log_write(priority, TAG.as_ptr().cast(), text);
+    }
+}
+
+#[cfg(target_os = "android")]
+fn configure_llama_logging() {
+    // SAFETY: the callback has the C ABI and remains valid for the process
+    // lifetime; it does not retain llama.cpp's temporary message pointer.
+    unsafe {
+        llama_log_set(Some(android_llama_log), std::ptr::null_mut());
+    }
+}
+
+#[cfg(not(target_os = "android"))]
+fn configure_llama_logging() {
+    send_logs_to_tracing(LogOptions::default());
+}
 
 #[derive(Clone)]
 pub struct LlamaProviderConfig {
@@ -240,6 +292,8 @@ pub enum LlamaProviderError {
     InvalidConfig(String),
     #[error("llama.cpp backend could not start: {0}")]
     Backend(String),
+    #[error("llama.cpp backend discovery failed: {0}")]
+    BackendDiscovery(String),
     #[error("GGUF model could not be loaded: {0}")]
     Model(String),
     #[error("multimodal projector file does not exist")]
@@ -280,14 +334,23 @@ pub struct LlamaProvider {
 
 impl LlamaProvider {
     pub fn load(config: LlamaProviderConfig) -> Result<Self, LlamaProviderError> {
-        Self::load_with_multimodal(config, None)
+        Self::load_with_options(config, None, None)
+    }
+
+    /// Loads a model after discovering dynamically linked GGML backends in `backend_directory`.
+    /// Static builds accept the same call and ignore the directory.
+    pub fn load_with_backend_directory(
+        config: LlamaProviderConfig,
+        backend_directory: &Path,
+    ) -> Result<Self, LlamaProviderError> {
+        Self::load_with_options(config, None, Some(backend_directory))
     }
 
     pub fn load_multimodal(
         config: LlamaProviderConfig,
         multimodal: LlamaMultimodalConfig,
     ) -> Result<Self, LlamaProviderError> {
-        Self::load_with_multimodal(config, Some(multimodal))
+        Self::load_with_options(config, Some(multimodal), None)
     }
 
     pub fn load_from_provider_config(
@@ -295,7 +358,7 @@ impl LlamaProvider {
         base_dir: &Path,
     ) -> Result<Self, LlamaProviderError> {
         let (config, multimodal) = provider_configs(value, base_dir)?;
-        Self::load_with_multimodal(config, multimodal)
+        Self::load_with_options(config, multimodal, None)
     }
 
     #[must_use]
@@ -303,14 +366,21 @@ impl LlamaProvider {
         self.multimodal.is_some()
     }
 
-    fn load_with_multimodal(
+    fn load_with_options(
         config: LlamaProviderConfig,
         multimodal: Option<LlamaMultimodalConfig>,
+        backend_directory: Option<&Path>,
     ) -> Result<Self, LlamaProviderError> {
         config.validate()?;
-        if !Path::new(&config.model_path).is_file() {
+        let model_path = Path::new(&config.model_path);
+        if !model_path.is_file() {
             return Err(LlamaProviderError::ModelNotFound);
         }
+        let model_diagnostics = model_file_diagnostics(model_path)?;
+        #[cfg(feature = "dynamic-backends")]
+        let backend_candidates = backend_directory
+            .map(backend_directory_diagnostics)
+            .transpose()?;
         if let Some(multimodal) = multimodal.as_ref() {
             multimodal.validate()?;
             if !multimodal.mmproj_path.is_file() {
@@ -320,7 +390,13 @@ impl LlamaProvider {
         let context_size =
             NonZeroU32::new(config.context_size).ok_or(LlamaProviderError::InvalidContextSize)?;
         let backend = match LLAMA_BACKEND.get_or_init(|| {
-            send_logs_to_tracing(LogOptions::default());
+            configure_llama_logging();
+            #[cfg(feature = "dynamic-backends")]
+            if let Some(directory) = backend_directory {
+                llama_cpp_2::llama_backend::load_backends_from_path(directory);
+            }
+            #[cfg(not(feature = "dynamic-backends"))]
+            let _ = backend_directory;
             LlamaBackend::init()
                 .map(Arc::new)
                 .map_err(|error| error.to_string())
@@ -328,10 +404,22 @@ impl LlamaProvider {
             Ok(backend) => Arc::clone(backend),
             Err(message) => return Err(LlamaProviderError::Backend(message.clone())),
         };
+        let backend_devices = list_llama_ggml_backend_devices();
+        #[cfg(feature = "dynamic-backends")]
+        if let (Some(candidates), true) = (backend_candidates, backend_devices.is_empty()) {
+            return Err(LlamaProviderError::BackendDiscovery(format!(
+                "[VIFU-LLAMA-BACKEND-002] no backend device was registered from the native library directory ({candidates}); install the baseline AAR or use a compatible optimized AAR"
+            )));
+        }
+        let backend_summary = backend_device_summary(&backend_devices);
         let model_params = LlamaModelParams::default().with_n_gpu_layers(config.gpu_layers);
         let model = Arc::new(
             LlamaModel::load_from_file(&backend, &config.model_path, &model_params)
-                .map_err(|error| LlamaProviderError::Model(error.to_string()))?,
+                .map_err(|error| {
+                    LlamaProviderError::Model(format!(
+                        "[VIFU-LLAMA-MODEL-003] {model_diagnostics}; backends: {backend_summary}; llama.cpp: {error}"
+                    ))
+                })?,
         );
         let multimodal = multimodal
             .map(|multimodal| {
@@ -368,6 +456,88 @@ impl LlamaProvider {
             multimodal,
         })
     }
+}
+
+fn model_file_diagnostics(path: &Path) -> Result<String, LlamaProviderError> {
+    let name = safe_file_name(path);
+    let metadata = std::fs::metadata(path).map_err(|error| {
+        LlamaProviderError::Model(format!(
+            "[VIFU-LLAMA-MODEL-001] cannot inspect '{name}': {error}"
+        ))
+    })?;
+    if metadata.len() == 0 {
+        return Err(LlamaProviderError::Model(format!(
+            "[VIFU-LLAMA-MODEL-002] '{name}' is empty"
+        )));
+    }
+    std::fs::File::open(path).map_err(|error| {
+        LlamaProviderError::Model(format!(
+            "[VIFU-LLAMA-MODEL-001] cannot read '{name}': {error}"
+        ))
+    })?;
+    Ok(format!("model '{name}' ({} bytes)", metadata.len()))
+}
+
+fn safe_file_name(path: &Path) -> String {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .unwrap_or("selected model")
+        .to_string()
+}
+
+#[cfg(feature = "dynamic-backends")]
+fn backend_directory_diagnostics(directory: &Path) -> Result<String, LlamaProviderError> {
+    if !directory.is_dir() {
+        return Err(LlamaProviderError::BackendDiscovery(
+            "[VIFU-LLAMA-BACKEND-001] native library directory is unavailable; install the baseline AAR or fix native library packaging"
+                .to_string(),
+        ));
+    }
+    let entries = std::fs::read_dir(directory).map_err(|error| {
+        LlamaProviderError::BackendDiscovery(format!(
+            "[VIFU-LLAMA-BACKEND-001] native library directory cannot be read: {error}"
+        ))
+    })?;
+    let candidates = entries
+        .filter_map(Result::ok)
+        .filter(|entry| is_backend_library(&entry.path()))
+        .count();
+    if candidates == 0 {
+        return Err(LlamaProviderError::BackendDiscovery(
+            "[VIFU-LLAMA-BACKEND-001] native library directory contains no GGML backend libraries; install the baseline AAR or fix native library packaging"
+                .to_string(),
+        ));
+    }
+    Ok(format!("{candidates} candidate libraries"))
+}
+
+#[cfg(feature = "dynamic-backends")]
+fn is_backend_library(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| {
+            name.starts_with("libggml-")
+                && (name.ends_with(".so") || name.ends_with(".dylib") || name.ends_with(".dll"))
+        })
+}
+
+fn backend_device_summary(devices: &[llama_cpp_2::LlamaBackendDevice]) -> String {
+    if devices.is_empty() {
+        return "none registered".to_string();
+    }
+    devices
+        .iter()
+        .map(|device| {
+            let name = if device.name.is_empty() {
+                "unnamed"
+            } else {
+                &device.name
+            };
+            format!("{}:{name}", device.backend)
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn provider_configs(
@@ -1733,6 +1903,29 @@ fn non_empty(value: String) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn model_diagnostics_do_not_expose_parent_directories() {
+        let path = Path::new("/private/app/data/models/lesson.gguf");
+
+        assert_eq!(safe_file_name(path), "lesson.gguf");
+    }
+
+    #[test]
+    fn backend_summary_reports_registered_devices() {
+        let devices = vec![llama_cpp_2::LlamaBackendDevice {
+            index: 0,
+            name: "CPU".to_string(),
+            description: "test CPU".to_string(),
+            backend: "CPU".to_string(),
+            memory_total: 0,
+            memory_free: 0,
+            device_type: llama_cpp_2::LlamaBackendDeviceType::Cpu,
+        }];
+
+        assert_eq!(backend_device_summary(&devices), "CPU:CPU");
+        assert_eq!(backend_device_summary(&[]), "none registered");
+    }
 
     #[tokio::test]
     async fn inference_slot_waits_until_the_current_request_finishes() {

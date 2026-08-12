@@ -279,4 +279,35 @@ mod tests {
         );
         let _ = std::fs::remove_file(path);
     }
+
+    #[test]
+    fn external_storage_recovers_when_authorization_metadata_is_missing() {
+        let path = std::env::temp_dir().join(format!(
+            "vifu-session-store-{}.sqlite",
+            uuid::Uuid::new_v4()
+        ));
+        let store = GatewaySessionStore::open(&path).unwrap();
+        let identity = MachineIdentity::generate().unwrap();
+        let session = SessionSummary::new(identity.clone(), 42).unwrap();
+        store
+            .persistence("android", GatewaySecretStorage::External)
+            .save(&session)
+            .unwrap();
+        let device_token = format!("vifu_gw_{}", "a".repeat(64));
+
+        let recovered = store
+            .load("android", Some(&identity), Some(&device_token))
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(
+            recovered.device_token.as_deref(),
+            Some(device_token.as_str())
+        );
+        assert_eq!(recovered.gateway_id, None);
+        assert_eq!(recovered.token_generation, None);
+        assert_eq!(recovered.token_expires_at, None);
+        assert_eq!(recovered.resume_session_id, None);
+        let _ = std::fs::remove_file(path);
+    }
 }
