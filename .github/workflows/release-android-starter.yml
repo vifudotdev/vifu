@@ -41,11 +41,14 @@ jobs:
         with:
           distribution: temurin
           java-version: "17"
-      - name: Install Android SDK 36
+      - name: Prepare Android SDK 36
         shell: bash
         run: |
-          yes | sdkmanager --licenses >/dev/null
-          sdkmanager "platforms;android-36" "build-tools;36.0.0"
+          test -n "${ANDROID_HOME:-}"
+          sdkmanager="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          test -x "$sdkmanager"
+          yes | "$sdkmanager" --licenses >/dev/null
+          "$sdkmanager" "platforms;android-36" "build-tools;36.0.0"
           test -n "${ANDROID_NDK_LATEST_HOME:-}"
           echo "ANDROID_NDK_HOME=$ANDROID_NDK_LATEST_HOME" >> "$GITHUB_ENV"
       - name: Build optimized and baseline APKs
@@ -63,7 +66,8 @@ jobs:
             -PvifuUseLocalCheckout=true \
             -PstarterVersionName="$version-optimized" \
             -PstarterVersionCode="$optimized_version_code"
-          apksigner verify --verbose app/build/outputs/apk/debug/app-debug.apk
+          "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --verbose \
+            app/build/outputs/apk/debug/app-debug.apk
           mkdir -p "$GITHUB_WORKSPACE/release-assets"
           cp app/build/outputs/apk/debug/app-debug.apk \
             "$GITHUB_WORKSPACE/release-assets/vifu-android-starter.apk"
@@ -73,7 +77,8 @@ jobs:
             -PvifuBackend=baseline \
             -PstarterVersionName="$version-baseline" \
             -PstarterVersionCode="$baseline_version_code"
-          apksigner verify --verbose app/build/outputs/apk/debug/app-debug.apk
+          "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --verbose \
+            app/build/outputs/apk/debug/app-debug.apk
           cp app/build/outputs/apk/debug/app-debug.apk \
             "$GITHUB_WORKSPACE/release-assets/vifu-android-starter-baseline.apk"
 
