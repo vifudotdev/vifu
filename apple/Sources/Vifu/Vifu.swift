@@ -756,7 +756,11 @@ public protocol VifuEmbeddedRuntimeProtocol: AnyObject, Sendable {
 
     func registerLlamaProvider(providerId: String, config: VifuLlamaProviderConfig) throws
 
+    func registerLlamaProviderWithBackends(providerId: String, config: VifuLlamaProviderConfig, backendLibraryDirectory: String) throws
+
     func registerProvider(providerId: String, provider: VifuAgentProvider) throws
+
+    func registerStreamingProvider(providerId: String, providerType: String, provider: VifuStreamingAgentProvider) throws
 
     func registerWhisperProvider(providerId: String, config: VifuWhisperProviderConfig) throws
 
@@ -769,6 +773,12 @@ public protocol VifuEmbeddedRuntimeProtocol: AnyObject, Sendable {
     func startInvoke(endpoint: String, sessionId: String, data: VifuInvocationData, metadataJson: String) throws  -> String
 
     func takeInvocation(handle: String) throws  -> VifuInvocationPoll
+
+    func unregisterAgent(agentId: String) throws  -> Bool
+
+    func unregisterEndpoint(name: String) throws  -> Bool
+
+    func unregisterProvider(providerId: String) throws  -> Bool
 
 }
 open class VifuEmbeddedRuntime: VifuEmbeddedRuntimeProtocol, @unchecked Sendable {
@@ -983,11 +993,31 @@ open func registerLlamaProvider(providerId: String, config: VifuLlamaProviderCon
 }
 }
 
+open func registerLlamaProviderWithBackends(providerId: String, config: VifuLlamaProviderConfig, backendLibraryDirectory: String)throws   {try rustCallWithError(FfiConverterTypeVifuRuntimeError_lift) {
+    uniffi_vifu_mobile_ffi_fn_method_vifuembeddedruntime_register_llama_provider_with_backends(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(providerId),
+        FfiConverterTypeVifuLlamaProviderConfig_lower(config),
+        FfiConverterString.lower(backendLibraryDirectory),$0
+    )
+}
+}
+
 open func registerProvider(providerId: String, provider: VifuAgentProvider)throws   {try rustCallWithError(FfiConverterTypeVifuRuntimeError_lift) {
     uniffi_vifu_mobile_ffi_fn_method_vifuembeddedruntime_register_provider(
             self.uniffiCloneHandle(),
         FfiConverterString.lower(providerId),
         FfiConverterCallbackInterfaceVifuAgentProvider_lower(provider),$0
+    )
+}
+}
+
+open func registerStreamingProvider(providerId: String, providerType: String, provider: VifuStreamingAgentProvider)throws   {try rustCallWithError(FfiConverterTypeVifuRuntimeError_lift) {
+    uniffi_vifu_mobile_ffi_fn_method_vifuembeddedruntime_register_streaming_provider(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(providerId),
+        FfiConverterString.lower(providerType),
+        FfiConverterCallbackInterfaceVifuStreamingAgentProvider_lower(provider),$0
     )
 }
 }
@@ -1047,6 +1077,33 @@ open func takeInvocation(handle: String)throws  -> VifuInvocationPoll  {
 })
 }
 
+open func unregisterAgent(agentId: String)throws  -> Bool  {
+    return try  FfiConverterBool.lift(try rustCallWithError(FfiConverterTypeVifuRuntimeError_lift) {
+    uniffi_vifu_mobile_ffi_fn_method_vifuembeddedruntime_unregister_agent(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(agentId),$0
+    )
+})
+}
+
+open func unregisterEndpoint(name: String)throws  -> Bool  {
+    return try  FfiConverterBool.lift(try rustCallWithError(FfiConverterTypeVifuRuntimeError_lift) {
+    uniffi_vifu_mobile_ffi_fn_method_vifuembeddedruntime_unregister_endpoint(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(name),$0
+    )
+})
+}
+
+open func unregisterProvider(providerId: String)throws  -> Bool  {
+    return try  FfiConverterBool.lift(try rustCallWithError(FfiConverterTypeVifuRuntimeError_lift) {
+    uniffi_vifu_mobile_ffi_fn_method_vifuembeddedruntime_unregister_provider(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(providerId),$0
+    )
+})
+}
+
 
 
 }
@@ -1090,6 +1147,172 @@ public func FfiConverterTypeVifuEmbeddedRuntime_lift(_ handle: UInt64) throws ->
 #endif
 public func FfiConverterTypeVifuEmbeddedRuntime_lower(_ value: VifuEmbeddedRuntime) -> UInt64 {
     return FfiConverterTypeVifuEmbeddedRuntime.lower(value)
+}
+
+
+
+
+
+
+public protocol VifuProviderInvocationProtocol: AnyObject, Sendable {
+
+    func activity()
+
+    func isCancelled()  -> Bool
+
+    func outputDelta(data: VifuInvocationData) throws
+
+    func stageCompleted(stage: VifuProviderStage, elapsedMs: UInt64, metadataJson: String) throws
+
+    func stageFailed(stage: VifuProviderStage, elapsedMs: UInt64, error: String, metadataJson: String) throws
+
+    func stageStarted(stage: VifuProviderStage, metadataJson: String) throws
+
+}
+open class VifuProviderInvocation: VifuProviderInvocationProtocol, @unchecked Sendable {
+    fileprivate let handle: UInt64
+
+    /// Used to instantiate a [FFIObject] without an actual handle, for fakes in tests, mostly.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public struct NoHandle {
+        public init() {}
+    }
+
+    // TODO: We'd like this to be `private` but for Swifty reasons,
+    // we can't implement `FfiConverter` without making this `required` and we can't
+    // make it `required` without making it `public`.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    required public init(unsafeFromHandle handle: UInt64) {
+        self.handle = handle
+    }
+
+    // This constructor can be used to instantiate a fake object.
+    // - Parameter noHandle: Placeholder value so we can have a constructor separate from the default empty one that may be implemented for classes extending [FFIObject].
+    //
+    // - Warning:
+    //     Any object instantiated with this constructor cannot be passed to an actual Rust-backed object. Since there isn't a backing handle the FFI lower functions will crash.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public init(noHandle: NoHandle) {
+        self.handle = 0
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public func uniffiCloneHandle() -> UInt64 {
+        return try! rustCall { uniffi_vifu_mobile_ffi_fn_clone_vifuproviderinvocation(self.handle, $0) }
+    }
+    // No primary constructor declared for this class.
+
+    deinit {
+        try! rustCall { uniffi_vifu_mobile_ffi_fn_free_vifuproviderinvocation(handle, $0) }
+    }
+
+
+
+
+open func activity()  {try! rustCall() {
+    uniffi_vifu_mobile_ffi_fn_method_vifuproviderinvocation_activity(
+            self.uniffiCloneHandle(),$0
+    )
+}
+}
+
+open func isCancelled() -> Bool  {
+    return try!  FfiConverterBool.lift(try! rustCall() {
+    uniffi_vifu_mobile_ffi_fn_method_vifuproviderinvocation_is_cancelled(
+            self.uniffiCloneHandle(),$0
+    )
+})
+}
+
+open func outputDelta(data: VifuInvocationData)throws   {try rustCallWithError(FfiConverterTypeVifuRuntimeError_lift) {
+    uniffi_vifu_mobile_ffi_fn_method_vifuproviderinvocation_output_delta(
+            self.uniffiCloneHandle(),
+        FfiConverterTypeVifuInvocationData_lower(data),$0
+    )
+}
+}
+
+open func stageCompleted(stage: VifuProviderStage, elapsedMs: UInt64, metadataJson: String)throws   {try rustCallWithError(FfiConverterTypeVifuRuntimeError_lift) {
+    uniffi_vifu_mobile_ffi_fn_method_vifuproviderinvocation_stage_completed(
+            self.uniffiCloneHandle(),
+        FfiConverterTypeVifuProviderStage_lower(stage),
+        FfiConverterUInt64.lower(elapsedMs),
+        FfiConverterString.lower(metadataJson),$0
+    )
+}
+}
+
+open func stageFailed(stage: VifuProviderStage, elapsedMs: UInt64, error: String, metadataJson: String)throws   {try rustCallWithError(FfiConverterTypeVifuRuntimeError_lift) {
+    uniffi_vifu_mobile_ffi_fn_method_vifuproviderinvocation_stage_failed(
+            self.uniffiCloneHandle(),
+        FfiConverterTypeVifuProviderStage_lower(stage),
+        FfiConverterUInt64.lower(elapsedMs),
+        FfiConverterString.lower(error),
+        FfiConverterString.lower(metadataJson),$0
+    )
+}
+}
+
+open func stageStarted(stage: VifuProviderStage, metadataJson: String)throws   {try rustCallWithError(FfiConverterTypeVifuRuntimeError_lift) {
+    uniffi_vifu_mobile_ffi_fn_method_vifuproviderinvocation_stage_started(
+            self.uniffiCloneHandle(),
+        FfiConverterTypeVifuProviderStage_lower(stage),
+        FfiConverterString.lower(metadataJson),$0
+    )
+}
+}
+
+
+
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeVifuProviderInvocation: FfiConverter {
+    typealias FfiType = UInt64
+    typealias SwiftType = VifuProviderInvocation
+
+    public static func lift(_ handle: UInt64) throws -> VifuProviderInvocation {
+        return VifuProviderInvocation(unsafeFromHandle: handle)
+    }
+
+    public static func lower(_ value: VifuProviderInvocation) -> UInt64 {
+        return value.uniffiCloneHandle()
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> VifuProviderInvocation {
+        let handle: UInt64 = try readInt(&buf)
+        return try lift(handle)
+    }
+
+    public static func write(_ value: VifuProviderInvocation, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeVifuProviderInvocation_lift(_ handle: UInt64) throws -> VifuProviderInvocation {
+    return try FfiConverterTypeVifuProviderInvocation.lift(handle)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeVifuProviderInvocation_lower(_ value: VifuProviderInvocation) -> UInt64 {
+    return FfiConverterTypeVifuProviderInvocation.lower(value)
 }
 
 
@@ -1827,7 +2050,11 @@ public struct VifuProviderRequest: Equatable, Hashable {
     public var projectId: String
     public var endpoint: String
     public var sessionId: String
+    public var providerId: String
     public var agentId: String
+    public var agentName: String
+    public var agentCapabilities: [String]
+    public var agentMetadataJson: String
     public var capability: String
     public var data: VifuInvocationData
     public var metadataJson: String
@@ -1836,11 +2063,15 @@ public struct VifuProviderRequest: Equatable, Hashable {
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(projectId: String, endpoint: String, sessionId: String, agentId: String, capability: String, data: VifuInvocationData, metadataJson: String, stateJson: String, stateRevision: UInt64) {
+    public init(projectId: String, endpoint: String, sessionId: String, providerId: String, agentId: String, agentName: String, agentCapabilities: [String], agentMetadataJson: String, capability: String, data: VifuInvocationData, metadataJson: String, stateJson: String, stateRevision: UInt64) {
         self.projectId = projectId
         self.endpoint = endpoint
         self.sessionId = sessionId
+        self.providerId = providerId
         self.agentId = agentId
+        self.agentName = agentName
+        self.agentCapabilities = agentCapabilities
+        self.agentMetadataJson = agentMetadataJson
         self.capability = capability
         self.data = data
         self.metadataJson = metadataJson
@@ -1865,7 +2096,11 @@ public struct FfiConverterTypeVifuProviderRequest: FfiConverterRustBuffer {
                 projectId: FfiConverterString.read(from: &buf),
                 endpoint: FfiConverterString.read(from: &buf),
                 sessionId: FfiConverterString.read(from: &buf),
+                providerId: FfiConverterString.read(from: &buf),
                 agentId: FfiConverterString.read(from: &buf),
+                agentName: FfiConverterString.read(from: &buf),
+                agentCapabilities: FfiConverterSequenceString.read(from: &buf),
+                agentMetadataJson: FfiConverterString.read(from: &buf),
                 capability: FfiConverterString.read(from: &buf),
                 data: FfiConverterTypeVifuInvocationData.read(from: &buf),
                 metadataJson: FfiConverterString.read(from: &buf),
@@ -1878,7 +2113,11 @@ public struct FfiConverterTypeVifuProviderRequest: FfiConverterRustBuffer {
         FfiConverterString.write(value.projectId, into: &buf)
         FfiConverterString.write(value.endpoint, into: &buf)
         FfiConverterString.write(value.sessionId, into: &buf)
+        FfiConverterString.write(value.providerId, into: &buf)
         FfiConverterString.write(value.agentId, into: &buf)
+        FfiConverterString.write(value.agentName, into: &buf)
+        FfiConverterSequenceString.write(value.agentCapabilities, into: &buf)
+        FfiConverterString.write(value.agentMetadataJson, into: &buf)
         FfiConverterString.write(value.capability, into: &buf)
         FfiConverterTypeVifuInvocationData.write(value.data, into: &buf)
         FfiConverterString.write(value.metadataJson, into: &buf)
@@ -2477,6 +2716,106 @@ public func FfiConverterTypeVifuProbeStatus_lower(_ value: VifuProbeStatus) -> R
 }
 
 
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+
+public enum VifuProviderStage: Equatable, Hashable {
+
+    case queue
+    case load
+    case tokenize
+    case prefill
+    case firstToken
+    case decode
+    case validate
+
+
+
+}
+
+#if compiler(>=6)
+extension VifuProviderStage: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeVifuProviderStage: FfiConverterRustBuffer {
+    typealias SwiftType = VifuProviderStage
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> VifuProviderStage {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        case 1: return .queue
+
+        case 2: return .load
+
+        case 3: return .tokenize
+
+        case 4: return .prefill
+
+        case 5: return .firstToken
+
+        case 6: return .decode
+
+        case 7: return .validate
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: VifuProviderStage, into buf: inout [UInt8]) {
+        switch value {
+
+
+        case .queue:
+            writeInt(&buf, Int32(1))
+
+
+        case .load:
+            writeInt(&buf, Int32(2))
+
+
+        case .tokenize:
+            writeInt(&buf, Int32(3))
+
+
+        case .prefill:
+            writeInt(&buf, Int32(4))
+
+
+        case .firstToken:
+            writeInt(&buf, Int32(5))
+
+
+        case .decode:
+            writeInt(&buf, Int32(6))
+
+
+        case .validate:
+            writeInt(&buf, Int32(7))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeVifuProviderStage_lift(_ buf: RustBuffer) throws -> VifuProviderStage {
+    return try FfiConverterTypeVifuProviderStage.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeVifuProviderStage_lower(_ value: VifuProviderStage) -> RustBuffer {
+    return FfiConverterTypeVifuProviderStage.lower(value)
+}
+
+
 
 public enum VifuRuntimeError: Swift.Error, Equatable, Hashable, Foundation.LocalizedError {
 
@@ -2680,6 +3019,133 @@ public func FfiConverterCallbackInterfaceVifuAgentProvider_lift(_ handle: UInt64
 #endif
 public func FfiConverterCallbackInterfaceVifuAgentProvider_lower(_ v: VifuAgentProvider) -> UInt64 {
     return FfiConverterCallbackInterfaceVifuAgentProvider.lower(v)
+}
+
+
+
+
+public protocol VifuStreamingAgentProvider: AnyObject, Sendable {
+
+    func invoke(request: VifuProviderRequest, invocation: VifuProviderInvocation) throws  -> VifuProviderResponse
+
+}
+
+
+// Put the implementation in a struct so we don't pollute the top-level namespace
+fileprivate struct UniffiCallbackInterfaceVifuStreamingAgentProvider {
+
+    // Create the VTable using a series of closures.
+    // Swift automatically converts these into C callback functions.
+    //
+    // This creates 1-element array, since this seems to be the only way to construct a const
+    // pointer that we can pass to the Rust code.
+    static let vtable: [UniffiVTableCallbackInterfaceVifuStreamingAgentProvider] = [UniffiVTableCallbackInterfaceVifuStreamingAgentProvider(
+        uniffiFree: { (uniffiHandle: UInt64) -> () in
+            do {
+                try FfiConverterCallbackInterfaceVifuStreamingAgentProvider.handleMap.remove(handle: uniffiHandle)
+            } catch {
+                print("Uniffi callback interface VifuStreamingAgentProvider: handle missing in uniffiFree")
+            }
+        },
+        uniffiClone: { (uniffiHandle: UInt64) -> UInt64 in
+            do {
+                return try FfiConverterCallbackInterfaceVifuStreamingAgentProvider.handleMap.clone(handle: uniffiHandle)
+            } catch {
+                fatalError("Uniffi callback interface VifuStreamingAgentProvider: handle missing in uniffiClone")
+            }
+        },
+        invoke: { (
+            uniffiHandle: UInt64,
+            request: RustBuffer,
+            invocation: UInt64,
+            uniffiOutReturn: UnsafeMutablePointer<RustBuffer>,
+            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+        ) in
+            let makeCall = {
+                () throws -> VifuProviderResponse in
+                guard let uniffiObj = try? FfiConverterCallbackInterfaceVifuStreamingAgentProvider.handleMap.get(handle: uniffiHandle) else {
+                    throw UniffiInternalError.unexpectedStaleHandle
+                }
+                return try uniffiObj.invoke(
+                     request: try FfiConverterTypeVifuProviderRequest_lift(request),
+                     invocation: try FfiConverterTypeVifuProviderInvocation_lift(invocation)
+                )
+            }
+
+
+            let writeReturn = { uniffiOutReturn.pointee = FfiConverterTypeVifuProviderResponse_lower($0) }
+            uniffiTraitInterfaceCallWithError(
+                callStatus: uniffiCallStatus,
+                makeCall: makeCall,
+                writeReturn: writeReturn,
+                lowerError: FfiConverterTypeVifuRuntimeError_lower
+            )
+        }
+    )]
+}
+
+private func uniffiCallbackInitVifuStreamingAgentProvider() {
+    uniffi_vifu_mobile_ffi_fn_init_callback_vtable_vifustreamingagentprovider(UniffiCallbackInterfaceVifuStreamingAgentProvider.vtable)
+}
+
+// FfiConverter protocol for callback interfaces
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterCallbackInterfaceVifuStreamingAgentProvider {
+    fileprivate static let handleMap = UniffiHandleMap<VifuStreamingAgentProvider>()
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+extension FfiConverterCallbackInterfaceVifuStreamingAgentProvider : FfiConverter {
+    typealias SwiftType = VifuStreamingAgentProvider
+    typealias FfiType = UInt64
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public static func lift(_ handle: UInt64) throws -> SwiftType {
+        try handleMap.get(handle: handle)
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        let handle: UInt64 = try readInt(&buf)
+        return try lift(handle)
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public static func lower(_ v: SwiftType) -> UInt64 {
+        return handleMap.insert(obj: v)
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public static func write(_ v: SwiftType, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(v))
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterCallbackInterfaceVifuStreamingAgentProvider_lift(_ handle: UInt64) throws -> VifuStreamingAgentProvider {
+    return try FfiConverterCallbackInterfaceVifuStreamingAgentProvider.lift(handle)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterCallbackInterfaceVifuStreamingAgentProvider_lower(_ v: VifuStreamingAgentProvider) -> UInt64 {
+    return FfiConverterCallbackInterfaceVifuStreamingAgentProvider.lower(v)
 }
 
 #if swift(>=5.8)
@@ -3047,7 +3513,13 @@ private let initializationResult: InitializationResult = {
     if (uniffi_vifu_mobile_ffi_checksum_method_vifuembeddedruntime_register_llama_provider() != 64019) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_vifu_mobile_ffi_checksum_method_vifuembeddedruntime_register_llama_provider_with_backends() != 25543) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_vifu_mobile_ffi_checksum_method_vifuembeddedruntime_register_provider() != 20943) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_vifu_mobile_ffi_checksum_method_vifuembeddedruntime_register_streaming_provider() != 11157) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_vifu_mobile_ffi_checksum_method_vifuembeddedruntime_register_whisper_provider() != 56163) {
@@ -3068,6 +3540,33 @@ private let initializationResult: InitializationResult = {
     if (uniffi_vifu_mobile_ffi_checksum_method_vifuembeddedruntime_take_invocation() != 12713) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_vifu_mobile_ffi_checksum_method_vifuembeddedruntime_unregister_agent() != 1977) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_vifu_mobile_ffi_checksum_method_vifuembeddedruntime_unregister_endpoint() != 31540) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_vifu_mobile_ffi_checksum_method_vifuembeddedruntime_unregister_provider() != 40438) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_vifu_mobile_ffi_checksum_method_vifuproviderinvocation_activity() != 63105) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_vifu_mobile_ffi_checksum_method_vifuproviderinvocation_is_cancelled() != 38701) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_vifu_mobile_ffi_checksum_method_vifuproviderinvocation_output_delta() != 43203) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_vifu_mobile_ffi_checksum_method_vifuproviderinvocation_stage_completed() != 27047) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_vifu_mobile_ffi_checksum_method_vifuproviderinvocation_stage_failed() != 46493) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_vifu_mobile_ffi_checksum_method_vifuproviderinvocation_stage_started() != 13496) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_vifu_mobile_ffi_checksum_constructor_vifuembeddedgateway_new() != 10979) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -3080,8 +3579,12 @@ private let initializationResult: InitializationResult = {
     if (uniffi_vifu_mobile_ffi_checksum_method_vifuagentprovider_invoke() != 55210) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_vifu_mobile_ffi_checksum_method_vifustreamingagentprovider_invoke() != 30832) {
+        return InitializationResult.apiChecksumMismatch
+    }
 
     uniffiCallbackInitVifuAgentProvider()
+    uniffiCallbackInitVifuStreamingAgentProvider()
     return InitializationResult.ok
 }()
 
