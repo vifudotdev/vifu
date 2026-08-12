@@ -2243,6 +2243,7 @@ mod tests {
             json!({
                 "deploymentId": uuid::Uuid::new_v4(),
                 "deployment": name,
+                "appId": format!("vifu_app_{}", "a".repeat(64)),
                 "projectId": uuid::Uuid::new_v4(),
                 "projectSlug": format!("project-{name}"),
                 "projectName": name,

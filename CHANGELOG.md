@@ -2,6 +2,19 @@
 
 All notable changes to Vifu are documented here.
 
+## 0.1.12 - 2026-08-12
+
+- Added App IDs and deployment enrollment across the Server, Gateway, TUI, and
+  Dashboard so embedded mobile Agents can pair with one Vifu project.
+- Added modular Android ARM64 runtime packages and a runnable Starter with
+  optimized and baseline llama.cpp backends, optional Whisper, and trace upload.
+- Added iOS and Godot iOS Starters and organized the mobile examples around
+  prebuilt evaluation paths and source projects.
+- Improved Gateway recovery, additive configuration compatibility, device
+  claiming, route refresh, and live trace retention.
+- Added the `cargo vifu` source-development command and host-neutral Console
+  packaging.
+
 ## 0.1.11 - 2026-08-08
 
 - Added topology-aware Runtime monitoring across local, self-hosted, and Cloud

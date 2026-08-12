@@ -110,14 +110,22 @@ jobs:
         run: cargo fmt --all --check
       - name: Test
         run: |
-          cargo test --workspace --locked --exclude vifu-provider-llama
+          cargo test --workspace --locked \
+            --exclude vifu-provider-llama \
+            --exclude vifu-mobile-ffi \
+            --exclude vifu-llama-ffi \
+            --exclude vifu-whisper-ffi
           cargo test --locked -p vifu-provider-llama
+          cargo test --locked -p vifu-mobile-ffi
+          cargo test --locked -p vifu-llama-ffi
+          cargo test --locked -p vifu-whisper-ffi
       - name: Topology protocol live matrix
+        id: topology
         env:
           VIFU_TOPOLOGY_REPORT_DIR: ${{ runner.temp }}/vifu-topology-live
         run: scripts/test-topologies.sh
       - name: Upload topology live-test report
-        if: always()
+        if: always() && steps.topology.outcome != 'skipped'
         uses: actions/upload-artifact@v7
         with:
           name: topology-live-test-report
@@ -290,10 +298,13 @@ jobs:
         with:
           distribution: temurin
           java-version: "17"
-      - name: Install Android SDK 36
+      - name: Prepare Android SDK 36
         run: |
-          yes | sdkmanager --licenses >/dev/null
-          sdkmanager "platforms;android-36" "build-tools;36.0.0"
+          test -n "${ANDROID_HOME:-}"
+          sdkmanager="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          test -x "$sdkmanager"
+          yes | "$sdkmanager" --licenses >/dev/null
+          "$sdkmanager" "platforms;android-36" "build-tools;36.0.0"
           test -n "${ANDROID_NDK_LATEST_HOME:-}"
           echo "ANDROID_NDK_HOME=$ANDROID_NDK_LATEST_HOME" >> "$GITHUB_ENV"
       - name: Build and inspect Android Maven artifacts
