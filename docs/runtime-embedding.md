@@ -160,7 +160,7 @@ Apple hosts use the equivalent `VifuEmbeddedRuntime` UniFFI object and implement
 bindings and JNI library, which follow the same contract. Android Core, llama,
 baseline llama, and Whisper are published as modular ARM64 Maven AARs. See the
 [`Vifu Android guide`](../integrations/android/README.md) and the
-[`Mobile Starter`](../examples/mobile-starter/README.md).
+[`mobile starter examples`](../examples/README.md).
 
 ## Connect An Embedded Runtime To Vifu Server
 

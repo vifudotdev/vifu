@@ -30,9 +30,10 @@ stable endpoints, Gateway transport, and traces.
 - [Gateway crate](../crates/vifu-gateway/README.md)
 - [VifuGodot for Apple hosts](../integrations/godot/apple/README.md)
 - [Mobile FFI for Apple and Android hosts](../crates/vifu-mobile-ffi/README.md)
-- [Mobile Starter for Android and iOS](../examples/mobile-starter/README.md)
+- [Runnable examples and mobile starters](../examples/README.md)
 - [Android Starter](../examples/android-starter/README.md)
-- [iOS Starter](../examples/ios-embedding/README.md)
+- [iOS Starter](../examples/ios-starter/README.md)
+- [Godot iOS Starter](../examples/godot-ios-starter/README.md)
 - [Android AAR reference](../integrations/android/README.md)
 
 ## Reference

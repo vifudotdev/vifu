@@ -164,5 +164,5 @@ VIFU_GODOT_MACOS_LIBGODOT_PATH=".build/libgodot/mac_libgodot.xcframework" \
 
 The focused tests use a fake Godot host to verify bidirectional frames,
 reconnection, and disconnection. Build the
-[`godot-ios-embedding`](../../../examples/godot-ios-embedding/) example on a
+[`godot-ios-starter`](../../../examples/godot-ios-starter/) example on a
 physical device to validate the libgodot runtime and rendering boundary.

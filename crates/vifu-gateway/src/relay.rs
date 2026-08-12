@@ -3698,7 +3698,7 @@ mod tests {
         let started = RuntimeMonitorEvent::InvocationStarted {
             trace_id: "trace-1".to_string(),
             invocation_id: "invocation-1".to_string(),
-            project_id: "ios-embedding".to_string(),
+            project_id: "ios-starter".to_string(),
             endpoint: "chat".to_string(),
             agent_id: "embedded-agent".to_string(),
             provider_id: "local-qwen".to_string(),

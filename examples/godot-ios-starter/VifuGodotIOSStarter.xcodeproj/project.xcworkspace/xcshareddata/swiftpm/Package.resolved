@@ -1,0 +1,42 @@
+{
+  "originHash" : "4cdd3cb8f5ff1a9b5137f880cb2e359729bd52e97440b4e4580f6472a5f8b6eb",
+  "pins" : [
+    {
+      "identity" : "swift-syntax",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/apple/swift-syntax",
+      "state" : {
+        "revision" : "2bc86522d115234d1f588efe2bcb4ce4be8f8b82",
+        "version" : "510.0.3"
+      }
+    },
+    {
+      "identity" : "swiftgodot",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/vifudotdev/SwiftGodot.git",
+      "state" : {
+        "revision" : "0ed15c08b71bd8ad0eae611f2c64d10c63f104df",
+        "version" : "4.5.1-vifu.1"
+      }
+    },
+    {
+      "identity" : "swiftgodotkit",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/vifudotdev/SwiftGodotKit.git",
+      "state" : {
+        "revision" : "6633cb9044400291ec56ad67552dddb34a3870e5",
+        "version" : "4.5.1-vifu.1"
+      }
+    },
+    {
+      "identity" : "vifu",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/vifudotdev/vifu.git",
+      "state" : {
+        "revision" : "0e2df5fbbc5f2a7aadde4315b2c3653e77fd92f4",
+        "version" : "0.1.11"
+      }
+    }
+  ],
+  "version" : 3
+}

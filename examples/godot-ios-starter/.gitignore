@@ -1,0 +1,12 @@
+DerivedData/
+.build/
+**/xcuserdata/
+VifuGodotIOSStarter/Resources/godot-ios-starter.pck
+VifuGodotIOSStarter/Resources/Models/*
+Godot/.godot/
+Godot/character.glb
+Godot/character.vrm
+Godot/character.vrm.import
+Godot/addons/Godot-MToon-Shader/
+Godot/addons/godot-lip-sync/
+Godot/addons/vrm/

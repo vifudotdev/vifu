@@ -34,7 +34,7 @@ Press `B` to open the Dashboard. The default Dashboard address is
 TUI.
 
 To run an on-device agent and inspect its inference stages on the same local
-network, continue with the [Mobile Starter](examples/mobile-starter/README.md).
+network, choose a platform in the [examples guide](examples/README.md).
 
 To run from a source checkout:
 
@@ -70,7 +70,8 @@ routes, and traces for each App.
 | Agent Providers | Built-in and configurable adapters | [Provider integrations](providers/README.md) |
 | Rust embedding | crates.io package | [Embed the Runtime](docs/runtime-embedding.md) |
 | Swift on iOS/macOS | SwiftPM package | [Apple application guide](docs/runtime-embedding.md#add-vifu-to-an-apple-application) |
-| Mobile Starter | Android release APK and iOS source/TestFlight path | [Run the Mobile Starter](examples/mobile-starter/README.md) |
+| Android Starter | Release APK and Kotlin source project | [Android Starter](examples/android-starter/README.md) |
+| iOS Starter | SwiftUI source and optional TestFlight beta | [iOS Starter](examples/ios-starter/README.md) |
 | Godot in an Apple host | VifuGodot SwiftPM package | [VifuGodot guide](integrations/godot/apple/README.md) |
 | Kotlin/Android | Modular Core, llama, and Whisper ARM64 Maven AARs | [Android Starter](examples/android-starter/README.md) |
 
@@ -98,9 +99,10 @@ routes, and traces for each App.
 - [vifu-gateway](crates/vifu-gateway/README.md)
 - [VifuGodot for Apple hosts](integrations/godot/apple/README.md)
 - [Mobile FFI for Apple and Android hosts](crates/vifu-mobile-ffi/README.md)
-- [Mobile Starter for Android and iOS](examples/mobile-starter/README.md)
+- [Runnable examples and mobile starters](examples/README.md)
 - [Android Starter](examples/android-starter/README.md)
-- [iOS Starter](examples/ios-embedding/README.md)
+- [iOS Starter](examples/ios-starter/README.md)
+- [Godot iOS Starter](examples/godot-ios-starter/README.md)
 - [Android AAR reference](integrations/android/README.md)
 
 #### Development

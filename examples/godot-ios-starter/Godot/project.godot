@@ -1,0 +1,26 @@
+[application]
+
+config/name="Vifu Godot iOS Starter"
+run/main_scene="res://main.tscn"
+
+[autoload]
+
+GlobalState="*res://global_state.gd"
+
+[display]
+
+window/size/viewport_width=750
+window/size/viewport_height=750
+window/stretch/mode="canvas_items"
+
+[vifu]
+
+bridge/debug_host="127.0.0.1"
+bridge/debug_ws_port=9876
+
+[rendering]
+
+renderer/rendering_method="mobile"
+renderer/rendering_method.mobile="mobile"
+textures/default_filters/use_nearest_mipmap_filter=false
+environment/defaults/default_clear_color=Color(0.055, 0.06, 0.075, 1)

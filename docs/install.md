@@ -27,7 +27,7 @@ On Windows:
 .\vifu.exe
 ```
 
-## Install the Mobile Starter
+## Install a mobile starter
 
 Use the release applications to verify an embedded mobile agent before opening
 the source projects:
@@ -40,8 +40,8 @@ the source projects:
 
 Both Starters can download the verified Qwen2.5 0.5B model, run chat locally,
 pair with the Vifu TUI, and upload performance traces to the developer
-computer. Follow the [Mobile Starter guide](../examples/mobile-starter/README.md)
-for pairing and the advanced source-build paths.
+computer. Use the [examples guide](../examples/README.md) to select a platform.
+Each platform guide contains pairing and source-build instructions.
 
 ## Build From Source
 

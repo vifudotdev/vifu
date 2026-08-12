@@ -51,7 +51,7 @@ jobs:
                 apple=true
                 android=true
                 ;;
-              Package.swift|apple/*|examples/ios-embedding/*|integrations/godot/apple/*|scripts/build-apple-package.sh)
+              Package.swift|apple/*|examples/ios-starter/*|examples/godot-ios-starter/*|integrations/godot/apple/*|scripts/build-apple-package.sh)
                 apple=true
                 ;;
               crates/vifu-llama-ffi/*|crates/vifu-whisper-ffi/*|examples/android-starter/*|integrations/android/*|scripts/build-android-package.sh|scripts/cmake/*)
@@ -207,8 +207,8 @@ jobs:
               build
           VIFU_SWIFT_LOCAL_ARTIFACT=target/vifu-apple-ci/VifuMobileFFI.xcframework \
             xcodebuild \
-              -project examples/ios-embedding/IOSEmbeddingDemo.xcodeproj \
-              -scheme IOSEmbeddingDemo \
+              -project examples/ios-starter/VifuIOSStarter.xcodeproj \
+              -scheme VifuIOSStarter \
               -destination "generic/platform=iOS" \
               -derivedDataPath "$RUNNER_TEMP/vifu-ios-starter-derived" \
               CODE_SIGNING_ALLOWED=NO \
@@ -246,7 +246,7 @@ jobs:
         with:
           name: mobile-ffi-apple-framework
           path: vifu-godot-workspace/vifu/target/vifu-apple-ci/VifuMobileFFI.xcframework
-      - name: Test VifuGodot package
+      - name: Test VifuGodot package and Starter
         working-directory: vifu-godot-workspace/vifu
         env:
           VIFU_GODOT_VIFU_PATH: ${{ github.workspace }}/vifu-godot-workspace/vifu
@@ -254,7 +254,16 @@ jobs:
           VIFU_GODOT_SWIFTGODOT_PATH: ${{ github.workspace }}/vifu-godot-workspace/libgodot/SwiftGodot
           SWIFTGODOTKIT_SWIFTGODOT_PATH: ${{ github.workspace }}/vifu-godot-workspace/libgodot/SwiftGodot
           VIFU_SWIFT_LOCAL_ARTIFACT: target/vifu-apple-ci/VifuMobileFFI.xcframework
-        run: swift test --package-path integrations/godot/apple
+        run: |
+          swift test --package-path integrations/godot/apple
+          xcodebuild \
+            -project examples/godot-ios-starter/VifuGodotIOSStarter.xcodeproj \
+            -scheme VifuGodotIOSStarter \
+            -destination "generic/platform=iOS" \
+            -derivedDataPath "$RUNNER_TEMP/vifu-godot-ios-starter-derived" \
+            CODE_SIGNING_ALLOWED=NO \
+            ONLY_ACTIVE_ARCH=YES \
+            build
 
   mobile-ffi-android:
     name: Mobile FFI (Android)
