@@ -179,111 +179,11 @@ jobs:
             ${{ runner.temp }}/dist/VifuMobileFFI.xcframework.zip.sha256
           if-no-files-found: error
 
-  android:
-    name: Android Maven packages
-    runs-on: ubuntu-latest
-    timeout-minutes: 45
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          persist-credentials: false
-          ref: ${{ inputs.release_tag || github.ref }}
-      - uses: dtolnay/rust-toolchain@1.95.0
-        with:
-          targets: aarch64-linux-android
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: android-maven-release
-      - uses: actions/setup-java@v5
-        with:
-          distribution: temurin
-          java-version: "17"
-      - name: Install Android SDK 36
-        run: |
-          yes | sdkmanager --licenses >/dev/null
-          sdkmanager "platforms;android-36" "build-tools;36.0.0"
-          test -n "${ANDROID_NDK_LATEST_HOME:-}"
-          echo "ANDROID_NDK_HOME=$ANDROID_NDK_LATEST_HOME" >> "$GITHUB_ENV"
-      - name: Build signed Android Starter APK
-        working-directory: examples/android-starter
-        env:
-          VIFU_ANDROID_STARTER_KEYSTORE_BASE64: ${{ secrets.VIFU_ANDROID_STARTER_KEYSTORE_BASE64 }}
-          VIFU_ANDROID_STARTER_KEYSTORE_PASSWORD: ${{ secrets.VIFU_ANDROID_STARTER_KEYSTORE_PASSWORD }}
-          VIFU_ANDROID_STARTER_KEY_ALIAS: ${{ secrets.VIFU_ANDROID_STARTER_KEY_ALIAS }}
-          VIFU_ANDROID_STARTER_KEY_PASSWORD: ${{ secrets.VIFU_ANDROID_STARTER_KEY_PASSWORD }}
-          VIFU_ANDROID_TEMP_DIR: ${{ runner.temp }}
-        run: |
-          version="${RELEASE_TAG#v}"
-          optimized_version_code=$((GITHUB_RUN_NUMBER * 2))
-          baseline_version_code=$((optimized_version_code + 1))
-          test -n "$version"
-          test -n "$VIFU_ANDROID_STARTER_KEYSTORE_BASE64"
-          test -n "$VIFU_ANDROID_STARTER_KEYSTORE_PASSWORD"
-          test -n "$VIFU_ANDROID_STARTER_KEY_ALIAS"
-          test -n "$VIFU_ANDROID_STARTER_KEY_PASSWORD"
-          export VIFU_ANDROID_STARTER_KEYSTORE="$RUNNER_TEMP/vifu-android-starter.jks"
-          printf '%s' "$VIFU_ANDROID_STARTER_KEYSTORE_BASE64" | base64 --decode > "$VIFU_ANDROID_STARTER_KEYSTORE"
-          chmod 600 "$VIFU_ANDROID_STARTER_KEYSTORE"
-          ./gradlew assembleRelease \
-            -PvifuUseLocalCheckout=true \
-            -PvifuVersion="$version" \
-            -PstarterVersionName="$version" \
-            -PstarterVersionCode="$optimized_version_code"
-          apksigner verify --verbose app/build/outputs/apk/release/app-release.apk
-          mkdir -p "$GITHUB_WORKSPACE/release-assets"
-          cp app/build/outputs/apk/release/app-release.apk \
-            "$GITHUB_WORKSPACE/release-assets/vifu-android-starter.apk"
-          ./gradlew clean assembleRelease \
-            -PvifuUseLocalCheckout=true \
-            -PvifuBackend=baseline \
-            -PvifuVersion="$version" \
-            -PstarterVersionName="$version" \
-            -PstarterVersionCode="$baseline_version_code"
-          apksigner verify --verbose app/build/outputs/apk/release/app-release.apk
-          cp app/build/outputs/apk/release/app-release.apk \
-            "$GITHUB_WORKSPACE/release-assets/vifu-android-starter-baseline.apk"
-          cd "$GITHUB_WORKSPACE/release-assets"
-          sha256sum vifu-android-starter*.apk > \
-            "vifu-android-starter-checksums.sha256"
-      - name: Build, sign, and publish Android packages
-        working-directory: integrations/android
-        env:
-          ORG_GRADLE_PROJECT_mavenCentralUsername: ${{ secrets.MAVEN_CENTRAL_USERNAME }}
-          ORG_GRADLE_PROJECT_mavenCentralPassword: ${{ secrets.MAVEN_CENTRAL_PASSWORD }}
-          ORG_GRADLE_PROJECT_signingInMemoryKey: ${{ secrets.MAVEN_SIGNING_KEY }}
-          ORG_GRADLE_PROJECT_signingInMemoryKeyPassword: ${{ secrets.MAVEN_SIGNING_PASSWORD }}
-          VIFU_ANDROID_TEMP_DIR: ${{ runner.temp }}
-        run: |
-          version="${RELEASE_TAG#v}"
-          test -n "$version"
-          test -n "$ORG_GRADLE_PROJECT_mavenCentralUsername"
-          test -n "$ORG_GRADLE_PROJECT_mavenCentralPassword"
-          test -n "$ORG_GRADLE_PROJECT_signingInMemoryKey"
-          test -n "$ORG_GRADLE_PROJECT_signingInMemoryKeyPassword"
-          ./gradlew publishToMavenCentral -PVERSION_NAME="$version"
-      - uses: actions/upload-artifact@v7
-        with:
-          name: android-maven-packages
-          path: |
-            integrations/android/vifu-android-core/build/outputs/aar/*.aar
-            integrations/android/vifu-android-llama/build/outputs/aar/*.aar
-            integrations/android/vifu-android-llama-baseline/build/outputs/aar/*.aar
-            integrations/android/vifu-android-whisper/build/outputs/aar/*.aar
-          if-no-files-found: error
-      - uses: actions/upload-artifact@v7
-        with:
-          name: android-starter-apk
-          path: |
-            release-assets/*.apk
-            release-assets/*.sha256
-          if-no-files-found: error
-
   publish:
     if: startsWith(github.ref, 'refs/tags/') || inputs.release_tag != ''
     needs:
       - build
       - apple
-      - android
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -302,8 +202,6 @@ jobs:
           dist/*.tar.gz.sha256
           dist/*.zip
           dist/*.zip.sha256
-          dist/*.apk
-          dist/vifu-android-starter-checksums.sha256
           --repo "$GITHUB_REPOSITORY"
           --verify-tag
           --generate-notes

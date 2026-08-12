@@ -33,8 +33,8 @@ Use the release applications to verify an embedded mobile agent before opening
 the source projects:
 
 - Android: install
-  [vifu-android-starter.apk](https://github.com/vifudotdev/vifu/releases/latest/download/vifu-android-starter.apk).
-  A baseline compatibility APK is available in the same release.
+  [vifu-android-starter.apk](https://github.com/vifudotdev/vifu/releases/download/android-starter-v0.1.0/vifu-android-starter.apk).
+  Install the baseline APK beside it to compare both backends on one device.
 - iPhone and iPad: install the Vifu iOS Starter if a beta has been shared with
   your TestFlight testing group, or use the advanced Xcode build path.
 

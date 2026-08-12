@@ -5,11 +5,26 @@ plugins {
     alias(libs.plugins.jetbrains.kotlin.android)
 }
 
+val useBuildTimePairing = providers.gradleProperty("vifuUseBuildTimePairing")
+    .map(String::toBoolean)
+    .getOrElse(false)
 val vifuProperties = Properties().apply {
-    rootProject.file("vifu.properties").takeIf { it.isFile }?.inputStream()?.use { load(it) }
+    if (useBuildTimePairing) {
+        rootProject.file("vifu.properties").takeIf { it.isFile }?.inputStream()?.use { load(it) }
+    }
 }
 
 val vifuBackend = providers.gradleProperty("vifuBackend").orNull ?: "optimized"
+val starterApplicationId = when (vifuBackend) {
+    "optimized" -> "dev.vifu.android.starter.optimized"
+    "baseline" -> "dev.vifu.android.starter.baseline"
+    else -> error("vifuBackend must be optimized or baseline")
+}
+val starterApplicationName = when (vifuBackend) {
+    "optimized" -> "Vifu Starter Optimized"
+    "baseline" -> "Vifu Starter Baseline"
+    else -> error("vifuBackend must be optimized or baseline")
+}
 val vifuArtifact = when (vifuBackend) {
     "optimized" -> "vifu-android-llama"
     "baseline" -> "vifu-android-llama-baseline"
@@ -32,13 +47,14 @@ android {
     compileSdk = providers.gradleProperty("VIFU_ANDROID_COMPILE_SDK").map(String::toInt).getOrElse(36)
 
     defaultConfig {
-        applicationId = "dev.vifu.android.starter"
+        applicationId = starterApplicationId
 
         minSdk = 33
         targetSdk = providers.gradleProperty("VIFU_ANDROID_TARGET_SDK").map(String::toInt).getOrElse(36)
 
         versionCode = starterVersionCode
         versionName = starterVersionName
+        manifestPlaceholders["vifuAppName"] = starterApplicationName
 
         ndk { abiFilters += "arm64-v8a" }
 

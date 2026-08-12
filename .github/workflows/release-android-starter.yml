@@ -1,0 +1,115 @@
+name: Release Android Starter
+
+on:
+  push:
+    tags:
+      - "android-starter-v*"
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Existing Android Starter tag to build and publish
+        required: true
+        type: string
+
+env:
+  RELEASE_TAG: ${{ inputs.release_tag || github.ref_name }}
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build demo APKs
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Validate release tag
+        shell: bash
+        run: |
+          [[ "$RELEASE_TAG" == android-starter-v* ]]
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          ref: ${{ inputs.release_tag || github.ref }}
+      - uses: dtolnay/rust-toolchain@1.95.0
+        with:
+          targets: aarch64-linux-android
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: android-starter-demo
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+      - name: Install Android SDK 36
+        shell: bash
+        run: |
+          yes | sdkmanager --licenses >/dev/null
+          sdkmanager "platforms;android-36" "build-tools;36.0.0"
+          test -n "${ANDROID_NDK_LATEST_HOME:-}"
+          echo "ANDROID_NDK_HOME=$ANDROID_NDK_LATEST_HOME" >> "$GITHUB_ENV"
+      - name: Build optimized and baseline APKs
+        working-directory: examples/android-starter
+        env:
+          VIFU_ANDROID_TEMP_DIR: ${{ runner.temp }}
+        shell: bash
+        run: |
+          version="${RELEASE_TAG#android-starter-v}"
+          optimized_version_code=$((GITHUB_RUN_NUMBER * 2))
+          baseline_version_code=$((optimized_version_code + 1))
+          test -n "$version"
+
+          ./gradlew assembleDebug \
+            -PvifuUseLocalCheckout=true \
+            -PstarterVersionName="$version-optimized" \
+            -PstarterVersionCode="$optimized_version_code"
+          apksigner verify --verbose app/build/outputs/apk/debug/app-debug.apk
+          mkdir -p "$GITHUB_WORKSPACE/release-assets"
+          cp app/build/outputs/apk/debug/app-debug.apk \
+            "$GITHUB_WORKSPACE/release-assets/vifu-android-starter.apk"
+
+          ./gradlew assembleDebug \
+            -PvifuUseLocalCheckout=true \
+            -PvifuBackend=baseline \
+            -PstarterVersionName="$version-baseline" \
+            -PstarterVersionCode="$baseline_version_code"
+          apksigner verify --verbose app/build/outputs/apk/debug/app-debug.apk
+          cp app/build/outputs/apk/debug/app-debug.apk \
+            "$GITHUB_WORKSPACE/release-assets/vifu-android-starter-baseline.apk"
+
+          cd "$GITHUB_WORKSPACE/release-assets"
+          sha256sum vifu-android-starter*.apk > \
+            vifu-android-starter-checksums.sha256
+      - uses: actions/upload-artifact@v7
+        with:
+          name: android-starter-apks
+          path: release-assets/*
+          if-no-files-found: error
+
+  publish:
+    name: Publish demo release
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: android-starter-apks
+          path: dist
+      - name: Publish Android Starter release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          version="${RELEASE_TAG#android-starter-v}"
+          gh release create "$RELEASE_TAG" \
+            dist/vifu-android-starter.apk \
+            dist/vifu-android-starter-baseline.apk \
+            dist/vifu-android-starter-checksums.sha256 \
+            --repo "$GITHUB_REPOSITORY" \
+            --verify-tag \
+            --prerelease \
+            --title "Vifu Android Starter $version" \
+            --notes "Install both APKs to compare the optimized and baseline backends on one ARM64 phone. Pair both applications with the same Vifu project, then compare their traces in the local TUI or Dashboard. These APKs use a test signature for direct device evaluation."

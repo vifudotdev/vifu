@@ -42,6 +42,6 @@ tasks.register("configureVifu") {
             setProperty("serverCertificateDerBase64", certificate)
             rootProject.file("vifu.properties").outputStream().use { store(it, null) }
         }
-        logger.lifecycle("Configured Vifu Android for $serverUrl")
+        logger.lifecycle("Configured the ignored Android Vifu connection file")
     }
 }

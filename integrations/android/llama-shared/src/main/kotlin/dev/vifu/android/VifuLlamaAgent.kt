@@ -188,22 +188,31 @@ class VifuLlamaAgent private constructor(
                 runtime.nativeLibraryDirectory(),
             )
             val bridge = LlamaProviderBridge(provider)
+            val buildProfile = VifuArtifactProfile.profile
+            val buildProfileId = when (buildProfile) {
+                VifuBuildProfile.ARM_OPTIMIZED -> "arm-optimized"
+                VifuBuildProfile.BASELINE -> "baseline"
+            }
+            val agentName = when (buildProfile) {
+                VifuBuildProfile.ARM_OPTIMIZED -> "Android llama (ARM optimized)"
+                VifuBuildProfile.BASELINE -> "Android llama (baseline)"
+            }
+            val agentMetadata = JSONObject().put("buildProfile", buildProfileId)
+            model.systemPrompt?.let {
+                agentMetadata.put(
+                    "persona",
+                    JSONObject().put("instructions", it),
+                )
+            }
             runtime.installProvider(
                 providerId = PROVIDER_ID,
                 providerType = "llama",
                 provider = bridge,
                 resource = bridge,
                 agentId = AGENT_ID,
-                agentName = "Android local llama",
+                agentName = agentName,
                 capabilities = listOf("chat"),
-                agentMetadataJson = model.systemPrompt
-                    ?.let {
-                        JSONObject().put(
-                            "persona",
-                            JSONObject().put("instructions", it),
-                        ).toString()
-                    }
-                    ?: "{}",
+                agentMetadataJson = agentMetadata.toString(),
                 endpoint = ENDPOINT,
                 endpointCapability = "chat",
                 timeoutMs = TIMEOUT_MS,

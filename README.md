@@ -26,6 +26,10 @@
 ./vifu
 ```
 
+4. Install the
+   [optimized Android Starter APK](https://github.com/vifudotdev/vifu/releases/download/android-starter-v0.1.0/vifu-android-starter.apk).
+   You can also [build the Starter from source](examples/android-starter/README.md#build-from-source).
+
 Vifu creates a local Runtime profile and opens the Runtime TUI. It stores local
 state in SQLite under `~/.vifu`.
 
@@ -33,8 +37,11 @@ Press `B` to open the Dashboard. The default Dashboard address is
 `http://127.0.0.1:6790`. Vifu continues to serve requests until you stop the
 TUI.
 
-To run an on-device agent and inspect its inference stages on the same local
-network, choose a platform in the [examples guide](examples/README.md).
+Pair the Android Starter with Vifu to inspect its inference stages. Install the
+[baseline APK](https://github.com/vifudotdev/vifu/releases/download/android-starter-v0.1.0/vifu-android-starter-baseline.apk)
+beside the optimized APK. Pair both applications with the same Vifu project to
+compare their traces on one device. Use a new one-time pairing code for each
+application. For iOS and other integrations, use the [examples guide](examples/README.md).
 
 To run from a source checkout:
 

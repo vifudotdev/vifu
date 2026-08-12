@@ -1,34 +1,27 @@
 # Vifu release artifacts
 
-The `release-binaries.yml` workflow builds the Vifu desktop archives, Apple
-Swift package artifact, Android Maven packages, and signed Android Starter APKs
-from a version tag.
+The `release-binaries.yml` workflow builds the Vifu desktop archives and Apple
+Swift package artifact from a version tag.
 
-## Android Starter signing
+The `release-android-starter.yml` workflow builds the Android Starter Demo from
+an `android-starter-v*` tag.
 
-Create one Android release keystore for `dev.vifu.android.starter` and retain it
-for every release. Store the keystore and passwords in the repository's GitHub
-Actions secrets. Configure these names:
+## Android Starter Demo
 
-- `VIFU_ANDROID_STARTER_KEYSTORE_BASE64`
-- `VIFU_ANDROID_STARTER_KEYSTORE_PASSWORD`
-- `VIFU_ANDROID_STARTER_KEY_ALIAS`
-- `VIFU_ANDROID_STARTER_KEY_PASSWORD`
-
-The workflow checks these values before it publishes the Android Maven
-packages. It never writes the keystore into a release artifact. After building,
-it runs `apksigner verify` and publishes:
+The workflow uses the Android debug signature and publishes:
 
 - `vifu-android-starter.apk`
 - `vifu-android-starter-baseline.apk`
 - `vifu-android-starter-checksums.sha256`
 
-The optimized APK receives an even version code. Its matching baseline APK
-receives the next version code so a user can install the compatibility build as
-an update. A later release's optimized build always has a higher version code.
+Each APK uses an independent application ID. A tester can install both APKs and
+compare their traces with the same Vifu project.
 
-The Android Maven publication continues to use its independent Maven Central
-credentials and signing key.
+The Demo workflow does not publish Maven packages. Source builds use the local
+Android integration through `-PvifuUseLocalCheckout=true`.
+
+The Demo signature is only for direct device evaluation. If a later Demo uses
+another signature, uninstall the old Demo before installation.
 
 ## Apple distribution
 
@@ -52,6 +45,4 @@ cd ../../examples/android-starter
 ./gradlew testDebugUnitTest assembleDebug -PvifuUseLocalCheckout=true
 ```
 
-Use a temporary signing certificate to exercise `assembleRelease` locally.
-Verify the resulting APK with the `apksigner` from Android SDK build tools. Do
-not use the temporary certificate for a published release.
+Use `apksigner verify` to inspect each APK before publication.

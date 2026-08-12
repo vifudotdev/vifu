@@ -12,14 +12,14 @@ embed Vifu in your own Android application.
 
 Requirements:
 
-- an ARM64 phone with Android 13 or later;
+- an ARM64 phone with Android 13 or later.
 - about 1.2 GiB of free storage during model setup.
 
 1. Download and extract the Vifu archive for your computer from the
    [latest release](https://github.com/vifudotdev/vifu/releases/latest).
-2. Download
-   [vifu-android-starter.apk](https://github.com/vifudotdev/vifu/releases/latest/download/vifu-android-starter.apk)
-   from the same release and install it on the phone.
+2. Download the
+   [optimized APK](https://github.com/vifudotdev/vifu/releases/download/android-starter-v0.1.0/vifu-android-starter.apk)
+   and install it on the phone.
 3. Open **Vifu Starter**. Choose **Download 469 MiB** to fetch the verified
    Qwen2.5 0.5B model, or import another GGUF.
 4. Send a message. The app stores the model on the phone and restores it on the
@@ -27,12 +27,20 @@ Requirements:
 
 The main APK uses Vifu's optimized ARM64 llama.cpp provider. If that provider
 cannot start on a specific phone, install the
-[baseline APK](https://github.com/vifudotdev/vifu/releases/latest/download/vifu-android-starter-baseline.apk).
-Both APKs expose the same app and saved data, so Android treats the baseline
-build as an update.
+[baseline APK](https://github.com/vifudotdev/vifu/releases/download/android-starter-v0.1.0/vifu-android-starter-baseline.apk).
+Android installs it beside the optimized APK. The launcher shows **Vifu Starter
+Optimized** and **Vifu Starter Baseline**. Pair both applications with the same
+Vifu project to compare their traces on one phone.
+
+Android isolates the data for each application. Download the model in both
+applications, or import the same GGUF into each application.
 
 Release checksums are in
-[vifu-android-starter-checksums.sha256](https://github.com/vifudotdev/vifu/releases/latest/download/vifu-android-starter-checksums.sha256).
+[vifu-android-starter-checksums.sha256](https://github.com/vifudotdev/vifu/releases/download/android-starter-v0.1.0/vifu-android-starter-checksums.sha256).
+
+These APKs use a test signature for direct device evaluation. They are not
+Google Play packages. If a future Demo uses another signature, uninstall both
+old Demo applications before installation.
 
 ## Pair and inspect
 
@@ -52,14 +60,17 @@ the app and paste the code. The app validates the one-time token and certificate
 pin, stores its device credential in Android Keystore, and reconnects on later
 launches.
 
+Create a new pairing code for the second application. Select the same Vifu
+project so both Agent traces appear together.
+
 The Dashboard QR is also available for camera-based application links. The
 copied native code is the reliable path for a local Server certificate because
 it carries the complete trust anchor.
 
 Run one chat turn. Success is visible in three places:
 
-- the app shows `Vifu: connected`;
-- the TUI lists `Android local llama`;
+- the app shows `Vifu: connected`.
+- the TUI lists `Android llama (ARM optimized)` or `Android llama (baseline)`.
 - the Dashboard shows the invocation model, stages, timings, and bounded
   errors.
 
@@ -73,34 +84,29 @@ the app.
 The source project is the advanced path. It requires Android SDK 36, an Android
 NDK, JDK 17, and `adb`.
 
-Build against the released Maven packages:
+Build from the Vifu checkout:
 
 ```bash
 cd examples/android-starter
-./gradlew installDebug
-```
-
-Build beside a Vifu checkout:
-
-```bash
 ./gradlew installDebug -PvifuUseLocalCheckout=true
 ```
 
 Use the baseline provider for a compatibility build:
 
 ```bash
-./gradlew installDebug -PvifuBackend=baseline
+./gradlew installDebug -PvifuUseLocalCheckout=true -PvifuBackend=baseline
 ```
 
 Add the independent Whisper provider when the host app needs transcription:
 
 ```bash
-./gradlew installDebug -PvifuWhisper=true
+./gradlew installDebug -PvifuUseLocalCheckout=true -PvifuWhisper=true
 ```
 
 The optional `configureVifu` task remains available for automated builds that
-bind a specific App ID and certificate at build time. The release APK uses
-runtime pairing, so end users do not need this task.
+bind a specific App ID and certificate at build time. Add
+`-PvifuUseBuildTimePairing=true` to that build. Normal source builds and the
+Demo APKs use runtime pairing and ignore `vifu.properties`.
 
 ## Minimal embedding API
 
