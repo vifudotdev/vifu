@@ -3,24 +3,38 @@
 	archiveVersion = 1;
 	classes = {
 	};
-	objectVersion = 77;
+	objectVersion = 60;
 	objects = {
 
 /* Begin PBXBuildFile section */
 		A30000000000000000000001 /* VifuGodot in Frameworks */ = {isa = PBXBuildFile; productRef = A3000000000000000000000D /* VifuGodot */; };
+		B30000000000000000000001 /* GodotEmbeddingViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = B30000000000000000000011 /* GodotEmbeddingViewModel.swift */; };
+		B30000000000000000000002 /* GodotEmbeddingView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B30000000000000000000012 /* GodotEmbeddingView.swift */; };
+		B30000000000000000000003 /* GatewayCodeScanner.swift in Sources */ = {isa = PBXBuildFile; fileRef = B30000000000000000000013 /* GatewayCodeScanner.swift */; };
+		B30000000000000000000004 /* RootView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B30000000000000000000014 /* RootView.swift */; };
+		B30000000000000000000005 /* GodotRuntimeStage.swift in Sources */ = {isa = PBXBuildFile; fileRef = B30000000000000000000015 /* GodotRuntimeStage.swift */; };
+		B30000000000000000000006 /* GodotEmbeddedRuntime.swift in Sources */ = {isa = PBXBuildFile; fileRef = B30000000000000000000016 /* GodotEmbeddedRuntime.swift */; };
+		B30000000000000000000007 /* GodotEmbed.swift in Sources */ = {isa = PBXBuildFile; fileRef = B30000000000000000000017 /* GodotEmbed.swift */; };
+		B30000000000000000000008 /* VifuGodotIOSStarterApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = B30000000000000000000018 /* VifuGodotIOSStarterApp.swift */; };
+		B30000000000000000000009 /* LocalModelStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = B30000000000000000000019 /* LocalModelStore.swift */; };
+		B3000000000000000000000A /* GatewayControlView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B3000000000000000000001A /* GatewayControlView.swift */; };
+		B3000000000000000000000B /* StarterRuntime.json in Resources */ = {isa = PBXBuildFile; fileRef = B3000000000000000000001B /* StarterRuntime.json */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
 		A10000000000000000000002 /* VifuGodotIOSStarter.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = VifuGodotIOSStarter.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		B30000000000000000000011 /* GodotEmbeddingViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GodotEmbeddingViewModel.swift; sourceTree = "<group>"; };
+		B30000000000000000000012 /* GodotEmbeddingView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GodotEmbeddingView.swift; sourceTree = "<group>"; };
+		B30000000000000000000013 /* GatewayCodeScanner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GatewayCodeScanner.swift; sourceTree = "<group>"; };
+		B30000000000000000000014 /* RootView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RootView.swift; sourceTree = "<group>"; };
+		B30000000000000000000015 /* GodotRuntimeStage.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GodotRuntimeStage.swift; sourceTree = "<group>"; };
+		B30000000000000000000016 /* GodotEmbeddedRuntime.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GodotEmbeddedRuntime.swift; sourceTree = "<group>"; };
+		B30000000000000000000017 /* GodotEmbed.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GodotEmbed.swift; sourceTree = "<group>"; };
+		B30000000000000000000018 /* VifuGodotIOSStarterApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VifuGodotIOSStarterApp.swift; sourceTree = "<group>"; };
+		B30000000000000000000019 /* LocalModelStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocalModelStore.swift; sourceTree = "<group>"; };
+		B3000000000000000000001A /* GatewayControlView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GatewayControlView.swift; sourceTree = "<group>"; };
+		B3000000000000000000001B /* StarterRuntime.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = StarterRuntime.json; sourceTree = "<group>"; };
 /* End PBXFileReference section */
-
-/* Begin PBXFileSystemSynchronizedRootGroup section */
-		A10000000000000000000003 /* VifuGodotIOSStarter */ = {
-			isa = PBXFileSystemSynchronizedRootGroup;
-			path = VifuGodotIOSStarter;
-			sourceTree = "<group>";
-		};
-/* End PBXFileSystemSynchronizedRootGroup section */
 
 /* Begin PBXFrameworksBuildPhase section */
 		A10000000000000000000004 /* Frameworks */ = {
@@ -34,6 +48,24 @@
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
+		A10000000000000000000003 /* VifuGodotIOSStarter */ = {
+			isa = PBXGroup;
+			children = (
+				B30000000000000000000011 /* GodotEmbeddingViewModel.swift */,
+				B30000000000000000000012 /* GodotEmbeddingView.swift */,
+				B30000000000000000000013 /* GatewayCodeScanner.swift */,
+				B30000000000000000000014 /* RootView.swift */,
+				B30000000000000000000015 /* GodotRuntimeStage.swift */,
+				B30000000000000000000016 /* GodotEmbeddedRuntime.swift */,
+				B30000000000000000000017 /* GodotEmbed.swift */,
+				B30000000000000000000018 /* VifuGodotIOSStarterApp.swift */,
+				B30000000000000000000019 /* LocalModelStore.swift */,
+				B3000000000000000000001A /* GatewayControlView.swift */,
+				B3000000000000000000001B /* StarterRuntime.json */,
+			);
+			path = VifuGodotIOSStarter;
+			sourceTree = "<group>";
+		};
 		A10000000000000000000005 = {
 			isa = PBXGroup;
 			children = (
@@ -65,9 +97,6 @@
 			);
 			dependencies = (
 			);
-			fileSystemSynchronizedGroups = (
-				A10000000000000000000003 /* VifuGodotIOSStarter */,
-			);
 			name = VifuGodotIOSStarter;
 			packageProductDependencies = (
 				A3000000000000000000000D /* VifuGodot */,
@@ -83,15 +112,16 @@
 			isa = PBXProject;
 			attributes = {
 				BuildIndependentTargetsInParallel = 1;
-				LastSwiftUpdateCheck = 2600;
-				LastUpgradeCheck = 2600;
+				LastSwiftUpdateCheck = 1540;
+				LastUpgradeCheck = 1540;
 				TargetAttributes = {
 					A10000000000000000000007 = {
-						CreatedOnToolsVersion = 26.0;
+						CreatedOnToolsVersion = 15.4;
 					};
 				};
 			};
 			buildConfigurationList = A1000000000000000000000C /* Build configuration list for PBXProject "VifuGodotIOSStarter" */;
+			compatibilityVersion = "Xcode 15.0";
 			developmentRegion = en;
 			hasScannedForEncodings = 0;
 			knownRegions = (
@@ -103,7 +133,6 @@
 			packageReferences = (
 				A3000000000000000000000E /* XCLocalSwiftPackageReference "../../integrations/godot/apple" */,
 			);
-			preferredProjectObjectVersion = 77;
 			productRefGroup = A10000000000000000000006 /* Products */;
 			projectDirPath = "";
 			projectRoot = "";
@@ -118,6 +147,7 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				B3000000000000000000000B /* StarterRuntime.json in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -128,6 +158,16 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				B30000000000000000000001 /* GodotEmbeddingViewModel.swift in Sources */,
+				B30000000000000000000002 /* GodotEmbeddingView.swift in Sources */,
+				B30000000000000000000003 /* GatewayCodeScanner.swift in Sources */,
+				B30000000000000000000004 /* RootView.swift in Sources */,
+				B30000000000000000000005 /* GodotRuntimeStage.swift in Sources */,
+				B30000000000000000000006 /* GodotEmbeddedRuntime.swift in Sources */,
+				B30000000000000000000007 /* GodotEmbed.swift in Sources */,
+				B30000000000000000000008 /* VifuGodotIOSStarterApp.swift in Sources */,
+				B30000000000000000000009 /* LocalModelStore.swift in Sources */,
+				B3000000000000000000000A /* GatewayControlView.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -226,7 +266,7 @@
 				SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD = YES;
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_STRICT_CONCURRENCY = complete;
-				SWIFT_VERSION = 6.0;
+				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = "1,2";
 			};
 			name = Debug;
@@ -268,7 +308,7 @@
 				SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD = YES;
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_STRICT_CONCURRENCY = complete;
-				SWIFT_VERSION = 6.0;
+				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = "1,2";
 			};
 			name = Release;

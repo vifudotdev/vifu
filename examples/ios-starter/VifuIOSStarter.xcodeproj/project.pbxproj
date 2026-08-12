@@ -3,24 +3,36 @@
 	archiveVersion = 1;
 	classes = {
 	};
-	objectVersion = 77;
+	objectVersion = 60;
 	objects = {
 
 /* Begin PBXBuildFile section */
 		A10000000000000000000001 /* Vifu in Frameworks */ = {isa = PBXBuildFile; productRef = A1000000000000000000000D /* Vifu */; };
+		B10000000000000000000001 /* EmbeddingViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000011 /* EmbeddingViewModel.swift */; };
+		B10000000000000000000002 /* VifuIOSStarterApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000012 /* VifuIOSStarterApp.swift */; };
+		B10000000000000000000003 /* EmbeddingView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000013 /* EmbeddingView.swift */; };
+		B10000000000000000000004 /* EmbeddedRuntime.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000014 /* EmbeddedRuntime.swift */; };
+		B10000000000000000000005 /* RuntimeStatusStage.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000015 /* RuntimeStatusStage.swift */; };
+		B10000000000000000000006 /* GatewayCodeScanner.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000016 /* GatewayCodeScanner.swift */; };
+		B10000000000000000000007 /* RootView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000017 /* RootView.swift */; };
+		B10000000000000000000008 /* LocalModelStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000018 /* LocalModelStore.swift */; };
+		B10000000000000000000009 /* GatewayControlView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000019 /* GatewayControlView.swift */; };
+		B1000000000000000000000A /* StarterRuntime.json in Resources */ = {isa = PBXBuildFile; fileRef = B1000000000000000000001A /* StarterRuntime.json */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
 		A10000000000000000000002 /* VifuIOSStarter.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = VifuIOSStarter.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		B10000000000000000000011 /* EmbeddingViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EmbeddingViewModel.swift; sourceTree = "<group>"; };
+		B10000000000000000000012 /* VifuIOSStarterApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VifuIOSStarterApp.swift; sourceTree = "<group>"; };
+		B10000000000000000000013 /* EmbeddingView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EmbeddingView.swift; sourceTree = "<group>"; };
+		B10000000000000000000014 /* EmbeddedRuntime.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EmbeddedRuntime.swift; sourceTree = "<group>"; };
+		B10000000000000000000015 /* RuntimeStatusStage.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RuntimeStatusStage.swift; sourceTree = "<group>"; };
+		B10000000000000000000016 /* GatewayCodeScanner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GatewayCodeScanner.swift; sourceTree = "<group>"; };
+		B10000000000000000000017 /* RootView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RootView.swift; sourceTree = "<group>"; };
+		B10000000000000000000018 /* LocalModelStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocalModelStore.swift; sourceTree = "<group>"; };
+		B10000000000000000000019 /* GatewayControlView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GatewayControlView.swift; sourceTree = "<group>"; };
+		B1000000000000000000001A /* StarterRuntime.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = StarterRuntime.json; sourceTree = "<group>"; };
 /* End PBXFileReference section */
-
-/* Begin PBXFileSystemSynchronizedRootGroup section */
-		A10000000000000000000003 /* VifuIOSStarter */ = {
-			isa = PBXFileSystemSynchronizedRootGroup;
-			path = VifuIOSStarter;
-			sourceTree = "<group>";
-		};
-/* End PBXFileSystemSynchronizedRootGroup section */
 
 /* Begin PBXFrameworksBuildPhase section */
 		A10000000000000000000004 /* Frameworks */ = {
@@ -34,6 +46,23 @@
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
+		A10000000000000000000003 /* VifuIOSStarter */ = {
+			isa = PBXGroup;
+			children = (
+				B10000000000000000000011 /* EmbeddingViewModel.swift */,
+				B10000000000000000000012 /* VifuIOSStarterApp.swift */,
+				B10000000000000000000013 /* EmbeddingView.swift */,
+				B10000000000000000000014 /* EmbeddedRuntime.swift */,
+				B10000000000000000000015 /* RuntimeStatusStage.swift */,
+				B10000000000000000000016 /* GatewayCodeScanner.swift */,
+				B10000000000000000000017 /* RootView.swift */,
+				B10000000000000000000018 /* LocalModelStore.swift */,
+				B10000000000000000000019 /* GatewayControlView.swift */,
+				B1000000000000000000001A /* StarterRuntime.json */,
+			);
+			path = VifuIOSStarter;
+			sourceTree = "<group>";
+		};
 		A10000000000000000000005 = {
 			isa = PBXGroup;
 			children = (
@@ -65,9 +94,6 @@
 			);
 			dependencies = (
 			);
-			fileSystemSynchronizedGroups = (
-				A10000000000000000000003 /* VifuIOSStarter */,
-			);
 			name = VifuIOSStarter;
 			packageProductDependencies = (
 				A1000000000000000000000D /* Vifu */,
@@ -83,15 +109,16 @@
 			isa = PBXProject;
 			attributes = {
 				BuildIndependentTargetsInParallel = 1;
-				LastSwiftUpdateCheck = 2600;
-				LastUpgradeCheck = 2600;
+				LastSwiftUpdateCheck = 1540;
+				LastUpgradeCheck = 1540;
 				TargetAttributes = {
 					A10000000000000000000007 = {
-						CreatedOnToolsVersion = 26.0;
+						CreatedOnToolsVersion = 15.4;
 					};
 				};
 			};
 			buildConfigurationList = A1000000000000000000000C /* Build configuration list for PBXProject "VifuIOSStarter" */;
+			compatibilityVersion = "Xcode 15.0";
 			developmentRegion = en;
 			hasScannedForEncodings = 0;
 			knownRegions = (
@@ -103,7 +130,6 @@
 			packageReferences = (
 				A1000000000000000000000E /* XCLocalSwiftPackageReference "../.." */,
 			);
-			preferredProjectObjectVersion = 77;
 			productRefGroup = A10000000000000000000006 /* Products */;
 			projectDirPath = "";
 			projectRoot = "";
@@ -118,6 +144,7 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				B1000000000000000000000A /* StarterRuntime.json in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -128,6 +155,15 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				B10000000000000000000001 /* EmbeddingViewModel.swift in Sources */,
+				B10000000000000000000002 /* VifuIOSStarterApp.swift in Sources */,
+				B10000000000000000000003 /* EmbeddingView.swift in Sources */,
+				B10000000000000000000004 /* EmbeddedRuntime.swift in Sources */,
+				B10000000000000000000005 /* RuntimeStatusStage.swift in Sources */,
+				B10000000000000000000006 /* GatewayCodeScanner.swift in Sources */,
+				B10000000000000000000007 /* RootView.swift in Sources */,
+				B10000000000000000000008 /* LocalModelStore.swift in Sources */,
+				B10000000000000000000009 /* GatewayControlView.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -226,7 +262,7 @@
 				SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD = YES;
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_STRICT_CONCURRENCY = complete;
-				SWIFT_VERSION = 6.0;
+				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = "1,2";
 			};
 			name = Debug;
@@ -268,7 +304,7 @@
 				SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD = YES;
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_STRICT_CONCURRENCY = complete;
-				SWIFT_VERSION = 6.0;
+				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = "1,2";
 			};
 			name = Release;
