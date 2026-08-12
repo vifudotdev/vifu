@@ -5,7 +5,7 @@ struct GodotEmbeddingView: View {
     @State private var viewModel: GodotEmbeddingViewModel
     @State private var showsGateway = false
 
-    init(modelURL: URL) {
+    @MainActor init(modelURL: URL) {
         _viewModel = State(initialValue: GodotEmbeddingViewModel(modelURL: modelURL))
     }
 

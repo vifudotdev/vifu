@@ -145,13 +145,8 @@ final class GodotEmbeddingViewModel {
         let requestMessages = Array(messages.dropLast())
 
         do {
-            let turn = try await runtime.reply(messages: requestMessages) { [weak self] delta in
-                await MainActor.run {
-                    guard let self,
-                          let index = self.messages.firstIndex(where: { $0.id == assistantID })
-                    else { return }
-                    self.messages[index].text += delta
-                }
+            let turn = try await runtime.reply(messages: requestMessages) { [self] delta in
+                await append(delta, to: assistantID)
             }
             if let index = messages.firstIndex(where: { $0.id == assistantID }) {
                 messages[index].text = turn.text
@@ -170,6 +165,11 @@ final class GodotEmbeddingViewModel {
     func stopSpeaking() {
         synthesizer.stopSpeaking(at: .immediate)
         activity = .idle
+    }
+
+    private func append(_ delta: String, to messageID: UUID) {
+        guard let index = messages.firstIndex(where: { $0.id == messageID }) else { return }
+        messages[index].text += delta
     }
 
     private func speak(_ text: String) {

@@ -5,7 +5,7 @@ struct EmbeddingView: View {
     @State private var viewModel: EmbeddingViewModel
     @State private var showsGateway = false
 
-    init(modelURL: URL) {
+    @MainActor init(modelURL: URL) {
         _viewModel = State(initialValue: EmbeddingViewModel(modelURL: modelURL))
     }
 
