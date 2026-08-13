@@ -1,7 +1,14 @@
 # Embed The Runtime
 
-The `vifu-runtime` crate is the portable Rust SDK for embedding Vifu directly
-inside an application.
+The `vifu-runtime` crate is the portable Rust core for embedding Vifu directly
+inside an application. Start with the task-based guide for your host:
+
+- [Python](get-started/python.md)
+- [TypeScript](get-started/typescript.md)
+- [Swift](get-started/swift.md)
+- [Kotlin](get-started/kotlin.md)
+- [Godot](get-started/godot.md)
+- [Rust](get-started/rust.md)
 
 ```toml
 [dependencies]

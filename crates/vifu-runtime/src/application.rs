@@ -4,12 +4,16 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
+#[cfg(not(target_arch = "wasm32"))]
 use std::thread::JoinHandle;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use tokio::sync::{mpsc, watch, Notify};
+#[cfg(not(target_arch = "wasm32"))]
+use tokio::sync::mpsc;
+use tokio::sync::{watch, Notify};
+use web_time::Instant;
 
 use crate::{
     EffectRequest, EffectResult, LocalProviderBinding, ProjectSettings, RuntimeManifest,
@@ -19,16 +23,23 @@ use crate::{
 const SNAPSHOT_VERSION: u32 = 1;
 const DEFAULT_TIMEOUT_MS: u64 = 30_000;
 const DEFAULT_EFFECT_LIMIT: usize = 64;
+#[cfg(not(target_arch = "wasm32"))]
 const MAX_IN_FLIGHT_INVOCATIONS: usize = 64;
 const MAX_RETAINED_INVOCATIONS: usize = 256;
 const MAX_RETAINED_INVOCATION_EVENTS: usize = 256;
 const MAX_COALESCED_EVENT_BYTES: usize = 64 * 1024;
+#[cfg(not(target_arch = "wasm32"))]
 const WORKER_QUEUE_CAPACITY: usize = 64;
 const MAX_RUNTIME_MONITOR_IO_BYTES: usize = 128 * 1024;
 
 /// A boxed provider future used by [`AgentProvider`].
+#[cfg(not(target_arch = "wasm32"))]
 pub type ProviderFuture<'a> =
     Pin<Box<dyn Future<Output = Result<ProviderResponse, RuntimeError>> + Send + 'a>>;
+
+#[cfg(target_arch = "wasm32")]
+pub type ProviderFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<ProviderResponse, RuntimeError>> + 'a>>;
 
 /// JSON or binary data passed through an embedded runtime invocation.
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
@@ -416,18 +427,37 @@ impl fmt::Debug for InvocationEvent {
 /// while their invocation is running.
 #[derive(Clone)]
 pub struct ProviderEventSink {
-    emit: Arc<dyn Fn(ProviderEvent) + Send + Sync>,
+    emit: Arc<dyn ProviderEventCallback>,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+trait ProviderEventCallback: Fn(ProviderEvent) + Send + Sync {}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl<T> ProviderEventCallback for T where T: Fn(ProviderEvent) + Send + Sync {}
+
+#[cfg(target_arch = "wasm32")]
+trait ProviderEventCallback: Fn(ProviderEvent) {}
+
+#[cfg(target_arch = "wasm32")]
+impl<T> ProviderEventCallback for T where T: Fn(ProviderEvent) {}
+
 impl ProviderEventSink {
-    fn new(emit: impl Fn(ProviderEvent) + Send + Sync + 'static) -> Self {
+    fn new(emit: impl ProviderEventCallback + 'static) -> Self {
         Self {
             emit: Arc::new(emit),
         }
     }
 
     /// Creates a sink that forwards every typed provider event to `emit`.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn from_fn(emit: impl Fn(ProviderEvent) + Send + Sync + 'static) -> Self {
+        Self::new(emit)
+    }
+
+    /// Creates a sink that forwards every typed provider event to `emit`.
+    #[cfg(target_arch = "wasm32")]
+    pub fn from_fn(emit: impl Fn(ProviderEvent) + 'static) -> Self {
         Self::new(emit)
     }
 
@@ -482,7 +512,19 @@ impl fmt::Debug for ProviderEventSink {
 /// Providers are registered dynamically by name. A provider may hold credentials
 /// internally, but credentials must never be placed in agent definitions,
 /// invocation metadata, snapshots, or returned trace attributes.
-pub trait AgentProvider: Send + Sync + 'static {
+#[cfg(not(target_arch = "wasm32"))]
+pub trait AgentProviderBounds: Send + Sync {}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl<T: Send + Sync> AgentProviderBounds for T {}
+
+#[cfg(target_arch = "wasm32")]
+pub trait AgentProviderBounds {}
+
+#[cfg(target_arch = "wasm32")]
+impl<T> AgentProviderBounds for T {}
+
+pub trait AgentProvider: AgentProviderBounds + 'static {
     fn supports(&self, capability: &str) -> bool;
 
     fn invoke<'a>(
@@ -1021,6 +1063,7 @@ struct InvocationRegistry {
 }
 
 impl InvocationRegistry {
+    #[cfg(not(target_arch = "wasm32"))]
     fn insert(
         &mut self,
         handle: InvocationHandle,
@@ -1347,20 +1390,22 @@ impl RuntimeCore {
         };
         let started = Instant::now();
         let (activity_sender, mut activity_receiver) = watch::channel(0_u64);
+        let provider_trace = Arc::new(Mutex::new(Vec::new()));
         let events = self.provider_event_sink(
             &InvocationHandle(invocation_id.clone()),
             trace_id,
             started,
             activity_sender,
             forwarded_events,
+            Arc::clone(&provider_trace),
         );
         let provider_call = provider.invoke_with_events(request, cancellation.clone(), events);
         tokio::pin!(provider_call);
         let idle_timeout = Duration::from_millis(endpoint.timeout_ms);
-        let idle_deadline = tokio::time::sleep(idle_timeout);
-        tokio::pin!(idle_deadline);
         let mut activity_open = true;
         let response = loop {
+            let idle_deadline = runtime_sleep(idle_timeout);
+            tokio::pin!(idle_deadline);
             tokio::select! {
                 biased;
                 _ = cancellation.cancelled() => return Err(RuntimeError::Cancelled),
@@ -1368,8 +1413,6 @@ impl RuntimeCore {
                 changed = activity_receiver.changed(), if activity_open => {
                     if changed.is_err() {
                         activity_open = false;
-                    } else {
-                        idle_deadline.as_mut().reset(tokio::time::Instant::now() + idle_timeout);
                     }
                 }
                 _ = &mut idle_deadline => {
@@ -1392,6 +1435,18 @@ impl RuntimeCore {
             .write()
             .map_err(|_| RuntimeError::Internal)?
             .insert(input.session_id.clone(), next_snapshot.clone());
+        let mut trace = provider_trace
+            .lock()
+            .map_err(|_| RuntimeError::Internal)?
+            .clone();
+        trace.push(InvocationTraceEvent {
+            name: "provider.invoke".to_string(),
+            status: "completed".to_string(),
+            duration_ms: duration_ms(started.elapsed()),
+            attributes: json!({
+                "endpoint": input.endpoint,
+            }),
+        });
         Ok(InvocationOutput {
             invocation_id,
             project_id: self.project_id.clone(),
@@ -1403,14 +1458,7 @@ impl RuntimeCore {
             data: response.data,
             metadata: response.metadata,
             snapshot: next_snapshot,
-            trace: vec![InvocationTraceEvent {
-                name: "provider.invoke".to_string(),
-                status: "completed".to_string(),
-                duration_ms: duration_ms(started.elapsed()),
-                attributes: json!({
-                    "endpoint": input.endpoint,
-                }),
-            }],
+            trace,
         })
     }
 
@@ -1459,6 +1507,7 @@ impl RuntimeCore {
         request_started: Instant,
         activity: watch::Sender<u64>,
         forwarded_events: ProviderEventSink,
+        provider_trace: Arc<Mutex<Vec<InvocationTraceEvent>>>,
     ) -> ProviderEventSink {
         let core = Arc::clone(self);
         let handle = handle.clone();
@@ -1467,6 +1516,37 @@ impl RuntimeCore {
             (forwarded_events.emit)(event.clone());
             if let Ok(mut invocations) = core.invocations.lock() {
                 invocations.push_provider_event(&handle, event.clone());
+            }
+            let trace_event = match &event {
+                ProviderEvent::StageCompleted {
+                    stage,
+                    elapsed_ms,
+                    metadata,
+                } => Some(InvocationTraceEvent {
+                    name: provider_stage_name(*stage).to_string(),
+                    status: "completed".to_string(),
+                    duration_ms: *elapsed_ms,
+                    attributes: metadata.clone(),
+                }),
+                ProviderEvent::StageFailed {
+                    stage,
+                    elapsed_ms,
+                    metadata,
+                    ..
+                } => Some(InvocationTraceEvent {
+                    name: provider_stage_name(*stage).to_string(),
+                    status: "failed".to_string(),
+                    duration_ms: *elapsed_ms,
+                    attributes: metadata.clone(),
+                }),
+                ProviderEvent::Activity
+                | ProviderEvent::OutputDelta { .. }
+                | ProviderEvent::StageStarted { .. } => None,
+            };
+            if let Some(trace_event) = trace_event {
+                if let Ok(mut trace) = provider_trace.lock() {
+                    trace.push(trace_event);
+                }
             }
             let (stage, status, elapsed_ms, metadata, error) = match event {
                 ProviderEvent::Activity => return,
@@ -1540,6 +1620,49 @@ impl RuntimeCore {
     }
 }
 
+fn provider_stage_name(stage: ProviderStage) -> &'static str {
+    match stage {
+        ProviderStage::Queue => "queue",
+        ProviderStage::Load => "load",
+        ProviderStage::Tokenize => "tokenize",
+        ProviderStage::Prefill => "prefill",
+        ProviderStage::FirstToken => "first_token",
+        ProviderStage::Decode => "decode",
+        ProviderStage::Validate => "validate",
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+async fn runtime_sleep(duration: Duration) {
+    tokio::time::sleep(duration).await;
+}
+
+#[cfg(target_arch = "wasm32")]
+async fn runtime_sleep(duration: Duration) {
+    use wasm_bindgen::JsCast;
+
+    let milliseconds = duration.as_millis().min(i32::MAX as u128) as i32;
+    let promise = js_sys::Promise::new(&mut |resolve, _reject| {
+        let global = js_sys::global();
+        let set_timeout = js_sys::Reflect::get(&global, &"setTimeout".into())
+            .ok()
+            .and_then(|value| value.dyn_into::<js_sys::Function>().ok());
+        if let Some(set_timeout) = set_timeout {
+            if let Ok(handle) = set_timeout.call2(&global, &resolve, &milliseconds.into()) {
+                let unref = js_sys::Reflect::get(&handle, &"unref".into())
+                    .ok()
+                    .and_then(|value| value.dyn_into::<js_sys::Function>().ok());
+                if let Some(unref) = unref {
+                    let _ = unref.call0(&handle);
+                }
+            }
+        } else {
+            let _ = resolve.call0(&wasm_bindgen::JsValue::UNDEFINED);
+        }
+    });
+    let _ = wasm_bindgen_futures::JsFuture::from(promise).await;
+}
+
 fn runtime_monitor_io_summary(data: &InvocationData) -> RuntimeMonitorIoSummary {
     match data {
         InvocationData::Binary(bytes) => RuntimeMonitorIoSummary {
@@ -1606,6 +1729,7 @@ fn merge_invocation_data(previous: &mut InvocationData, next: &InvocationData) -
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 enum WorkerCommand {
     Start {
         handle: InvocationHandle,
@@ -1614,11 +1738,13 @@ enum WorkerCommand {
     },
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 struct RuntimeWorker {
     sender: Mutex<Option<mpsc::Sender<WorkerCommand>>>,
     thread: Mutex<Option<JoinHandle<()>>>,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl RuntimeWorker {
     fn spawn(core: Arc<RuntimeCore>) -> Result<Self, RuntimeError> {
         let (sender, mut receiver) = mpsc::channel(WORKER_QUEUE_CAPACITY);
@@ -1705,6 +1831,7 @@ impl RuntimeWorker {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl Drop for RuntimeWorker {
     fn drop(&mut self) {
         if let Ok(sender) = self.sender.get_mut() {
@@ -1726,6 +1853,7 @@ impl Drop for RuntimeWorker {
 #[derive(Clone)]
 pub struct VifuRuntime {
     core: Arc<RuntimeCore>,
+    #[cfg(not(target_arch = "wasm32"))]
     worker: Arc<Mutex<Option<RuntimeWorker>>>,
 }
 
@@ -1769,8 +1897,13 @@ impl VifuRuntime {
             monitor_observer: RwLock::new(None),
             monitor_io_observer: RwLock::new(None),
         });
+        #[cfg(not(target_arch = "wasm32"))]
         let worker = Arc::new(Mutex::new(None));
-        Ok(Self { core, worker })
+        Ok(Self {
+            core,
+            #[cfg(not(target_arch = "wasm32"))]
+            worker,
+        })
     }
 
     pub fn project_id(&self) -> &str {
@@ -2132,37 +2265,47 @@ impl VifuRuntime {
     }
 
     pub fn start_invoke(&self, input: InvocationInput) -> Result<InvocationHandle, RuntimeError> {
-        validate_identifier("endpoint", &input.endpoint)?;
-        validate_identifier("session", &input.session_id)?;
-        let handle = InvocationHandle(self.core.next_invocation_id());
-        let cancellation = CancellationToken::default();
-        let mut worker = self.worker.lock().map_err(|_| RuntimeError::Internal)?;
-        if worker.is_none() {
-            *worker = Some(RuntimeWorker::spawn(Arc::clone(&self.core))?);
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = input;
+            return Err(RuntimeError::InvalidDefinition(
+                "background invocation polling is unavailable in WASM; use invoke".to_string(),
+            ));
         }
-        self.core
-            .invocations
-            .lock()
-            .map_err(|_| RuntimeError::Internal)?
-            .insert(handle.clone(), cancellation.clone())?;
-        let send_result =
-            worker
-                .as_ref()
-                .ok_or(RuntimeError::Internal)?
-                .send(WorkerCommand::Start {
-                    handle: handle.clone(),
-                    input,
-                    cancellation,
-                });
-        if let Err(error) = send_result {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            validate_identifier("endpoint", &input.endpoint)?;
+            validate_identifier("session", &input.session_id)?;
+            let handle = InvocationHandle(self.core.next_invocation_id());
+            let cancellation = CancellationToken::default();
+            let mut worker = self.worker.lock().map_err(|_| RuntimeError::Internal)?;
+            if worker.is_none() {
+                *worker = Some(RuntimeWorker::spawn(Arc::clone(&self.core))?);
+            }
             self.core
                 .invocations
                 .lock()
                 .map_err(|_| RuntimeError::Internal)?
-                .remove(&handle);
-            return Err(error);
+                .insert(handle.clone(), cancellation.clone())?;
+            let send_result =
+                worker
+                    .as_ref()
+                    .ok_or(RuntimeError::Internal)?
+                    .send(WorkerCommand::Start {
+                        handle: handle.clone(),
+                        input,
+                        cancellation,
+                    });
+            if let Err(error) = send_result {
+                self.core
+                    .invocations
+                    .lock()
+                    .map_err(|_| RuntimeError::Internal)?
+                    .remove(&handle);
+                return Err(error);
+            }
+            Ok(handle)
         }
-        Ok(handle)
     }
 
     pub fn poll_invocation(
@@ -2562,6 +2705,22 @@ mod tests {
                 .expect("endpoint should invoke");
             assert_eq!(output.capability, capability);
         }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn invocation_result_includes_completed_provider_stages() {
+        let runtime = configured_runtime(Arc::new(StreamingTestProvider));
+
+        let output = runtime
+            .invoke(InvocationInput::json("chat", json!({})))
+            .await
+            .expect("streaming provider should complete");
+
+        assert_eq!(output.trace[0].name, "tokenize");
+        assert_eq!(output.trace[0].status, "completed");
+        assert_eq!(output.trace[0].duration_ms, 2);
+        assert_eq!(output.trace[0].attributes, json!({ "inputTokens": 4 }));
+        assert_eq!(output.trace[1].name, "provider.invoke");
     }
 
     #[tokio::test(flavor = "current_thread")]

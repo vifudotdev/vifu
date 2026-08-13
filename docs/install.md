@@ -43,6 +43,22 @@ pair with the Vifu TUI, and upload performance traces to the developer
 computer. Use the [examples guide](../examples/README.md) to select a platform.
 Each platform guide contains pairing and source-build instructions.
 
+## Install An Embedded SDK
+
+Choose the task-based tutorial for the application host:
+
+- [Python](get-started/python.md): build the UniFFI package and native Rust library.
+- [TypeScript](get-started/typescript.md): build the Rust WebAssembly Runtime and native Gateway companion.
+- [Swift](get-started/swift.md): add the Vifu Swift package in Xcode.
+- [Kotlin](get-started/kotlin.md): add the modular Android AAR for each local Provider.
+- [Godot](get-started/godot.md): add VifuGodot to the Apple host.
+- [Rust](get-started/rust.md): add `vifu-runtime` to the Cargo application.
+
+Python and TypeScript use source-built packages in this revision. Their
+tutorials show the exact build and local installation path. Do not substitute
+an OpenAI HTTP client when the application needs embedded Runtime, Gateway, or
+Server control.
+
 ## Build From Source
 
 Use Cargo when you want to build from source.

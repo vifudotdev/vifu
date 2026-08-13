@@ -10,7 +10,7 @@
     "check": "bun run check:boundaries && bun run check:public && bun run typecheck",
     "check:boundaries": "node scripts/check-dashboard-boundaries.mjs",
     "check:public": "node scripts/check-public-repo.mjs",
-    "typecheck": "bun run --cwd packages/protocol typecheck && bun run --cwd packages/console typecheck && bun run build:packages && bun run --cwd npm-packages/dashboard typecheck",
+    "typecheck": "bun run --cwd packages/protocol typecheck && bun run --cwd packages/console typecheck && bun run --cwd npm-packages/sdk typecheck && bun run build:packages && bun run --cwd npm-packages/dashboard typecheck",
     "build:packages": "bun run --cwd packages/protocol build && bun run --cwd packages/console build",
     "build:console": "bun run build:packages && bun run --cwd npm-packages/dashboard build:embedded",
     "build": "bun run build:packages && bun run --cwd npm-packages/dashboard build",

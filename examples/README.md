@@ -20,3 +20,24 @@ also needs the engine lifecycle and Runtime Bridge.
 | Example | Purpose | External runtime |
 | --- | --- | --- |
 | [`macbook-agent-swarm`](macbook-agent-swarm/) | Compare local-provider settings under concurrent logical-agent load | Vifu CLI and a local Provider |
+
+## Language starters
+
+| Example | Embedded Runtime | What it proves |
+| --- | --- | --- |
+| [`python-starter`](python-starter/) | Rust through UniFFI | Python Provider registration, invocation, and local trace |
+| [`typescript-starter`](typescript-starter/) | Rust through WebAssembly | TypeScript Provider registration, invocation, and local trace |
+
+## Framework and model adapters
+
+| Example | Role of Vifu |
+| --- | --- |
+| [`google-adk-python`](google-adk-python/) | Expose a Vifu endpoint as an ADK Python function tool |
+| [`google-adk-typescript`](google-adk-typescript/) | Expose a Vifu endpoint as an ADK TypeScript `FunctionTool` |
+| [`foundry-local-python`](foundry-local-python/) | Wrap Foundry Local native streaming chat as a Vifu Provider |
+| [`foundry-local-typescript`](foundry-local-typescript/) | Wrap Foundry Local native streaming chat as a Vifu Provider |
+
+Each framework adapter has a focused fake-provider test. This verifies the
+Vifu boundary independently of model downloads and third-party credentials.
+Use the [language tutorials](../docs/get-started/README.md) for the common
+Runtime, Gateway, and tracing workflow.

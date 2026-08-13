@@ -3,7 +3,7 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 #[cfg(feature = "local-whisper")]
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use web_time::Instant;
 
 use reqwest::header::{HeaderMap, CONTENT_TYPE};
 use serde_json::{json, Value};
@@ -1178,7 +1178,13 @@ fn provider_url(base_url: &str, path: &str) -> Result<String, String> {
 }
 
 fn provider_http_client(timeout: Option<std::time::Duration>) -> Result<reqwest::Client, String> {
+    #[cfg(not(target_arch = "wasm32"))]
     let mut builder = reqwest::Client::builder().redirect(reqwest::redirect::Policy::none());
+    #[cfg(target_arch = "wasm32")]
+    let builder = reqwest::Client::builder();
+    #[cfg(target_arch = "wasm32")]
+    let _ = timeout;
+    #[cfg(not(target_arch = "wasm32"))]
     if let Some(timeout) = timeout {
         builder = builder.timeout(timeout);
     }

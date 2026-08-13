@@ -4140,12 +4140,16 @@ dependencies = [
  "bevy_app",
  "bevy_ecs",
  "hound",
+ "js-sys",
  "reqwest",
  "rusqlite",
  "serde",
  "serde_json",
  "sha2 0.11.0",
  "tokio",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-time",
  "whisper-rs",
 ]
 
@@ -4179,6 +4183,18 @@ dependencies = [
  "uuid",
  "vifu-gateway",
  "vifu-runtime",
+]
+
+[[package]]
+name = "vifu-wasm"
+version = "0.1.12"
+dependencies = [
+ "js-sys",
+ "serde",
+ "serde_json",
+ "vifu-runtime",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
 ]
 
 [[package]]

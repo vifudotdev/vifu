@@ -1,12 +1,13 @@
 # Vifu Documentation
 
-Vifu is an Agent Runtime in Rust for embedding and operating agents inside
-products. Product code owns domain state, UI, safety, and allowed actions;
-Vifu owns provider connections, agent identity, Project Settings, sessions,
-stable endpoints, Gateway transport, and traces.
+Vifu is an on-device Agent Runtime and local operations platform. Product code
+owns domain state, UI, safety, and allowed actions. Vifu owns Provider
+connections, Agent identity, Project Settings, sessions, stable endpoints,
+Gateway transport, and attributable traces.
 
 ## Start
 
+- [Build with Vifu in Python, TypeScript, Swift, Kotlin, Godot, or Rust](get-started/README.md)
 - [Install Vifu](install.md)
 - [Apps and App IDs](apps-and-app-ids.md)
 - [Runtime topology, monitoring, and Gateway enrollment](topology-and-pairing.md)
@@ -16,6 +17,7 @@ stable endpoints, Gateway transport, and traces.
 
 ## Operate
 
+- [Trace data, privacy, and performance comparisons](observability.md)
 - [Topology protocol live testing](topology-live-testing.md)
 - [ARM optimization TUI](arm-optimization-tui.md)
 - [Provider integrations](../providers/README.md)
@@ -26,6 +28,15 @@ stable endpoints, Gateway transport, and traces.
 ## Embed
 
 - [Embed the Runtime](runtime-embedding.md)
+- [Python tutorial](get-started/python.md)
+- [TypeScript tutorial](get-started/typescript.md)
+- [Swift tutorial](get-started/swift.md)
+- [Kotlin tutorial](get-started/kotlin.md)
+- [Godot tutorial](get-started/godot.md)
+- [Rust tutorial](get-started/rust.md)
+- [Framework and model integrations](integrations/README.md)
+- [Google ADK integration](integrations/google-adk.md)
+- [Foundry Local integration](integrations/foundry-local.md)
 - [Runtime API](https://docs.rs/vifu-runtime)
 - [Gateway crate](../crates/vifu-gateway/README.md)
 - [VifuGodot for Apple hosts](../integrations/godot/apple/README.md)

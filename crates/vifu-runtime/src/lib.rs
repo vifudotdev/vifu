@@ -51,12 +51,18 @@ pub use runtime::{
 #[cfg(feature = "sqlite")]
 pub use sqlite_store::SqliteRuntimeStore;
 
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn unix_time_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |duration| {
             u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
         })
+}
+
+#[cfg(target_arch = "wasm32")]
+pub(crate) fn unix_time_ms() -> u64 {
+    js_sys::Date::now().max(0.0) as u64
 }
 
 pub mod prelude {

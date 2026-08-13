@@ -46,7 +46,7 @@ for (const directory of sourceRoots.filter((root) => root.startsWith("crates/"))
 if (workspaceCrateDirectories.size === 0) {
   violations.push("Cargo.toml: workspace members must include at least one crates/* entry");
 }
-await enforceDirectoryAllowlist("npm-packages", new Set(["dashboard"]));
+await enforceDirectoryAllowlist("npm-packages", new Set(["dashboard", "sdk"]));
 await enforceDirectoryAllowlist("crates", workspaceCrateDirectories);
 
 for (const root of sourceRoots) {

@@ -4,14 +4,14 @@
 
 <div align="center">
 
-<b>Agent runtime in Rust.</b>
+<b>Build, connect, and inspect on-device AI agents.</b>
 
 [![Crates.io](https://img.shields.io/crates/v/vifu.svg)](https://crates.io/crates/vifu)
 [![Runtime API](https://docs.rs/vifu-runtime/badge.svg)](https://docs.rs/vifu-runtime)
 [![CI](https://github.com/vifudotdev/vifu/actions/workflows/ci.yml/badge.svg)](https://github.com/vifudotdev/vifu/actions/workflows/ci.yml)
 [![Discord](https://img.shields.io/badge/Discord-Join-5865F2?logo=discord&logoColor=white)](https://discord.com/invite/VdqqFwJbNE)
 
-[quick start](#quick-start) / [docs](docs/README.md) / [install](docs/install.md) / [topology](docs/topology-and-pairing.md) / [console](docs/embedded-console.md) / [providers](providers/README.md) / [embed](docs/runtime-embedding.md) / [self-host](docs/self-hosting.md) / [build](BUILD.md)
+[quick start](#quick-start) / [build with Vifu](docs/get-started/README.md) / [docs](docs/README.md) / [install](docs/install.md) / [traces](docs/observability.md) / [providers](providers/README.md) / [self-host](docs/self-hosting.md) / [build](BUILD.md)
 
 </div>
 
@@ -45,17 +45,20 @@ application. For iOS and other integrations, use the [examples guide](examples/R
 
 ## Description
 
-Vifu gives products stable endpoints for local and remote AI Agents. Product
-code owns the state, UI, safety rules, and allowed actions.
+Vifu is an on-device Agent Runtime and local operations platform. It gives
+applications stable endpoints for AI Agents that run across phones, computers,
+games, and embedded devices. Product code owns the UI, safety rules, and
+allowed actions.
 
 Vifu manages the provider connections, Agents, endpoints, sessions, keys,
 routes, and traces for each App.
 
 - Connect local or external Providers to named endpoints.
 - Call endpoints through an OpenAI-compatible HTTP API.
-- Inspect Agents and traces in the TUI or Console.
+- Inspect stages, latency, model identity, Agents, and devices in the TUI or Dashboard.
 - Embed the Rust Runtime in an application.
 - Connect an embedded Runtime to a Server through Agent Gateway.
+- Compare model, Provider, build, and device performance with attributable traces.
 - Import or export Project Settings as JSON.
 
 ## Available surfaces
@@ -66,6 +69,8 @@ routes, and traces for each App.
 | Self-host Server and Console | Docker Compose | [Self-host](docs/self-hosting.md) |
 | Agent Providers | Built-in and configurable adapters | [Provider integrations](providers/README.md) |
 | Rust embedding | crates.io package | [Embed the Runtime](docs/runtime-embedding.md) |
+| Python | Rust Runtime and Gateway through UniFFI | [Python tutorial](docs/get-started/python.md) |
+| TypeScript/Node.js | Rust Runtime through WebAssembly and native Gateway companion | [TypeScript tutorial](docs/get-started/typescript.md) |
 | Swift on iOS/macOS | SwiftPM package | [Apple application guide](docs/runtime-embedding.md#add-vifu-to-an-apple-application) |
 | Android Starter | Release APK and Kotlin source project | [Android Starter](examples/android-starter/README.md) |
 | iOS Starter | SwiftUI source and optional TestFlight beta | [iOS Starter](examples/ios-starter/README.md) |
@@ -75,6 +80,8 @@ routes, and traces for each App.
 ## Documentation
 
 - [Dashboard architecture](docs/dashboard-architecture.md)
+- [Build with Vifu in each language](docs/get-started/README.md)
+- [Understand and compare trace data](docs/observability.md)
 
 #### Use Vifu
 
@@ -86,12 +93,17 @@ routes, and traces for each App.
 - [Self-host with Docker](docs/self-hosting.md)
 - [Project Settings](docs/project-settings.md)
 - [Provider integrations](providers/README.md)
+- [Framework and model integrations](docs/integrations/README.md)
+- [Google ADK](docs/integrations/google-adk.md)
+- [Foundry Local](docs/integrations/foundry-local.md)
 - [Local llama Provider](providers/llama/README.md)
 - [Local Whisper Provider](providers/local-whisper/README.md)
 
 #### Embed Vifu
 
 - [Embed the Runtime](docs/runtime-embedding.md)
+- [Python SDK](sdk/python/README.md)
+- [TypeScript SDK](npm-packages/sdk/README.md)
 - [vifu-runtime API](https://docs.rs/vifu-runtime)
 - [vifu-gateway](crates/vifu-gateway/README.md)
 - [VifuGodot for Apple hosts](integrations/godot/apple/README.md)

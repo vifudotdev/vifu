@@ -1,0 +1,31 @@
+{
+  "name": "@vifu/sdk",
+  "version": "0.1.12",
+  "description": "Embed Vifu Runtime, Gateway, and Server controls in TypeScript and JavaScript.",
+  "type": "commonjs",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "require": "./dist/index.js",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "node scripts/test.mjs"
+  },
+  "keywords": [
+    "agents",
+    "on-device-ai",
+    "typescript",
+    "wasm"
+  ],
+  "license": "Apache-2.0"
+}

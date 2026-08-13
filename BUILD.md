@@ -168,6 +168,36 @@ then enter the same identity and deployment authorization rules.
 SQLx uses runtime-checked queries. SQLite lifecycle and restart tests always
 run. PostgreSQL integration is mandatory in CI.
 
+## Python And TypeScript SDKs
+
+Build and test the embedded Python SDK:
+
+```bash
+scripts/build-python-sdk.sh
+PYTHONPATH=target/python-sdk python3 -m unittest discover -s sdk/python/tests -v
+PYTHONPATH=target/python-sdk python3 examples/python-starter/main.py
+```
+
+Build and test the WebAssembly-backed TypeScript SDK:
+
+```bash
+bun run --cwd npm-packages/sdk build
+bun run --cwd npm-packages/sdk test
+bun examples/typescript-starter/main.ts
+```
+
+The framework adapter tests use protocol-faithful fake model clients. They do
+not download a model or require a third-party credential:
+
+```bash
+PYTHONPATH=target/python-sdk:examples/google-adk-python \
+  python3 examples/google-adk-python/test_vifu_tool.py
+PYTHONPATH=target/python-sdk:examples/foundry-local-python \
+  python3 examples/foundry-local-python/test_provider.py
+bun examples/google-adk-typescript/test.ts
+bun examples/foundry-local-typescript/test.ts
+```
+
 ## Apple Package
 
 The root `Package.swift` is the public SwiftPM manifest. It combines the tracked

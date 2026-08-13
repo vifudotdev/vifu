@@ -1,0 +1,22 @@
+[package]
+name = "vifu-wasm"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "WebAssembly bindings for embedding Vifu Runtime in JavaScript and TypeScript."
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+js-sys = "0.3"
+serde.workspace = true
+serde_json.workspace = true
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+vifu-runtime = { path = "../vifu-runtime", default-features = false }

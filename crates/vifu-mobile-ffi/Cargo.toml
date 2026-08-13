@@ -11,7 +11,7 @@ rust-version.workspace = true
 publish = false
 
 [lib]
-crate-type = ["staticlib", "cdylib"]
+crate-type = ["rlib", "staticlib", "cdylib"]
 name = "vifu_mobile_ffi"
 
 [dependencies]
@@ -32,6 +32,10 @@ local-whisper = ["vifu-gateway/local-whisper", "vifu-runtime/local-whisper"]
 [[bin]]
 name = "uniffi-bindgen"
 path = "uniffi-bindgen.rs"
+
+[[bin]]
+name = "vifu-sdk-gateway"
+path = "vifu-sdk-gateway.rs"
 
 [build-dependencies]
 uniffi = { workspace = true, features = ["build"] }
