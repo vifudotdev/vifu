@@ -230,6 +230,8 @@ function ProjectSectionView({
         project={project}
         keys={data.runtime.apiKeys}
         profiles={data.runtime.profiles}
+        bindings={data.runtime.bindings}
+        deployments={data.runtime.deployments}
         browserApiBaseUrl={browserApiBaseUrl}
       />
     );

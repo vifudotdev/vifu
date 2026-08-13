@@ -4386,7 +4386,8 @@ pub async fn list_openai_models(
                 ApiKeyAgentScope::Selected { profile_ids } => Some(profile_ids.as_slice()),
             };
             let agents =
-                db::list_public_agents(&state.pool, key.project_id, allowed_profile_ids).await?;
+                list_invocable_public_chat_agents(&state.pool, key.project_id, allowed_profile_ids)
+                    .await?;
             Ok(Json(json!({
                 "object": "list",
                 "data": agents.into_iter().map(|agent| json!({
@@ -4422,7 +4423,8 @@ pub async fn list_project_openai_models(
         }
     };
     let agents =
-        db::list_public_agents(&state.pool, project.project.id, allowed_profile_ids).await?;
+        list_invocable_public_chat_agents(&state.pool, project.project.id, allowed_profile_ids)
+            .await?;
     Ok(Json(json!({
         "object": "list",
         "data": agents.into_iter().map(|agent| json!({
@@ -4431,6 +4433,44 @@ pub async fn list_project_openai_models(
             "owned_by": "vifu",
         })).collect::<Vec<_>>()
     })))
+}
+
+async fn list_invocable_public_chat_agents(
+    storage: &db::Storage,
+    project_id: Uuid,
+    allowed_profile_ids: Option<&[Uuid]>,
+) -> Result<Vec<crate::models::PublicAgent>, ApiError> {
+    let agents = db::list_public_agents(storage, project_id, allowed_profile_ids).await?;
+    let mut invocable = Vec::with_capacity(agents.len());
+    for agent in agents {
+        if !agent
+            .capabilities
+            .iter()
+            .any(|capability| capability == "chat")
+        {
+            continue;
+        }
+        let route =
+            match db::resolve_profile_route(storage, project_id, &agent.slug, "chat", None, None)
+                .await
+            {
+                Ok(route) => route,
+                Err(ApiError::NotFound) => continue,
+                Err(error) => return Err(error),
+            };
+        if route.provider_type == "vifu-runtime" {
+            let Some(gateway_id) = profile_gateway_id(&route) else {
+                continue;
+            };
+            if !db::runtime_deployment_allows_remote_invocation(storage, project_id, &gateway_id)
+                .await?
+            {
+                continue;
+            }
+        }
+        invocable.push(agent);
+    }
+    Ok(invocable)
 }
 
 pub async fn list_project_agents(
@@ -5081,7 +5121,7 @@ async fn transcribe_profile_audio(
             )
             .await?
             {
-                return Err(ApiError::Forbidden);
+                return Err(ApiError::AgentDeploymentUnavailable);
             }
             let agent_id = route.resource_id.as_deref().ok_or_else(|| {
                 ApiError::Invalid(
@@ -6336,7 +6376,7 @@ async fn invoke_profile_chat(
                 )
                 .await?
             {
-                return Err(ApiError::Forbidden);
+                return Err(ApiError::AgentDeploymentUnavailable);
             }
             let agent_id = route.resource_id.as_deref().ok_or_else(|| {
                 ApiError::Invalid("Gateway capability is missing resourceId".to_string())
@@ -6440,7 +6480,7 @@ async fn invoke_profile_embedding(
             )
             .await?
             {
-                return Err(ApiError::Forbidden);
+                return Err(ApiError::AgentDeploymentUnavailable);
             }
             let agent_id = route.resource_id.as_deref().ok_or_else(|| {
                 ApiError::Invalid("embedding capability is missing resourceId".to_string())
@@ -8732,7 +8772,7 @@ fn generate_api_key() -> String {
 
 fn api_error_trace_status(error: &ApiError) -> &'static str {
     match error {
-        ApiError::AgentGatewayUnavailable => "unavailable",
+        ApiError::AgentGatewayUnavailable | ApiError::AgentDeploymentUnavailable => "unavailable",
         ApiError::Backpressure => "rejected",
         ApiError::Timeout => "timed_out",
         _ => "failed",
@@ -8756,8 +8796,9 @@ mod tests {
         agent_gateway_pairing, api_error_trace_status, apply_runtime_provider_configuration,
         chat_request_summary, chat_trace_request, embedding_request_summary, embedding_response,
         feedback_endpoint_permission_allowed, gateway_binding_config,
-        hydrate_trace_gateway_identities, invocation_json_response, merge_json_objects,
-        optional_feedback_message, optional_feedback_path, optional_feedback_text, patch_text,
+        hydrate_trace_gateway_identities, invocation_json_response,
+        list_invocable_public_chat_agents, merge_json_objects, optional_feedback_message,
+        optional_feedback_path, optional_feedback_text, patch_text,
         prepare_project_provider_assignment_with_secret_key, profile_slug, profile_timeout,
         project_slug, runtime_provider_generation, trace_model_parameters,
         validate_chat_completion_request, validate_embedding_request,
@@ -8770,6 +8811,97 @@ mod tests {
         ProfileCapabilityDraft,
     };
     use crate::ServerEndpointIdentity;
+
+    #[tokio::test]
+    async fn model_discovery_omits_a_profile_after_its_gateway_is_detached() {
+        let path = std::env::temp_dir().join(format!(
+            "vifu-detached-model-{}.sqlite",
+            uuid::Uuid::new_v4()
+        ));
+        let storage = crate::db::connect(&format!("sqlite://{}", path.display()), 5)
+            .await
+            .expect("SQLite should connect");
+        crate::db::migrate(&storage)
+            .await
+            .expect("SQLite should migrate");
+        let project_id = uuid::Uuid::new_v4();
+        crate::db::create_project(
+            &storage,
+            crate::db::NewProject {
+                id: project_id,
+                owner_user_id: None,
+                slug: "detached-model",
+                name: "Detached model",
+                description: None,
+                gateway_id: "gateway-old",
+                binding_ids: &[],
+            },
+        )
+        .await
+        .expect("project should be created");
+        let deployment = crate::db::list_runtime_deployments(&storage, project_id)
+            .await
+            .expect("deployments should list")
+            .into_iter()
+            .find(|deployment| deployment.is_primary)
+            .expect("primary deployment should exist");
+        crate::db::update_runtime_deployment(
+            &storage,
+            project_id,
+            &deployment.name,
+            crate::db::RuntimeDeploymentPatch {
+                config_sync_enabled: None,
+                trace_mode: None,
+                remote_invocation_enabled: Some(true),
+            },
+        )
+        .await
+        .expect("remote invocation should be enabled");
+        crate::db::ensure_discovered_binding(
+            &storage,
+            crate::db::NewDiscoveredBinding {
+                project_id,
+                gateway_id: "gateway-old",
+                agent_id: "android-chat",
+                agent_name: "Android chat",
+                provider_key: "android-llama",
+                runtime_provider_key: "android-llama",
+                provider_type: "vifu-runtime",
+            },
+        )
+        .await
+        .expect("discovered Agent should be imported");
+
+        assert_eq!(
+            list_invocable_public_chat_agents(&storage, project_id, None)
+                .await
+                .expect("models should list")
+                .len(),
+            1
+        );
+
+        crate::db::unassign_runtime_deployment_gateway(
+            &storage,
+            project_id,
+            deployment.id,
+            "gateway-old",
+        )
+        .await
+        .expect("Gateway should detach");
+
+        assert!(
+            list_invocable_public_chat_agents(&storage, project_id, None)
+                .await
+                .expect("models should list")
+                .is_empty()
+        );
+
+        match storage {
+            crate::db::Storage::Postgres(pool) => pool.close().await,
+            crate::db::Storage::Sqlite(pool) => pool.close().await,
+        }
+        std::fs::remove_file(path).expect("temporary SQLite database should be removable");
+    }
 
     #[test]
     fn runtime_provider_edits_compile_only_portable_settings_and_resources() {
@@ -9074,6 +9206,10 @@ mod tests {
         assert_eq!(api_error_trace_status(&ApiError::Timeout), "timed_out");
         assert_eq!(
             api_error_trace_status(&ApiError::AgentGatewayUnavailable),
+            "unavailable"
+        );
+        assert_eq!(
+            api_error_trace_status(&ApiError::AgentDeploymentUnavailable),
             "unavailable"
         );
         assert_eq!(api_error_trace_status(&ApiError::Backpressure), "rejected");

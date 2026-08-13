@@ -14,13 +14,15 @@ import {
   X,
 } from "lucide-react";
 import { RuntimeLink, useRuntimeConsoleHost, useRuntimeConsoleRouter } from "../host";
-import { inferenceApiBaseUrl } from "../inference-url";
+import { curlCommandForBaseUrl, inferenceApiBaseUrl } from "../inference-url";
 import type {
+  AgentBinding,
   AgentProfile,
   ApiKeyAgentScope,
   ApiKeyPermissions,
   ApiKeyRecord,
   RuntimeProject,
+  RuntimeDeployment,
 } from "../types";
 import { DeleteApiKeyButton, RevokeApiKeyButton } from "./runtime-actions";
 
@@ -37,18 +39,22 @@ export function ApiIntegrationsView({
   project,
   keys,
   profiles,
+  bindings,
+  deployments,
   browserApiBaseUrl,
 }: {
   project: RuntimeProject;
   keys: ApiKeyRecord[];
   profiles: AgentProfile[];
+  bindings: AgentBinding[];
+  deployments: RuntimeDeployment[];
   browserApiBaseUrl: string;
 }) {
   const [createdKeys, setCreatedKeys] = useState<ApiKeyRecord[]>([]);
-  const agentOptions = profiles
-    .filter((profile) => profile.projectId === project.id && !profile.archivedAt)
-    .map((profile) => ({ profileId: profile.id, name: profile.name, slug: profile.slug }))
-    .sort((left, right) => left.name.localeCompare(right.name));
+  const activeProjectProfiles = profiles.filter(
+    (profile) => profile.projectId === project.id && !profile.archivedAt,
+  );
+  const agentOptions = apiAgentOptions(project.id, profiles, bindings, deployments);
   const scopedKeys = [
     ...createdKeys.filter((createdKey) => !keys.some((key) => key.id === createdKey.id)),
     ...keys,
@@ -143,7 +149,7 @@ export function ApiIntegrationsView({
           </section>
         </div>
       ) : (
-        <ApiSetupEmpty projectSlug={project.slug} />
+        <ApiSetupEmpty projectSlug={project.slug} hasProfiles={activeProjectProfiles.length > 0} />
       )}
 
       <section className="api-integration-section api-keys-section">
@@ -262,13 +268,22 @@ function IntegrationSectionHeading({
   );
 }
 
-function ApiSetupEmpty({ projectSlug }: { projectSlug: string }) {
+function ApiSetupEmpty({ projectSlug, hasProfiles }: { projectSlug: string; hasProfiles: boolean }) {
   const host = useRuntimeConsoleHost();
   return (
     <section className="api-integration-section api-setup-empty">
       <Terminal aria-hidden="true" />
-      <div><strong>Add an agent to start</strong><span>Agents added to the app become models on this endpoint.</span></div>
-      <RuntimeLink className="secondary-button" href={host.projectSectionHref(projectSlug, "agents")}>Open Agents<ArrowRight aria-hidden="true" /></RuntimeLink>
+      {hasProfiles ? (
+        <>
+          <div><strong>Make an agent available</strong><span>Assign its Gateway to a deployment that allows remote calls.</span></div>
+          <RuntimeLink className="secondary-button" href={host.projectSectionHref(projectSlug, "deployments")}>Open Deployments<ArrowRight aria-hidden="true" /></RuntimeLink>
+        </>
+      ) : (
+        <>
+          <div><strong>Add an agent to start</strong><span>Agents added to the app become models on this endpoint.</span></div>
+          <RuntimeLink className="secondary-button" href={host.projectSectionHref(projectSlug, "agents")}>Open Agents<ArrowRight aria-hidden="true" /></RuntimeLink>
+        </>
+      )}
     </section>
   );
 }
@@ -800,12 +815,35 @@ function buildCodeExample(tab: CodeTab, baseUrl: string, model: string): string 
   return buildCurlExample(baseUrl, model);
 }
 
-function buildCurlExample(baseUrl: string, model: string, apiKey?: string): string {
+export function apiAgentOptions(
+  projectId: string,
+  profiles: AgentProfile[],
+  bindings: AgentBinding[],
+  deployments: RuntimeDeployment[],
+) {
+  const remotelyInvocableGatewayIds = new Set(
+    deployments
+      .filter((deployment) => deployment.projectId === projectId && deployment.remoteInvocationEnabled)
+      .flatMap((deployment) => deployment.gatewayIds),
+  );
+  return profiles
+    .filter((profile) => profile.projectId === projectId && !profile.archivedAt)
+    .filter((profile) => {
+      const binding = bindings.find((candidate) => candidate.profileId === profile.id);
+      return !binding
+        || binding.provider !== "vifu-runtime"
+        || remotelyInvocableGatewayIds.has(binding.gatewayId);
+    })
+    .map((profile) => ({ profileId: profile.id, name: profile.name, slug: profile.slug }))
+    .sort((left, right) => left.name.localeCompare(right.name));
+}
+
+export function buildCurlExample(baseUrl: string, model: string, apiKey?: string): string {
   const authHeader = apiKey
     ? shellQuote(`Authorization: Bearer ${apiKey}`)
     : '"Authorization: Bearer $VIFU_API_KEY"';
   return [
-    `curl ${shellQuote(`${baseUrl}/chat/completions`)} \\`,
+    `${curlCommandForBaseUrl(baseUrl)} ${shellQuote(`${baseUrl}/chat/completions`)} \\`,
     "  --request POST \\",
     `  --header ${authHeader} \\`,
     `  --header ${shellQuote("Content-Type: application/json")} \\`,

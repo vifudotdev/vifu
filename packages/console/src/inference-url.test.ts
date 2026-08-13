@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { chatCompletionsUrl, inferenceApiBaseUrl } from "./inference-url";
+import { chatCompletionsUrl, curlCommandForBaseUrl, inferenceApiBaseUrl } from "./inference-url";
 
 describe("inference API URLs", () => {
   it("uses the fixed OpenAI-compatible path without a project slug", () => {
@@ -18,5 +18,13 @@ describe("inference API URLs", () => {
     expect(chatCompletionsUrl("http://127.0.0.1:6790/?source=console#runtime")).toBe(
       "http://127.0.0.1:6790/v1/chat/completions",
     );
+  });
+
+  it("makes cURL work with a generated certificate on a LAN address", () => {
+    expect(curlCommandForBaseUrl("https://192.168.10.20:6790/v1")).toBe("curl --insecure");
+  });
+
+  it("keeps certificate verification for system-trusted HTTPS", () => {
+    expect(curlCommandForBaseUrl("https://api.vifu.dev/v1")).toBe("curl");
   });
 });

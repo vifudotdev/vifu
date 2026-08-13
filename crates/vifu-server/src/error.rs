@@ -26,6 +26,8 @@ pub enum ApiError {
     AgentGatewayCredentialRevoked,
     #[error("agent gateway is not available")]
     AgentGatewayUnavailable,
+    #[error("the agent is not assigned to a deployment that allows remote invocation")]
+    AgentDeploymentUnavailable,
     #[error("agent gateway is busy")]
     Backpressure,
     #[error("agent request timed out")]
@@ -65,6 +67,10 @@ impl IntoResponse for ApiError {
             Self::AgentGatewayUnavailable => {
                 (StatusCode::SERVICE_UNAVAILABLE, "AGENT_GATEWAY_UNAVAILABLE")
             }
+            Self::AgentDeploymentUnavailable => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "AGENT_DEPLOYMENT_UNAVAILABLE",
+            ),
             Self::Backpressure => (StatusCode::TOO_MANY_REQUESTS, "BACKPRESSURE"),
             Self::Timeout => (StatusCode::GATEWAY_TIMEOUT, "REQUEST_TIMEOUT"),
             Self::RuntimeNotPublished => (StatusCode::CONFLICT, "project_runtime_not_published"),
