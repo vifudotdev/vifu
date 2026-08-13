@@ -47,7 +47,9 @@ jobs:
           test -n "${ANDROID_HOME:-}"
           sdkmanager="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
           test -x "$sdkmanager"
+          set +o pipefail
           yes | "$sdkmanager" --licenses >/dev/null
+          set -o pipefail
           "$sdkmanager" "platforms;android-36" "build-tools;36.0.0"
           test -n "${ANDROID_NDK_LATEST_HOME:-}"
           echo "ANDROID_NDK_HOME=$ANDROID_NDK_LATEST_HOME" >> "$GITHUB_ENV"
