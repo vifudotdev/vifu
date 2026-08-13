@@ -2927,7 +2927,12 @@ fn agent_gateway_pairing(endpoint: &crate::ServerEndpointIdentity, token: &str) 
     let pairing_uri = endpoint
         .gateway_pairing_web_uri(token)
         .expect("generated Gateway enrollment token must be valid");
-    let qr_svg = qrcode::QrCode::new(pairing_uri.as_bytes())
+    let pairing_qr_uri = if endpoint.certificate_sha256.is_some() {
+        pairing_deep_link.as_str()
+    } else {
+        pairing_uri.as_str()
+    };
+    let qr_svg = qrcode::QrCode::new(pairing_qr_uri.as_bytes())
         .map(|code| {
             code.render::<qrcode::render::svg::Color<'_>>()
                 .min_dimensions(256, 256)
@@ -2941,6 +2946,7 @@ fn agent_gateway_pairing(endpoint: &crate::ServerEndpointIdentity, token: &str) 
         "certificateSha256": endpoint.certificate_sha256,
         "pairingUri": pairing_uri,
         "pairingDeepLink": pairing_deep_link,
+        "pairingQrUri": pairing_qr_uri,
         "pairingQrSvg": qr_svg,
         "pairingTerminalQr": terminal_qr,
     })
@@ -8709,6 +8715,7 @@ mod tests {
         assert_eq!(bridge.origin().ascii_serialization(), "https://vifu.ai");
         assert!(bridge.fragment().is_some());
         let deep_link = reqwest::Url::parse(pairing["pairingDeepLink"].as_str().unwrap()).unwrap();
+        assert_eq!(pairing["pairingQrUri"], pairing["pairingUri"]);
         let query = deep_link
             .query_pairs()
             .collect::<std::collections::HashMap<_, _>>();
@@ -8719,6 +8726,20 @@ mod tests {
         );
         assert!(!query.contains_key("certificate"));
         assert!(pairing["certificateDer"].is_null());
+    }
+
+    #[test]
+    fn pairing_uses_the_native_link_for_a_pinned_lan_server() {
+        let pairing = agent_gateway_pairing(
+            &ServerEndpointIdentity {
+                server_url: "https://192.0.2.20:6790".to_string(),
+                certificate_der_base64: Some("AQID".to_string()),
+                certificate_sha256: Some("synthetic-fingerprint".to_string()),
+            },
+            "vifu_ge_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        );
+
+        assert_eq!(pairing["pairingQrUri"], pairing["pairingDeepLink"]);
     }
 
     #[test]

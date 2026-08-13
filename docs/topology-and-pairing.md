@@ -95,9 +95,10 @@ from another Gateway does not close it.
 The QR keeps its exact terminal dimensions. If the window is too small, the TUI
 shows the required size.
 
-A Dashboard QR can contain an `https://vifu.ai/pair#...` bridge URL. A configured
-application-link bridge passes its URL fragment to the installed app as a
-`vifu://gateway/enroll?...` link.
+A Dashboard QR uses the native `vifu://gateway/enroll?...` link for a local
+Server with a pinned certificate. A Server with a system-trusted certificate
+uses the `https://vifu.ai/pair#...` application-link bridge. Both links contain
+the Server address from the current configuration.
 
 The Dashboard's **Copy pairing code** action copies the complete native
 `vifu://` payload, including the generated certificate and fingerprint for a
