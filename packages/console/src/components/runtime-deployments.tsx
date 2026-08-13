@@ -25,6 +25,7 @@ import type {
   RuntimeDeployment,
   RuntimeProject,
 } from "../types";
+import { DEVICE_STATUS_REFRESH_MS, useRuntimeLiveRefresh } from "./runtime-live-refresh";
 
 export type GatewayPairing = {
   serverUrl: string;
@@ -45,7 +46,7 @@ type Enrollment = {
 
 export const MAX_APPLY_POLL_ATTEMPTS = 6;
 export const ENROLLMENT_REFRESH_MS = 2_000;
-export const GATEWAY_STATUS_REFRESH_MS = 5_000;
+export const GATEWAY_STATUS_REFRESH_MS = DEVICE_STATUS_REFRESH_MS;
 
 export function nativeGatewayPairingCode(pairing: GatewayPairing): string {
   return pairing.pairingDeepLink;
@@ -115,6 +116,180 @@ export function gatewayDeploymentPresentation(
   };
 }
 
+export function primaryRuntimeDeployment(
+  deployments: RuntimeDeployment[],
+): RuntimeDeployment | undefined {
+  return deployments.find((deployment) => deployment.isPrimary) ?? deployments[0];
+}
+
+export function runtimeDeviceGatewayIds(
+  deployments: RuntimeDeployment[],
+  gateways: AgentGateway[],
+): string[] {
+  const gatewayIds = new Set(deployments.flatMap((deployment) => deployment.gatewayIds));
+  for (const gateway of gateways) gatewayIds.add(gateway.gatewayId);
+  return [...gatewayIds];
+}
+
+export function RuntimeDevicesView({
+  project,
+  deployments,
+  agentGateways,
+}: {
+  project: RuntimeProject;
+  deployments: RuntimeDeployment[];
+  agentGateways: AgentGateway[];
+}) {
+  const host = useRuntimeConsoleHost();
+  const router = useRuntimeConsoleRouter();
+  const [pendingGatewayId, setPendingGatewayId] = useState<string | null>(null);
+  const [message, setMessage] = useState<{ tone: "error" | "success"; text: string } | null>(null);
+  const gatewayIds = runtimeDeviceGatewayIds(deployments, agentGateways);
+  const devices = gatewayIds
+    .map((gatewayId) => ({
+      presentation: gatewayDeploymentPresentation(gatewayId, agentGateways),
+      deployments: deployments.filter((deployment) => deployment.gatewayIds.includes(gatewayId)),
+    }))
+    .sort((left, right) => gatewayConnectionRank(left.presentation.gateway?.status)
+      - gatewayConnectionRank(right.presentation.gateway?.status)
+      || left.presentation.name.localeCompare(right.presentation.name));
+  const connectedDevices = devices.filter(({ presentation }) => presentation.gateway?.status === "connected").length;
+
+  useRuntimeLiveRefresh(true);
+
+  async function revokeGateway(gatewayId: string, name: string) {
+    if (!window.confirm(`Revoke access for ${name}? The device will need to pair again.`)) return;
+    setPendingGatewayId(gatewayId);
+    setMessage(null);
+    try {
+      await host.request(`agent-gateways/${gatewayId}/revoke`, "POST");
+      setMessage({ tone: "success", text: `${name} access revoked.` });
+      router.refresh();
+    } catch (error) {
+      setMessage({ tone: "error", text: error instanceof Error ? error.message : "Device access could not be revoked." });
+    } finally {
+      setPendingGatewayId(null);
+    }
+  }
+
+  return (
+    <div className="devices-workbench">
+      <section className={`device-connect-rail${connectedDevices > 0 ? " has-devices" : ""}`}>
+        <div className="device-connect-copy">
+          <span className="device-connect-signal" aria-hidden="true"><i /></span>
+          <div>
+            <span>{connectedDevices > 0 ? "Device network" : "First connection"}</span>
+            <strong>{connectedDevices > 0 ? `${connectedDevices} ${connectedDevices === 1 ? "device" : "devices"} online` : "Pair your first device"}</strong>
+            <p>{connectedDevices > 0 ? "Vifu is receiving live runtime status from your paired devices." : "Scan one code from the Android, iOS, desktop, or embedded Starter."}</p>
+          </div>
+        </div>
+        <DevicePairingAction project={project} deployments={deployments} />
+      </section>
+
+      {message ? <div className={`action-message deployment-message ${message.tone}`} role={message.tone === "error" ? "alert" : "status"}>{message.text}</div> : null}
+
+      <section className="device-inventory" aria-label="Paired devices">
+        <header>
+          <div><h2>Paired devices</h2><p>Phones, computers, and embedded Gateways connected to this app.</p></div>
+          <span><strong>{connectedDevices}</strong> online · <strong>{devices.length}</strong> total</span>
+        </header>
+        {devices.length > 0 ? (
+          <div className="device-inventory-grid">
+            {devices.map(({ presentation, deployments: assignedDeployments }) => (
+              <DeviceGatewayCard
+                key={presentation.gatewayId}
+                presentation={presentation}
+                deployments={assignedDeployments}
+                showEnvironments={deployments.length > 1}
+                pending={pendingGatewayId === presentation.gatewayId}
+                onRevoke={() => revokeGateway(presentation.gatewayId, presentation.name)}
+              />
+            ))}
+          </div>
+        ) : (
+          <div className="device-inventory-empty">
+            <Smartphone aria-hidden="true" />
+            <strong>No devices paired</strong>
+            <span>Use Pair device above. This page will update when the device connects.</span>
+          </div>
+        )}
+      </section>
+    </div>
+  );
+}
+
+export function DevicePairingAction({
+  project,
+  deployments,
+}: {
+  project: RuntimeProject;
+  deployments: RuntimeDeployment[];
+}) {
+  const host = useRuntimeConsoleHost();
+  const router = useRuntimeConsoleRouter();
+  const primaryDeployment = primaryRuntimeDeployment(deployments);
+  const [deploymentName, setDeploymentName] = useState(primaryDeployment?.name ?? "");
+  const [enrollment, setEnrollment] = useState<Enrollment | null>(null);
+  const [pending, setPending] = useState(false);
+  const [message, setMessage] = useState<{ tone: "error" | "success"; text: string } | null>(null);
+  const multipleEnvironments = deployments.length > 1;
+
+  useEffect(() => {
+    if (!deployments.some((deployment) => deployment.name === deploymentName)) {
+      setDeploymentName(primaryRuntimeDeployment(deployments)?.name ?? "");
+    }
+  }, [deploymentName, deployments]);
+
+  useRuntimeLiveRefresh(
+    Boolean(enrollment && Date.parse(enrollment.expiresAt) > Date.now()),
+    ENROLLMENT_REFRESH_MS,
+  );
+
+  async function pairDevice() {
+    const deployment = deployments.find((candidate) => candidate.name === deploymentName)
+      ?? primaryRuntimeDeployment(deployments);
+    if (!deployment) {
+      setMessage({ tone: "error", text: "This app has no runtime configuration available for pairing." });
+      return;
+    }
+    setPending(true);
+    setMessage(null);
+    try {
+      const nextEnrollment = await host.request<Enrollment>(
+        `apps/${project.slug}/deployments/${deployment.name}/agent-gateway-enrollments`,
+        "POST",
+      );
+      setEnrollment(nextEnrollment);
+      setMessage({ tone: "success", text: "Pairing code ready." });
+      router.refresh();
+    } catch (error) {
+      setMessage({ tone: "error", text: error instanceof Error ? error.message : "Pairing code could not be created." });
+    } finally {
+      setPending(false);
+    }
+  }
+
+  return (
+    <div className="device-pairing-action">
+      <div className="device-pairing-controls">
+        {multipleEnvironments ? (
+          <label>
+            <span>Environment</span>
+            <select value={deploymentName} onChange={(event) => setDeploymentName(event.target.value)}>
+              {deployments.map((deployment) => <option value={deployment.name} key={deployment.id}>{deployment.name}</option>)}
+            </select>
+          </label>
+        ) : null}
+        <button className="primary-button" type="button" onClick={pairDevice} disabled={pending || !primaryDeployment}>
+          <Link2 aria-hidden="true" />{pending ? "Preparing" : "Pair device"}
+        </button>
+      </div>
+      {message ? <div className={`action-message device-pairing-message ${message.tone}`} role={message.tone === "error" ? "alert" : "status"}>{message.text}</div> : null}
+      {enrollment ? <EnrollmentPanel enrollment={enrollment} showEnvironment={multipleEnvironments} onClose={() => setEnrollment(null)} /> : null}
+    </div>
+  );
+}
+
 export function RuntimeDeploymentsView({
   project,
   deployments,
@@ -135,7 +310,6 @@ export function RuntimeDeploymentsView({
   const [settingsSource, setSettingsSource] = useState(() => formatProjectSettings(
     latestRelease?.manifest ?? emptyProjectSettings(project.slug),
   ));
-  const [enrollment, setEnrollment] = useState<Enrollment | null>(null);
   const [pending, setPending] = useState<string | null>(null);
   const [message, setMessage] = useState<{ tone: "error" | "success"; text: string } | null>(null);
   const supportsApplyState = deployments.some((deployment) => deployment.applyStates !== undefined);
@@ -148,10 +322,6 @@ export function RuntimeDeploymentsView({
   );
   const applyTarget = useMemo(() => runtimeApplyTarget(deployments), [deployments]);
   const [applyPoll, setApplyPoll] = useState({ target: applyTarget, attempt: 0 });
-  const hasAssignedGateways = deployments.some((deployment) => deployment.gatewayIds.length > 0);
-  const enrollmentIsActive = Boolean(
-    enrollment && Date.parse(enrollment.expiresAt) > Date.now(),
-  );
 
   useEffect(() => {
     if (!waitingForApply) {
@@ -173,15 +343,6 @@ export function RuntimeDeploymentsView({
     }, runtimeApplyPollDelay(applyPoll.attempt));
     return () => window.clearTimeout(timer);
   }, [router, waitingForApply, applyTarget, applyPoll]);
-
-  useEffect(() => {
-    if (!enrollmentIsActive && !hasAssignedGateways) return;
-    const timer = window.setInterval(
-      () => router.refresh(),
-      enrollmentIsActive ? ENROLLMENT_REFRESH_MS : GATEWAY_STATUS_REFRESH_MS,
-    );
-    return () => window.clearInterval(timer);
-  }, [enrollmentIsActive, hasAssignedGateways, router]);
 
   async function action<T>(key: string, work: () => Promise<T>, success: string): Promise<T | null> {
     setPending(key);
@@ -212,7 +373,7 @@ export function RuntimeDeploymentsView({
         traceMode: "summary",
         remoteInvocationEnabled: false,
       }),
-      `Deployment ${name} created.`,
+      `Environment ${name} created.`,
     );
     if (created) form.reset();
   }
@@ -222,7 +383,7 @@ export function RuntimeDeploymentsView({
     try {
       settings = JSON.parse(settingsSource) as ProjectSettings;
     } catch {
-      setMessage({ tone: "error", text: "App settings JSON is not valid." });
+      setMessage({ tone: "error", text: "Configuration release JSON is not valid." });
       return;
     }
     const result = await action(
@@ -232,7 +393,7 @@ export function RuntimeDeploymentsView({
         "POST",
         { settings },
       ),
-      "App settings imported.",
+      "Configuration release imported.",
     );
     if (result?.release) setSettingsSource(formatProjectSettings(result.release.manifest));
   }
@@ -240,7 +401,7 @@ export function RuntimeDeploymentsView({
   function exportProjectSettings() {
     const settings = latestRelease?.manifest;
     if (!settings) {
-      setMessage({ tone: "error", text: "There are no saved app settings to export." });
+      setMessage({ tone: "error", text: "There are no configuration releases to export." });
       return;
     }
     const blob = new Blob([formatProjectSettings(settings)], { type: "application/json" });
@@ -252,7 +413,7 @@ export function RuntimeDeploymentsView({
     anchor.click();
     anchor.remove();
     window.setTimeout(() => URL.revokeObjectURL(url), 0);
-    setMessage({ tone: "success", text: "App settings exported." });
+    setMessage({ tone: "success", text: "Configuration release exported." });
   }
 
   async function loadProjectSettingsFile(event: ChangeEvent<HTMLInputElement>) {
@@ -261,22 +422,10 @@ export function RuntimeDeploymentsView({
     if (!file) return;
     try {
       setSettingsSource(await file.text());
-      setMessage({ tone: "success", text: "App settings file loaded." });
+      setMessage({ tone: "success", text: "Configuration release file loaded." });
     } catch {
-      setMessage({ tone: "error", text: "App settings file could not be read." });
+      setMessage({ tone: "error", text: "Configuration release file could not be read." });
     }
-  }
-
-  async function pairGateway(deployment: RuntimeDeployment) {
-    const result = await action(
-      `pair-${deployment.id}`,
-      () => host.request<Enrollment>(
-        `apps/${project.slug}/deployments/${deployment.name}/agent-gateway-enrollments`,
-        "POST",
-      ),
-      "Pairing token created.",
-    );
-    if (result) setEnrollment(result);
   }
 
   async function activate(deployment: RuntimeDeployment, version: number) {
@@ -335,7 +484,7 @@ export function RuntimeDeploymentsView({
         `apps/${project.slug}/deployments/${deployment.name}/promote`,
         "POST",
       ),
-      `${deployment.name} is now the primary deployment.`,
+      `${deployment.name} is now the primary environment.`,
     );
   }
 
@@ -343,7 +492,7 @@ export function RuntimeDeploymentsView({
     <div className="deployment-workbench">
       <section className="deployment-toolbar">
         <form onSubmit={createDeployment}>
-          <label><span>New deployment</span><input name="name" required maxLength={64} placeholder="staging" /></label>
+          <label><span>New environment</span><input name="name" required maxLength={64} placeholder="staging" /></label>
           <button className="secondary-button" type="submit" disabled={pending === "create"}>
             <Plus aria-hidden="true" />{pending === "create" ? "Creating" : "Create"}
           </button>
@@ -356,7 +505,7 @@ export function RuntimeDeploymentsView({
 
       {message ? <div className={`action-message deployment-message ${message.tone}`} role={message.tone === "error" ? "alert" : "status"}>{message.text}</div> : null}
 
-      <section className="deployment-grid" aria-label="Runtime deployments">
+      <section className="deployment-grid" aria-label="Advanced runtime environments">
         {deployments.map((deployment) => {
           const gatewayCards = deployment.gatewayIds
             .map((gatewayId) => gatewayDeploymentPresentation(gatewayId, agentGateways))
@@ -368,7 +517,7 @@ export function RuntimeDeploymentsView({
             <header>
               <div>
                 <span className="deployment-icon"><Settings2 aria-hidden="true" /></span>
-                <div><strong>{deployment.name}</strong><small>{deployment.gatewayIds.length} paired gateways</small></div>
+                <div><strong>{deployment.name}</strong><small>{deployment.gatewayIds.length} paired devices</small></div>
               </div>
               {deployment.isPrimary ? <span className="deployment-primary"><Star aria-hidden="true" />Primary</span> : null}
             </header>
@@ -394,7 +543,7 @@ export function RuntimeDeploymentsView({
             ) : (
               <div className="deployment-gateways-empty">
                 <Link2 aria-hidden="true" />
-                <div><strong>No Gateway paired</strong><span>Pair a device to deploy settings and receive traces.</span></div>
+                <div><strong>No devices assigned</strong><span>Devices paired to this environment receive its configuration.</span></div>
               </div>
             )}
             <form className="deployment-policy-form" onSubmit={(event) => updatePolicies(deployment, event)}>
@@ -403,20 +552,19 @@ export function RuntimeDeploymentsView({
               <label><span>Trace upload</span><select name="traceMode" defaultValue={deployment.traceMode === "full" ? "summary" : deployment.traceMode}><option value="off">Off</option><option value="summary">Summary</option></select></label>
               <button className="icon-text-button" type="submit" disabled={pending === `settings-${deployment.id}`}><Check aria-hidden="true" />Save</button>
             </form>
-            <footer>
-              <button className="secondary-button" type="button" onClick={() => pairGateway(deployment)} disabled={pending === `pair-${deployment.id}`}><Link2 aria-hidden="true" />Pair gateway</button>
-              {!deployment.isPrimary ? <button className="quiet-button" type="button" onClick={() => promote(deployment)} disabled={pending === `promote-${deployment.id}`}><Star aria-hidden="true" />Make primary</button> : null}
-            </footer>
+            {!deployment.isPrimary ? (
+              <footer>
+                <button className="quiet-button" type="button" onClick={() => promote(deployment)} disabled={pending === `promote-${deployment.id}`}><Star aria-hidden="true" />Make primary</button>
+              </footer>
+            ) : null}
             </article>
           );
         })}
       </section>
 
-      {enrollment ? <EnrollmentPanel enrollment={enrollment} onClose={() => setEnrollment(null)} /> : null}
-
       <section className="release-workbench">
         <header>
-          <div><h2>App settings</h2><p>Database-backed provider, agent, and endpoint settings.</p></div>
+          <div><h2>Configuration releases</h2><p>Versioned provider, agent, and endpoint configuration for advanced environments.</p></div>
           <div className="settings-artifact-actions">
             <label className="secondary-button settings-file-button">
               <CloudUpload aria-hidden="true" />Load JSON
@@ -426,7 +574,7 @@ export function RuntimeDeploymentsView({
             <button className="primary-button" type="button" onClick={importProjectSettings} disabled={pending === "import-settings"}><CloudUpload aria-hidden="true" />{pending === "import-settings" ? "Importing" : "Import"}</button>
           </div>
         </header>
-        <textarea value={settingsSource} onChange={(event) => setSettingsSource(event.target.value)} spellCheck={false} aria-label="App settings JSON" />
+        <textarea value={settingsSource} onChange={(event) => setSettingsSource(event.target.value)} spellCheck={false} aria-label="Configuration release JSON" />
         <div className="release-list">
           {releases.length > 0 ? releases.map((release) => (
             <article key={release.id}>
@@ -439,7 +587,7 @@ export function RuntimeDeploymentsView({
                 ))}
               </div>
             </article>
-          )) : <div className="deployment-empty">No saved app settings yet.</div>}
+          )) : <div className="deployment-empty">No configuration releases saved yet.</div>}
         </div>
       </section>
     </div>
@@ -494,6 +642,62 @@ function DeploymentGatewayCard({
   );
 }
 
+function DeviceGatewayCard({
+  presentation,
+  deployments,
+  showEnvironments,
+  pending,
+  onRevoke,
+}: {
+  presentation: ReturnType<typeof gatewayDeploymentPresentation>;
+  deployments: RuntimeDeployment[];
+  showEnvironments: boolean;
+  pending: boolean;
+  onRevoke: () => void;
+}) {
+  const connected = presentation.gateway?.status === "connected";
+  return (
+    <article className={`deployment-gateway-card device-gateway-card ${connected ? "online" : "offline"}`}>
+      <i className="deployment-gateway-rail" aria-hidden="true" />
+      <div className="deployment-gateway-identity">
+        <span className="deployment-gateway-device" aria-hidden="true">
+          <GatewayDeviceIcon kind={presentation.kind} platform={presentation.platform} />
+        </span>
+        <div>
+          <div className="deployment-gateway-name">
+            <strong>{presentation.name}</strong>
+            <span>{presentation.typeLabel}</span>
+          </div>
+          <p>
+            <span>{presentation.deviceLabel}</span>
+            {presentation.applicationLabel ? <span>{presentation.applicationLabel}</span> : null}
+          </p>
+        </div>
+      </div>
+      <div className="deployment-gateway-state">
+        <GatewayConnectionStatus gateway={presentation.gateway} agentLabel={presentation.agentLabel} />
+        {showEnvironments ? (
+          <span className="device-environment-count">
+            {deployments.length} {deployments.length === 1 ? "environment" : "environments"}
+          </span>
+        ) : null}
+      </div>
+      <div className="deployment-gateway-id">
+        <span>Gateway ID</span>
+        <code title={presentation.gatewayId}>{presentation.gatewayId}</code>
+      </div>
+      <div className="deployment-gateway-actions">
+        <button className="icon-button danger" type="button" title="Revoke device access" aria-label={`Revoke access for ${presentation.name}`} onClick={onRevoke} disabled={pending}><ShieldOff aria-hidden="true" /></button>
+      </div>
+      {showEnvironments && deployments.length > 0 ? (
+        <div className="device-environment-list" aria-label="Assigned environments">
+          {deployments.map((deployment) => <span key={deployment.id}>{deployment.name}</span>)}
+        </div>
+      ) : null}
+    </article>
+  );
+}
+
 function GatewayDeviceIcon({ kind, platform }: { kind: string; platform: string }) {
   const DeviceIcon = platform === "android" || platform === "ios"
     ? Smartphone
@@ -530,7 +734,15 @@ function GatewayApplyStatus({ deployment, gatewayId }: { deployment: RuntimeDepl
   );
 }
 
-function EnrollmentPanel({ enrollment, onClose }: { enrollment: Enrollment; onClose: () => void }) {
+function EnrollmentPanel({
+  enrollment,
+  showEnvironment,
+  onClose,
+}: {
+  enrollment: Enrollment;
+  showEnvironment: boolean;
+  onClose: () => void;
+}) {
   const [copied, setCopied] = useState(false);
   const [copyFailed, setCopyFailed] = useState(false);
   async function copyToken() {
@@ -557,7 +769,7 @@ function EnrollmentPanel({ enrollment, onClose }: { enrollment: Enrollment; onCl
     : null;
   return (
     <section className={`enrollment-panel${qrSource ? " has-qr" : ""}`} role="status">
-      <div><strong>Pair with {enrollment.deployment}</strong><p>Copy this one-time code into the mobile Starter within five minutes. The QR supports configured application-link bridges.</p></div>
+      <div><strong>Pair a device</strong><p>Scan this one-time code from the Starter. It expires in five minutes.{showEnvironment ? ` The device will join ${enrollment.deployment}.` : ""}</p></div>
       {qrSource ? <img className="enrollment-qr" src={qrSource} alt="Vifu Server pairing code" /> : null}
       <code>{enrollment.pairing ? nativeGatewayPairingCode(enrollment.pairing) : enrollment.enrollmentToken}</code>
       <div><button className="secondary-button" type="button" onClick={enrollment.pairing ? copyPairingCode : copyToken}>{copied ? <Check aria-hidden="true" /> : <Clipboard aria-hidden="true" />}{copied ? "Copied" : enrollment.pairing ? "Copy pairing code" : "Copy token"}</button><button className="quiet-button" type="button" onClick={onClose}>Done</button></div>

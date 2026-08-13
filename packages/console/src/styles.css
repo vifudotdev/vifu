@@ -1200,6 +1200,255 @@ svg {
   gap: 14px;
 }
 
+.devices-workbench,
+.settings-workbench {
+  display: grid;
+  gap: 20px;
+  min-width: 0;
+}
+
+.device-connect-rail {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 18px;
+  min-width: 0;
+  padding: 18px 20px;
+  border: 1px solid var(--line-strong);
+  border-left: 3px solid var(--accent);
+  border-radius: 7px;
+  background: linear-gradient(100deg, color-mix(in srgb, var(--accent) 6%, var(--surface)) 0%, var(--surface) 48%);
+}
+
+.device-connect-rail.has-devices {
+  border-left-color: var(--success);
+  background: linear-gradient(100deg, color-mix(in srgb, var(--success) 6%, var(--surface)) 0%, var(--surface) 48%);
+}
+
+.device-connect-copy {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 14px;
+}
+
+.device-connect-copy > div {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+}
+
+.device-connect-copy > div > span {
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+}
+
+.device-connect-copy strong {
+  font-size: 17px;
+  letter-spacing: -.015em;
+}
+
+.device-connect-copy p {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.device-connect-signal {
+  position: relative;
+  display: grid;
+  width: 42px;
+  height: 42px;
+  flex: 0 0 auto;
+  place-items: center;
+  border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--line));
+  border-radius: 50%;
+}
+
+.device-connect-signal::before {
+  width: 24px;
+  height: 24px;
+  border: 1px solid color-mix(in srgb, var(--accent) 48%, transparent);
+  border-radius: 50%;
+  content: "";
+}
+
+.device-connect-signal i {
+  position: absolute;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--accent) 12%, transparent);
+}
+
+.device-connect-rail.has-devices .device-connect-signal,
+.device-connect-rail.has-devices .device-connect-signal::before {
+  border-color: color-mix(in srgb, var(--success) 45%, var(--line));
+}
+
+.device-connect-rail.has-devices .device-connect-signal i {
+  background: var(--success);
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--success) 12%, transparent);
+}
+
+.device-pairing-action {
+  display: contents;
+}
+
+.device-pairing-controls {
+  display: flex;
+  grid-column: 2;
+  align-items: end;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.device-pairing-controls label {
+  display: grid;
+  gap: 4px;
+  color: var(--text-muted);
+  font-size: 10px;
+  font-weight: 600;
+}
+
+.device-pairing-controls select {
+  min-width: 150px;
+}
+
+.device-pairing-message,
+.device-pairing-action > .enrollment-panel {
+  grid-column: 1 / -1;
+}
+
+.device-inventory {
+  display: grid;
+  gap: 14px;
+}
+
+.device-inventory > header {
+  display: flex;
+  align-items: end;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.device-inventory > header > div {
+  display: grid;
+  gap: 3px;
+}
+
+.device-inventory h2,
+.device-inventory p {
+  margin: 0;
+}
+
+.device-inventory h2 {
+  font-size: 15px;
+}
+
+.device-inventory p,
+.device-inventory > header > span {
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.device-inventory > header > span strong {
+  color: var(--text);
+  font-family: var(--font-mono);
+}
+
+.device-inventory-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 430px), 1fr));
+  gap: 10px;
+}
+
+.device-inventory-empty {
+  display: grid;
+  min-height: 180px;
+  place-items: center;
+  align-content: center;
+  gap: 5px;
+  border: 1px dashed var(--line-strong);
+  border-radius: 7px;
+  color: var(--text-muted);
+  text-align: center;
+}
+
+.device-inventory-empty svg {
+  width: 24px;
+  height: 24px;
+  margin-bottom: 5px;
+}
+
+.device-inventory-empty strong {
+  color: var(--text);
+  font-size: 13px;
+}
+
+.device-inventory-empty span {
+  max-width: 380px;
+  font-size: 11px;
+}
+
+.advanced-settings {
+  overflow: hidden;
+  border: 1px solid var(--line-strong);
+  border-radius: 7px;
+  background: var(--surface);
+}
+
+.advanced-settings > summary {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 11px;
+  padding: 15px 17px;
+  cursor: pointer;
+  list-style: none;
+}
+
+.advanced-settings > summary::-webkit-details-marker {
+  display: none;
+}
+
+.advanced-settings > summary > svg {
+  width: 16px;
+  height: 16px;
+  transition: transform .16s ease;
+}
+
+.advanced-settings:not([open]) > summary > svg {
+  transform: rotate(-90deg);
+}
+
+.advanced-settings > summary > div {
+  display: grid;
+  gap: 2px;
+}
+
+.advanced-settings > summary span,
+.advanced-settings > summary small {
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.advanced-settings-body {
+  padding: 18px;
+  border-top: 1px solid var(--line);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .advanced-settings > summary > svg {
+    transition: none;
+  }
+}
+
 .health-section {
   min-width: 0;
 }
@@ -6660,6 +6909,29 @@ button:disabled {
   height: 14px;
 }
 
+.device-environment-count {
+  color: var(--text-muted);
+  font-size: 9px;
+  white-space: nowrap;
+}
+
+.device-environment-list {
+  display: flex;
+  grid-column: 1 / -1;
+  flex-wrap: wrap;
+  gap: 5px;
+  padding-top: 9px;
+  border-top: 1px solid var(--line);
+}
+
+.device-environment-list span {
+  padding: 2px 7px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--text-muted);
+  font-size: 9px;
+}
+
 .deployment-gateways-empty {
   display: flex;
   min-height: 70px;
@@ -6959,6 +7231,15 @@ button:disabled {
 }
 
 @media (max-width: 900px) {
+  .device-connect-rail {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .device-pairing-controls {
+    grid-column: 1;
+    justify-content: flex-start;
+  }
+
   .deployment-policy-form {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
@@ -6993,6 +7274,33 @@ button:disabled {
 }
 
 @media (max-width: 560px) {
+  .device-connect-copy {
+    align-items: flex-start;
+  }
+
+  .device-pairing-controls,
+  .device-inventory > header {
+    width: 100%;
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .device-pairing-controls select {
+    width: 100%;
+  }
+
+  .advanced-settings > summary {
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+
+  .advanced-settings > summary small {
+    display: none;
+  }
+
+  .advanced-settings-body {
+    padding: 14px;
+  }
+
   .deployment-toolbar,
   .deployment-toolbar form,
   .release-workbench > header,

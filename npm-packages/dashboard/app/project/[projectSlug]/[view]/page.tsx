@@ -7,6 +7,7 @@ export const dynamic = "force-dynamic";
 
 const VIEWS = new Set<DashboardSection>([
   "overview",
+  "devices",
   "agents",
   "providers",
   "deployments",

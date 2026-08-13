@@ -5,8 +5,10 @@ import {
   gatewayDeploymentPresentation,
   latestGatewaySession,
   nativeGatewayPairingCode,
+  primaryRuntimeDeployment,
   runtimeApplyPollDelay,
   runtimeApplyTarget,
+  runtimeDeviceGatewayIds,
 } from "./runtime-deployments";
 import type { AgentGateway, RuntimeDeployment } from "../types";
 
@@ -20,6 +22,27 @@ describe("gateway pairing", () => {
       pairingDeepLink: "vifu://gateway/enroll?server=complete&certificate=AQID",
       pairingQrSvg: null,
     })).toBe("vifu://gateway/enroll?server=complete&certificate=AQID");
+  });
+
+  test("uses the primary environment without exposing a choice for the default path", () => {
+    const deployment = (id: string, isPrimary: boolean): RuntimeDeployment => ({
+      id,
+      projectId: "project-1",
+      name: id,
+      isPrimary,
+      configSyncEnabled: true,
+      traceMode: "summary",
+      remoteInvocationEnabled: false,
+      activeReleaseVersion: null,
+      gatewayIds: [],
+      createdAt: "2026-01-01T00:00:00Z",
+      updatedAt: "2026-01-01T00:00:00Z",
+    });
+
+    expect(primaryRuntimeDeployment([
+      deployment("staging", false),
+      deployment("development", true),
+    ])?.name).toBe("development");
   });
 });
 
@@ -60,6 +83,36 @@ describe("runtime deployment apply polling", () => {
 });
 
 describe("deployment gateway status", () => {
+  test("builds one device inventory from assigned and currently reported Gateways", () => {
+    const deployment: RuntimeDeployment = {
+      id: "development",
+      projectId: "project-1",
+      name: "development",
+      isPrimary: true,
+      configSyncEnabled: true,
+      traceMode: "summary",
+      remoteInvocationEnabled: false,
+      activeReleaseVersion: null,
+      gatewayIds: ["android-optimized"],
+      createdAt: "2026-01-01T00:00:00Z",
+      updatedAt: "2026-01-01T00:00:00Z",
+    };
+    const gateway: AgentGateway = {
+      id: "baseline-session",
+      gatewayId: "android-baseline",
+      sessionId: "baseline-session",
+      status: "connected",
+      agents: [],
+      metadata: {},
+      connectedAt: "2026-01-01T00:00:00Z",
+      lastSeenAt: "2026-01-01T00:00:00Z",
+      disconnectedAt: null,
+    };
+
+    expect(runtimeDeviceGatewayIds([deployment], [gateway]).sort())
+      .toEqual(["android-baseline", "android-optimized"]);
+  });
+
   test("uses the reported device identity instead of the opaque Gateway ID", () => {
     const gateway: AgentGateway = {
       id: "session-1",

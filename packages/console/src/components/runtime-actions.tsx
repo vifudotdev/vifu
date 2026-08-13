@@ -23,7 +23,6 @@ export function ProjectCreateForm({
   const host = useRuntimeConsoleHost();
   const router = useRuntimeConsoleRouter();
   const [state, setState] = useState<ActionState>(null);
-  const [createdSlug, setCreatedSlug] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
   const [projectName, setProjectName] = useState("");
   const isMenu = variant === "menu";
@@ -32,7 +31,6 @@ export function ProjectCreateForm({
     event.preventDefault();
     setPending(true);
     setState(null);
-    setCreatedSlug(null);
     const form = new FormData(event.currentTarget);
     try {
       const payload = await host.request<{ app?: { slug?: string; appId?: string } }>("apps", "POST", {
@@ -40,9 +38,8 @@ export function ProjectCreateForm({
         description: optionalValue(form, "description"),
       });
       const slug = payload.app?.slug ?? null;
-      setCreatedSlug(slug);
       setState({ tone: "success", message: "App created." });
-      if (isMenu && slug) router.push(host.projectHref(slug));
+      if (slug) router.push(host.projectHref(slug));
     } catch (error) {
       setState({ tone: "error", message: errorMessage(error) });
     } finally {
@@ -67,7 +64,6 @@ export function ProjectCreateForm({
       </div>
       <div className="form-actions">
         <button className="primary-button" type="submit" disabled={pending}><Plus aria-hidden="true" />{pending ? "Creating" : "Create app"}</button>
-        {createdSlug && !isMenu ? <button className="secondary-button" type="button" onClick={() => router.push(host.projectHref(createdSlug))}>Open app</button> : null}
         <ActionMessage state={state} />
       </div>
     </form>

@@ -275,8 +275,8 @@ function ApiSetupEmpty({ projectSlug, hasProfiles }: { projectSlug: string; hasP
       <Terminal aria-hidden="true" />
       {hasProfiles ? (
         <>
-          <div><strong>Make an agent available</strong><span>Assign its Gateway to a deployment that allows remote calls.</span></div>
-          <RuntimeLink className="secondary-button" href={host.projectSectionHref(projectSlug, "deployments")}>Open Deployments<ArrowRight aria-hidden="true" /></RuntimeLink>
+          <div><strong>Make an agent available</strong><span>Enable remote calls in the app's advanced runtime settings.</span></div>
+          <RuntimeLink className="secondary-button" href={host.projectSectionHref(projectSlug, "deployments")}>Open advanced settings<ArrowRight aria-hidden="true" /></RuntimeLink>
         </>
       ) : (
         <>

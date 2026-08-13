@@ -10,10 +10,10 @@ import {
   KeyRound,
   LayoutDashboard,
   LogOut,
-  Network,
   Plug,
   ScrollText,
   Settings,
+  TabletSmartphone,
 } from "lucide-react";
 import type { DashboardData } from "../data";
 import type {
@@ -36,11 +36,17 @@ import {
 } from "./runtime-actions";
 import { RuntimeAgentsView } from "./runtime-agents";
 import { RuntimeProvidersView } from "./runtime-providers";
-import { RuntimeDeploymentsView } from "./runtime-deployments";
+import {
+  DevicePairingAction,
+  RuntimeDeploymentsView,
+  RuntimeDevicesView,
+} from "./runtime-deployments";
+import { useRuntimeLiveRefresh } from "./runtime-live-refresh";
 import { RuntimeImage, RuntimeLink, useRuntimeConsoleHost } from "../host";
 
 export type DashboardSection =
   | "overview"
+  | "devices"
   | "agents"
   | "providers"
   | "deployments"
@@ -62,11 +68,11 @@ type NavigationItem = {
   capability?: keyof ServerCapabilities;
 };
 
-const PROJECT_NAVIGATION: NavigationItem[] = [
+export const PROJECT_NAVIGATION: NavigationItem[] = [
   { id: "overview", label: "Overview", icon: LayoutDashboard },
+  { id: "devices", label: "Devices", icon: TabletSmartphone, capability: "agentGateways" },
   { id: "agents", label: "Agents", icon: Bot, capability: "profiles" },
   { id: "providers", label: "Providers", icon: Plug, capability: "providerConnections" },
-  { id: "deployments", label: "Deployments", icon: Network },
   { id: "api", label: "API", icon: KeyRound, capability: "apiKeys" },
   { id: "logs", label: "Traces", icon: ScrollText, capability: "traces" },
   { id: "settings", label: "Settings", icon: Settings },
@@ -74,9 +80,10 @@ const PROJECT_NAVIGATION: NavigationItem[] = [
 
 const SECTION_TITLES: Record<DashboardSection, string> = {
   overview: "Overview",
+  devices: "Devices",
   agents: "Agents",
   providers: "Providers",
-  deployments: "Deployments",
+  deployments: "Settings",
   api: "API Integrations",
   logs: "Traces",
   settings: "Settings",
@@ -91,7 +98,8 @@ export function RuntimeConsole({
   const host = useRuntimeConsoleHost();
   const brand = host.brand;
   const capabilities = data.authority.status.capabilities;
-  const activeSection = isSectionAvailable(section, capabilities) ? section : "overview";
+  const requestedSection = isSectionAvailable(section, capabilities) ? section : "overview";
+  const activeSection = requestedSection === "deployments" ? "settings" : requestedSection;
   const selectedProject = projectSlug
     ? selectProject(data.runtime.projects, projectSlug)
     : null;
@@ -137,7 +145,7 @@ export function RuntimeConsole({
           <header className="page-header project-page-header"><h1>{title}</h1></header>
           <div className={`console-content ${activeSection}-content`}>
             <ProjectSectionView
-              section={activeSection}
+              section={requestedSection}
               project={selectedProject}
               data={data}
               browserApiBaseUrl={browserApiBaseUrl}
@@ -190,6 +198,15 @@ function ProjectSectionView({
   browserApiBaseUrl: string;
 }) {
   const endpoints = appEndpoints(project, data.runtime.endpoints);
+  if (section === "devices") {
+    return (
+      <RuntimeDevicesView
+        project={project}
+        deployments={data.runtime.deployments}
+        agentGateways={data.runtime.agentGateways}
+      />
+    );
+  }
   if (section === "agents") {
     return (
       <RuntimeAgentsView
@@ -214,16 +231,6 @@ function ProjectSectionView({
       />
     );
   }
-  if (section === "deployments") {
-    return (
-      <RuntimeDeploymentsView
-        project={project}
-        deployments={data.runtime.deployments}
-        releases={data.runtime.releases}
-        agentGateways={data.runtime.agentGateways}
-      />
-    );
-  }
   if (section === "api") {
     return (
       <ApiIntegrationsView
@@ -237,12 +244,16 @@ function ProjectSectionView({
     );
   }
   if (section === "logs") return <TracesView project={project} traces={appTraces(data.runtime.traces, project)} />;
-  if (section === "settings") {
+  if (section === "settings" || section === "deployments") {
     return (
       <SettingsView
         project={project}
         endpoints={endpoints}
         browserApiBaseUrl={browserApiBaseUrl}
+        deployments={data.runtime.deployments}
+        releases={data.runtime.releases}
+        agentGateways={data.runtime.agentGateways}
+        advancedOpen={section === "deployments"}
       />
     );
   }
@@ -286,8 +297,20 @@ function HealthView({
   const agentTotal = data.runtime.profiles.length;
   const traces = appTraces(data.runtime.traces, project);
   const traceSummary = summarizeTraces(traces);
+  useRuntimeLiveRefresh(true);
   return (
     <div className="health-dashboard">
+      <section className={`device-connect-rail overview-device-rail${connectedGateways > 0 ? " has-devices" : ""}`}>
+        <div className="device-connect-copy">
+          <span className="device-connect-signal" aria-hidden="true"><i /></span>
+          <div>
+            <span>{connectedGateways > 0 ? "Live device status" : "Connect your app"}</span>
+            <strong>{connectedGateways > 0 ? `${connectedGateways} ${connectedGateways === 1 ? "device" : "devices"} online` : "Pair your first device"}</strong>
+            <p>{connectedGateways > 0 ? "Status and agents refresh here while this page is open." : "Connect a phone, computer, or embedded runtime with one pairing code."}</p>
+          </div>
+        </div>
+        <DevicePairingAction project={project} deployments={data.runtime.deployments} />
+      </section>
       <HealthSection title="Summary" defaultOpen>
         <dl className="health-summary-card">
           <div className="wide">
@@ -303,7 +326,7 @@ function HealthView({
             <dd><span className="health-unavailable">Not available</span></dd>
           </div>
           <div>
-            <dt>Gateways</dt>
+            <dt>Devices</dt>
             <dd>{connectedGateways}/{gatewayCards.length}</dd>
           </div>
           <div>
@@ -341,7 +364,7 @@ function HealthView({
           </TraceMetricCard>
         </div>
       </HealthSection>
-      <HealthSection title="Gateways" count={`${connectedGateways}/${gatewayCards.length} connected`} defaultOpen>
+      <HealthSection title="Devices" count={`${connectedGateways}/${gatewayCards.length} connected`} defaultOpen>
         {gatewayCards.length > 0 ? (
           <div className="gateway-health-grid">
             {gatewayCards.map(({ gateway, agents }) => (
@@ -349,7 +372,7 @@ function HealthView({
             ))}
           </div>
         ) : (
-          <EmptyState>No gateways paired.</EmptyState>
+          <EmptyState>No devices paired.</EmptyState>
         )}
       </HealthSection>
     </div>
@@ -478,15 +501,23 @@ function SettingsView({
   project,
   endpoints,
   browserApiBaseUrl,
+  deployments,
+  releases,
+  agentGateways,
+  advancedOpen,
 }: {
   project: RuntimeProject;
   endpoints: AgentEndpoint[];
   browserApiBaseUrl: string;
+  deployments: DashboardData["runtime"]["deployments"];
+  releases: DashboardData["runtime"]["releases"];
+  agentGateways: AgentGateway[];
+  advancedOpen: boolean;
 }) {
   const host = useRuntimeConsoleHost();
   const primaryEndpoint = endpoints[0];
   return (
-    <>
+    <div className="settings-workbench">
       <section className="content-section">
         <SectionHeading title="App settings" />
         <dl className="definition-grid">
@@ -498,17 +529,32 @@ function SettingsView({
           <div><dt>Status</dt><dd>{project.enabled ? "Enabled" : "Disabled"}</dd></div>
         </dl>
       </section>
+      <details className="advanced-settings" id="environments" open={advancedOpen}>
+        <summary>
+          <ChevronDown aria-hidden="true" />
+          <div><strong>Advanced runtime configuration</strong><span>Manage multiple environments, device policies, and versioned configuration.</span></div>
+          <small>{deployments.length} {deployments.length === 1 ? "environment" : "environments"}</small>
+        </summary>
+        <div className="advanced-settings-body">
+          <RuntimeDeploymentsView
+            project={project}
+            deployments={deployments}
+            releases={releases}
+            agentGateways={agentGateways}
+          />
+        </div>
+      </details>
       <section className="content-section danger-section">
         <SectionHeading title="Danger zone" />
         <div className="settings-danger-row">
           <div>
             <strong>Delete app</strong>
-            <p>Remove this app from the dashboard. Detected gateway agents are not deleted.</p>
+            <p>Remove this app from the dashboard. Paired devices and their local agents are not deleted.</p>
           </div>
           <DeleteResourceButton path={`apps/${project.id}`} label={project.name} redirectTo={host.projectRootHref()} />
         </div>
       </section>
-    </>
+    </div>
   );
 }
 
@@ -524,15 +570,14 @@ function SetupRail({ project, providerCount, agentCount, callableCount, connecte
   const agentsReady = agentCount > 0;
   const endpointReady = callableCount > 0;
   const gatewayReady = connectedGatewayCount > 0;
-  const nextStep = !providerReady
-    ? "Connect an agent provider"
+  const runtimeReady = providerReady || gatewayReady;
+  const nextStep = !runtimeReady
+    ? "Connect a device or provider"
     : !agentsReady
-      ? "Discover provider agents"
+      ? "Add an agent"
       : !endpointReady
-        ? "Add an agent"
-        : !gatewayReady
-          ? "Reconnect agent gateway"
-          : "App is ready to call";
+        ? "Make the agent callable"
+        : "App is ready to call";
   return (
     <section className="setup-rail project-setup-rail" aria-label="App setup">
       <div>
@@ -541,14 +586,14 @@ function SetupRail({ project, providerCount, agentCount, callableCount, connecte
       </div>
       <ol>
         <li className="ready"><strong>App</strong><small>{project.slug}</small></li>
-        <li className={providerReady ? "ready" : "active"}><strong>Provider</strong><small>{providerReady ? `${providerCount} assigned` : "Assign one in Providers"}</small></li>
-        <li className={agentsReady ? "ready" : providerReady ? "active" : undefined}><strong>Agents</strong><small>{agentsReady ? `${agentCount} available` : "Add or detect agents"}</small></li>
-        <li className={endpointReady ? "ready" : agentsReady ? "active" : undefined}><strong>Endpoint</strong><small>{endpointReady ? `${callableCount} callable` : "Agents become callable when added"}</small></li>
-        <li className={gatewayReady ? "ready" : endpointReady ? "active" : undefined}><strong>Gateway</strong><small>{gatewayReady ? `${connectedGatewayCount} online` : "Start gateway"}</small></li>
+        <li className={runtimeReady ? "ready" : "active"}><strong>Runtime</strong><small>{gatewayReady ? `${connectedGatewayCount} devices online` : providerReady ? `${providerCount} providers connected` : "Pair a device or provider"}</small></li>
+        <li className={agentsReady ? "ready" : runtimeReady ? "active" : undefined}><strong>Agents</strong><small>{agentsReady ? `${agentCount} available` : "Add or detect agents"}</small></li>
+        <li className={endpointReady ? "ready" : agentsReady ? "active" : undefined}><strong>API</strong><small>{endpointReady ? `${callableCount} callable` : "Agents become callable when added"}</small></li>
       </ol>
       <div className="setup-actions">
-        {!providerReady ? <RuntimeLink className="primary-button" href={host.projectSectionHref(project.slug, "providers")}>Open Providers</RuntimeLink> : null}
-        {providerReady && !endpointReady ? <RuntimeLink className="secondary-button" href={host.projectSectionHref(project.slug, "agents")}>Add agents</RuntimeLink> : null}
+        {!runtimeReady ? <RuntimeLink className="primary-button" href={host.projectSectionHref(project.slug, "devices")}>Open Devices</RuntimeLink> : null}
+        {!runtimeReady ? <RuntimeLink className="secondary-button" href={host.projectSectionHref(project.slug, "providers")}>Connect Provider</RuntimeLink> : null}
+        {runtimeReady && !endpointReady ? <RuntimeLink className="secondary-button" href={host.projectSectionHref(project.slug, "agents")}>Add agents</RuntimeLink> : null}
       </div>
     </section>
   );
@@ -606,6 +651,7 @@ function selectProject(projects: RuntimeProject[], projectSlug: string | undefin
 }
 
 function isSectionAvailable(section: DashboardSection, capabilities: ServerCapabilities): boolean {
+  if (section === "deployments") return true;
   const item = PROJECT_NAVIGATION.find((entry) => entry.id === section);
   return Boolean(item && (!item.capability || capabilities[item.capability]));
 }
@@ -712,7 +758,7 @@ function runtimeStatusLabel(status: string): string {
 }
 
 function gatewayCountLabel(count: number): string {
-  return `${count} ${count === 1 ? "gateway" : "gateways"} online`;
+  return `${count} ${count === 1 ? "device" : "devices"} online`;
 }
 
 function statusClassName(status: string): string {

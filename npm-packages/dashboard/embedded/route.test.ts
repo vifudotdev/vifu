@@ -24,4 +24,14 @@ describe("embedded console route", () => {
     expect(consoleRouteHref({ projectSlug: "stardew-valley", section: "agents" }))
       .toBe("/project/stardew-valley/agents");
   });
+
+  it("routes the ordinary pairing workflow through Devices", () => {
+    const route = readConsoleRoute("/project/arm-lab/devices");
+    expect(route).toMatchObject({ projectSlug: "arm-lab", section: "devices" });
+    expect(consoleRouteHref(route)).toBe("/project/arm-lab/devices");
+  });
+
+  it("keeps legacy deployment links available for advanced settings", () => {
+    expect(readConsoleRoute("/project/arm-lab/deployments").section).toBe("deployments");
+  });
 });

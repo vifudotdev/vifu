@@ -2,6 +2,7 @@ import type { DashboardSection } from "@vifu/console/react";
 
 const SECTION_IDS = new Set<DashboardSection>([
   "overview",
+  "devices",
   "agents",
   "providers",
   "deployments",
