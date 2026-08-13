@@ -335,8 +335,8 @@ class MainActivity : AppCompatActivity() {
         val input = EditText(this).apply {
             hint = "vifu://gateway/enroll?..."
             inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
-            setSingleLine(false)
-            minLines = 3
+            setSingleLine(true)
+            setHorizontallyScrolling(true)
         }
         AlertDialog.Builder(this)
             .setTitle("Pair with Vifu")

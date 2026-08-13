@@ -32,7 +32,7 @@ val vifuArtifact = when (vifuBackend) {
 }
 val vifuWhisper = providers.gradleProperty("vifuWhisper").orNull?.toBooleanStrictOrNull() ?: false
 val vifuVersion = providers.gradleProperty("vifuVersion").orNull ?: libs.versions.vifu.get()
-val starterVersionName = providers.gradleProperty("starterVersionName").orNull ?: "0.1.0"
+val starterVersionName = providers.gradleProperty("starterVersionName").orNull ?: "0.1.1"
 val starterVersionCode = providers.gradleProperty("starterVersionCode").orNull?.toIntOrNull() ?: 1
 val releaseKeystoreFile = providers.environmentVariable("VIFU_ANDROID_STARTER_KEYSTORE").orNull
 val releaseKeystorePassword = providers.environmentVariable("VIFU_ANDROID_STARTER_KEYSTORE_PASSWORD").orNull
