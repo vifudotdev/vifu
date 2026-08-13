@@ -948,6 +948,7 @@ pub struct VifuEmbeddedGatewayConfig {
     pub server_url: String,
     pub runtime_database_path: String,
     pub server_certificate_der: Option<Vec<u8>>,
+    pub gateway_metadata_json: String,
 }
 
 #[derive(Clone, uniffi::Record)]
@@ -1027,6 +1028,10 @@ impl VifuEmbeddedGateway {
         if let Some(certificate_der) = config.server_certificate_der {
             gateway_config = gateway_config.with_server_certificate_der(certificate_der);
         }
+        let gateway_metadata = parse_json(&config.gateway_metadata_json, "gateway metadata")?;
+        gateway_config = gateway_config
+            .with_gateway_metadata(gateway_metadata)
+            .map_err(|message| VifuRuntimeError::InvalidConfig { message })?;
         let gateway = EmbeddedRuntimeGateway::new(runtime.runtime.clone(), gateway_config)
             .map_err(|message| VifuRuntimeError::InvalidConfig { message })?;
         Ok(Arc::new(Self { runtime, gateway }))

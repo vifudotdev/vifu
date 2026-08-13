@@ -47,6 +47,7 @@ class VifuWhisperAgent private constructor(
     private val ownsHost: Boolean,
 ) : Closeable {
     val connectionState = host.connectionState
+    val connectionError = host.connectionError
     private val closed = AtomicBoolean(false)
     private val sessionId = "android-whisper-${UUID.randomUUID()}"
 

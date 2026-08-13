@@ -8,6 +8,7 @@ use vifu_runtime::ProviderStage;
 
 use crate::db;
 use crate::error::ApiError;
+use crate::gateway_identity::scoped_provider_key;
 
 const MAX_TELEMETRY_DURATION_MS: u64 = 24 * 60 * 60 * 1_000;
 const MAX_TELEMETRY_TOKEN_COUNT: u64 = 1_000_000_000;
@@ -230,6 +231,20 @@ pub(crate) async fn persist_batch(
         },
     )
     .await
+}
+
+pub(crate) async fn persist_batch_for_gateway(
+    storage: &db::Storage,
+    request_id: Uuid,
+    gateway_id: &str,
+    mut batch: TraceTelemetryBatch,
+) -> Result<(), ApiError> {
+    for event in &mut batch.events {
+        if let TraceTelemetry::InvocationStarted { provider_key, .. } = event {
+            *provider_key = scoped_provider_key(gateway_id, provider_key);
+        }
+    }
+    persist_batch(storage, request_id, batch).await
 }
 
 fn telemetry_gap_observation_id(request_id: Uuid) -> Uuid {

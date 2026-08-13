@@ -155,6 +155,7 @@ impl Config {
         if let Some(authority) = access_token_authority.as_ref() {
             authority.validate()?;
         }
+        self.guest_bootstrap_enabled = access_token_authority.is_some();
         self.access_token_authority = access_token_authority;
         Ok(())
     }
@@ -314,6 +315,7 @@ impl Config {
             provider_home_dir.join("vifu.sqlite").display()
         );
         let access_token_authority = access_token_authority(&mut lookup)?;
+        let guest_bootstrap_enabled = access_token_authority.is_some();
 
         let public_dashboard_url = configured_value(&mut lookup, "VIFU_PUBLIC_DASHBOARD_URL")?;
         let mut config = Self {
@@ -357,7 +359,7 @@ impl Config {
             provider_registry_file,
             runtime_extensions: Vec::new(),
             access_token_authority,
-            guest_bootstrap_enabled: false,
+            guest_bootstrap_enabled,
             guest_project_ttl: Duration::from_secs(7 * 24 * 60 * 60),
             guest_project_limit: 10_000,
             server_url: None,
@@ -743,6 +745,7 @@ mod tests {
         })
         .unwrap();
         assert_eq!(config.deployment_mode, DeploymentMode::SelfHosted);
+        assert!(!config.guest_bootstrap_enabled);
     }
 
     #[test]
@@ -761,6 +764,7 @@ mod tests {
             "https://auth.vifu.test/v1/deployments/authorize"
         );
         assert_eq!(authority.deployment_id, "dep_01JTESTDEPLOYMENT");
+        assert!(config.guest_bootstrap_enabled);
     }
 
     #[test]

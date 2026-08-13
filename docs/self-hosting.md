@@ -138,16 +138,12 @@ Each App starts with a `development` deployment and an App ID. More deployments
 can use different Gateways and active Runtime Releases while keeping the same
 App contract. The primary deployment serves the existing App endpoint.
 
-Guest bootstrap is optional. If an operator enables it, an unpaired Gateway can
-receive a temporary Guest App and deployment. It also receives an App key and
-claim token.
-
-The Console can transfer the Guest App to a signed-in owner. This transfer does
-not replace the App ID or Gateway identity. Guest Apps use the configured
-lifetime.
-
-App ID registration and one-time enrollment do not create a Guest App. The
-managed deployment bootstrap credential also does not create one.
+A self-hosted Vifu installation uses permanent Apps. When its database is
+empty, the first CLI run creates a stable `Local app`; operators can create
+more Apps and deployments explicitly.
+App ID registration and one-time enrollment add Gateways to an existing App.
+The temporary claim flow is an official hosted-service policy and is not a
+self-host configuration option.
 
 Agent Gateway is a Server transport: it requires a reachable Vifu Server.
 Applications that embed `VifuRuntime` register their providers directly as

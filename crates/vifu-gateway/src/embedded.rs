@@ -194,6 +194,7 @@ pub struct EmbeddedRuntimeGatewayConfig {
     pub server_url: String,
     pub runtime_database_path: PathBuf,
     pub server_certificate_der: Option<Vec<u8>>,
+    pub gateway_metadata: Value,
 }
 
 impl EmbeddedRuntimeGatewayConfig {
@@ -202,6 +203,7 @@ impl EmbeddedRuntimeGatewayConfig {
             server_url: server_url.into(),
             runtime_database_path: runtime_database_path.into(),
             server_certificate_der: None,
+            gateway_metadata: serde_json::json!({}),
         }
     }
 
@@ -209,6 +211,15 @@ impl EmbeddedRuntimeGatewayConfig {
     pub fn with_server_certificate_der(mut self, certificate_der: Vec<u8>) -> Self {
         self.server_certificate_der = Some(certificate_der);
         self
+    }
+
+    /// Adds payload-safe host identity and device metadata to Gateway sessions.
+    pub fn with_gateway_metadata(mut self, metadata: Value) -> Result<Self, String> {
+        if !metadata.is_object() {
+            return Err("gateway metadata must be a JSON object".to_string());
+        }
+        self.gateway_metadata = metadata;
+        Ok(self)
     }
 }
 
@@ -345,6 +356,7 @@ impl EmbeddedRuntimeGateway {
         let server_url = self.config.server_url.clone();
         let runtime_database_path = self.config.runtime_database_path.clone();
         let server_certificate_der = self.config.server_certificate_der.clone();
+        let gateway_metadata = self.config.gateway_metadata.clone();
         let embedded_runtime = self.runtime.clone();
         let (monitor_sender, monitor_receiver) =
             tokio::sync::mpsc::channel(EMBEDDED_MONITOR_QUEUE_CAPACITY);
@@ -440,8 +452,9 @@ impl EmbeddedRuntimeGateway {
                                     }
                                 });
                             let allow_guest_bootstrap = cfg!(feature = "sqlite")
-                                && authorization_token_allows_guest_bootstrap(
+                                && authorization_allows_guest_bootstrap(
                                     enrollment_token.as_deref(),
+                                    device_token.as_deref(),
                                 );
                             let connection_status = Arc::clone(&status);
                             let runtime_observer = Arc::new(move |event: GatewayRuntimeEvent| {
@@ -474,6 +487,7 @@ impl EmbeddedRuntimeGateway {
                                 allow_guest_bootstrap,
                                 providers: &providers,
                                 agents: &agents,
+                                gateway_metadata,
                                 route_overrides: None,
                                 runtime_observer: Some(runtime_observer),
                                 capture_sender: None,
@@ -812,8 +826,11 @@ fn clear_guest_project(guest_project: &Mutex<Option<EmbeddedGuestProject>>) -> R
     Ok(())
 }
 
-fn authorization_token_allows_guest_bootstrap(token: Option<&str>) -> bool {
-    token.is_none()
+fn authorization_allows_guest_bootstrap(
+    enrollment_token: Option<&str>,
+    device_token: Option<&str>,
+) -> bool {
+    enrollment_token.is_none() && device_token.is_none()
 }
 
 #[cfg(test)]
@@ -832,14 +849,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn only_an_unpaired_gateway_can_create_a_guest_project() {
-        assert!(authorization_token_allows_guest_bootstrap(None));
-        assert!(!authorization_token_allows_guest_bootstrap(Some(
-            "vifu_gb_0123456789abcdef"
-        )));
-        assert!(!authorization_token_allows_guest_bootstrap(Some(
-            "vifu_ge_0123456789abcdef"
-        )));
+    fn authorized_gateway_cannot_create_a_guest_project_after_restart() {
+        assert!(!authorization_allows_guest_bootstrap(
+            None,
+            Some("vifu_gw_0123456789abcdef")
+        ));
+    }
+
+    #[test]
+    fn fresh_gateway_without_authorization_can_create_a_guest_project() {
+        assert!(authorization_allows_guest_bootstrap(None, None));
     }
 
     struct EchoProvider;

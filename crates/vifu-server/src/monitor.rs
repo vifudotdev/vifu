@@ -543,6 +543,7 @@ mod tests {
                     allow_guest_bootstrap: false,
                     providers: &providers,
                     agents: &agents,
+                    gateway_metadata: serde_json::json!({ "name": "Topology test Gateway" }),
                     route_overrides: None,
                     runtime_observer: Some(observer),
                     capture_sender: None,

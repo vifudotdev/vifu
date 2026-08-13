@@ -1322,13 +1322,15 @@ public struct VifuEmbeddedGatewayConfig: Equatable, Hashable {
     public var serverUrl: String
     public var runtimeDatabasePath: String
     public var serverCertificateDer: Data?
+    public var gatewayMetadataJson: String
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(serverUrl: String, runtimeDatabasePath: String, serverCertificateDer: Data?) {
+    public init(serverUrl: String, runtimeDatabasePath: String, serverCertificateDer: Data?, gatewayMetadataJson: String) {
         self.serverUrl = serverUrl
         self.runtimeDatabasePath = runtimeDatabasePath
         self.serverCertificateDer = serverCertificateDer
+        self.gatewayMetadataJson = gatewayMetadataJson
     }
 
 
@@ -1347,7 +1349,8 @@ public struct FfiConverterTypeVifuEmbeddedGatewayConfig: FfiConverterRustBuffer 
             try VifuEmbeddedGatewayConfig(
                 serverUrl: FfiConverterString.read(from: &buf),
                 runtimeDatabasePath: FfiConverterString.read(from: &buf),
-                serverCertificateDer: FfiConverterOptionData.read(from: &buf)
+                serverCertificateDer: FfiConverterOptionData.read(from: &buf),
+                gatewayMetadataJson: FfiConverterString.read(from: &buf)
         )
     }
 
@@ -1355,6 +1358,7 @@ public struct FfiConverterTypeVifuEmbeddedGatewayConfig: FfiConverterRustBuffer 
         FfiConverterString.write(value.serverUrl, into: &buf)
         FfiConverterString.write(value.runtimeDatabasePath, into: &buf)
         FfiConverterOptionData.write(value.serverCertificateDer, into: &buf)
+        FfiConverterString.write(value.gatewayMetadataJson, into: &buf)
     }
 }
 

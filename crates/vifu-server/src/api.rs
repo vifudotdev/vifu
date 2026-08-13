@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path as FsPath;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -33,6 +33,7 @@ use crate::auth::{
 use crate::config::DeploymentMode;
 use crate::db::{self, EndpointPatch, NewEndpoint, NewProject, ProfilePatch, ProjectPatch};
 use crate::error::ApiError;
+use crate::gateway_identity::{scope_available_agent, scoped_provider_key};
 use crate::models::{
     slugify, validate_slug, AgentEndpoint, AgentGatewaySession, ApiKeyAgentScope,
     ApiKeyPermissions, ApiKeyRecord, AssignProjectOwner, BootstrapGatewayRuntimeRelease,
@@ -1298,25 +1299,29 @@ fn compile_profile_runtime_manifest(
         .iter()
         .find(|capability| capability.kind == "chat")
     {
+        let connection = provider_connections
+            .iter()
+            .find(|connection| connection.provider_key == chat.provider_key);
+        let runtime_provider_key = connection
+            .and_then(|connection| connection.config.get("runtimeProviderKey"))
+            .and_then(Value::as_str)
+            .unwrap_or(&chat.provider_key);
         let provider = manifest
             .providers
             .iter_mut()
-            .find(|provider| provider.id == chat.provider_key)
+            .find(|provider| provider.id == runtime_provider_key)
             .ok_or_else(|| {
                 ApiError::Conflict(format!(
-                    "provider {} is not installed in the active runtime release",
-                    chat.provider_key
+                    "provider {runtime_provider_key} is not installed in the active runtime release"
                 ))
             })?;
-        if let Some(connection) = provider_connections
-            .iter()
-            .find(|connection| connection.provider_key == chat.provider_key)
-            .filter(|connection| connection.provider_type == "vifu-runtime")
+        if let Some(connection) =
+            connection.filter(|connection| connection.provider_type == "vifu-runtime")
         {
             apply_runtime_provider_configuration(provider, &connection.config)?;
         }
         provider_generation = runtime_provider_generation(&provider.settings)?;
-        agent.provider.clone_from(&chat.provider_key);
+        agent.provider = runtime_provider_key.to_string();
     }
     let metadata = runtime_agent_metadata(agent);
     metadata.insert("persona".to_string(), version.persona.clone());
@@ -1415,10 +1420,14 @@ async fn sync_runtime_provider_configuration(
         serde_json::from_value::<ProjectSettings>(active_release.manifest).map_err(|error| {
             ApiError::Invalid(format!("active runtime release is invalid: {error}"))
         })?;
+    let runtime_provider_key = config
+        .get("runtimeProviderKey")
+        .and_then(Value::as_str)
+        .unwrap_or(provider_key);
     let Some(provider) = manifest
         .providers
         .iter_mut()
-        .find(|provider| provider.id == provider_key)
+        .find(|provider| provider.id == runtime_provider_key)
     else {
         return Ok(None);
     };
@@ -1427,7 +1436,7 @@ async fn sync_runtime_provider_configuration(
     for agent in manifest
         .agents
         .iter_mut()
-        .filter(|agent| agent.provider == provider_key)
+        .filter(|agent| agent.provider == runtime_provider_key)
     {
         let metadata = runtime_agent_metadata(agent);
         if let Some(generation) = &provider_generation {
@@ -2371,6 +2380,7 @@ pub async fn upload_agent_gateway_runtime_traces(
         return Err(ApiError::Forbidden);
     }
     let project = db::get_project(&state.pool, deployment.project_id).await?;
+    let gateway_session_id = state.relay.session_for(&gateway_id).await;
     let mut accepted = Vec::with_capacity(input.traces.len());
     for trace in input.traces {
         trace
@@ -2402,6 +2412,7 @@ pub async fn upload_agent_gateway_runtime_traces(
                 id: trace_id,
                 request_id,
                 project_id: project.project.id,
+                gateway_session_id,
                 operation: "runtime.invoke",
                 provider_key: trace.provider.as_deref(),
                 capability_kind: trace.capability.as_deref(),
@@ -2490,9 +2501,10 @@ pub async fn upload_agent_gateway_runtime_trace_observations(
     {
         return Err(ApiError::Forbidden);
     }
-    crate::telemetry::persist_batch(
+    crate::telemetry::persist_batch_for_gateway(
         &state.pool,
         input.request_id,
+        &gateway_id,
         vifu_gateway::protocol::TraceTelemetryBatch {
             events: input.events,
             dropped_events: input.dropped_events,
@@ -3352,24 +3364,25 @@ pub async fn list_project_agent_candidates(
     Path(slug): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
     let project = authorized_project_by_slug(&state, &headers, &slug, ProjectAccess::Read).await?;
+    let gateway_ids = project_runtime_gateway_ids(&state, &project).await?;
     let mut available_provider_keys = db::list_provider_connections(&state.pool, &slug)
         .await?
         .into_iter()
         .map(|provider| provider.provider_key)
         .collect::<HashSet<_>>();
-    let available_agents = db::list_available_agents(&state.pool).await?;
-    available_provider_keys.extend(
-        available_agents
-            .iter()
-            .filter(|agent| agent.gateway_id == project.project.gateway_id)
-            .filter_map(|agent| {
-                agent
-                    .metadata
-                    .get("providerKey")
-                    .and_then(Value::as_str)
-                    .map(str::to_string)
-            }),
-    );
+    let available_agents = db::list_available_agents(&state.pool)
+        .await?
+        .into_iter()
+        .filter(|agent| gateway_ids.contains(&agent.gateway_id))
+        .map(scope_available_agent)
+        .collect::<Vec<_>>();
+    available_provider_keys.extend(available_agents.iter().filter_map(|agent| {
+        agent
+            .metadata
+            .get("providerKey")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+    }));
     let imported = db::list_project_profile_provider_resources(&state.pool, project.project.id)
         .await?
         .into_iter()
@@ -3396,9 +3409,6 @@ pub async fn list_project_agent_candidates(
         })
         .collect::<Vec<_>>();
     candidates.extend(available_agents.into_iter().filter_map(|agent| {
-        if agent.gateway_id != project.project.gateway_id {
-            return None;
-        }
         let provider_key = agent
             .metadata
             .get("providerKey")
@@ -3438,7 +3448,10 @@ pub async fn import_project_agent(
     let gateway_id = required_identifier("agent gateway id", &input.gateway_id)?;
     let agent_id = required_identifier("agent id", &input.agent_id)?;
     let provider_key = required_identifier("provider key", &input.provider_key)?;
-    if gateway_id != project.project.gateway_id {
+    if !project_runtime_gateway_ids(&state, &project)
+        .await?
+        .contains(gateway_id)
+    {
         return Err(ApiError::Forbidden);
     }
     let agent = db::list_available_agents(&state.pool)
@@ -3447,8 +3460,19 @@ pub async fn import_project_agent(
         .find(|agent| {
             agent.gateway_id == gateway_id
                 && agent.id == agent_id
-                && agent.metadata.get("providerKey").and_then(Value::as_str) == Some(provider_key)
+                && agent
+                    .metadata
+                    .get("providerKey")
+                    .and_then(Value::as_str)
+                    .is_some_and(|runtime_provider_key| {
+                        scoped_provider_key(gateway_id, runtime_provider_key) == provider_key
+                    })
         })
+        .ok_or(ApiError::NotFound)?;
+    let runtime_provider_key = agent
+        .metadata
+        .get("providerKey")
+        .and_then(Value::as_str)
         .ok_or(ApiError::NotFound)?;
     let provider_type = agent
         .metadata
@@ -3459,6 +3483,7 @@ pub async fn import_project_agent(
         db::find_project_profile_by_provider_resource(
             &state.pool,
             project.project.id,
+            gateway_id,
             provider_key,
             agent_id,
         )
@@ -3474,12 +3499,15 @@ pub async fn import_project_agent(
     } else {
         let binding_id = db::ensure_discovered_binding(
             &state.pool,
-            project.project.id,
-            gateway_id,
-            agent_id,
-            &agent.name,
-            provider_key,
-            provider_type,
+            db::NewDiscoveredBinding {
+                project_id: project.project.id,
+                gateway_id,
+                agent_id,
+                agent_name: &agent.name,
+                provider_key,
+                runtime_provider_key,
+                provider_type,
+            },
         )
         .await?;
         db::assign_project_binding(&state.pool, project.project.id, binding_id).await?;
@@ -3572,6 +3600,51 @@ fn trace_page_payload(mut traces: Vec<EndpointTrace>, limit: i64) -> Value {
         "traces": traces,
         "nextCursor": next_cursor,
     })
+}
+
+fn hydrate_trace_gateway_identities(
+    traces: &mut [EndpointTrace],
+    sessions: &[AgentGatewaySession],
+) {
+    let mut latest_session_by_gateway = HashMap::new();
+    for session in sessions {
+        latest_session_by_gateway
+            .entry(session.gateway_id.as_str())
+            .or_insert(session);
+    }
+
+    for trace in traces {
+        let gateway_id = trace.gateway_id.clone().or_else(|| {
+            trace
+                .request
+                .get("gatewayId")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+        });
+        let Some(gateway_id) = gateway_id else {
+            continue;
+        };
+        trace.gateway_id.get_or_insert_with(|| gateway_id.clone());
+
+        let Some(session) = latest_session_by_gateway.get(gateway_id.as_str()) else {
+            continue;
+        };
+        if trace.gateway_name.is_none() {
+            trace.gateway_name = session
+                .metadata
+                .get("name")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+                .or_else(|| Some(gateway_id.clone()));
+        }
+        if trace.gateway_metadata.is_none() {
+            trace.gateway_metadata = Some(session.metadata.clone());
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3678,7 +3751,7 @@ pub async fn list_traces(
         ));
     }
     let limit = query.limit();
-    let traces = db::list_traces(
+    let mut traces = db::list_traces(
         &state.pool,
         db::TraceListOptions {
             endpoint_id: query.endpoint_id,
@@ -3693,6 +3766,10 @@ pub async fn list_traces(
         },
     )
     .await?;
+    hydrate_trace_gateway_identities(
+        &mut traces,
+        &db::list_agent_gateway_sessions(&state.pool).await?,
+    );
     Ok(Json(trace_page_payload(traces, limit)))
 }
 
@@ -3939,6 +4016,7 @@ pub async fn list_project_available_agents(
         .await?
         .into_iter()
         .filter(|agent| gateway_ids.contains(&agent.gateway_id))
+        .map(scope_available_agent)
         .collect::<Vec<_>>();
     Ok(Json(json!({ "agents": agents })))
 }
@@ -3980,7 +4058,7 @@ pub async fn list_project_traces(
         project_endpoint(&state, project.project.id, endpoint_id).await?;
     }
     let limit = query.limit();
-    let traces = db::list_traces(
+    let mut traces = db::list_traces(
         &state.pool,
         db::TraceListOptions {
             endpoint_id: query.endpoint_id,
@@ -3995,6 +4073,13 @@ pub async fn list_project_traces(
         },
     )
     .await?;
+    let gateway_ids = project_runtime_gateway_ids(&state, project).await?;
+    let sessions = db::list_agent_gateway_sessions(&state.pool)
+        .await?
+        .into_iter()
+        .filter(|session| gateway_ids.contains(&session.gateway_id))
+        .collect::<Vec<_>>();
+    hydrate_trace_gateway_identities(&mut traces, &sessions);
     Ok(Json(trace_page_payload(traces, limit)))
 }
 
@@ -6192,12 +6277,17 @@ fn gateway_binding_config(
     profile_name: &str,
     profile_slug: &str,
 ) -> Result<Value, ApiError> {
+    let runtime_provider_key = capability_config
+        .get("runtimeProviderKey")
+        .and_then(Value::as_str)
+        .unwrap_or(provider_key)
+        .to_string();
     let binding = capability_config.as_object_mut().ok_or_else(|| {
         ApiError::Invalid("Gateway capability config must be an object".to_string())
     })?;
     binding.insert(
         "providerKey".to_string(),
-        Value::String(provider_key.to_string()),
+        Value::String(runtime_provider_key),
     );
     binding.insert(
         "capability".to_string(),
@@ -7350,11 +7440,13 @@ async fn resolve_runtime_provider(
     let overrides = decrypted_provider_secrets(state, &connection)?;
     let (provider_type, base_url, config, secrets) = if connection.source_kind == "custom" {
         let project = db::get_project_by_slug(&state.pool, project_slug).await?;
+        let gateway_id = provider_connection_gateway_id(&connection.config)
+            .unwrap_or(&project.project.gateway_id);
         let source = resolve_project_provider_source(
             state,
             &connection.source_kind,
             &connection.source_key,
-            Some(&project.project.gateway_id),
+            Some(gateway_id),
         )
         .await?;
         let base_url = if connection.base_url.trim().is_empty() {
@@ -7869,13 +7961,9 @@ async fn effective_provider_connection(
         return Ok(connection);
     }
     let project = db::get_project(&state.pool, connection.project_id).await?;
-    let source = match available_provider(
-        state,
-        Some(&project.project.gateway_id),
-        &connection.source_key,
-    )
-    .await
-    {
+    let gateway_id =
+        provider_connection_gateway_id(&connection.config).unwrap_or(&project.project.gateway_id);
+    let source = match available_provider(state, Some(gateway_id), &connection.source_key).await {
         Ok(source) => source,
         Err(ApiError::NotFound) => {
             if connection.status != "offline" {
@@ -7896,17 +7984,33 @@ async fn effective_provider_connection(
     Ok(connection)
 }
 
+fn provider_connection_gateway_id(config: &Value) -> Option<&str> {
+    config
+        .get("gatewayId")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
 async fn reconcile_project_provider_agents(
     state: &AppState,
     project_slug: &str,
-    provider_key: &str,
+    connection: &ProviderConnection,
 ) -> Result<usize, ApiError> {
     let project = db::get_project_by_slug(&state.pool, project_slug).await?;
+    let gateway_id =
+        provider_connection_gateway_id(&connection.config).unwrap_or(&project.project.gateway_id);
+    let runtime_provider_key = connection
+        .config
+        .get("runtimeProviderKey")
+        .and_then(Value::as_str)
+        .unwrap_or(&connection.source_key);
     let agents = db::list_available_agents(&state.pool).await?;
     let mut added = 0_usize;
     for agent in agents.into_iter().filter(|agent| {
-        agent.gateway_id == project.project.gateway_id
-            && agent.metadata.get("providerKey").and_then(Value::as_str) == Some(provider_key)
+        agent.gateway_id == gateway_id
+            && agent.metadata.get("providerKey").and_then(Value::as_str)
+                == Some(runtime_provider_key)
             && agent.status == "connected"
     }) {
         let provider_type = agent
@@ -7917,7 +8021,8 @@ async fn reconcile_project_provider_agents(
         match db::find_project_profile_by_provider_resource(
             &state.pool,
             project.project.id,
-            provider_key,
+            gateway_id,
+            &connection.provider_key,
             &agent.id,
         )
         .await?
@@ -7944,12 +8049,15 @@ async fn reconcile_project_provider_agents(
             None => {
                 db::ensure_discovered_binding(
                     &state.pool,
-                    project.project.id,
-                    &agent.gateway_id,
-                    &agent.id,
-                    &agent.name,
-                    provider_key,
-                    provider_type,
+                    db::NewDiscoveredBinding {
+                        project_id: project.project.id,
+                        gateway_id: &agent.gateway_id,
+                        agent_id: &agent.id,
+                        agent_name: &agent.name,
+                        provider_key: &connection.provider_key,
+                        runtime_provider_key,
+                        provider_type,
+                    },
                 )
                 .await?;
                 added += 1;
@@ -7966,28 +8074,23 @@ async fn refresh_project_provider(
 ) -> Result<(ProviderConnection, Option<String>, usize), ApiError> {
     if connection.source_kind == "custom" {
         let project = db::get_project_by_slug(&state.pool, project_slug).await?;
-        let (status, message) = match available_provider(
-            state,
-            Some(&project.project.gateway_id),
-            &connection.source_key,
-        )
-        .await
-        {
-            Ok(_) => ("online", None),
-            Err(ApiError::NotFound) => (
-                "offline",
-                Some(format!(
-                    "provider {} is not reported by gateway {}",
-                    connection.source_key, project.project.gateway_id
-                )),
-            ),
-            Err(error) => return Err(error),
-        };
+        let gateway_id = provider_connection_gateway_id(&connection.config)
+            .unwrap_or(&project.project.gateway_id);
+        let (status, message) =
+            match available_provider(state, Some(gateway_id), &connection.source_key).await {
+                Ok(_) => ("online", None),
+                Err(ApiError::NotFound) => (
+                    "offline",
+                    Some(format!(
+                        "provider {} is not reported by gateway {}",
+                        connection.source_key, gateway_id
+                    )),
+                ),
+                Err(error) => return Err(error),
+            };
         let updated =
             db::update_provider_connection_status(&state.pool, connection.id, status).await?;
-        let added_agents =
-            reconcile_project_provider_agents(state, project_slug, &connection.provider_key)
-                .await?;
+        let added_agents = reconcile_project_provider_agents(state, project_slug, &updated).await?;
         return Ok((
             effective_provider_connection(state, updated).await?,
             message,
@@ -8004,8 +8107,7 @@ async fn refresh_project_provider(
     )
     .await;
     let updated = db::update_provider_connection_status(&state.pool, connection.id, status).await?;
-    let added_agents =
-        reconcile_project_provider_agents(state, project_slug, &connection.provider_key).await?;
+    let added_agents = reconcile_project_provider_agents(state, project_slug, &updated).await?;
     Ok((
         effective_provider_connection(state, updated).await?,
         message,
@@ -8653,16 +8755,20 @@ mod tests {
     use super::{
         agent_gateway_pairing, api_error_trace_status, apply_runtime_provider_configuration,
         chat_request_summary, chat_trace_request, embedding_request_summary, embedding_response,
-        feedback_endpoint_permission_allowed, gateway_binding_config, invocation_json_response,
-        merge_json_objects, optional_feedback_message, optional_feedback_path,
-        optional_feedback_text, patch_text, prepare_project_provider_assignment_with_secret_key,
-        profile_slug, profile_timeout, project_slug, runtime_provider_generation,
-        trace_model_parameters, validate_chat_completion_request, validate_embedding_request,
+        feedback_endpoint_permission_allowed, gateway_binding_config,
+        hydrate_trace_gateway_identities, invocation_json_response, merge_json_objects,
+        optional_feedback_message, optional_feedback_path, optional_feedback_text, patch_text,
+        prepare_project_provider_assignment_with_secret_key, profile_slug, profile_timeout,
+        project_slug, runtime_provider_generation, trace_model_parameters,
+        validate_chat_completion_request, validate_embedding_request,
         validate_profile_version_input, validate_safe_generation_settings, validate_timeout,
         validated_provider_base_url, AppFeedbackInput, TraceQuery,
     };
     use crate::error::ApiError;
-    use crate::models::{ApiKeyPermissions, EndpointPermission, ProfileCapabilityDraft};
+    use crate::models::{
+        AgentGatewaySession, ApiKeyPermissions, EndpointPermission, EndpointTrace,
+        ProfileCapabilityDraft,
+    };
     use crate::ServerEndpointIdentity;
 
     #[test]
@@ -8795,6 +8901,67 @@ mod tests {
             reversed_window.validate(),
             Err(ApiError::Invalid(message)) if message.contains("earlier than")
         ));
+    }
+
+    #[test]
+    fn legacy_trace_gateway_id_resolves_to_the_latest_reported_name() {
+        let now = chrono::Utc::now();
+        let gateway_id = "gateway-kitchen-light";
+        let mut traces = vec![EndpointTrace {
+            id: uuid::Uuid::new_v4(),
+            request_id: uuid::Uuid::new_v4(),
+            endpoint_id: None,
+            project_id: None,
+            gateway_session_id: None,
+            gateway_id: None,
+            gateway_name: None,
+            gateway_metadata: None,
+            profile_id: None,
+            profile_version_id: None,
+            profile_slug: None,
+            profile_name: None,
+            profile_version_number: None,
+            operation: "chat".to_string(),
+            provider_key: None,
+            capability_kind: None,
+            selection_key: None,
+            status: "completed".to_string(),
+            latency_ms: Some(12),
+            model: None,
+            completion_start_ms: None,
+            usage: None,
+            decode_ms: None,
+            app_outcome: None,
+            request: json!({ "gatewayId": gateway_id }),
+            response: None,
+            error: None,
+            created_at: now,
+            completed_at: Some(now),
+        }];
+        let sessions = vec![AgentGatewaySession {
+            id: uuid::Uuid::new_v4(),
+            gateway_id: gateway_id.to_string(),
+            session_id: uuid::Uuid::new_v4(),
+            status: "disconnected".to_string(),
+            agents: json!([]),
+            metadata: json!({
+                "name": "Kitchen light",
+                "kind": "light",
+                "platform": "embedded"
+            }),
+            connected_at: now,
+            last_seen_at: now,
+            disconnected_at: Some(now),
+        }];
+
+        hydrate_trace_gateway_identities(&mut traces, &sessions);
+
+        assert_eq!(traces[0].gateway_id.as_deref(), Some(gateway_id));
+        assert_eq!(traces[0].gateway_name.as_deref(), Some("Kitchen light"));
+        assert_eq!(
+            traces[0].gateway_metadata.as_ref().unwrap()["kind"],
+            "light"
+        );
     }
 
     #[test]
@@ -8984,8 +9151,8 @@ mod tests {
     #[test]
     fn gateway_binding_carries_the_server_profile_identity_and_persona() {
         let binding = gateway_binding_config(
-            json!({ "temperature": 0 }),
-            "local-qwen",
+            json!({ "temperature": 0, "runtimeProviderKey": "local-qwen" }),
+            "local-qwen--gateway-scope",
             "chat",
             &json!({ "instructions": "Choose one safe action." }),
             "Stardew Valley combat/0",
@@ -9000,6 +9167,8 @@ mod tests {
             "Choose one safe action."
         );
         assert_eq!(binding["capability"], "chat");
+        assert_eq!(binding["providerKey"], "local-qwen");
+        assert_eq!(binding["runtimeProviderKey"], "local-qwen");
     }
 
     #[test]

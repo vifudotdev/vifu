@@ -82,6 +82,7 @@ async fn status(config: LoadedRuntimeConfig) -> Result<(), String> {
     );
     if gateway_is_local {
         let gateway_options = config.gateway_options()?;
+        gateway::migrate_legacy_session(&gateway_options)?;
         let session_scope = gateway_options.session_scope.clone();
         let gateway = gateway_options.load_config()?;
         gateway::status(&gateway, &session_scope).await?;
@@ -99,6 +100,7 @@ async fn doctor(config: LoadedRuntimeConfig) -> Result<(), String> {
     }
     if config.gateway_is_local()? {
         let gateway_options = config.gateway_options()?;
+        gateway::migrate_legacy_session(&gateway_options)?;
         let session_scope = gateway_options.session_scope.clone();
         let gateway = gateway_options.load_config()?;
         gateway::doctor(&gateway, &session_scope).await?;
@@ -129,6 +131,7 @@ async fn run_combined(config: LoadedRuntimeConfig, open_browser: bool) -> Result
     let server_state = vifu_server::connect(server_config)
         .await
         .map_err(|error| error.to_string())?;
+    prepare_local_app(&config, &server_state, Some(&mut gateway_options)).await?;
     apply_local_server_certificate(
         &mut gateway_options,
         server_state.server_endpoint.as_deref(),
@@ -176,8 +179,12 @@ async fn run_server_only(config: LoadedRuntimeConfig, open_browser: bool) -> Res
     let server_config = config.server_config()?;
     let console_url = local_console_url(&server_config);
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
-    let mut server = tokio::spawn(vifu_server::serve(
-        server_config,
+    let server_state = vifu_server::connect(server_config)
+        .await
+        .map_err(|error| error.to_string())?;
+    prepare_local_app(&config, &server_state, None).await?;
+    let mut server = tokio::spawn(vifu_server::serve_state(
+        server_state,
         wait_for_shutdown(shutdown_rx),
     ));
     announce_console(console_url, open_browser);
@@ -328,6 +335,7 @@ async fn run_combined_tui(config: LoadedRuntimeConfig) -> Result<(), String> {
     let server_state = vifu_server::connect(server_config)
         .await
         .map_err(|error| error.to_string())?;
+    prepare_local_app(&config, &server_state, Some(&mut gateway_options)).await?;
     apply_local_server_certificate(
         &mut gateway_options,
         server_state.server_endpoint.as_deref(),
@@ -410,6 +418,7 @@ async fn run_server_only_tui(config: LoadedRuntimeConfig) -> Result<(), String> 
     let server_state = vifu_server::connect(server_config)
         .await
         .map_err(|error| error.to_string())?;
+    prepare_local_app(&config, &server_state, None).await?;
     let server_monitor = server_state.monitor.subscribe();
     let monitor_bridge = tokio::spawn(bridge_server_monitor(server_monitor, monitor_tx));
     let mut server = tokio::spawn(vifu_server::serve_state(
@@ -773,6 +782,47 @@ fn local_console_url(config: &ServerConfig) -> Option<String> {
         .or_else(|| Some(format!("http://{}", config.addr)))
 }
 
+async fn prepare_local_app(
+    config: &LoadedRuntimeConfig,
+    server: &vifu_server::AppState,
+    gateway_options: Option<&mut crate::gateway::GatewayRuntimeOptions>,
+) -> Result<(), String> {
+    if !config.uses_local_app_bootstrap()? {
+        return Ok(());
+    }
+    if let Some(options) = gateway_options.as_deref() {
+        gateway::migrate_legacy_session(options)?;
+    }
+    let stored_guest_app_id = gateway_options
+        .as_deref()
+        .filter(|options| options.enrollment_token.is_none())
+        .map(gateway::stored_guest_app_id)
+        .transpose()?
+        .flatten();
+    let preferred_app_id = gateway_options
+        .as_deref()
+        .and_then(|options| options.enrollment_token.as_deref())
+        .or_else(|| {
+            gateway_options
+                .as_deref()
+                .and_then(|options| options.migrated_app_id.as_deref())
+        })
+        .or(stored_guest_app_id.as_deref());
+    let app = vifu_server::ensure_local_bootstrap_app(server, preferred_app_id)
+        .await
+        .map_err(|error| format!("the local App could not be prepared: {error}"))?;
+    if let Some(gateway_options) = gateway_options {
+        gateway::clear_stored_guest_app(gateway_options)?;
+        gateway::store_pending_app_id_if_unauthorized(gateway_options, &app.app_id)?;
+        gateway_options.allow_guest_bootstrap = false;
+        gateway_options.pairing_app = Some(crate::gateway::PairingAppTarget {
+            project_id: app.project_id,
+            deployment_id: app.deployment_id,
+        });
+    }
+    Ok(())
+}
+
 fn apply_local_server_certificate(
     options: &mut crate::gateway::GatewayRuntimeOptions,
     endpoint: Option<&vifu_server::ServerEndpointIdentity>,
@@ -1082,6 +1132,9 @@ mod tests {
             allow_guest_bootstrap: true,
             enrollment_token: None,
             session_scope: "test".to_string(),
+            legacy_session_scope: None,
+            migrated_app_id: None,
+            pairing_app: None,
         };
 
         apply_local_server_certificate(&mut options, Some(&endpoint)).unwrap();

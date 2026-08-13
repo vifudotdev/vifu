@@ -93,7 +93,7 @@ export function RuntimeTraceWorkbench({ projectId, projectSlug, traces: initialT
   const [query, setQuery] = useState("");
   const deferredQuery = useDeferredValue(query);
   const [agentFilter, setAgentFilter] = useState("all");
-  const [modelFilter, setModelFilter] = useState("all");
+  const [gatewayFilter, setGatewayFilter] = useState("all");
   const [statusFilter, setStatusFilter] = useState<"all" | TraceStatusGroup>("all");
   const [selectedTraceId, setSelectedTraceId] = useState<string | null>(null);
   const [selectedObservationId, setSelectedObservationId] = useState<string | null>(null);
@@ -410,18 +410,18 @@ export function RuntimeTraceWorkbench({ projectId, projectSlug, traces: initialT
     () => uniqueSorted([...rows, ...pausedRows].map((row) => row.presentation.agent)),
     [pausedRows, rows],
   );
-  const modelOptions = useMemo(
-    () => uniqueSorted([...rows, ...pausedRows].flatMap((row) => row.presentation.model ? [row.presentation.model] : [])),
+  const gatewayOptions = useMemo(
+    () => uniqueSorted([...rows, ...pausedRows].map((row) => row.presentation.gateway)),
     [pausedRows, rows],
   );
 
   const normalizedQuery = deferredQuery.trim().toLowerCase();
   const visibleRows = useMemo(() => rows.filter((row) => {
     if (agentFilter !== "all" && row.presentation.agent !== agentFilter) return false;
-    if (modelFilter !== "all" && row.presentation.model !== modelFilter) return false;
+    if (gatewayFilter !== "all" && row.presentation.gateway !== gatewayFilter) return false;
     if (statusFilter !== "all" && row.presentation.status !== statusFilter) return false;
     return !normalizedQuery || row.searchText.includes(normalizedQuery);
-  }), [agentFilter, modelFilter, normalizedQuery, rows, statusFilter]);
+  }), [agentFilter, gatewayFilter, normalizedQuery, rows, statusFilter]);
 
   const traceById = useMemo(() => new Map(traces.map((trace) => [trace.id, trace])), [traces]);
   const selectedTrace = selectedTraceId ? traceById.get(selectedTraceId) ?? null : null;
@@ -549,7 +549,7 @@ export function RuntimeTraceWorkbench({ projectId, projectSlug, traces: initialT
   const resetFilters = useCallback(() => {
     setQuery("");
     setAgentFilter("all");
-    setModelFilter("all");
+    setGatewayFilter("all");
     setStatusFilter("all");
     setDateFrom("");
     setDateTo("");
@@ -584,7 +584,7 @@ export function RuntimeTraceWorkbench({ projectId, projectSlug, traces: initialT
           <Search aria-hidden="true" />
           <span className="sr-only">Search traces</span>
           <input
-            placeholder="Search trace, agent, model, or error..."
+            placeholder="Search trace, agent, Gateway, model, or error..."
             type="search"
             value={query}
             onChange={(event) => setQuery(event.target.value)}
@@ -608,10 +608,10 @@ export function RuntimeTraceWorkbench({ projectId, projectSlug, traces: initialT
           </select>
         </label>
         <label>
-          <span className="sr-only">Filter models</span>
-          <select value={modelFilter} onChange={(event) => setModelFilter(event.target.value)}>
-            <option value="all">All models</option>
-            {modelOptions.map((model) => <option key={model} value={model}>{model}</option>)}
+          <span className="sr-only">Filter Gateways</span>
+          <select value={gatewayFilter} onChange={(event) => setGatewayFilter(event.target.value)}>
+            <option value="all">All Gateways</option>
+            {gatewayOptions.map((gateway) => <option key={gateway} value={gateway}>{gateway}</option>)}
           </select>
         </label>
         <label className="trace-date-filter">
@@ -663,7 +663,7 @@ export function RuntimeTraceWorkbench({ projectId, projectSlug, traces: initialT
                 <div>Date / time</div>
                 <div>Status</div>
                 <div>Agent</div>
-                <div>Model</div>
+                <div>Gateway</div>
                 <div>Latency</div>
                 <div>TTFT</div>
                 <div>Tok/s</div>
@@ -745,7 +745,7 @@ function TraceRow({
         <time title={formatDate(trace.createdAt)}>{formatShortDateTime(trace.createdAt)}</time>
         <span className={`trace-status ${presentation.status}`}>{presentation.statusLabel}</span>
         <strong title={presentation.agent}>{presentation.agent}</strong>
-        <code title={presentation.model ?? undefined}>{presentation.model ?? "-"}</code>
+        <code title={presentation.gatewayId ?? presentation.gateway}>{presentation.gateway}</code>
         <span>{formatMetric(presentation.latencyMs, "ms")}</span>
         <span>{formatMetric(presentation.ttftMs, "ms")}</span>
         <span>{formatMetric(presentation.tokensPerSecond, "", 1)}</span>
@@ -795,7 +795,7 @@ const TraceDetail = memo(function TraceDetail({
       </header>
 
       <div className="trace-detail-kpis">
-        <div><span>Model</span><strong>{presentation.model ?? "-"}</strong></div>
+        <div><span>Gateway</span><strong title={presentation.gatewayId ?? undefined}>{presentation.gateway}</strong></div>
         <div><span>Latency</span><strong>{formatMetric(presentation.latencyMs, "ms")}</strong></div>
         <div><span>TTFT</span><strong>{formatMetric(presentation.ttftMs, "ms")}</strong></div>
         <div><span>Tokens/s</span><strong>{formatMetric(presentation.tokensPerSecond, "", 1)}</strong></div>
@@ -931,6 +931,9 @@ function TraceDetailTab({
     return (
       <div className="trace-payload-grid">
         <TracePayload title="Metadata" value={metadata} />
+        {!selectedSpan && trace.gatewayMetadata
+          ? <TracePayload title="Gateway metadata" value={trace.gatewayMetadata} />
+          : null}
       </div>
     );
   }
@@ -967,6 +970,7 @@ function TraceSummary({ trace, spans, selectedSpan }: {
         <div><dt>Status</dt><dd>{selectedSpan?.status ?? trace.status}</dd></div>
         <div><dt>Duration</dt><dd>{formatMetric(selectedSpan?.durationMs ?? trace.latencyMs, "ms")}</dd></div>
         <div><dt>Provider</dt><dd>{selectedSpan?.providerKey ?? trace.providerKey ?? "-"}</dd></div>
+        <div><dt>Gateway</dt><dd title={trace.gatewayId ?? undefined}>{traceListPresentation(trace).gateway}</dd></div>
         <div><dt>Model</dt><dd>{selectedSpan ? observationModel(selectedSpan) ?? "-" : traceListPresentation(trace).model ?? "-"}</dd></div>
         <div><dt>TTFT</dt><dd>{formatMetric(selectedSpan ? observationTtftMs(selectedSpan) : traceListPresentation(trace).ttftMs, "ms")}</dd></div>
         <div><dt>Tokens</dt><dd>{formatUsage(usage)}</dd></div>
@@ -1128,6 +1132,9 @@ function sameTraceRevision(a: EndpointTrace, b: EndpointTrace): boolean {
     && a.error === b.error
     && a.profileName === b.profileName
     && a.providerKey === b.providerKey
+    && a.gatewayId === b.gatewayId
+    && a.gatewayName === b.gatewayName
+    && formatJson(a.gatewayMetadata) === formatJson(b.gatewayMetadata)
     && formatJson(a.request) === formatJson(b.request)
     && formatJson(a.response) === formatJson(b.response)
     && aPresentation.model === bPresentation.model
@@ -1189,6 +1196,8 @@ function traceMetadata(trace: EndpointTrace): Record<string, unknown> {
     endpointId: trace.endpointId,
     projectId: trace.projectId,
     gatewaySessionId: trace.gatewaySessionId,
+    gatewayId: trace.gatewayId,
+    gatewayName: trace.gatewayName,
     profileId: trace.profileId,
     profileVersionId: trace.profileVersionId,
     profileVersionNumber: trace.profileVersionNumber,

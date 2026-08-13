@@ -188,7 +188,9 @@ let gateway = try VifuEmbeddedGateway(
     runtime: runtime,
     config: VifuEmbeddedGatewayConfig(
         serverUrl: serverURL,
-        runtimeDatabasePath: runtimeDatabaseURL.path
+        runtimeDatabasePath: runtimeDatabaseURL.path,
+        serverCertificateDer: nil,
+        gatewayMetadata: .currentAppleMobile()
     )
 )
 try gateway.start(
@@ -202,10 +204,10 @@ if let updated = try gateway.status().authorization {
 }
 ```
 
-`start` sends the agent roster, timing stages, model identity, host metrics,
-terminal status, and bounded errors. It does not send root invocation input or
-output. A private debugging surface can send those bounded summaries only after
-the host application obtains explicit user consent:
+`start` sends the Gateway name, device metadata, agent roster, timing stages,
+model identity, host metrics, terminal status, and bounded errors. It does not
+send root invocation input or output. A private debugging surface can send
+those bounded summaries after the host application gets explicit user consent:
 
 ```swift
 try gateway.startWithMonitorIo(

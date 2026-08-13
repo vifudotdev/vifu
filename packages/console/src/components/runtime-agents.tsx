@@ -115,7 +115,8 @@ function AgentCard({
     && stringValue(agent.metadata.providerKey) === providerKey
     && agent.status === "connected"
   )) : false;
-  const availability = provider?.providerType === "openclaw"
+  const gatewayManaged = Boolean(provider && stringValue(provider.config.gatewayId));
+  const availability = gatewayManaged
     ? (gatewayOnline ? { label: "Online", className: "online" } : { label: "Unavailable", className: "offline" })
     : provider?.status === "online"
       ? { label: "Online", className: "online" }

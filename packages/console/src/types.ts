@@ -291,6 +291,9 @@ export type EndpointTrace = {
   endpointId: string | null;
   projectId: string | null;
   gatewaySessionId: string | null;
+  gatewayId?: string | null;
+  gatewayName?: string | null;
+  gatewayMetadata?: Record<string, unknown> | null;
   profileId: string | null;
   profileVersionId: string | null;
   profileSlug: string | null;

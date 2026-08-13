@@ -22,6 +22,8 @@ pub struct RuntimeConfig {
     pub server: Option<ServerRuntimeConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gateway: Option<GatewayRuntimeConfig>,
+    #[serde(skip)]
+    legacy_gateway_app_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -40,25 +42,12 @@ pub struct ServerRuntimeConfig {
     pub runtime_extensions: Vec<RuntimeExtensionConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub authority: Option<AccessTokenAuthorityConfig>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub guest_bootstrap: Option<GuestBootstrapConfig>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ServerDashboardConfig {
     pub address: String,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct GuestBootstrapConfig {
-    #[serde(default)]
-    pub enabled: bool,
-    #[serde(default = "default_guest_ttl_hours")]
-    pub ttl_hours: u64,
-    #[serde(default = "default_guest_project_limit")]
-    pub max_projects: u32,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -82,10 +71,6 @@ pub struct AccessTokenAuthorityConfig {
 #[serde(deny_unknown_fields)]
 pub struct GatewayRuntimeConfig {
     pub address: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub app_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub guest_bootstrap: Option<bool>,
 }
 
 impl LoadedRuntimeConfig {
@@ -129,49 +114,26 @@ impl LoadedRuntimeConfig {
             .ok_or_else(|| "an Agent Gateway requires a configured Vifu Server".to_string())?;
         let server_url = server.address.clone();
         let local_server = server.local_socket_addr()?.is_some();
-        let local_guest_enabled = server
-            .guest_bootstrap
-            .as_ref()
-            .is_some_and(|guest| guest.enabled);
-        let app_id = gateway
-            .app_id
-            .clone()
-            .or_else(|| std::env::var("VIFU_APP_ID").ok())
-            .filter(|value| !value.trim().is_empty());
-        if let Some(app_id) = app_id.as_deref() {
-            validate_app_id(app_id)?;
-        }
-        let allow_guest_bootstrap = if app_id.is_some() {
-            false
-        } else {
-            gateway.guest_bootstrap.unwrap_or(if local_server {
-                local_guest_enabled
-            } else {
-                true
-            })
-        };
-        if local_server && allow_guest_bootstrap && !local_guest_enabled {
-            return Err(
-                "gateway.guest_bootstrap requires server.guest_bootstrap.enabled for a local Server"
-                    .to_string(),
-            );
-        }
+        let allow_guest_bootstrap = !local_server;
         Ok(GatewayRuntimeOptions {
             server_url,
             server_certificate_der: None,
             allow_guest_bootstrap,
-            enrollment_token: app_id.clone(),
-            session_scope: match app_id {
-                Some(app_id) => format!(
-                    "{}:app:{}",
-                    self.profile.as_deref().unwrap_or("default"),
-                    app_id
-                ),
-                None => self
-                    .profile
-                    .clone()
-                    .unwrap_or_else(|| "default".to_string()),
-            },
+            // Use a removed legacy App ID once so installations that had not
+            // yet received a Device Token can complete their migration.
+            enrollment_token: self.config.legacy_gateway_app_id.clone(),
+            session_scope: self
+                .profile
+                .clone()
+                .unwrap_or_else(|| "default".to_string()),
+            legacy_session_scope: self.config.legacy_gateway_app_id.as_ref().map(|app_id| {
+                format!(
+                    "{}:app:{app_id}",
+                    self.profile.as_deref().unwrap_or("default")
+                )
+            }),
+            migrated_app_id: self.config.legacy_gateway_app_id.clone(),
+            pairing_app: None,
         })
     }
 
@@ -209,13 +171,6 @@ impl LoadedRuntimeConfig {
         config.apply_runtime_extensions(server.runtime_extensions(&self.path)?)?;
         if server.authority.is_some() {
             config.apply_access_token_authority(server.access_token_authority()?)?;
-        }
-        if let Some(guest) = server.guest_bootstrap.as_ref() {
-            config.apply_guest_bootstrap(
-                guest.enabled,
-                std::time::Duration::from_secs(guest.ttl_hours.saturating_mul(60 * 60)),
-                guest.max_projects,
-            )?;
         }
         Ok(config)
     }
@@ -255,6 +210,14 @@ impl LoadedRuntimeConfig {
             .map(GatewayRuntimeConfig::local_socket_addr)
             .transpose()
             .map(|address| address.flatten().is_some())
+    }
+
+    pub fn uses_local_app_bootstrap(&self) -> Result<bool, String> {
+        let server =
+            self.config.server.as_ref().ok_or_else(|| {
+                format!("{} does not configure a Vifu Server", self.path.display())
+            })?;
+        Ok(server.authority.is_none() && self.server_is_local()?)
     }
 }
 
@@ -302,17 +265,11 @@ impl RuntimeConfig {
                 database_url_file: None,
                 runtime_extensions: Vec::new(),
                 authority: None,
-                guest_bootstrap: Some(GuestBootstrapConfig {
-                    enabled: true,
-                    ttl_hours: default_guest_ttl_hours(),
-                    max_projects: default_guest_project_limit(),
-                }),
             }),
             gateway: Some(GatewayRuntimeConfig {
                 address: vifu_gateway::config::DEFAULT_SERVER_URL.to_string(),
-                app_id: None,
-                guest_bootstrap: None,
             }),
+            legacy_gateway_app_id: None,
         })
     }
 
@@ -342,6 +299,7 @@ impl RuntimeConfig {
             return Ok(self);
         }
 
+        let legacy_gateway_app_id = self.legacy_gateway_app_id.clone();
         let mut root = serde_json::to_value(self)
             .map_err(|error| format!("Vifu runtime configuration could not be encoded: {error}"))?;
         for raw_override in overrides {
@@ -349,9 +307,10 @@ impl RuntimeConfig {
             let segments = config_path.split('.').collect::<Vec<_>>();
             apply_json_override(&mut root, &segments, value)?;
         }
-        let config = serde_json::from_value(root).map_err(|error| {
+        let mut config: Self = serde_json::from_value(root).map_err(|error| {
             format!("Vifu runtime configuration is invalid after applying -c/--config: {error}")
         })?;
+        config.legacy_gateway_app_id = legacy_gateway_app_id;
         Self::validate(path, config).map_err(|error| format!("{error} after applying -c/--config"))
     }
 
@@ -376,7 +335,7 @@ impl RuntimeConfig {
         match toml::Value::Table(table.clone()).try_into::<Self>() {
             Ok(config) => Self::validate(path, config).map(|config| (config, false)),
             Err(current_error) => {
-                let Some(config) = migrate_pre_address_config(table)? else {
+                let Some(config) = migrate_legacy_config(table)? else {
                     return Err(format!(
                         "Vifu runtime configuration {} is invalid: {current_error}",
                         path.display()
@@ -407,7 +366,7 @@ impl RuntimeConfig {
     }
 }
 
-fn migrate_pre_address_config(mut root: toml::Table) -> Result<Option<RuntimeConfig>, String> {
+fn migrate_legacy_config(mut root: toml::Table) -> Result<Option<RuntimeConfig>, String> {
     let server_has_legacy_fields = root
         .get("server")
         .and_then(toml::Value::as_table)
@@ -416,7 +375,37 @@ fn migrate_pre_address_config(mut root: toml::Table) -> Result<Option<RuntimeCon
                 || server.contains_key("listener")
                 || server.contains_key("tls")
         });
-    if !root.contains_key("version") && !server_has_legacy_fields {
+    let server_has_guest_bootstrap = root
+        .get("server")
+        .and_then(toml::Value::as_table)
+        .is_some_and(|server| server.contains_key("guest_bootstrap"));
+    let gateway_has_guest_bootstrap = root
+        .get("gateway")
+        .and_then(toml::Value::as_table)
+        .is_some_and(|gateway| gateway.contains_key("guest_bootstrap"));
+    let gateway_has_app_id = root
+        .get("gateway")
+        .and_then(toml::Value::as_table)
+        .is_some_and(|gateway| gateway.contains_key("app_id"));
+    let legacy_gateway_app_id = if gateway_has_app_id {
+        let app_id = root
+            .get("gateway")
+            .and_then(toml::Value::as_table)
+            .and_then(|gateway| gateway.get("app_id"))
+            .and_then(toml::Value::as_str)
+            .ok_or_else(|| "legacy gateway.app_id must be a string".to_string())?
+            .to_string();
+        validate_legacy_app_id(&app_id)?;
+        Some(app_id)
+    } else {
+        None
+    };
+    if !root.contains_key("version")
+        && !server_has_legacy_fields
+        && !server_has_guest_bootstrap
+        && !gateway_has_guest_bootstrap
+        && !gateway_has_app_id
+    {
         return Ok(None);
     }
 
@@ -427,6 +416,7 @@ fn migrate_pre_address_config(mut root: toml::Table) -> Result<Option<RuntimeCon
     }
 
     if let Some(server) = root.get_mut("server").and_then(toml::Value::as_table_mut) {
+        server.remove("guest_bootstrap");
         let legacy_api_address = server
             .remove("api_addr")
             .and_then(|value| value.as_str().map(str::to_string));
@@ -446,6 +436,8 @@ fn migrate_pre_address_config(mut root: toml::Table) -> Result<Option<RuntimeCon
     }
 
     if let Some(gateway) = root.get_mut("gateway").and_then(toml::Value::as_table_mut) {
+        gateway.remove("guest_bootstrap");
+        gateway.remove("app_id");
         if !gateway.contains_key("address") {
             gateway.insert(
                 "address".to_string(),
@@ -454,10 +446,25 @@ fn migrate_pre_address_config(mut root: toml::Table) -> Result<Option<RuntimeCon
         }
     }
 
-    toml::Value::Table(root)
+    let mut config: RuntimeConfig = toml::Value::Table(root)
         .try_into::<RuntimeConfig>()
-        .map(Some)
-        .map_err(|error| format!("legacy Vifu runtime configuration is invalid: {error}"))
+        .map_err(|error| format!("legacy Vifu runtime configuration is invalid: {error}"))?;
+    config.legacy_gateway_app_id = legacy_gateway_app_id;
+    Ok(Some(config))
+}
+
+fn validate_legacy_app_id(value: &str) -> Result<(), String> {
+    let suffix = value
+        .strip_prefix("vifu_app_")
+        .ok_or_else(|| "legacy gateway.app_id must start with vifu_app_".to_string())?;
+    if suffix.len() != 64
+        || !suffix
+            .bytes()
+            .all(|character| character.is_ascii_hexdigit())
+    {
+        return Err("legacy gateway.app_id is invalid".to_string());
+    }
+    Ok(())
 }
 
 fn origin_from_listener(listener: &str) -> String {
@@ -526,14 +533,6 @@ fn apply_json_override(
     apply_json_override(child, remaining, value)
 }
 
-const fn default_guest_ttl_hours() -> u64 {
-    7 * 24
-}
-
-const fn default_guest_project_limit() -> u32 {
-    10_000
-}
-
 fn deployment_owns_server(value: Option<&str>) -> Result<bool, String> {
     match value.map(str::trim).filter(|value| !value.is_empty()) {
         None | Some("local") => Ok(false),
@@ -581,20 +580,6 @@ impl ServerRuntimeConfig {
                 return Err(
                     "server deployment_id and authority must be configured together".to_string(),
                 )
-            }
-        }
-        if let Some(guest) = self.guest_bootstrap.as_ref() {
-            let ttl = std::time::Duration::from_secs(guest.ttl_hours.saturating_mul(60 * 60));
-            if !(std::time::Duration::from_secs(60 * 60)
-                ..=std::time::Duration::from_secs(30 * 24 * 60 * 60))
-                .contains(&ttl)
-            {
-                return Err("guest_bootstrap.ttl_hours must be between 1 and 720".to_string());
-            }
-            if !(1..=1_000_000).contains(&guest.max_projects) {
-                return Err(
-                    "guest_bootstrap.max_projects must be between 1 and 1000000".to_string()
-                );
             }
         }
         vifu_gateway::relay::agent_gateway_websocket_url(&self.address)
@@ -693,9 +678,6 @@ impl GatewayRuntimeConfig {
     fn validate(&self) -> Result<(), String> {
         vifu_gateway::relay::agent_gateway_websocket_url(&self.address)
             .map_err(|error| format!("gateway.address is invalid: {error}"))?;
-        if let Some(app_id) = self.app_id.as_deref() {
-            validate_app_id(app_id)?;
-        }
         Ok(())
     }
 
@@ -703,20 +685,6 @@ impl GatewayRuntimeConfig {
         self.validate()?;
         vifu_gateway::config::local_component_socket_addr(&self.address)
     }
-}
-
-fn validate_app_id(value: &str) -> Result<(), String> {
-    let suffix = value
-        .strip_prefix("vifu_app_")
-        .ok_or_else(|| "gateway.app_id must start with vifu_app_".to_string())?;
-    if suffix.len() != 64
-        || !suffix
-            .chars()
-            .all(|character| character.is_ascii_hexdigit())
-    {
-        return Err("gateway.app_id is invalid".to_string());
-    }
-    Ok(())
 }
 
 impl AccessTokenAuthorityConfig {
@@ -927,48 +895,29 @@ address = "http://localhost:6790"
     }
 
     #[test]
-    fn app_id_becomes_the_gateway_enrollment_token_and_session_scope() {
-        let app_id = format!("vifu_app_{}", "a".repeat(64));
+    fn gateway_session_is_scoped_to_the_server_profile_not_an_app() {
         let config = RuntimeConfig::parse(
-            Path::new("/tmp/app.toml"),
-            &format!(
-                r#"
-[server]
-address = "https://api.example.com"
-
-[gateway]
-address = "https://api.example.com"
-app_id = "{app_id}"
-"#,
-            ),
-        )
-        .unwrap();
-        let loaded = LoadedRuntimeConfig {
-            path: Path::new("/tmp/app.toml").to_path_buf(),
-            profile: None,
-            config,
-        };
-        let options = loaded.gateway_options().unwrap();
-        assert_eq!(options.enrollment_token.as_deref(), Some(app_id.as_str()));
-        assert_eq!(options.session_scope, format!("default:app:{app_id}"));
-        assert!(!options.allow_guest_bootstrap);
-    }
-
-    #[test]
-    fn rejects_invalid_app_id() {
-        let error = RuntimeConfig::parse(
-            Path::new("/tmp/app.toml"),
+            Path::new("/tmp/gateway.toml"),
             r#"
 [server]
 address = "https://api.example.com"
 
 [gateway]
 address = "https://api.example.com"
-app_id = "app-demo"
 "#,
         )
-        .unwrap_err();
-        assert!(error.contains("gateway.app_id"));
+        .unwrap();
+        let loaded = LoadedRuntimeConfig {
+            path: Path::new("/tmp/gateway.toml").to_path_buf(),
+            profile: Some("work".to_string()),
+            config,
+        };
+
+        let options = loaded.gateway_options().unwrap();
+
+        assert!(options.enrollment_token.is_none());
+        assert_eq!(options.session_scope, "work");
+        assert!(options.allow_guest_bootstrap);
     }
 
     #[test]
@@ -1035,7 +984,7 @@ enrollment_token = "vifu_ge_not-persisted"
     }
 
     #[test]
-    fn gateway_can_disable_guest_bootstrap() {
+    fn legacy_gateway_guest_setting_does_not_disable_hosted_bootstrap() {
         let config = RuntimeConfig::parse(
             Path::new("/tmp/config.toml"),
             r#"
@@ -1055,7 +1004,7 @@ guest_bootstrap = false
         };
 
         let options = loaded.gateway_options().unwrap();
-        assert!(!options.allow_guest_bootstrap);
+        assert!(options.allow_guest_bootstrap);
     }
 
     #[test]
@@ -1081,7 +1030,7 @@ database_url = "postgres://vifu@127.0.0.1:5432/vifu"
     }
 
     #[test]
-    fn all_interface_server_address_enables_managed_tls_and_guest_device_enrollment() {
+    fn all_interface_server_address_enables_managed_tls_without_local_guest_bootstrap() {
         let directory =
             std::env::temp_dir().join(format!("vifu-lan-config-{}", uuid::Uuid::new_v4()));
         let path = directory.join("config.toml");
@@ -1114,8 +1063,8 @@ address = "http://127.0.0.1:6790"
         assert_eq!(server.addr, "0.0.0.0:6790".parse().unwrap());
         assert_eq!(server.server_url.as_deref(), Some("https://0.0.0.0:6790"));
         assert!(server.tls.is_some());
-        assert!(server.guest_bootstrap_enabled);
-        assert!(loaded.gateway_options().unwrap().allow_guest_bootstrap);
+        assert!(!server.guest_bootstrap_enabled);
+        assert!(!loaded.gateway_options().unwrap().allow_guest_bootstrap);
         std::fs::remove_dir_all(directory).unwrap();
     }
 
@@ -1247,10 +1196,6 @@ credential_file = "extension_key"
 
         let server = config.server.as_ref().expect("first run enables Server");
         assert_eq!(server.address, vifu_gateway::config::DEFAULT_SERVER_URL);
-        assert!(server
-            .guest_bootstrap
-            .as_ref()
-            .is_some_and(|guest| guest.enabled));
         assert_eq!(
             server.database_url(&path).unwrap(),
             format!(
@@ -1265,15 +1210,96 @@ credential_file = "extension_key"
             profile: None,
             config: config.clone(),
         };
-        assert!(loaded.gateway_options().unwrap().allow_guest_bootstrap);
+        assert!(!loaded.gateway_options().unwrap().allow_guest_bootstrap);
         assert!(std::fs::read_to_string(&path)
             .unwrap()
             .contains("[gateway]\naddress = \"http://127.0.0.1:6790\""));
-        assert!(std::fs::read_to_string(&path)
+        assert!(!std::fs::read_to_string(&path)
             .unwrap()
             .contains("[server.guest_bootstrap]"));
         assert!(!std::fs::read_to_string(&path).unwrap().contains("version"));
         assert!(path.exists());
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn removes_legacy_guest_bootstrap_settings_from_existing_configuration() {
+        let directory =
+            std::env::temp_dir().join(format!("vifu-guest-config-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("config.toml");
+        std::fs::write(
+            &path,
+            r#"[server]
+address = "http://127.0.0.1:6790"
+
+[server.guest_bootstrap]
+enabled = true
+ttl_hours = 168
+max_projects = 10000
+
+[gateway]
+address = "http://127.0.0.1:6790"
+guest_bootstrap = false
+"#,
+        )
+        .unwrap();
+
+        let config = RuntimeConfig::load_or_create(&path).unwrap();
+
+        assert!(config.server.is_some());
+        assert!(config.gateway.is_some());
+        assert!(!std::fs::read_to_string(&path)
+            .unwrap()
+            .contains("guest_bootstrap"));
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn removes_legacy_app_id_from_existing_configuration() {
+        let directory =
+            std::env::temp_dir().join(format!("vifu-local-app-config-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("config.toml");
+        std::fs::write(
+            &path,
+            r#"[server]
+address = "http://127.0.0.1:6790"
+
+[gateway]
+address = "http://127.0.0.1:6790"
+app_id = "vifu_app_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+"#,
+        )
+        .unwrap();
+
+        let config = RuntimeConfig::load_or_create(&path).unwrap();
+        let loaded = super::LoadedRuntimeConfig {
+            path: path.clone(),
+            profile: None,
+            config: config.clone(),
+        };
+        let gateway = loaded.gateway_options().unwrap();
+        let migrated = std::fs::read_to_string(&path).unwrap();
+
+        assert!(config.server.is_some());
+        assert!(config.gateway.is_some());
+        assert_eq!(
+            gateway.legacy_session_scope.as_deref(),
+            Some(
+                "default:app:vifu_app_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            )
+        );
+        assert_eq!(
+            gateway.migrated_app_id.as_deref(),
+            Some("vifu_app_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+        );
+        assert_eq!(
+            gateway.enrollment_token.as_deref(),
+            gateway.migrated_app_id.as_deref()
+        );
+        assert!(!migrated.contains("app_id"));
+        assert!(!migrated.contains("vifu_app_"));
         std::fs::remove_dir_all(directory).unwrap();
     }
 
@@ -1371,8 +1397,8 @@ address = "127.0.0.1:6790"
     }
 
     #[test]
-    fn parses_toml_config_override_values() {
-        let config = RuntimeConfig::parse(
+    fn rejects_guest_bootstrap_config_override() {
+        let error = RuntimeConfig::parse(
             Path::new("/tmp/config.toml"),
             "[server]\naddress = \"http://localhost:6790\"\n\n[gateway]\naddress = \"http://localhost:6790\"\n",
         )
@@ -1384,12 +1410,9 @@ address = "127.0.0.1:6790"
                     .to_string(),
             ],
         )
-        .unwrap();
+        .unwrap_err();
 
-        let guest = config.server.unwrap().guest_bootstrap.unwrap();
-        assert!(guest.enabled);
-        assert_eq!(guest.ttl_hours, 24);
-        assert_eq!(guest.max_projects, 50);
+        assert!(error.contains("unknown field `guest_bootstrap`"));
     }
 
     #[test]

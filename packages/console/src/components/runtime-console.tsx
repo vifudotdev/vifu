@@ -264,16 +264,21 @@ function HealthView({
   const connectedAgentKeys = new Set(
     data.runtime.availableAgents
       .filter((agent) => agent.status === "connected")
-      .map((agent) => `${agent.gatewayId}/${agent.id}`),
+      .map((agent) => `${agent.gatewayId}/${stringValue(agent.metadata.providerKey)}/${agent.id}`),
   );
   const connected = data.runtime.profiles.filter((profile) => {
     const binding = data.runtime.bindings.find((item) => item.profileId === profile.id);
-    if (binding && connectedAgentKeys.has(`${binding.gatewayId}/${binding.agentId}`)) return true;
     const detail = data.profileDetails.find((item) => item.profile.id === profile.id);
     const active = detail?.versions.find((item) => item.version.id === profile.activeVersionId);
     const providerKey = typeof active?.version.source.providerKey === "string"
       ? active.version.source.providerKey
-      : active?.capabilities[0]?.providerKey;
+      : active?.capabilities[0]?.providerKey ?? stringValue(binding?.config.providerKey);
+    if (binding && providerKey) {
+      const provider = data.projectProviders.find((item) => item.providerKey === providerKey);
+      const gatewayManaged = Boolean(provider && stringValue(provider.config.gatewayId));
+      const gatewayOnline = connectedAgentKeys.has(`${binding.gatewayId}/${providerKey}/${binding.agentId}`);
+      if (gatewayManaged || gatewayOnline) return gatewayOnline;
+    }
     return data.projectProviders.some((provider) => provider.providerKey === providerKey && provider.status === "online");
   }).length;
   const agentTotal = data.runtime.profiles.length;
@@ -297,7 +302,7 @@ function HealthView({
           </div>
           <div>
             <dt>Gateways</dt>
-            <dd>{connectedGateways}</dd>
+            <dd>{connectedGateways}/{gatewayCards.length}</dd>
           </div>
           <div>
             <dt>Agents</dt>
@@ -334,15 +339,15 @@ function HealthView({
           </TraceMetricCard>
         </div>
       </HealthSection>
-      <HealthSection title="Gateways" count={`${connectedGateways} connected`} defaultOpen>
-        {connectedGatewayCards.length > 0 ? (
+      <HealthSection title="Gateways" count={`${connectedGateways}/${gatewayCards.length} connected`} defaultOpen>
+        {gatewayCards.length > 0 ? (
           <div className="gateway-health-grid">
-            {connectedGatewayCards.map(({ gateway, agents }) => (
+            {gatewayCards.map(({ gateway, agents }) => (
               <GatewayHealthCard gateway={gateway} agents={agents} key={gateway.gatewayId} />
             ))}
           </div>
         ) : (
-          <EmptyState>No gateways connected.</EmptyState>
+          <EmptyState>No gateways paired.</EmptyState>
         )}
       </HealthSection>
     </div>
@@ -386,13 +391,15 @@ function GatewayHealthCard({ gateway, agents }: { gateway: AgentGateway; agents:
     <article className="gateway-health-card">
       <header>
         <div>
-          <strong>{gatewayDisplayLabel(gateway.gatewayId)}</strong>
-          <code>{shortId(gateway.sessionId, 12)}</code>
+          <strong>{gatewayDisplayLabel(gateway)}</strong>
+          <code title={gateway.gatewayId}>{shortId(gateway.gatewayId, 18)}</code>
         </div>
         <span className={statusClassName(gateway.status)}>{gateway.status}</span>
       </header>
       <dl>
         <div><dt>Agents</dt><dd>{fallbackAgents.length}</dd></div>
+        <div><dt>Type</dt><dd>{gatewayKindLabel(gateway.metadata)}</dd></div>
+        <div><dt>Device</dt><dd>{gatewayDeviceLabel(gateway.metadata)}</dd></div>
         <div><dt>Last seen</dt><dd>{formatDate(gateway.lastSeenAt)}</dd></div>
       </dl>
       <div className="gateway-agent-list">
@@ -614,7 +621,8 @@ function gatewayStatusMap(gateways: AgentGateway[]): Map<string, AgentGateway> {
 
 function gatewayHealthCards(gateways: AgentGateway[], agents: AvailableAgent[]): Array<{ gateway: AgentGateway; agents: AvailableAgent[] }> {
   return Array.from(gatewayStatusMap(gateways).values())
-    .sort((a, b) => gatewayStatusRank(a.status) - gatewayStatusRank(b.status) || a.gatewayId.localeCompare(b.gatewayId))
+    .sort((a, b) => gatewayStatusRank(a.status) - gatewayStatusRank(b.status)
+      || gatewayDisplayLabel(a).localeCompare(gatewayDisplayLabel(b)))
     .map((gateway) => ({
       gateway,
       agents: agents
@@ -625,6 +633,10 @@ function gatewayHealthCards(gateways: AgentGateway[], agents: AvailableAgent[]):
 
 function gatewayStatusRank(status: string): number {
   return status === "connected" ? 0 : status === "pending" ? 1 : 2;
+}
+
+function stringValue(value: unknown): string {
+  return typeof value === "string" ? value : "";
 }
 
 function appEndpoints(project: RuntimeProject, endpoints: AgentEndpoint[]): AgentEndpoint[] {
@@ -731,6 +743,24 @@ function shortId(value: string, length = 12): string {
   return value.length > length ? `${value.slice(0, Math.max(4, length - 4))}...` : value;
 }
 
-function gatewayDisplayLabel(value: string): string {
+function gatewayDisplayLabel(gateway: AgentGateway): string {
+  const reportedName = stringValue(gateway.metadata.name).trim();
+  if (reportedName) return reportedName;
+  const value = gateway.gatewayId;
   return value.startsWith("gateway-") ? `Gateway ${shortId(value.replace(/^gateway-/, ""))}` : shortId(value);
+}
+
+function gatewayKindLabel(metadata: Record<string, unknown>): string {
+  const kind = stringValue(metadata.kind).trim();
+  const platform = stringValue(metadata.platform).trim();
+  return [kind, platform].filter(Boolean).join(" · ") || "Gateway";
+}
+
+function gatewayDeviceLabel(metadata: Record<string, unknown>): string {
+  const device = metadata.device && typeof metadata.device === "object"
+    ? metadata.device as Record<string, unknown>
+    : {};
+  const manufacturer = stringValue(device.manufacturer).trim();
+  const model = stringValue(device.model).trim();
+  return [manufacturer, model].filter(Boolean).join(" ") || "-";
 }

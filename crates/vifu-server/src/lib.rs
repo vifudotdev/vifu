@@ -5,6 +5,7 @@ pub mod config;
 pub mod console;
 pub mod db;
 pub mod error;
+mod gateway_identity;
 pub mod models;
 pub mod monitor;
 mod openclaw_device;
@@ -45,6 +46,17 @@ pub struct AppState {
     pub relay: RelayHub,
     pub monitor: monitor::ServerMonitorHub,
     pub server_endpoint: Option<Arc<ServerEndpointIdentity>>,
+}
+
+#[derive(Debug)]
+pub struct LocalBootstrapApp {
+    pub project_id: uuid::Uuid,
+    pub app_id: String,
+    pub project_slug: String,
+    pub project_name: String,
+    pub deployment_id: uuid::Uuid,
+    pub deployment: String,
+    pub created: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -181,6 +193,71 @@ pub async fn connect(config: Config) -> Result<AppState, ApiError> {
     let mut state = state_with_storage(config, pool);
     state.server_endpoint = load_server_endpoint_identity(&state.config)?.map(Arc::new);
     Ok(state)
+}
+
+/// Ensures that a local Vifu installation has an App for its initial UI state.
+///
+/// An App is created only when the Server has no Apps. The preferred App is
+/// used solely to migrate an App created by the older Guest bootstrap flow;
+/// otherwise existing Apps are returned without changing them.
+pub async fn ensure_local_bootstrap_app(
+    state: &AppState,
+    preferred_app_id: Option<&str>,
+) -> Result<LocalBootstrapApp, ApiError> {
+    let projects = db::list_projects(&state.pool).await?;
+    let preferred_project_id = preferred_app_id
+        .and_then(|app_id| {
+            projects
+                .iter()
+                .find(|project| project.project.app_id == app_id)
+        })
+        .map(|project| project.project.id);
+    let selected_id = preferred_project_id
+        .or_else(|| {
+            projects
+                .iter()
+                .find(|project| project.project.name == "Local app")
+                .map(|project| project.project.id)
+        })
+        .or_else(|| projects.first().map(|project| project.project.id));
+    let (project, created) = match selected_id {
+        Some(project_id) => {
+            if preferred_project_id == Some(project_id) {
+                db::promote_guest_project(&state.pool, project_id).await?;
+            }
+            (db::get_project(&state.pool, project_id).await?, false)
+        }
+        None => (
+            db::create_project(
+                &state.pool,
+                db::NewProject {
+                    id: uuid::Uuid::new_v4(),
+                    owner_user_id: None,
+                    slug: "local-app",
+                    name: "Local app",
+                    description: Some("Default App for this Vifu installation"),
+                    gateway_id: "",
+                    binding_ids: &[],
+                },
+            )
+            .await?,
+            true,
+        ),
+    };
+    let deployment = db::list_runtime_deployments(&state.pool, project.project.id)
+        .await?
+        .into_iter()
+        .find(|deployment| deployment.is_primary)
+        .ok_or_else(|| ApiError::Conflict("the local App has no primary deployment".to_string()))?;
+    Ok(LocalBootstrapApp {
+        project_id: project.project.id,
+        app_id: project.project.app_id,
+        project_slug: project.project.slug,
+        project_name: project.project.name,
+        deployment_id: deployment.id,
+        deployment: deployment.name,
+        created,
+    })
 }
 
 fn diagnose_startup_error(stage: &str, error: ApiError) -> ApiError {
@@ -774,8 +851,8 @@ mod tests {
     use tower::ServiceExt;
 
     use super::{
-        app, load_server_endpoint_identity, state, state_with_storage, state_with_storage_and_auth,
-        AppState, ServerEndpointIdentity,
+        app, ensure_local_bootstrap_app, load_server_endpoint_identity, state, state_with_storage,
+        state_with_storage_and_auth, AppState, ServerEndpointIdentity,
     };
     use crate::auth::{
         AccessTokenAuth, AccessTokenAuthFuture, ApplicationAuth, Identity, Operation,
@@ -783,6 +860,147 @@ mod tests {
     use crate::config::{Config, DeploymentMode};
     use crate::db::Storage;
     use crate::error::ApiError;
+
+    async fn local_bootstrap_test_state(prefix: &str) -> (PathBuf, Storage, AppState) {
+        let path = std::env::temp_dir().join(format!("{prefix}-{}.sqlite", uuid::Uuid::new_v4()));
+        let storage = crate::db::connect(&format!("sqlite://{}", path.display()), 5)
+            .await
+            .unwrap();
+        crate::db::migrate(&storage).await.unwrap();
+        let state = state_with_storage(Config::from_env().unwrap(), storage.clone());
+        (path, storage, state)
+    }
+
+    async fn close_local_bootstrap_test_storage(path: PathBuf, storage: Storage) {
+        match storage {
+            Storage::Postgres(pool) => pool.close().await,
+            Storage::Sqlite(pool) => pool.close().await,
+        }
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn local_bootstrap_app_is_created_once_and_reused() {
+        let (path, storage, state) = local_bootstrap_test_state("vifu-local-bootstrap-app").await;
+
+        let created = ensure_local_bootstrap_app(&state, None).await.unwrap();
+        let reused = ensure_local_bootstrap_app(&state, None).await.unwrap();
+
+        assert_eq!(
+            (
+                reused.project_id,
+                reused.app_id.as_str(),
+                reused.project_slug.as_str(),
+                reused.project_name.as_str(),
+                reused.deployment_id,
+                reused.deployment.as_str(),
+                reused.created,
+            ),
+            (
+                created.project_id,
+                created.app_id.as_str(),
+                "local-app",
+                "Local app",
+                created.deployment_id,
+                "development",
+                false,
+            )
+        );
+        assert!(created.created);
+        close_local_bootstrap_test_storage(path, storage).await;
+    }
+
+    #[tokio::test]
+    async fn local_bootstrap_promotes_the_preferred_legacy_guest_in_place() {
+        let (path, storage, state) = local_bootstrap_test_state("vifu-local-bootstrap-guest").await;
+        let project_id = uuid::Uuid::new_v4();
+        let guest = crate::db::create_project(
+            &storage,
+            crate::db::NewProject {
+                id: project_id,
+                owner_user_id: None,
+                slug: "guest-existing",
+                name: "Guest app",
+                description: None,
+                gateway_id: "gateway-existing",
+                binding_ids: &[],
+            },
+        )
+        .await
+        .unwrap();
+        crate::db::create_guest_project(
+            &storage,
+            crate::db::NewGuestProject {
+                project_id,
+                gateway_id: "gateway-existing",
+                claim_token_hash: b"synthetic-claim-token-hash",
+                expires_at: chrono::Utc::now() + chrono::Duration::days(7),
+            },
+        )
+        .await
+        .unwrap();
+
+        let promoted = ensure_local_bootstrap_app(&state, Some(&guest.project.app_id))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            (
+                promoted.project_id,
+                promoted.app_id.as_str(),
+                promoted.project_name.as_str(),
+                crate::db::get_active_guest_project_by_project_id(&storage, project_id)
+                    .await
+                    .unwrap(),
+                promoted.created,
+            ),
+            (
+                project_id,
+                guest.project.app_id.as_str(),
+                "Local app",
+                None,
+                false,
+            )
+        );
+        close_local_bootstrap_test_storage(path, storage).await;
+    }
+
+    #[tokio::test]
+    async fn local_bootstrap_does_not_mutate_multiple_existing_apps() {
+        let (path, storage, state) =
+            local_bootstrap_test_state("vifu-local-bootstrap-multiple-apps").await;
+        for (slug, name) in [("alpha", "Alpha"), ("beta", "Beta")] {
+            crate::db::create_project(
+                &storage,
+                crate::db::NewProject {
+                    id: uuid::Uuid::new_v4(),
+                    owner_user_id: None,
+                    slug,
+                    name,
+                    description: None,
+                    gateway_id: "",
+                    binding_ids: &[],
+                },
+            )
+            .await
+            .unwrap();
+        }
+
+        let selected = ensure_local_bootstrap_app(&state, None).await.unwrap();
+        let projects = crate::db::list_projects(&storage).await.unwrap();
+        let mut names = projects
+            .iter()
+            .map(|project| project.project.name.as_str())
+            .collect::<Vec<_>>();
+        names.sort_unstable();
+
+        assert!(!selected.created);
+        assert_eq!(names, ["Alpha", "Beta"]);
+        assert!(projects
+            .iter()
+            .any(|project| project.project.id == selected.project_id));
+        close_local_bootstrap_test_storage(path, storage).await;
+    }
 
     #[test]
     fn gateway_pairing_uri_contains_the_endpoint_token_and_pinned_certificate() {
@@ -1516,7 +1734,9 @@ mod tests {
         let body = to_bytes(candidates.into_body(), 64 * 1024).await.unwrap();
         let candidates: Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(candidates["candidates"].as_array().unwrap().len(), 1);
-        assert_eq!(candidates["candidates"][0]["providerKey"], "openclaw-local");
+        let provider_key =
+            crate::gateway_identity::scoped_provider_key("gateway-account", "openclaw-local");
+        assert_eq!(candidates["candidates"][0]["providerKey"], provider_key);
 
         let imported = owner_app
             .clone()
@@ -1525,11 +1745,12 @@ mod tests {
                     .header("authorization", format!("Vifu {owner_credential}"))
                     .header("content-type", "application/json")
                     .body(Body::from(
-                        r#"{
-                            "gatewayId":"gateway-account",
-                            "agentId":"guide",
-                            "providerKey":"openclaw-local"
-                        }"#,
+                        serde_json::json!({
+                            "gatewayId": "gateway-account",
+                            "agentId": "guide",
+                            "providerKey": provider_key,
+                        })
+                        .to_string(),
                     ))
                     .unwrap(),
             )

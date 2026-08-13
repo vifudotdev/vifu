@@ -45,6 +45,30 @@ class VifuGatewayPairingCodeTest {
     }
 
     @Test
+    fun storedBindingKeepsTrustDataButNotTheOneTimeToken() {
+        val token = "vifu_ge_" + "e".repeat(64)
+        val certificate = "local-certificate".toByteArray()
+        val fingerprint = MessageDigest.getInstance("SHA-256")
+            .digest(certificate)
+            .joinToString(prefix = "sha256:", separator = "") { "%02x".format(it) }
+        val pairing = VifuGatewayPairingCode(
+            "vifu://gateway/enroll" +
+                "?server=${encode("https://macbook.local:6790")}" +
+                "&token=$token" +
+                "&certificate=${encode(Base64.getEncoder().encodeToString(certificate))}" +
+                "&fingerprint=$fingerprint",
+        )
+
+        val resumed = VifuStoredGatewayBinding.from(pairing)
+            .connectionConfig(captureTraceContent = true)
+
+        assertEquals("https://macbook.local:6790", resumed.serverUrl)
+        assertArrayEquals(certificate, resumed.serverCertificateDer)
+        assertNull(resumed.enrollmentToken)
+        assertEquals(true, resumed.captureTraceContent)
+    }
+
+    @Test
     fun rejectsInvalidToken() {
         assertThrows(IllegalArgumentException::class.java) {
             VifuGatewayPairingCode(

@@ -9,6 +9,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use base64::Engine;
 use futures_util::{SinkExt, StreamExt};
+use serde_json::Value;
 use tokio::sync::{mpsc, oneshot, OwnedSemaphorePermit, Semaphore};
 use tokio::task::JoinHandle;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
@@ -43,7 +44,9 @@ use vifu_runtime::{RuntimeStore, RuntimeTraceRecord, SqliteRuntimeStore};
 const MAX_CONCURRENT_CALLS: usize = 64;
 const OUTBOUND_QUEUE_CAPACITY: usize = 128;
 const WEBSOCKET_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
-const MAX_RECONNECT_DELAY: Duration = Duration::from_secs(30);
+const INITIAL_RECONNECT_DELAY: Duration = Duration::from_secs(1);
+const MAX_LOCAL_RECONNECT_DELAY: Duration = Duration::from_secs(3);
+const MAX_REMOTE_RECONNECT_DELAY: Duration = Duration::from_secs(30);
 const MAX_PENDING_TELEMETRY_BATCHES: usize = 512;
 const MAX_CONCURRENT_TELEMETRY_UPLOADS: usize = 4;
 const MAX_CONCURRENT_REJECTION_DELIVERIES: usize = 64;
@@ -409,6 +412,7 @@ pub struct AgentGatewayRuntime<'a> {
     pub allow_guest_bootstrap: bool,
     pub providers: &'a [Arc<dyn AgentGatewayProvider>],
     pub agents: &'a [AgentDescriptor],
+    pub gateway_metadata: Value,
     pub route_overrides: Option<Arc<SessionRouteOverrides>>,
     pub runtime_observer: Option<GatewayRuntimeObserver>,
     pub capture_sender: Option<mpsc::Sender<GatewayCaptureEvent>>,
@@ -1008,7 +1012,8 @@ async fn run_agent_gateway_inner(
     pairing_observer: Option<GatewayPairingObserver>,
 ) -> Result<(), String> {
     let websocket_url = agent_gateway_websocket_url(runtime.server_url)?;
-    let mut reconnect_delay = Duration::from_secs(1);
+    let maximum_reconnect_delay = reconnect_delay_ceiling(runtime.server_url);
+    let mut reconnect_delay = INITIAL_RECONNECT_DELAY;
     let telemetry_backlog: TelemetryBacklog =
         Arc::new(Mutex::new(TelemetryBacklogState::default()));
     let telemetry_uploads = Arc::new(Semaphore::new(MAX_CONCURRENT_TELEMETRY_UPLOADS));
@@ -1031,6 +1036,10 @@ async fn run_agent_gateway_inner(
         {
             Ok(ConnectionOutcome::Shutdown) => return Ok(()),
             Ok(ConnectionOutcome::Disconnected) => {
+                // The handshake and authorization succeeded. A later socket
+                // close starts a new outage and must not inherit an old,
+                // already-maximized failure delay.
+                reconnect_delay = INITIAL_RECONNECT_DELAY;
                 let message = format!(
                     "Agent Gateway disconnected; reconnecting in {}s.",
                     reconnect_delay.as_secs()
@@ -1098,7 +1107,46 @@ async fn run_agent_gateway_inner(
             _ = tokio::time::sleep(reconnect_delay) => {}
             _ = tokio::signal::ctrl_c() => return Ok(()),
         }
-        reconnect_delay = reconnect_delay.saturating_mul(2).min(MAX_RECONNECT_DELAY);
+        reconnect_delay = reconnect_delay
+            .saturating_mul(2)
+            .min(maximum_reconnect_delay);
+    }
+}
+
+fn reconnect_delay_ceiling(server_url: &str) -> Duration {
+    let is_local = Url::parse(server_url)
+        .ok()
+        .and_then(|url| url.host_str().map(str::to_owned))
+        .is_some_and(|host| is_local_network_host(&host));
+    if is_local {
+        MAX_LOCAL_RECONNECT_DELAY
+    } else {
+        MAX_REMOTE_RECONNECT_DELAY
+    }
+}
+
+fn is_local_network_host(host: &str) -> bool {
+    if host.eq_ignore_ascii_case("localhost") || host.to_ascii_lowercase().ends_with(".local") {
+        return true;
+    }
+    let Ok(address) = host.parse::<IpAddr>() else {
+        return false;
+    };
+    match address {
+        IpAddr::V4(address) => {
+            let octets = address.octets();
+            address.is_private()
+                || address.is_loopback()
+                || address.is_link_local()
+                || address.is_unspecified()
+                || (octets[0] == 100 && (64..=127).contains(&octets[1]))
+        }
+        IpAddr::V6(address) => {
+            address.is_loopback()
+                || address.is_unique_local()
+                || address.is_unicast_link_local()
+                || address.is_unspecified()
+        }
     }
 }
 
@@ -1923,6 +1971,7 @@ async fn run_connection(
                 .as_ref()
                 .map(|pairing| pairing.request_id.to_string())
         });
+    let identity_reassignment_authorized = followup.is_some();
     let signature_payload = protocol::gateway_signature_payload(
         &audience,
         &nonce,
@@ -1951,15 +2000,7 @@ async fn run_connection(
             protocol: protocol::VERSION.to_string(),
             resume_session_id: session.resume_session_id,
             agents: runtime.agents.to_vec(),
-            metadata: serde_json::json!({
-                "adapter": "vifu",
-                "features": features,
-                "providers": runtime.providers.iter().map(|provider| serde_json::json!({
-                    "id": provider.id(),
-                    "type": provider.provider_type(),
-                })).collect::<Vec<_>>(),
-                "version": env!("CARGO_PKG_VERSION")
-            }),
+            metadata: gateway_hello_metadata(runtime, features),
             machine: protocol::GatewayMachineProof {
                 id: session.identity.machine_id.clone(),
                 public_key: session.identity.public_key.clone(),
@@ -2007,15 +2048,11 @@ async fn run_connection(
             .to_string()
             .into());
     };
-    if session
-        .gateway_id
-        .as_deref()
-        .is_some_and(|stored| stored != gateway_id)
-    {
-        return Err("server authenticated a different agent gateway identity"
-            .to_string()
-            .into());
-    }
+    validate_authenticated_gateway_identity(
+        session.gateway_id.as_deref(),
+        &gateway_id,
+        identity_reassignment_authorized,
+    )?;
     session.gateway_id = Some(gateway_id);
     if let Some(auth) = auth {
         session.device_token = Some(auth.device_token);
@@ -2027,6 +2064,7 @@ async fn run_connection(
             .to_string()
             .into());
     }
+    session.pending_app_id = None;
     session.pairing = None;
     if let Some(observer) = observers.pairing {
         observer(None);
@@ -2704,6 +2742,50 @@ async fn run_connection(
     Ok(outcome)
 }
 
+fn gateway_hello_metadata(runtime: &AgentGatewayRuntime<'_>, features: Vec<&str>) -> Value {
+    let mut metadata = runtime
+        .gateway_metadata
+        .as_object()
+        .cloned()
+        .unwrap_or_default();
+    metadata.insert("adapter".to_string(), Value::String("vifu".to_string()));
+    metadata.insert("features".to_string(), serde_json::json!(features));
+    metadata.insert(
+        "providers".to_string(),
+        Value::Array(
+            runtime
+                .providers
+                .iter()
+                .map(|provider| {
+                    serde_json::json!({
+                        "id": provider.id(),
+                        "type": provider.provider_type(),
+                    })
+                })
+                .collect(),
+        ),
+    );
+    metadata.insert(
+        "version".to_string(),
+        Value::String(env!("CARGO_PKG_VERSION").to_string()),
+    );
+    Value::Object(metadata)
+}
+
+fn validate_authenticated_gateway_identity(
+    stored_gateway_id: Option<&str>,
+    authenticated_gateway_id: &str,
+    identity_reassignment_authorized: bool,
+) -> Result<(), String> {
+    if stored_gateway_id
+        .is_some_and(|stored_gateway_id| stored_gateway_id != authenticated_gateway_id)
+        && !identity_reassignment_authorized
+    {
+        return Err("server authenticated a different agent gateway identity".to_string());
+    }
+    Ok(())
+}
+
 async fn receive_embedded_monitor_event(
     monitor: Option<&EmbeddedRuntimeMonitor>,
 ) -> Option<EmbeddedRuntimeMonitorEvent> {
@@ -3045,9 +3127,25 @@ async fn sync_runtime_state(
         .enrollment_token
         .as_deref()
         .filter(|value| value.starts_with("vifu_app_"));
+    let guest_deployment_id = session
+        .guest_project
+        .as_ref()
+        .map(|guest| guest.deployment_id);
     let embedded_deployment = runtime.embedded_runtime.and_then(|embedded| {
-        select_embedded_deployment(&deployments, embedded.project_id(), requested_app_id)
+        select_embedded_deployment(
+            &deployments,
+            embedded.project_id(),
+            requested_app_id,
+            guest_deployment_id,
+        )
     });
+    if runtime.embedded_runtime.is_some() && deployments.len() > 1 && embedded_deployment.is_none()
+    {
+        return Err(
+            "the embedded runtime is assigned to multiple Apps; pair it with one App again"
+                .to_string(),
+        );
+    }
     if let (Some(deployment), Some(monitor)) =
         (embedded_deployment, runtime.embedded_monitor.as_ref())
     {
@@ -3138,6 +3236,7 @@ fn select_embedded_deployment<'a>(
     deployments: &'a [crate::control::RuntimeDeploymentConfiguration],
     embedded_project_id: &str,
     requested_app_id: Option<&str>,
+    guest_deployment_id: Option<Uuid>,
 ) -> Option<&'a crate::control::RuntimeDeploymentConfiguration> {
     deployments
         .iter()
@@ -3148,6 +3247,14 @@ fn select_embedded_deployment<'a>(
                     .iter()
                     .find(|deployment| deployment.app_id == app_id)
             })
+        })
+        .or_else(|| {
+            let guest_deployment_id = guest_deployment_id?;
+            let mut candidates = deployments
+                .iter()
+                .filter(|deployment| deployment.deployment_id != guest_deployment_id);
+            let candidate = candidates.next()?;
+            candidates.next().is_none().then_some(candidate)
         })
         .or_else(|| (deployments.len() == 1).then(|| &deployments[0]))
 }
@@ -3402,16 +3509,19 @@ mod tests {
     use super::{
         agent_gateway_error, agent_gateway_websocket_url, decode_command,
         dispatch_preflight_failure, embedded_runtime_telemetry_command, encode_command,
-        enqueue_telemetry_batch, expire_embedded_runtime_traces, gateway_protocol_error,
-        guest_claim_url, handle_telemetry_flush_result, observe_capture_dropped,
-        pairing_authorization_url, parse_proc_kib_value, queue_error, record_embedded_runtime_io,
-        resolve_provider, runtime_profile_name, runtime_trace_for_deployment, safe_observer_error,
+        enqueue_telemetry_batch, expire_embedded_runtime_traces, gateway_hello_metadata,
+        gateway_protocol_error, guest_claim_url, handle_telemetry_flush_result,
+        observe_capture_dropped, pairing_authorization_url, parse_proc_kib_value, queue_error,
+        reconnect_delay_ceiling, record_embedded_runtime_io, resolve_provider,
+        runtime_profile_name, runtime_trace_for_deployment, safe_observer_error,
         safe_trace_telemetry, sanitize_error, select_embedded_deployment, trigger_telemetry_flush,
-        try_capture, write_terminal_line, AgentGatewayProvider, EmbeddedRuntimeMonitor,
-        GatewayCaptureEvent, GatewayInvocationTerminal, GatewayOutputPolicy, GatewayRuntimeEvent,
+        try_capture, validate_authenticated_gateway_identity, write_terminal_line,
+        AgentGatewayProvider, AgentGatewayRuntime, EmbeddedRuntimeMonitor, GatewayCaptureEvent,
+        GatewayInvocationTerminal, GatewayOutputPolicy, GatewayRuntimeEvent,
         InProcessGatewayProvider, InvocationDelivery, InvocationTelemetry, OpenClawGatewayProvider,
         PendingTelemetryBatch, RuntimeControlClient, SessionRouteOverrides, TelemetryBacklogState,
-        EMBEDDED_TRACE_RETENTION, MAX_PENDING_TELEMETRY_BATCHES,
+        EMBEDDED_TRACE_RETENTION, MAX_LOCAL_RECONNECT_DELAY, MAX_PENDING_TELEMETRY_BATCHES,
+        MAX_REMOTE_RECONNECT_DELAY,
     };
     use crate::control::TraceObservationUploadError;
     use crate::gateway_frame;
@@ -3426,6 +3536,85 @@ mod tests {
         ProviderFuture, ProviderRequest, ProviderResponse, ProviderStage, RuntimeMonitorEvent,
         RuntimeMonitorStageStatus, RuntimeTraceRecord,
     };
+
+    #[test]
+    fn local_network_gateways_use_a_short_reconnect_ceiling() {
+        for server_url in [
+            "https://192.168.50.246:6790",
+            "https://10.0.0.8:6790",
+            "https://100.79.193.71:6790",
+            "https://vifu.local:6790",
+            "http://127.0.0.1:6790",
+        ] {
+            assert_eq!(
+                reconnect_delay_ceiling(server_url),
+                MAX_LOCAL_RECONNECT_DELAY,
+                "{server_url}",
+            );
+        }
+    }
+
+    #[test]
+    fn remote_gateways_keep_the_long_reconnect_ceiling() {
+        assert_eq!(
+            reconnect_delay_ceiling("https://api.vifu.dev"),
+            MAX_REMOTE_RECONNECT_DELAY,
+        );
+    }
+
+    #[test]
+    fn hello_metadata_keeps_device_identity_and_protects_protocol_fields() {
+        let providers: Vec<Arc<dyn AgentGatewayProvider>> = Vec::new();
+        let runtime = AgentGatewayRuntime {
+            server_url: "http://127.0.0.1:6790",
+            server_certificate_der: None,
+            agent_gateway_bootstrap_token: None,
+            enrollment_token: None,
+            allow_guest_bootstrap: false,
+            providers: &providers,
+            agents: &[],
+            gateway_metadata: json!({
+                "name": "Kitchen light",
+                "kind": "light",
+                "adapter": "untrusted-override",
+            }),
+            route_overrides: None,
+            runtime_observer: None,
+            capture_sender: None,
+            config_epoch: 0,
+            provider_models: None,
+            session_path: None,
+            runtime_database_path: std::path::Path::new("runtime.sqlite"),
+            embedded_runtime: None,
+            embedded_monitor: None,
+            output_policy: GatewayOutputPolicy::Observer,
+        };
+
+        let metadata = gateway_hello_metadata(&runtime, vec!["trace-upload-v1"]);
+
+        assert_eq!(metadata["name"], "Kitchen light");
+        assert_eq!(metadata["adapter"], "vifu");
+    }
+
+    #[test]
+    fn explicit_reenrollment_can_replace_a_stale_server_gateway_id() {
+        assert!(validate_authenticated_gateway_identity(
+            Some("gateway-from-old-server-state"),
+            "gateway-from-current-server-state",
+            true,
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn ordinary_reconnect_rejects_a_different_server_gateway_id() {
+        assert!(validate_authenticated_gateway_identity(
+            Some("gateway-from-old-server-state"),
+            "gateway-from-current-server-state",
+            false,
+        )
+        .is_err());
+    }
 
     fn deployment(
         app_id: &str,
@@ -3457,9 +3646,32 @@ mod tests {
         let deployments = vec![old, requested.clone()];
 
         assert_eq!(
-            select_embedded_deployment(&deployments, "android-app", Some("vifu_app_requested"),)
-                .map(|deployment| deployment.deployment_id),
+            select_embedded_deployment(
+                &deployments,
+                "android-app",
+                Some("vifu_app_requested"),
+                None,
+            )
+            .map(|deployment| deployment.deployment_id),
             Some(requested.deployment_id)
+        );
+    }
+
+    #[test]
+    fn persisted_guest_fallback_does_not_hide_the_only_enrolled_deployment() {
+        let paired = deployment("vifu_app_paired", "paired-app");
+        let accidental_guest = deployment("vifu_app_guest", "accidental-guest");
+        let deployments = vec![paired.clone(), accidental_guest.clone()];
+
+        assert_eq!(
+            select_embedded_deployment(
+                &deployments,
+                "android-app",
+                None,
+                Some(accidental_guest.deployment_id),
+            )
+            .map(|deployment| deployment.deployment_id),
+            Some(paired.deployment_id)
         );
     }
 

@@ -41,6 +41,19 @@ describe("decodeTracePayload", () => {
     });
   });
 
+  it("decodes the Android llama response as assistant text", () => {
+    expect(decodeTracePayload({ text: "本地模型已经回答。" })).toEqual({
+      kind: "conversation",
+      messages: [{
+        content: "本地模型已经回答。",
+        name: null,
+        role: "assistant",
+        toolCalls: [],
+        toolCallId: null,
+      }],
+    });
+  });
+
   it("summarizes embeddings instead of rendering vector walls", () => {
     expect(decodeTracePayload({
       data: [

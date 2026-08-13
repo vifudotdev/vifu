@@ -6372,7 +6372,7 @@ button:disabled {
 .deployment-policy-form label {
   display: grid;
   gap: 5px;
-  color: var(--muted);
+  color: var(--text-muted);
   font-size: 12px;
 }
 
@@ -6387,7 +6387,7 @@ button:disabled {
 
 .deployment-summary {
   gap: 18px;
-  color: var(--muted);
+  color: var(--text-muted);
   font-size: 12px;
 }
 
@@ -6433,7 +6433,7 @@ button:disabled {
 }
 
 .deployment-card header small {
-  color: var(--muted);
+  color: var(--text-muted);
 }
 
 .deployment-icon {
@@ -6482,7 +6482,7 @@ button:disabled {
 }
 
 .deployment-card dt {
-  color: var(--muted);
+  color: var(--text-muted);
   font-size: 10px;
   text-transform: uppercase;
 }
@@ -6498,30 +6498,211 @@ button:disabled {
 }
 
 .deployment-gateways {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 430px), 1fr));
+  gap: 8px;
 }
 
-.deployment-gateways > div {
-  min-width: 0;
+.deployment-gateway-card {
+  position: relative;
+  overflow: hidden;
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto auto 28px 28px;
+  min-width: 0;
+  grid-template-areas:
+    "identity state"
+    "gateway-id actions";
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 11px 16px;
+  padding: 13px 12px 11px 15px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: #fafbfc;
+}
+
+.deployment-gateway-rail {
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 3px;
+  background: var(--text-muted);
+}
+
+.deployment-gateway-card.online .deployment-gateway-rail {
+  background: var(--success);
+}
+
+.deployment-gateway-identity {
+  display: flex;
+  min-width: 0;
+  align-items: flex-start;
+  gap: 10px;
+  grid-area: identity;
+}
+
+.deployment-gateway-device {
+  display: grid;
+  width: 34px;
+  height: 34px;
+  flex: 0 0 auto;
+  place-items: center;
+  border: 1px solid var(--line-strong);
+  border-radius: 7px;
+  background: var(--surface);
+  color: var(--text-muted);
+}
+
+.deployment-gateway-card.online .deployment-gateway-device {
+  border-color: color-mix(in srgb, var(--success) 34%, var(--line));
+  color: var(--success);
+}
+
+.deployment-gateway-device svg {
+  width: 16px;
+  height: 16px;
+}
+
+.deployment-gateway-identity > div {
+  min-width: 0;
+}
+
+.deployment-gateway-name {
+  display: flex;
+  min-width: 0;
   align-items: center;
+  gap: 7px;
+}
+
+.deployment-gateway-name strong {
+  display: -webkit-box;
+  overflow: hidden;
+  min-width: 0;
+  font-size: 13px;
+  line-height: 1.35;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.deployment-gateway-name > span {
+  flex: 0 0 auto;
+  padding: 2px 6px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--text-muted);
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: .02em;
+}
+
+.deployment-gateway-identity p {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 8px;
+  margin: 4px 0 0;
+  color: var(--text-muted);
+  font-size: 10px;
+  line-height: 1.45;
+}
+
+.deployment-gateway-identity p span + span::before {
+  margin-right: 8px;
+  color: var(--line-strong);
+  content: "•";
+}
+
+.deployment-gateway-state {
+  display: grid;
+  min-width: 102px;
+  align-content: start;
+  justify-items: end;
+  gap: 5px;
+  grid-area: state;
+}
+
+.deployment-gateway-id {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 7px;
+  grid-area: gateway-id;
+}
+
+.deployment-gateway-id > span {
+  color: var(--text-muted);
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: .05em;
+  text-transform: uppercase;
+}
+
+.deployment-gateway-id code {
+  overflow: hidden;
+  color: var(--text-muted);
+  font-size: 9px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.deployment-gateway-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
   gap: 4px;
+  grid-area: actions;
+}
+
+.deployment-gateway-actions .icon-button {
+  width: 28px;
+  height: 28px;
+}
+
+.deployment-gateway-actions .icon-button svg {
+  width: 14px;
+  height: 14px;
+}
+
+.deployment-gateways-empty {
+  display: flex;
+  min-height: 70px;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  border: 1px dashed var(--line-strong);
+  border-radius: 7px;
+  color: var(--text-muted);
+  background: #fafbfc;
+}
+
+.deployment-gateways-empty > svg {
+  width: 17px;
+  height: 17px;
+}
+
+.deployment-gateways-empty > div {
+  display: grid;
+  gap: 2px;
+}
+
+.deployment-gateways-empty strong {
+  color: var(--text);
+  font-size: 11px;
+}
+
+.deployment-gateways-empty span {
+  font-size: 10px;
 }
 
 .deployment-gateway-connection {
+  min-width: 0;
   display: grid;
-  min-width: 92px;
   gap: 1px;
+  justify-items: end;
 }
 
 .deployment-gateway-connection strong {
   display: flex;
   align-items: center;
   gap: 5px;
-  color: var(--muted);
+  color: var(--text-muted);
   font-size: 10px;
   font-weight: 600;
 }
@@ -6530,7 +6711,7 @@ button:disabled {
   width: 6px;
   height: 6px;
   border-radius: 999px;
-  background: var(--muted);
+  background: var(--text-muted);
 }
 
 .deployment-gateway-connection.online strong {
@@ -6542,30 +6723,9 @@ button:disabled {
 }
 
 .deployment-gateway-connection small {
-  color: var(--muted);
+  color: var(--text-muted);
   font-size: 9px;
   white-space: nowrap;
-}
-
-.deployment-gateways .icon-button {
-  width: 28px;
-  height: 28px;
-}
-
-.deployment-gateways .icon-button svg {
-  width: 14px;
-  height: 14px;
-}
-
-.deployment-gateways code {
-  overflow: hidden;
-  max-width: 100%;
-  padding: 3px 6px;
-  border: 1px solid var(--line);
-  border-radius: 4px;
-  color: var(--muted);
-  font-size: 10px;
-  text-overflow: ellipsis;
 }
 
 .deployment-policy-form {
@@ -6756,12 +6916,16 @@ button:disabled {
 }
 
 .gateway-apply-status {
-  margin-left: auto;
+  padding: 2px 6px;
+  border-radius: 999px;
+  background: var(--surface-strong);
   font-size: 10px;
+  font-weight: 600;
   white-space: nowrap;
 }
 
 .gateway-apply-status.applied {
+  background: var(--success-soft);
   color: var(--success);
 }
 
@@ -6859,6 +7023,31 @@ button:disabled {
 
   .deployment-card dl div:nth-child(-n + 2) {
     border-bottom: 1px solid var(--line);
+  }
+
+  .deployment-gateway-card {
+    grid-template-areas:
+      "identity"
+      "state"
+      "gateway-id"
+      "actions";
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .deployment-gateway-state {
+    width: 100%;
+    min-width: 0;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: center;
+    justify-items: start;
+  }
+
+  .deployment-gateway-connection {
+    justify-items: start;
+  }
+
+  .deployment-gateway-actions {
+    justify-content: flex-start;
   }
 }
 

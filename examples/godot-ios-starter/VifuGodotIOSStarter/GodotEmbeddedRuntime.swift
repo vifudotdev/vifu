@@ -132,7 +132,10 @@ final class GodotEmbeddedRuntime: @unchecked Sendable {
             config: VifuEmbeddedGatewayConfig(
                 serverUrl: binding.serverURL,
                 runtimeDatabasePath: runtimeDatabasePath,
-                serverCertificateDer: binding.certificateDER
+                serverCertificateDer: binding.certificateDER,
+                gatewayMetadata: .currentAppleMobile(
+                    attributes: ["integration": "godot"]
+                )
             )
         )
         try nextGateway.start(

@@ -182,6 +182,7 @@ dispatch! {
     pub async fn activate_runtime_configuration_release(storage: &Storage, deployment_id: Uuid, release: NewProjectRuntimeRelease<'_>) -> Result<(), ApiError>;
     pub async fn activate_profile_runtime_release(storage: &Storage, profile_id: Uuid, profile_version_id: Uuid, deployment_id: Uuid, release: NewProjectRuntimeRelease<'_>) -> Result<(), ApiError>;
     pub async fn create_guest_project(storage: &Storage, input: NewGuestProject<'_>) -> Result<(), ApiError>;
+    pub async fn promote_guest_project(storage: &Storage, project_id: Uuid) -> Result<bool, ApiError>;
     pub async fn get_active_guest_project_for_gateway(storage: &Storage, gateway_id: &str) -> Result<Option<(ProjectWithBindings, DateTime<Utc>)>, ApiError>;
     pub async fn get_active_guest_project_by_project_id(storage: &Storage, project_id: Uuid) -> Result<Option<DateTime<Utc>>, ApiError>;
     pub async fn count_active_guest_projects(storage: &Storage) -> Result<i64, ApiError>;
@@ -210,8 +211,9 @@ dispatch! {
     pub async fn list_projects_for_provider_key(storage: &Storage, provider_key: &str) -> Result<Vec<(Uuid, String)>, ApiError>;
     pub async fn list_project_profile_provider_resources(storage: &Storage, project_id: Uuid) -> Result<Vec<(String, String)>, ApiError>;
     pub async fn list_archived_project_agent_sources(storage: &Storage, project_id: Uuid) -> Result<Vec<ArchivedProjectAgentSource>, ApiError>;
+    pub async fn archive_legacy_discovered_provider(storage: &Storage, project_id: Uuid, runtime_provider_key: &str) -> Result<u64, ApiError>;
     pub async fn restore_project_profile(storage: &Storage, project_id: Uuid, profile_id: Uuid) -> Result<AgentProfile, ApiError>;
-    pub async fn find_project_profile_by_provider_resource(storage: &Storage, project_id: Uuid, provider_key: &str, agent_id: &str) -> Result<Option<(Uuid, bool, Uuid)>, ApiError>;
+    pub async fn find_project_profile_by_provider_resource(storage: &Storage, project_id: Uuid, gateway_id: &str, provider_key: &str, agent_id: &str) -> Result<Option<(Uuid, bool, Uuid)>, ApiError>;
     pub async fn refresh_discovered_binding_record(storage: &Storage, binding_id: Uuid, gateway_id: &str, agent_name: &str) -> Result<(), ApiError>;
     pub async fn unassign_project_provider(storage: &Storage, project_id: Uuid, provider_key: &str) -> Result<(), ApiError>;
     pub async fn assign_project_binding(storage: &Storage, project_id: Uuid, binding_id: Uuid) -> Result<(), ApiError>;
@@ -236,7 +238,7 @@ dispatch! {
     pub async fn list_bindings(storage: &Storage) -> Result<Vec<AgentBinding>, ApiError>;
     pub async fn get_binding(storage: &Storage, id: Uuid) -> Result<AgentBinding, ApiError>;
     pub async fn create_binding(storage: &Storage, id: Uuid, profile_id: Uuid, provider: &str, gateway_id: &str, agent_id: &str, config: &Value) -> Result<AgentBinding, ApiError>;
-    pub async fn ensure_discovered_binding(storage: &Storage, project_id: Uuid, gateway_id: &str, agent_id: &str, agent_name: &str, provider_key: &str, provider_type: &str) -> Result<Uuid, ApiError>;
+    pub async fn ensure_discovered_binding(storage: &Storage, input: NewDiscoveredBinding<'_>) -> Result<Uuid, ApiError>;
     pub async fn update_binding(storage: &Storage, id: Uuid, gateway_id: Option<&str>, agent_id: Option<&str>, config: Option<&Value>) -> Result<AgentBinding, ApiError>;
     pub async fn delete_binding(storage: &Storage, id: Uuid) -> Result<(), ApiError>;
     pub async fn list_endpoints(storage: &Storage) -> Result<Vec<AgentEndpoint>, ApiError>;
@@ -496,12 +498,15 @@ mod tests {
         .expect("project should be created");
         let binding_id = ensure_discovered_binding(
             &storage,
-            project_id,
-            "gateway-old",
-            "companion-demo",
-            "Android Local Companion",
-            "android-local-model",
-            "vifu-runtime",
+            NewDiscoveredBinding {
+                project_id,
+                gateway_id: "gateway-old",
+                agent_id: "companion-demo",
+                agent_name: "Android Local Companion",
+                provider_key: "android-local-model",
+                runtime_provider_key: "android-local-model",
+                provider_type: "vifu-runtime",
+            },
         )
         .await
         .expect("discovered binding should be created");
@@ -730,6 +735,77 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn sqlite_trace_listing_attributes_a_named_gateway_session() {
+        let (storage, path) = sqlite_storage().await;
+        let project_id = Uuid::new_v4();
+        create_project(
+            &storage,
+            NewProject {
+                id: project_id,
+                owner_user_id: None,
+                slug: "named-gateway-trace",
+                name: "Named Gateway trace",
+                description: None,
+                gateway_id: "gateway-kitchen-light",
+                binding_ids: &[],
+            },
+        )
+        .await
+        .expect("project should be created");
+        let (gateway_session_id, _) = open_agent_gateway_session(
+            &storage,
+            "gateway-kitchen-light",
+            None,
+            &json!([]),
+            &json!({
+                "name": "Kitchen light",
+                "kind": "light",
+                "device": { "manufacturer": "Example" },
+            }),
+        )
+        .await
+        .expect("Gateway session should open");
+        create_uploaded_runtime_trace(
+            &storage,
+            NewUploadedRuntimeTrace {
+                id: Uuid::new_v4(),
+                request_id: Uuid::new_v4(),
+                project_id,
+                gateway_session_id: Some(gateway_session_id),
+                operation: "runtime.invoke",
+                provider_key: Some("light-provider"),
+                capability_kind: Some("control"),
+                status: "completed",
+                latency_ms: 1,
+                request: &json!({ "agent": "light-agent" }),
+                created_at: Utc::now(),
+            },
+        )
+        .await
+        .expect("trace should be created");
+
+        let traces = list_traces(
+            &storage,
+            TraceListOptions {
+                endpoint_id: None,
+                project_id: Some(project_id),
+                request_id: None,
+                trace_id: None,
+                allowed_profile_ids: None,
+                created_from: None,
+                created_before: None,
+                cursor: None,
+                limit: 10,
+            },
+        )
+        .await
+        .expect("trace should list");
+
+        assert_eq!(traces[0].gateway_name.as_deref(), Some("Kitchen light"));
+        close_and_remove(storage, &path).await;
+    }
+
+    #[tokio::test]
     async fn sqlite_trace_listing_uses_stable_cursor_and_date_window() {
         let (storage, path) = sqlite_storage().await;
         let project_id = Uuid::new_v4();
@@ -767,6 +843,7 @@ mod tests {
                     id,
                     request_id: Uuid::new_v4(),
                     project_id,
+                    gateway_session_id: None,
                     operation: "runtime.invoke",
                     provider_key: Some("local-provider"),
                     capability_kind: Some("chat"),

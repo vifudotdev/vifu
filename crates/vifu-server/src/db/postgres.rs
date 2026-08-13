@@ -821,6 +821,27 @@ pub async fn create_guest_project(
     Ok(())
 }
 
+pub async fn promote_guest_project(pool: &PgPool, project_id: Uuid) -> Result<bool, ApiError> {
+    let mut transaction = pool.begin().await?;
+    let deleted = sqlx::query("DELETE FROM guest_projects WHERE project_id = $1")
+        .bind(project_id)
+        .execute(&mut *transaction)
+        .await?;
+    if deleted.rows_affected() == 1 {
+        sqlx::query(
+            "UPDATE projects
+             SET name = CASE WHEN name = 'Guest app' THEN 'Local app' ELSE name END,
+                 updated_at = NOW()
+             WHERE id = $1",
+        )
+        .bind(project_id)
+        .execute(&mut *transaction)
+        .await?;
+    }
+    transaction.commit().await?;
+    Ok(deleted.rows_affected() == 1)
+}
+
 pub async fn get_active_guest_project_for_gateway(
     pool: &PgPool,
     gateway_id: &str,
@@ -1647,9 +1668,89 @@ pub async fn restore_project_profile(
     Ok(profile)
 }
 
+pub async fn archive_legacy_discovered_provider(
+    pool: &PgPool,
+    project_id: Uuid,
+    runtime_provider_key: &str,
+) -> Result<u64, ApiError> {
+    let mut transaction = pool.begin().await?;
+    let archived = sqlx::query(
+        "UPDATE agent_profiles AS profile
+         SET archived_at = NOW(), updated_at = NOW()
+         WHERE profile.project_id = $1
+           AND profile.archived_at IS NULL
+           AND EXISTS (
+               SELECT 1
+               FROM agent_bindings AS binding
+               JOIN agent_profile_versions AS version
+                 ON version.id = profile.active_version_id
+               WHERE binding.profile_id = profile.id
+                 AND COALESCE(NULLIF(binding.config->>'providerKey', ''), binding.provider) = $2
+                 AND binding.config->>'source' LIKE '%-discovery'
+                 AND version.source->>'managed' = 'true'
+           )",
+    )
+    .bind(project_id)
+    .bind(runtime_provider_key)
+    .execute(&mut *transaction)
+    .await?
+    .rows_affected();
+    if archived == 0 {
+        transaction.commit().await?;
+        return Ok(0);
+    }
+    sqlx::query(
+        "DELETE FROM project_bindings
+         WHERE project_id = $1
+           AND binding_id IN (
+               SELECT binding.id
+               FROM agent_bindings AS binding
+               JOIN agent_profiles AS profile ON profile.id = binding.profile_id
+               JOIN agent_profile_versions AS version ON version.id = profile.active_version_id
+               WHERE profile.project_id = $1
+                 AND profile.archived_at IS NOT NULL
+                 AND COALESCE(NULLIF(binding.config->>'providerKey', ''), binding.provider) = $2
+                 AND binding.config->>'source' LIKE '%-discovery'
+                 AND version.source->>'managed' = 'true'
+           )",
+    )
+    .bind(project_id)
+    .bind(runtime_provider_key)
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "DELETE FROM provider_connections AS provider
+         WHERE provider.project_id = $1
+           AND provider.provider_key = $2
+           AND provider.source_kind = 'custom'
+           AND provider.source_key = $2
+           AND provider.config->>'source' = 'agent-gateway'
+           AND NOT EXISTS (
+               SELECT 1
+               FROM agent_profiles AS profile
+               JOIN agent_profile_versions AS version ON version.id = profile.active_version_id
+               LEFT JOIN agent_profile_capabilities AS capability
+                 ON capability.profile_version_id = version.id
+               WHERE profile.project_id = $1
+                 AND profile.archived_at IS NULL
+                 AND (
+                     version.source->>'providerKey' = $2
+                     OR capability.provider_key = $2
+                 )
+           )",
+    )
+    .bind(project_id)
+    .bind(runtime_provider_key)
+    .execute(&mut *transaction)
+    .await?;
+    transaction.commit().await?;
+    Ok(archived)
+}
+
 pub async fn find_project_profile_by_provider_resource(
     pool: &PgPool,
     project_id: Uuid,
+    gateway_id: &str,
     provider_key: &str,
     agent_id: &str,
 ) -> Result<Option<(Uuid, bool, Uuid)>, ApiError> {
@@ -1662,12 +1763,14 @@ pub async fn find_project_profile_by_provider_resource(
          WHERE profile.project_id = $1
            AND binding.agent_id = $2
            AND COALESCE(NULLIF(binding.config->>'providerKey', ''), binding.provider) = $3
+           AND binding.gateway_id = $4
          ORDER BY profile.archived_at NULLS FIRST, profile.created_at ASC
          LIMIT 1",
     )
     .bind(project_id)
     .bind(agent_id)
     .bind(provider_key)
+    .bind(gateway_id)
     .fetch_optional(pool)
     .await
     .map_err(ApiError::from)
@@ -1679,6 +1782,7 @@ pub async fn refresh_discovered_binding_record(
     gateway_id: &str,
     agent_name: &str,
 ) -> Result<(), ApiError> {
+    let mut transaction = pool.begin().await?;
     sqlx::query(
         "UPDATE agent_bindings
          SET gateway_id = $2,
@@ -1689,8 +1793,18 @@ pub async fn refresh_discovered_binding_record(
     .bind(binding_id)
     .bind(gateway_id)
     .bind(agent_name)
-    .execute(pool)
+    .execute(&mut *transaction)
     .await?;
+    sqlx::query(
+        "UPDATE agent_profiles
+         SET name = $2, updated_at = NOW()
+         WHERE id = (SELECT profile_id FROM agent_bindings WHERE id = $1)",
+    )
+    .bind(binding_id)
+    .bind(agent_name)
+    .execute(&mut *transaction)
+    .await?;
+    transaction.commit().await?;
     Ok(())
 }
 
@@ -2485,13 +2599,17 @@ pub async fn create_binding(
 
 pub async fn ensure_discovered_binding(
     pool: &PgPool,
-    project_id: Uuid,
-    gateway_id: &str,
-    agent_id: &str,
-    agent_name: &str,
-    provider_key: &str,
-    provider_type: &str,
+    input: NewDiscoveredBinding<'_>,
 ) -> Result<Uuid, ApiError> {
+    let NewDiscoveredBinding {
+        project_id,
+        gateway_id,
+        agent_id,
+        agent_name,
+        provider_key,
+        runtime_provider_key,
+        provider_type,
+    } = input;
     if let Some(binding) =
         find_binding_by_agent_gateway_agent(pool, project_id, gateway_id, agent_id, provider_key)
             .await?
@@ -2533,6 +2651,7 @@ pub async fn ensure_discovered_binding(
         "source": source_kind,
         "agentName": display_name,
         "providerKey": provider_key,
+        "runtimeProviderKey": runtime_provider_key,
     });
     let persona = json!({ "files": {} });
     let runtime = json!({});
@@ -2540,6 +2659,7 @@ pub async fn ensure_discovered_binding(
     let source = json!({
         "type": provider_type,
         "providerKey": provider_key,
+        "runtimeProviderKey": runtime_provider_key,
         "gatewayId": gateway_id,
         "resourceId": agent_id,
         "managed": true,
@@ -2552,6 +2672,7 @@ pub async fn ensure_discovered_binding(
         config: json!({
             "gatewayId": gateway_id,
             "source": source_kind,
+            "runtimeProviderKey": runtime_provider_key,
         }),
         input_schema: json!({}),
         output_schema: json!({}),
@@ -4202,15 +4323,16 @@ pub async fn create_uploaded_runtime_trace(
     let request = redact_trace_value(trace.request);
     let result = sqlx::query(
         "INSERT INTO endpoint_traces
-            (id, request_id, project_id, operation, provider_key, capability_kind,
-             status, latency_ms, request, created_at, completed_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
-                 CASE WHEN $7 = 'pending' THEN NULL ELSE $10 END)
+            (id, request_id, project_id, gateway_session_id, operation, provider_key,
+             capability_kind, status, latency_ms, request, created_at, completed_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11,
+                 CASE WHEN $8 = 'pending' THEN NULL ELSE $11 END)
          ON CONFLICT (request_id) DO NOTHING",
     )
     .bind(trace.id)
     .bind(trace.request_id)
     .bind(trace.project_id)
+    .bind(trace.gateway_session_id)
     .bind(trace.operation)
     .bind(trace.provider_key)
     .bind(trace.capability_kind)
@@ -4640,7 +4762,11 @@ pub async fn list_traces(
     } = options;
     let mut query = QueryBuilder::<Postgres>::new(
         "SELECT trace.id, trace.request_id, trace.endpoint_id,
-                trace.project_id, trace.gateway_session_id, trace.profile_id,
+                trace.project_id, trace.gateway_session_id,
+                gateway_session.gateway_id AS gateway_id,
+                COALESCE(gateway_session.metadata ->> 'name', gateway_session.gateway_id) AS gateway_name,
+                gateway_session.metadata AS gateway_metadata,
+                trace.profile_id,
                 trace.profile_version_id, profile.slug AS profile_slug,
                 profile.name AS profile_name,
                 profile_version.version_number AS profile_version_number,
@@ -4701,6 +4827,8 @@ pub async fn list_traces(
                 END AS app_outcome,
                 trace.request, trace.response, trace.error, trace.created_at, trace.completed_at
          FROM endpoint_traces trace
+         LEFT JOIN agent_gateway_sessions gateway_session
+            ON gateway_session.session_id = trace.gateway_session_id
          LEFT JOIN agent_profiles profile ON profile.id = trace.profile_id
          LEFT JOIN agent_profile_versions profile_version
             ON profile_version.id = trace.profile_version_id",

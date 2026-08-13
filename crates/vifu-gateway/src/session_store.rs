@@ -45,6 +45,8 @@ struct StoredGatewaySession {
     token_expires_at: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     resume_session_id: Option<uuid::Uuid>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pending_app_id: Option<String>,
     created_at_unix: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[serde(rename = "guestApp", alias = "guestProject")]
@@ -120,6 +122,7 @@ impl GatewaySessionStore {
             token_generation,
             token_expires_at,
             resume_session_id,
+            pending_app_id: stored.pending_app_id,
             created_at_unix: stored.created_at_unix,
             guest_project: stored.guest_project,
             pairing: stored.pairing,
@@ -158,6 +161,7 @@ impl GatewaySessionPersistence {
             token_generation: session.token_generation,
             token_expires_at: session.token_expires_at.clone(),
             resume_session_id: session.resume_session_id,
+            pending_app_id: session.pending_app_id.clone(),
             created_at_unix: session.created_at_unix,
             guest_project: session.guest_project.clone(),
             pairing: session.pairing.clone(),

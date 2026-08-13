@@ -425,8 +425,13 @@ function providerTone(type: string): string {
 }
 
 function providerOnline(provider: ProjectProvider, agents: AvailableAgent[]): boolean {
-  if (provider.providerType === "openclaw") {
-    return agents.some((agent) => agent.status === "connected" && stringValue(agent.metadata.providerKey) === provider.providerKey);
+  const gatewayId = stringValue(provider.config.gatewayId);
+  if (gatewayId) {
+    return agents.some((agent) => (
+      agent.gatewayId === gatewayId
+      && agent.status === "connected"
+      && stringValue(agent.metadata.providerKey) === provider.providerKey
+    ));
   }
   return provider.status === "online";
 }

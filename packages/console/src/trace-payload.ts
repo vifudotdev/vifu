@@ -40,6 +40,9 @@ function conversationMessages(value: unknown): DecodedMessage[] {
   if (typeof value.output_text === "string") {
     return [decodedMessage("assistant", value.output_text)];
   }
+  if (typeof value.text === "string") {
+    return [decodedMessage("assistant", value.text)];
+  }
   return [];
 }
 

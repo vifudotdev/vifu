@@ -181,9 +181,10 @@ impl Config {
 fn validate_enrollment_token(token: &str) -> Result<(), String> {
     let secret = token
         .strip_prefix("vifu_ge_")
-        .ok_or_else(|| "Agent Gateway enrollment token is invalid".to_string())?;
-    if token.len() != 72 || !secret.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        return Err("Agent Gateway enrollment token is invalid".to_string());
+        .or_else(|| token.strip_prefix("vifu_app_"))
+        .ok_or_else(|| "Agent Gateway enrollment token or App ID is invalid".to_string())?;
+    if secret.len() != 64 || !secret.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err("Agent Gateway enrollment token or App ID is invalid".to_string());
     }
     Ok(())
 }
@@ -636,6 +637,32 @@ mod tests {
 
         assert!(config.enrollment_token.unwrap().starts_with("vifu_ge_"));
         assert!(config.agent_gateway_bootstrap_token.is_none());
+        restore_env("VIFU_AGENT_GATEWAY_BOOTSTRAP_TOKEN", previous_token);
+        restore_env(
+            "VIFU_AGENT_GATEWAY_BOOTSTRAP_TOKEN_FILE",
+            previous_token_file,
+        );
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn app_id_is_accepted_as_a_gateway_enrollment_selector() {
+        let _guard = env_lock().lock().unwrap();
+        let dir = unique_directory("vifu-gateway-app-id");
+        let previous_token = std::env::var_os("VIFU_AGENT_GATEWAY_BOOTSTRAP_TOKEN");
+        let previous_token_file = std::env::var_os("VIFU_AGENT_GATEWAY_BOOTSTRAP_TOKEN_FILE");
+        std::env::remove_var("VIFU_AGENT_GATEWAY_BOOTSTRAP_TOKEN");
+        std::env::remove_var("VIFU_AGENT_GATEWAY_BOOTSTRAP_TOKEN_FILE");
+        let app_id = format!("vifu_app_{}", "a".repeat(64));
+
+        let config = Config::load_from_home_dir(
+            dir.clone(),
+            "https://api.example.com".to_string(),
+            Some(app_id.clone()),
+        )
+        .unwrap();
+
+        assert_eq!(config.enrollment_token.as_deref(), Some(app_id.as_str()));
         restore_env("VIFU_AGENT_GATEWAY_BOOTSTRAP_TOKEN", previous_token);
         restore_env(
             "VIFU_AGENT_GATEWAY_BOOTSTRAP_TOKEN_FILE",

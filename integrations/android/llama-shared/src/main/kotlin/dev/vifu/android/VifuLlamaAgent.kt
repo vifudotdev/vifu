@@ -20,19 +20,26 @@ import dev.vifu.runtime.VifuRuntimeException
 import dev.vifu.runtime.VifuStreamingAgentProvider
 import java.io.Closeable
 import java.io.File
+import java.lang.ref.WeakReference
 import java.security.MessageDigest
 import java.util.UUID
 import java.util.concurrent.CancellationException
 import java.util.concurrent.ExecutionException
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
-import kotlinx.coroutines.delay
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -61,8 +68,11 @@ class VifuLlamaAgent private constructor(
 ) : Closeable {
     val buildProfile: VifuBuildProfile = VifuArtifactProfile.profile
     val connectionState = host.connectionState
+    val connectionError = host.connectionError
+    val hasGatewayConnection = host.hasGatewayConnection
 
     private val closed = AtomicBoolean(false)
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val conversationMutex = Mutex()
     private val conversation = mutableListOf<ChatMessage>()
     private val sessionId = "android-${UUID.randomUUID()}"
@@ -129,7 +139,16 @@ class VifuLlamaAgent private constructor(
 
     override fun close() {
         if (!closed.compareAndSet(false, true)) return
+        scope.cancel()
         if (ownsHost) host.close() else runCatching { host.unloadProvider(PROVIDER_ID) }
+    }
+
+    private fun persistGatewayBinding(
+        store: VifuGatewayBindingStore,
+        binding: VifuStoredGatewayBinding,
+    ): Job = scope.launch {
+        connectionState.first { it == VifuConnectionState.Connected }
+        store.save(binding)
     }
 
     companion object {
@@ -149,15 +168,58 @@ class VifuLlamaAgent private constructor(
             model: VifuLlamaConfig,
         ): VifuLlamaAgent = openInternal(context, connection, model)
 
+        /**
+         * Opens the local agent and automatically restores its last successful Gateway pairing.
+         * Pass a fresh pairing code only when enrolling this installation with a Vifu App.
+         */
+        suspend fun connect(
+            context: Context,
+            model: VifuLlamaConfig,
+            pairingCode: String? = null,
+            defaultConnection: VifuConnectionConfig? = null,
+            captureTraceContent: Boolean = false,
+        ): VifuLlamaAgent = managedAgentMutex.withLock {
+            val appContext = context.applicationContext
+            val store = VifuGatewayBindingStore(appContext, MANAGED_GATEWAY_SCOPE)
+            val pairing = pairingCode?.let(::VifuGatewayPairingCode)
+            managedAgent.get()?.close()
+            val storedBinding = if (pairing == null) store.load() else null
+            val connection = when {
+                pairing != null -> pairing.connectionConfig(captureTraceContent)
+                storedBinding != null -> storedBinding.connectionConfig(captureTraceContent)
+                else -> defaultConnection?.copy(captureTraceContent = captureTraceContent)
+            }?.withBuildProfile()
+            val agent = openInternal(
+                context = appContext,
+                connection = connection,
+                model = model,
+                runtimeScope = MANAGED_GATEWAY_SCOPE,
+            )
+            if (pairing != null) {
+                agent.persistGatewayBinding(store, VifuStoredGatewayBinding.from(pairing))
+            }
+            managedAgent = WeakReference(agent)
+            agent
+        }
+
+        /** Clears the automatic Gateway binding used by [connect]. */
+        fun clearConnection(context: Context) {
+            VifuGatewayBindingStore(
+                context.applicationContext,
+                MANAGED_GATEWAY_SCOPE,
+            ).clear()
+        }
+
         private suspend fun openInternal(
             context: Context,
             connection: VifuConnectionConfig?,
             model: VifuLlamaConfig,
+            runtimeScope: String? = null,
         ): VifuLlamaAgent {
             val modelFile = File(model.modelPath)
             val runtime = VifuAndroidRuntime.open(
                 context = context,
-                scope = "llama-${sha256(modelFile.canonicalPath).take(16)}",
+                scope = runtimeScope ?: "llama-${sha256(modelFile.canonicalPath).take(16)}",
                 connection = connection,
             )
             return try {
@@ -197,7 +259,9 @@ class VifuLlamaAgent private constructor(
                 VifuBuildProfile.ARM_OPTIMIZED -> "Android llama (ARM optimized)"
                 VifuBuildProfile.BASELINE -> "Android llama (baseline)"
             }
-            val agentMetadata = JSONObject().put("buildProfile", buildProfileId)
+            val agentMetadata = JSONObject()
+                .put("buildProfile", buildProfileId)
+                .put("model", File(model.modelPath).name)
             model.systemPrompt?.let {
                 agentMetadata.put(
                     "persona",
@@ -219,6 +283,18 @@ class VifuLlamaAgent private constructor(
             )
             VifuLlamaAgent(runtime, ownsHost)
         }
+
+        private fun VifuConnectionConfig.withBuildProfile(): VifuConnectionConfig {
+            val profile = when (VifuArtifactProfile.profile) {
+                VifuBuildProfile.ARM_OPTIMIZED -> "arm-optimized"
+                VifuBuildProfile.BASELINE -> "baseline"
+            }
+            return copy(gatewayAttributes = gatewayAttributes + ("buildProfile" to profile))
+        }
+
+        private val managedAgentMutex = Mutex()
+        private var managedAgent = WeakReference<VifuLlamaAgent>(null)
+        private const val MANAGED_GATEWAY_SCOPE = "llama-managed"
 
         private fun sha256(value: String): String = MessageDigest.getInstance("SHA-256")
             .digest(value.toByteArray())

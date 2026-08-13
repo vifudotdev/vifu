@@ -135,7 +135,10 @@ The first run creates these files:
 - `~/.vifu/vifu.sqlite`
 
 The default process starts the Server and Agent Gateway. It also opens the Vifu
-TUI in an interactive terminal.
+TUI in an interactive terminal. The first run creates one permanent `Local app`
+and connects the bundled local Gateway to it. The Gateway stores its
+Server-issued Device Token and reconnects with the same identity. Vifu does not
+put an App ID in the runtime configuration.
 
 Press `B` to open the local Dashboard. Press `q` to stop Vifu. Vifu asks for
 confirmation if requests, a comparison, or a route override is active.
@@ -149,16 +152,15 @@ The generated configuration makes both network roles explicit:
 [server]
 address = "http://127.0.0.1:6790"
 
-[server.guest_bootstrap]
-enabled = true
-
 [gateway]
 address = "http://127.0.0.1:6790"
 ```
 
 The generated configuration starts both roles in the same process. The Server
 uses `server.address`. The Agent Gateway uses `gateway.address` and connects to
-the Server.
+the Server. Apps and deployment assignments remain Server state. If the Server
+runs without the bundled Gateway, the first run still creates the `Local app`
+and its `development` deployment, ready for a device to enroll.
 
 For remote Servers, separate Gateways, monitor keys, and device enrollment, read
 [Runtime topology, monitoring, and Gateway enrollment](topology-and-pairing.md).

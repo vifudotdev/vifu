@@ -35,6 +35,8 @@ pub struct SessionSummary {
     pub token_expires_at: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resume_session_id: Option<Uuid>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_app_id: Option<String>,
     pub created_at_unix: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[serde(rename = "guestApp", alias = "guestProject")]
@@ -80,6 +82,7 @@ impl fmt::Debug for SessionSummary {
             .field("token_generation", &self.token_generation)
             .field("token_expires_at", &self.token_expires_at)
             .field("resume_session_id", &self.resume_session_id)
+            .field("pending_app_id", &self.pending_app_id)
             .field("created_at_unix", &self.created_at_unix)
             .field(
                 "guest_project",
@@ -105,6 +108,7 @@ impl SessionSummary {
             token_generation: None,
             token_expires_at: None,
             resume_session_id: None,
+            pending_app_id: None,
             created_at_unix,
             guest_project: None,
             pairing: None,
@@ -205,6 +209,9 @@ pub(crate) fn validate_session(session: &SessionSummary) -> Result<(), String> {
     if session.token_generation == Some(0) {
         return Err("Gateway token generation must be greater than zero".to_string());
     }
+    if let Some(app_id) = session.pending_app_id.as_deref() {
+        validate_app_id(app_id, "pending App ID")?;
+    }
     if session.created_at_unix == 0 {
         return Err("created_at_unix must be greater than zero".to_string());
     }
@@ -224,13 +231,7 @@ pub(crate) fn validate_session(session: &SessionSummary) -> Result<(), String> {
 
 fn validate_guest_project(guest: &GuestProjectSummary) -> Result<(), String> {
     if !guest.app_id.is_empty() {
-        let app_id = guest
-            .app_id
-            .strip_prefix("vifu_app_")
-            .ok_or_else(|| "invalid guest App ID".to_string())?;
-        if app_id.len() != 64 || !app_id.chars().all(|value| value.is_ascii_hexdigit()) {
-            return Err("invalid guest App ID".to_string());
-        }
+        validate_app_id(&guest.app_id, "guest App ID")?;
     }
     validate_identifier("guest app slug", &guest.project_slug)?;
     validate_identifier("guest deployment", &guest.deployment)?;
@@ -247,6 +248,16 @@ fn validate_guest_project(guest: &GuestProjectSummary) -> Result<(), String> {
         || guest.expires_at.chars().any(char::is_control)
     {
         return Err("invalid guest expiration".to_string());
+    }
+    Ok(())
+}
+
+fn validate_app_id(value: &str, label: &str) -> Result<(), String> {
+    let suffix = value
+        .strip_prefix("vifu_app_")
+        .ok_or_else(|| format!("invalid {label}"))?;
+    if suffix.len() != 64 || !suffix.chars().all(|value| value.is_ascii_hexdigit()) {
+        return Err(format!("invalid {label}"));
     }
     Ok(())
 }

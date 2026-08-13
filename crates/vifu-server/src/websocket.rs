@@ -19,6 +19,7 @@ use crate::auth::{
 };
 use crate::db;
 use crate::error::ApiError;
+use crate::gateway_identity::scoped_provider_key;
 use crate::models::AgentGatewayAuthorization;
 use crate::monitor::ServerMonitorEvent;
 use crate::AppState;
@@ -138,6 +139,7 @@ async fn run_socket(
         }
     };
     let gateway_id = authorization.gateway_id.as_str();
+    let metadata = crate::gateway_identity::normalized_gateway_metadata(metadata, &agents);
     let application_feedback_supported =
         gateway_supports_feature(&metadata, protocol::APPLICATION_FEEDBACK_FEATURE);
     let embedded_monitoring_supported =
@@ -280,7 +282,7 @@ async fn run_socket(
                     AgentGatewayCommand::Error { request_id: None, .. } => {}
                     AgentGatewayCommand::RuntimeTelemetry { batch }
                         if embedded_monitoring_supported => {
-                        match persist_runtime_telemetry(state, gateway_id, &batch).await {
+                        match persist_runtime_telemetry(state, gateway_id, session_id, &batch).await {
                             Ok(true) => state.monitor.publish(ServerMonitorEvent::RuntimeTelemetry {
                                 gateway_id: gateway_id.to_string(),
                                 batch: Box::new(batch),
@@ -329,6 +331,7 @@ enum RuntimeTelemetryPersistError {
 async fn persist_runtime_telemetry(
     state: &AppState,
     gateway_id: &str,
+    gateway_session_id: Uuid,
     batch: &protocol::RuntimeTelemetryBatch,
 ) -> Result<bool, RuntimeTelemetryPersistError> {
     let deployment = db::list_runtime_deployments_for_gateway(&state.pool, gateway_id)
@@ -362,7 +365,7 @@ async fn persist_runtime_telemetry(
                 "runtime telemetry timestamp is invalid".to_string(),
             )
         })?;
-    let (provider_key, capability_kind) = batch
+    let (runtime_provider_key, capability_kind) = batch
         .events
         .iter()
         .find_map(|event| match event {
@@ -376,6 +379,8 @@ async fn persist_runtime_telemetry(
         .map_or((None, None), |(provider, capability)| {
             (Some(provider), Some(capability))
         });
+    let provider_key = runtime_provider_key
+        .map(|provider_key| crate::gateway_identity::scoped_provider_key(gateway_id, provider_key));
     let request = json!({
         "source": "embedded-runtime-live",
         "gatewayId": gateway_id,
@@ -384,6 +389,7 @@ async fn persist_runtime_telemetry(
         "invocationId": batch.invocation_id,
         "endpoint": batch.endpoint,
         "agent": batch.agent_id,
+        "runtimeProviderKey": runtime_provider_key,
     });
     let request_id = crate::api::runtime_trace_uuid("request", gateway_id, &batch.trace_id);
     let trace_id = crate::api::runtime_trace_uuid("trace", gateway_id, &batch.trace_id);
@@ -393,8 +399,9 @@ async fn persist_runtime_telemetry(
             id: trace_id,
             request_id,
             project_id: project.project.id,
+            gateway_session_id: Some(gateway_session_id),
             operation: "runtime.invoke",
-            provider_key,
+            provider_key: provider_key.as_deref(),
             capability_kind,
             status: "pending",
             latency_ms: 0,
@@ -414,7 +421,7 @@ async fn persist_runtime_telemetry(
                 name: "runtime.invoke",
                 kind: "embedded_runtime",
                 observation_type: "generation",
-                provider_key,
+                provider_key: provider_key.as_deref(),
                 capability_kind,
                 model: None,
                 model_parameters: None,
@@ -429,9 +436,10 @@ async fn persist_runtime_telemetry(
         || batch.root_input_summary.is_some()
         || batch.root_output_summary.is_some()
     {
-        crate::telemetry::persist_batch(
+        crate::telemetry::persist_batch_for_gateway(
             &state.pool,
             request_id,
+            gateway_id,
             protocol::TraceTelemetryBatch {
                 events: batch.events.clone(),
                 dropped_events: batch.dropped_events,
@@ -750,16 +758,19 @@ async fn reconcile_project_agents(
 ) -> Result<(), crate::error::ApiError> {
     let gateway_projects = db::list_projects_for_gateway(&state.pool, gateway_id).await?;
     for agent in agents {
-        let Some(provider_key) = agent
+        let Some(runtime_provider_key) = agent
             .metadata
             .get("providerKey")
             .and_then(serde_json::Value::as_str)
         else {
             continue;
         };
-        if vifu_gateway::protocol::validate_identifier("provider key", provider_key).is_err() {
+        if vifu_gateway::protocol::validate_identifier("provider key", runtime_provider_key)
+            .is_err()
+        {
             continue;
         }
+        let provider_key = scoped_provider_key(gateway_id, runtime_provider_key);
         let reported_provider_type = agent
             .metadata
             .get("providerType")
@@ -774,27 +785,34 @@ async fn reconcile_project_agents(
                 "gateway"
             };
         let mut projects = gateway_projects.clone();
-        projects.extend(db::list_projects_for_provider_key(&state.pool, provider_key).await?);
+        projects.extend(db::list_projects_for_provider_key(&state.pool, &provider_key).await?);
         projects.sort_unstable_by_key(|(project_id, _)| *project_id);
         projects.dedup_by_key(|(project_id, _)| *project_id);
         for (project_id, project_slug) in projects {
-            if !db::project_provider_is_assigned(&state.pool, project_id, provider_key).await? {
+            db::archive_legacy_discovered_provider(&state.pool, project_id, runtime_provider_key)
+                .await?;
+            if !db::project_provider_is_assigned(&state.pool, project_id, &provider_key).await? {
                 let provider_name = agent
                     .metadata
                     .get("providerName")
                     .and_then(serde_json::Value::as_str)
-                    .unwrap_or(provider_key);
-                let provider_config =
-                    discovered_provider_config(agent, gateway_id, provider_key, provider_type);
+                    .filter(|name| !name.trim().is_empty())
+                    .unwrap_or(&agent.name);
+                let provider_config = discovered_provider_config(
+                    agent,
+                    gateway_id,
+                    runtime_provider_key,
+                    provider_type,
+                );
                 let encrypted_secret_json =
                     encrypt_secret_json("{}", &state.config.provider_secret_key)?;
                 db::upsert_provider_connection(
                     &state.pool,
                     &project_slug,
                     db::NewProviderConnection {
-                        provider_key,
+                        provider_key: &provider_key,
                         source_kind: "custom",
-                        source_key: provider_key,
+                        source_key: runtime_provider_key,
                         name: provider_name,
                         provider_type,
                         base_url: "",
@@ -810,7 +828,8 @@ async fn reconcile_project_agents(
             match db::find_project_profile_by_provider_resource(
                 &state.pool,
                 project_id,
-                provider_key,
+                gateway_id,
+                &provider_key,
                 &agent.id,
             )
             .await?
@@ -827,12 +846,15 @@ async fn reconcile_project_agents(
                 None => {
                     db::ensure_discovered_binding(
                         &state.pool,
-                        project_id,
-                        gateway_id,
-                        &agent.id,
-                        &agent.name,
-                        provider_key,
-                        provider_type,
+                        db::NewDiscoveredBinding {
+                            project_id,
+                            gateway_id,
+                            agent_id: &agent.id,
+                            agent_name: &agent.name,
+                            provider_key: &provider_key,
+                            runtime_provider_key,
+                            provider_type,
+                        },
                     )
                     .await?;
                 }
@@ -845,7 +867,7 @@ async fn reconcile_project_agents(
 fn discovered_provider_config(
     agent: &vifu_gateway::protocol::AgentDescriptor,
     gateway_id: &str,
-    provider_key: &str,
+    runtime_provider_key: &str,
     provider_type: &str,
 ) -> serde_json::Value {
     let runtime_provider_type = agent
@@ -889,7 +911,7 @@ fn discovered_provider_config(
     validation
         .providers
         .push(vifu_runtime::ProviderRequirement {
-            id: provider_key.to_string(),
+            id: runtime_provider_key.to_string(),
             provider_type: runtime_provider_type.to_string(),
             capabilities: capabilities.clone(),
             settings: settings.clone(),
@@ -903,6 +925,7 @@ fn discovered_provider_config(
     json!({
         "gatewayId": gateway_id,
         "source": "agent-gateway",
+        "runtimeProviderKey": runtime_provider_key,
         "runtimeProviderType": runtime_provider_type,
         "capabilities": capabilities,
         "settings": settings,
@@ -1014,9 +1037,9 @@ mod tests {
     use super::{
         authorize_gateway_machine, can_recover_missing_guest_token, decode_command,
         discovered_provider_config, encode_command, gateway_pairing_url, reconcile_project_agents,
-        GatewayAuthorizationOutcome,
+        scoped_provider_key, GatewayAuthorizationOutcome,
     };
-    use crate::auth::hash_api_key;
+    use crate::auth::{encrypt_secret_json, hash_api_key};
     use crate::config::Config;
     use crate::db::{self, NewEndpoint, NewProject, NewRuntimeDistribution};
     use crate::error::ApiError;
@@ -1271,8 +1294,9 @@ mod tests {
             .unwrap();
         assert_eq!(profiles.len(), 1);
         assert_eq!(profiles[0].name, "Guide");
+        let provider_key = scoped_provider_key(&gateway_id, "openclaw-local");
         assert!(
-            db::project_provider_is_assigned(&state.pool, project_id, "openclaw-local")
+            db::project_provider_is_assigned(&state.pool, project_id, &provider_key)
                 .await
                 .unwrap()
         );
@@ -1280,7 +1304,154 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(providers.len(), 1);
-        assert_eq!(providers[0].provider_key, "openclaw-local");
+        assert_eq!(providers[0].provider_key, provider_key);
+        assert_eq!(providers[0].source_key, "openclaw-local");
+    }
+
+    #[tokio::test]
+    async fn gateways_with_the_same_runtime_agent_get_distinct_project_resources() {
+        let Some(pool) = maybe_test_pool().await else {
+            return;
+        };
+        let first_gateway_id = format!("gateway-{}", Uuid::new_v4().simple());
+        let second_gateway_id = format!("gateway-{}", Uuid::new_v4().simple());
+        let project_id = Uuid::new_v4();
+        let project_slug = format!("multi-gateway-{}", Uuid::new_v4().simple());
+        db::create_project(
+            &pool,
+            NewProject {
+                id: project_id,
+                owner_user_id: None,
+                slug: &project_slug,
+                name: "Multi-gateway project",
+                description: None,
+                gateway_id: &first_gateway_id,
+                binding_ids: &[],
+            },
+        )
+        .await
+        .unwrap();
+        let primary = db::list_runtime_deployments(&pool, project_id)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|deployment| deployment.is_primary)
+            .unwrap();
+        db::assign_runtime_deployment_gateway(&pool, project_id, primary.id, &second_gateway_id)
+            .await
+            .unwrap();
+        let state = state_with_storage(Config::from_env().unwrap(), pool);
+        let encrypted_secret_json =
+            encrypt_secret_json("{}", &state.config.provider_secret_key).unwrap();
+        db::upsert_provider_connection(
+            &state.pool,
+            &project_slug,
+            db::NewProviderConnection {
+                provider_key: "android-llama",
+                source_kind: "custom",
+                source_key: "android-llama",
+                name: "Legacy Android llama",
+                provider_type: "vifu-runtime",
+                base_url: "",
+                config: &json!({
+                    "gatewayId": second_gateway_id,
+                    "source": "agent-gateway"
+                }),
+                encrypted_secret_json: &encrypted_secret_json,
+                secret_keys: &[],
+                display_secret: None,
+                status: "online",
+            },
+        )
+        .await
+        .unwrap();
+        db::ensure_discovered_binding(
+            &state.pool,
+            db::NewDiscoveredBinding {
+                project_id,
+                gateway_id: &second_gateway_id,
+                agent_id: "android-local-chat",
+                agent_name: "Legacy merged Android llama",
+                provider_key: "android-llama",
+                runtime_provider_key: "android-llama",
+                provider_type: "vifu-runtime",
+            },
+        )
+        .await
+        .unwrap();
+        let descriptor = |name: &str| AgentDescriptor {
+            id: "android-local-chat".to_string(),
+            name: name.to_string(),
+            metadata: json!({
+                "providerKey": "android-llama",
+                "providerType": "vifu-runtime",
+                "localProviderType": "llama"
+            }),
+        };
+
+        reconcile_project_agents(
+            &state,
+            &first_gateway_id,
+            &[descriptor("Android llama (ARM optimized)")],
+        )
+        .await
+        .unwrap();
+        reconcile_project_agents(
+            &state,
+            &second_gateway_id,
+            &[descriptor("Android llama (baseline)")],
+        )
+        .await
+        .unwrap();
+        reconcile_project_agents(
+            &state,
+            &first_gateway_id,
+            &[descriptor("Android llama (ARM optimized)")],
+        )
+        .await
+        .unwrap();
+
+        let profiles = db::list_project_profiles(&state.pool, project_id)
+            .await
+            .unwrap();
+        assert_eq!(profiles.len(), 2);
+        assert_eq!(
+            db::list_archived_project_agent_sources(&state.pool, project_id)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        let providers = db::list_provider_connections(&state.pool, &project_slug)
+            .await
+            .unwrap();
+        assert_eq!(providers.len(), 2);
+        assert!(providers
+            .iter()
+            .all(|provider| provider.source_key == "android-llama"));
+        assert_ne!(providers[0].provider_key, providers[1].provider_key);
+
+        let profile_ids = profiles
+            .iter()
+            .map(|profile| profile.id)
+            .collect::<std::collections::HashSet<_>>();
+        let bindings = db::list_bindings(&state.pool)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|binding| profile_ids.contains(&binding.profile_id))
+            .collect::<Vec<_>>();
+        assert_eq!(bindings.len(), 2);
+        assert_eq!(
+            bindings
+                .iter()
+                .map(|binding| binding.gateway_id.as_str())
+                .collect::<std::collections::HashSet<_>>(),
+            std::collections::HashSet::from([
+                first_gateway_id.as_str(),
+                second_gateway_id.as_str(),
+            ])
+        );
     }
 
     #[tokio::test]
@@ -1627,6 +1798,7 @@ mod tests {
                 allow_guest_bootstrap: false,
                 providers: &providers,
                 agents: &agents,
+                gateway_metadata: json!({ "name": "Wire test Gateway" }),
                 route_overrides: None,
                 runtime_observer: Some(runtime_observer),
                 capture_sender: None,

@@ -8,6 +8,9 @@ data class VifuConnectionConfig(
     val serverCertificateDer: ByteArray? = null,
     val captureTraceContent: Boolean = false,
     val enrollmentToken: String? = null,
+    val gatewayName: String? = null,
+    val gatewayKind: String? = null,
+    val gatewayAttributes: Map<String, String> = emptyMap(),
 ) {
     init {
         require(appId == null || APP_ID.matches(appId)) {
@@ -18,6 +21,20 @@ data class VifuConnectionConfig(
         }
         require(appId == null || enrollmentToken == null) {
             "appId and enrollmentToken cannot both be set"
+        }
+        require(gatewayName == null || gatewayName.trim().length in 1..128) {
+            "gatewayName must contain between 1 and 128 characters"
+        }
+        require(gatewayKind == null || GATEWAY_KIND.matches(gatewayKind)) {
+            "gatewayKind must use lowercase letters, numbers, dots, underscores, or hyphens"
+        }
+        require(gatewayAttributes.size <= 32) {
+            "gatewayAttributes cannot contain more than 32 entries"
+        }
+        require(gatewayAttributes.all { (key, value) ->
+            ATTRIBUTE_KEY.matches(key) && value.length <= 256
+        }) {
+            "gatewayAttributes must use bounded identifier keys and values"
         }
         val uri = runCatching { URI(serverUrl) }.getOrNull()
         require(uri?.host != null && (uri.scheme == "https" || isLoopbackHttp(uri))) {
@@ -31,6 +48,8 @@ data class VifuConnectionConfig(
     private companion object {
         val APP_ID = Regex("^vifu_app_[0-9a-fA-F]{64}$")
         val ENROLLMENT_TOKEN = Regex("^vifu_ge_[0-9a-fA-F]{64}$")
+        val GATEWAY_KIND = Regex("^[a-z0-9][a-z0-9._-]{0,63}$")
+        val ATTRIBUTE_KEY = Regex("^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
     }
 }
 

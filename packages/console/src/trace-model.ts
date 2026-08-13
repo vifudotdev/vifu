@@ -13,6 +13,8 @@ export type TraceStatusGroup = "running" | "passed" | "problems" | "unknown";
 export type TraceListPresentation = {
   agent: string;
   appScore: string | null;
+  gateway: string;
+  gatewayId: string | null;
   latencyMs: number | null;
   model: string | null;
   status: TraceStatusGroup;
@@ -92,10 +94,21 @@ export function traceListPresentation(trace: EndpointTrace): TraceListPresentati
   );
   const appScore = normalizedScoreValue(trace.appOutcome) ?? appScoreLabel(scores);
   const status = appScore === "fail" ? "problems" : runtimeStatus;
+  const gatewayId = firstString(
+    trace.gatewayId,
+    nestedValue(trace.request, "gatewayId"),
+  );
+  const gateway = firstString(
+    trace.gatewayName,
+    trace.gatewayMetadata?.name,
+    nestedValue(trace.request, "gatewayName"),
+  ) ?? (gatewayId ? gatewayId.replace(/^gateway-/, "Gateway ") : "Unknown Gateway");
 
   return {
     agent: traceAgentLabel(trace),
     appScore,
+    gateway,
+    gatewayId,
     latencyMs: trace.latencyMs,
     model,
     status,
@@ -143,6 +156,8 @@ export function traceSearchText(trace: EndpointTrace): string {
     trace.profileSlug ?? "",
     trace.profileName ?? "",
     presentation.agent,
+    presentation.gateway,
+    presentation.gatewayId ?? "",
     presentation.model ?? "",
     trace.error ?? "",
   ].join(" ").toLowerCase();

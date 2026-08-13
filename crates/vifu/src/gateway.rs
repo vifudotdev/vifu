@@ -75,16 +75,16 @@ impl GatewayControl {
 
 #[derive(Clone, Default)]
 pub(crate) struct DevicePairingController {
-    current_guest: Arc<Mutex<Option<GuestPairingContext>>>,
+    current_app: Arc<Mutex<Option<DevicePairingContext>>>,
     gateway_credential: Arc<Mutex<Option<String>>>,
 }
 
 #[derive(Clone)]
-struct GuestPairingContext {
+struct DevicePairingContext {
     server_url: String,
     server_certificate_der: Option<Vec<u8>>,
-    project_api_key: String,
-    claim_token: String,
+    project_api_key: Option<String>,
+    claim_token: Option<String>,
     project_id: Uuid,
     deployment_id: Uuid,
     claimed: bool,
@@ -92,7 +92,7 @@ struct GuestPairingContext {
 
 impl DevicePairingController {
     fn clear(&self) {
-        if let Ok(mut current) = self.current_guest.lock() {
+        if let Ok(mut current) = self.current_app.lock() {
             *current = None;
         }
         if let Ok(mut credential) = self.gateway_credential.lock() {
@@ -106,12 +106,12 @@ impl DevicePairingController {
         server_certificate_der: Option<&[u8]>,
         guest: &session::GuestProjectSummary,
     ) {
-        if let Ok(mut current) = self.current_guest.lock() {
-            *current = Some(GuestPairingContext {
+        if let Ok(mut current) = self.current_app.lock() {
+            *current = Some(DevicePairingContext {
                 server_url: server_url.to_string(),
                 server_certificate_der: server_certificate_der.map(<[u8]>::to_vec),
-                project_api_key: guest.api_key.clone(),
-                claim_token: guest.claim_token.clone(),
+                project_api_key: Some(guest.api_key.clone()),
+                claim_token: Some(guest.claim_token.clone()),
                 project_id: guest.project_id,
                 deployment_id: guest.deployment_id,
                 claimed: false,
@@ -119,8 +119,27 @@ impl DevicePairingController {
         }
     }
 
+    fn set_app(
+        &self,
+        server_url: &str,
+        server_certificate_der: Option<&[u8]>,
+        app: &PairingAppTarget,
+    ) {
+        if let Ok(mut current) = self.current_app.lock() {
+            *current = Some(DevicePairingContext {
+                server_url: server_url.to_string(),
+                server_certificate_der: server_certificate_der.map(<[u8]>::to_vec),
+                project_api_key: None,
+                claim_token: None,
+                project_id: app.project_id,
+                deployment_id: app.deployment_id,
+                claimed: true,
+            });
+        }
+    }
+
     fn set_project_claimed(&self, project_id: Uuid, claimed: bool) {
-        if let Ok(mut current) = self.current_guest.lock() {
+        if let Ok(mut current) = self.current_app.lock() {
             if let Some(context) = current
                 .as_mut()
                 .filter(|context| context.project_id == project_id)
@@ -141,9 +160,9 @@ impl DevicePairingController {
         dashboard_url: &str,
     ) -> Result<Option<String>, String> {
         let context = self
-            .current_guest
+            .current_app
             .lock()
-            .map_err(|_| "Guest project state is unavailable".to_string())?
+            .map_err(|_| "App state is unavailable".to_string())?
             .clone();
         let Some(context) = context else {
             return Ok(None);
@@ -151,23 +170,24 @@ impl DevicePairingController {
         if context.claimed {
             return Ok(None);
         }
+        let Some(claim_token) = context.claim_token.as_deref() else {
+            return Ok(None);
+        };
         if same_web_origin(&context.server_url, dashboard_url) {
             return Ok(None);
         }
-        relay::guest_claim_url(dashboard_url, &context.claim_token).map(Some)
+        relay::guest_claim_url(dashboard_url, claim_token).map(Some)
     }
 
     pub(crate) async fn create_enrollment(
         &self,
     ) -> Result<vifu_gateway::control::GuestGatewayEnrollment, String> {
         let context = self
-            .current_guest
+            .current_app
             .lock()
-            .map_err(|_| "Guest device pairing state is unavailable".to_string())?
+            .map_err(|_| "App device pairing state is unavailable".to_string())?
             .clone()
-            .ok_or_else(|| {
-                "Waiting for the Agent Gateway to create its Guest project".to_string()
-            })?;
+            .ok_or_else(|| "Waiting for the Agent Gateway to select an App".to_string())?;
         let gateway_credential = self
             .gateway_credential
             .lock()
@@ -182,9 +202,12 @@ impl DevicePairingController {
             )
             .await;
         }
+        let project_api_key = context.project_api_key.as_deref().ok_or_else(|| {
+            "Waiting for the Agent Gateway to connect before pairing a device".to_string()
+        })?;
         RuntimeControlClient::create_guest_gateway_enrollment_with_server_certificate(
             &context.server_url,
-            &context.project_api_key,
+            project_api_key,
             context.server_certificate_der.as_deref(),
         )
         .await
@@ -228,6 +251,15 @@ pub struct GatewayRuntimeOptions {
     pub allow_guest_bootstrap: bool,
     pub enrollment_token: Option<String>,
     pub session_scope: String,
+    pub(crate) legacy_session_scope: Option<String>,
+    pub(crate) migrated_app_id: Option<String>,
+    pub(crate) pairing_app: Option<PairingAppTarget>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct PairingAppTarget {
+    pub project_id: Uuid,
+    pub deployment_id: Uuid,
 }
 
 impl GatewayRuntimeOptions {
@@ -645,6 +677,7 @@ pub async fn run(
     monitor: Option<RuntimeEventSender>,
     control: GatewayControl,
 ) -> Result<(), String> {
+    migrate_legacy_session(&options)?;
     let verbose = monitor.is_none();
     if verbose {
         println!("Vifu");
@@ -830,6 +863,16 @@ pub async fn run(
         let session_store = GatewaySessionStore::open(&runtime_database_file)?;
         let session_key = gateway_session_state_key(&options.session_scope, &config.server_url)?;
         let mut session = load_or_create_session(&session_store, &session_key)?;
+        if config.enrollment_token.is_none() {
+            config.enrollment_token.clone_from(&session.pending_app_id);
+        }
+        if let Some(app) = options.pairing_app.as_ref() {
+            control.device_pairing.set_app(
+                &config.server_url,
+                options.server_certificate_der.as_deref(),
+                app,
+            );
+        }
         restore_device_pairing(
             &control.device_pairing,
             &config.server_url,
@@ -884,6 +927,7 @@ pub async fn run(
             allow_guest_bootstrap: options.allow_guest_bootstrap,
             providers: &runtime_providers,
             agents: &agents,
+            gateway_metadata: local_gateway_metadata(),
             route_overrides: Some(control.optimization.route_overrides()),
             runtime_observer,
             capture_sender: Some(capture_sender.clone()),
@@ -1037,6 +1081,29 @@ pub async fn run(
             .await;
         }
     }
+}
+
+fn local_gateway_metadata() -> serde_json::Value {
+    let hostname = std::env::var("HOSTNAME")
+        .or_else(|_| std::env::var("HOST"))
+        .or_else(|_| std::env::var("COMPUTERNAME"))
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "local computer".to_string());
+    serde_json::json!({
+        "name": format!("Vifu on {hostname}"),
+        "kind": "computer",
+        "platform": std::env::consts::OS,
+        "device": {
+            "architecture": std::env::consts::ARCH,
+            "hostname": hostname,
+        },
+        "application": {
+            "name": "Vifu",
+            "version": env!("CARGO_PKG_VERSION"),
+        },
+    })
 }
 
 async fn publish_runtime_project_roster(
@@ -1659,6 +1726,119 @@ fn print_server_config(config: &Config) -> Result<(), String> {
     Ok(())
 }
 
+pub(crate) fn stored_guest_app_id(
+    options: &GatewayRuntimeOptions,
+) -> Result<Option<String>, String> {
+    let config = options.load_config()?;
+    let (store, key) = gateway_session_store(&config, &options.session_scope)?;
+    Ok(store
+        .load(&key, None, None)?
+        .and_then(|session| session.guest_project.map(|guest| guest.app_id)))
+}
+
+pub(crate) fn store_pending_app_id_if_unauthorized(
+    options: &GatewayRuntimeOptions,
+    app_id: &str,
+) -> Result<(), String> {
+    let config = options.load_config()?;
+    let (store, key) = gateway_session_store(&config, &options.session_scope)?;
+    store_pending_app_id(&store, &key, app_id)
+}
+
+fn store_pending_app_id(
+    store: &GatewaySessionStore,
+    key: &str,
+    app_id: &str,
+) -> Result<(), String> {
+    let mut session = load_or_create_session(store, key)?;
+    if session.device_token.is_some() || session.pending_app_id.as_deref() == Some(app_id) {
+        return Ok(());
+    }
+    session.pending_app_id = Some(app_id.to_string());
+    store
+        .persistence(key, GatewaySecretStorage::Persisted)
+        .save(&session)
+}
+
+pub(crate) fn migrate_legacy_session(options: &GatewayRuntimeOptions) -> Result<(), String> {
+    let Some(legacy_scope) = options.legacy_session_scope.as_deref() else {
+        return Ok(());
+    };
+    if legacy_scope == options.session_scope {
+        return Ok(());
+    }
+    let config = options.load_config()?;
+    let store = GatewaySessionStore::open(config.runtime_database_file())?;
+    migrate_legacy_session_state(
+        &store,
+        &config.server_url,
+        &options.session_scope,
+        legacy_scope,
+        options.migrated_app_id.as_deref(),
+    )
+}
+
+fn migrate_legacy_session_state(
+    store: &GatewaySessionStore,
+    server_url: &str,
+    current_scope: &str,
+    legacy_scope: &str,
+    app_id: Option<&str>,
+) -> Result<(), String> {
+    migrate_session_scope(store, server_url, current_scope, legacy_scope)?;
+    let Some(app_id) = app_id else {
+        return Ok(());
+    };
+    let current_key = gateway_session_state_key(current_scope, server_url)?;
+    let mut session = match store.load(&current_key, None, None)? {
+        Some(session) => session,
+        None => SessionSummary::new(
+            vifu_gateway::identity::MachineIdentity::generate()?,
+            now_unix_seconds()?,
+        )?,
+    };
+    if session.device_token.is_none() {
+        session.pending_app_id = Some(app_id.to_string());
+        store
+            .persistence(current_key, GatewaySecretStorage::Persisted)
+            .save(&session)?;
+    }
+    Ok(())
+}
+
+fn migrate_session_scope(
+    store: &GatewaySessionStore,
+    server_url: &str,
+    current_scope: &str,
+    legacy_scope: &str,
+) -> Result<(), String> {
+    let current_key = gateway_session_state_key(current_scope, server_url)?;
+    if store.load(&current_key, None, None)?.is_some() {
+        return Ok(());
+    }
+    let legacy_key = gateway_session_state_key(legacy_scope, server_url)?;
+    let Some(session) = store.load(&legacy_key, None, None)? else {
+        return Ok(());
+    };
+    store
+        .persistence(current_key, GatewaySecretStorage::Persisted)
+        .save(&session)
+}
+
+pub(crate) fn clear_stored_guest_app(options: &GatewayRuntimeOptions) -> Result<(), String> {
+    let config = options.load_config()?;
+    let (store, key) = gateway_session_store(&config, &options.session_scope)?;
+    let Some(mut session) = store.load(&key, None, None)? else {
+        return Ok(());
+    };
+    if session.guest_project.take().is_none() {
+        return Ok(());
+    }
+    store
+        .persistence(&key, GatewaySecretStorage::Persisted)
+        .save(&session)
+}
+
 fn print_stored_session(config: &Config, session_scope: &str) -> Result<(), String> {
     let (store, key) = gateway_session_store(config, session_scope)?;
     match store.load(&key, None, None)? {
@@ -1768,9 +1948,10 @@ mod tests {
     use super::load_local_whisper_provider;
     use super::{
         format_terminal_link, gateway_runtime_observer, load_available_openai_compatible_provider,
-        load_openai_compatible_provider, mark_gateway_authorized, project_profile_registrations,
-        restore_device_pairing, run_capture_worker, runtime_backends,
-        should_register_openai_compatible, AgentProviderConfig, DevicePairingController,
+        load_openai_compatible_provider, mark_gateway_authorized, migrate_legacy_session_state,
+        migrate_session_scope, project_profile_registrations, restore_device_pairing,
+        run_capture_worker, runtime_backends, should_register_openai_compatible,
+        store_pending_app_id, AgentProviderConfig, DevicePairingController,
     };
     use crate::monitor::{RuntimeEvent, RuntimeHealth, RuntimeStage, StageStatus};
     use serde_json::json;
@@ -1782,6 +1963,101 @@ mod tests {
             #[cfg(feature = "local-llama")]
             crate::local_models::LocalModelPool::for_device(),
         )
+    }
+
+    #[test]
+    fn legacy_app_scoped_gateway_session_moves_to_the_profile_scope() {
+        let path = std::env::temp_dir().join(format!(
+            "vifu-gateway-session-migration-{}.sqlite",
+            Uuid::new_v4()
+        ));
+        let store = vifu_gateway::session_store::GatewaySessionStore::open(&path).unwrap();
+        let server_url = "https://api.example.com";
+        let legacy_scope = format!("default:app:vifu_app_{}", "a".repeat(64));
+        let legacy_key =
+            vifu_gateway::session_store::gateway_session_state_key(&legacy_scope, server_url)
+                .unwrap();
+        let session = vifu_gateway::session::SessionSummary::new(
+            vifu_gateway::identity::MachineIdentity::generate().unwrap(),
+            42,
+        )
+        .unwrap();
+        store
+            .persistence(
+                &legacy_key,
+                vifu_gateway::session_store::GatewaySecretStorage::Persisted,
+            )
+            .save(&session)
+            .unwrap();
+
+        migrate_session_scope(&store, server_url, "default", &legacy_scope).unwrap();
+
+        let current_key =
+            vifu_gateway::session_store::gateway_session_state_key("default", server_url).unwrap();
+        assert_eq!(store.load(&current_key, None, None).unwrap(), Some(session));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn legacy_app_id_survives_a_status_only_migration_without_a_device_token() {
+        let path = std::env::temp_dir().join(format!(
+            "vifu-gateway-pending-app-migration-{}.sqlite",
+            Uuid::new_v4()
+        ));
+        let app_id = format!("vifu_app_{}", "a".repeat(64));
+        let legacy_scope = format!("default:app:{app_id}");
+        let store = vifu_gateway::session_store::GatewaySessionStore::open(&path).unwrap();
+
+        migrate_legacy_session_state(
+            &store,
+            "https://api.example.com",
+            "default",
+            &legacy_scope,
+            Some(&app_id),
+        )
+        .unwrap();
+
+        let key = vifu_gateway::session_store::gateway_session_state_key(
+            "default",
+            "https://api.example.com",
+        )
+        .unwrap();
+        assert_eq!(
+            store
+                .load(&key, None, None)
+                .unwrap()
+                .unwrap()
+                .pending_app_id,
+            Some(app_id)
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn local_app_id_is_restored_when_the_gateway_has_no_device_token() {
+        let path = std::env::temp_dir().join(format!(
+            "vifu-gateway-local-app-recovery-{}.sqlite",
+            Uuid::new_v4()
+        ));
+        let store = vifu_gateway::session_store::GatewaySessionStore::open(&path).unwrap();
+        let key = vifu_gateway::session_store::gateway_session_state_key(
+            "default",
+            "https://192.0.2.20:6790",
+        )
+        .unwrap();
+        let app_id = format!("vifu_app_{}", "b".repeat(64));
+
+        store_pending_app_id(&store, &key, &app_id).unwrap();
+
+        assert_eq!(
+            store
+                .load(&key, None, None)
+                .unwrap()
+                .unwrap()
+                .pending_app_id,
+            Some(app_id)
+        );
+        let _ = std::fs::remove_file(path);
     }
 
     fn guest_project() -> vifu_gateway::session::GuestProjectSummary {
@@ -1810,7 +2086,7 @@ mod tests {
             Some(&guest),
         );
 
-        let current = controller.current_guest.lock().unwrap().clone().unwrap();
+        let current = controller.current_app.lock().unwrap().clone().unwrap();
         assert_eq!(
             (
                 current.server_url,
@@ -1821,8 +2097,8 @@ mod tests {
             (
                 "https://192.0.2.20:6790".to_string(),
                 Some(vec![1, 2, 3]),
-                "synthetic-project-key".to_string(),
-                "synthetic-claim-token".to_string(),
+                Some("synthetic-project-key".to_string()),
+                Some("synthetic-claim-token".to_string()),
             )
         );
     }

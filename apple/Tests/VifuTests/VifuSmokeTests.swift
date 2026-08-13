@@ -4,6 +4,42 @@ import XCTest
 @testable import VifuRuntimeBridge
 
 final class VifuSmokeTests: XCTestCase {
+    func testGatewayMetadataBuildsTypedConfigJSON() throws {
+        let metadata = VifuGatewayMetadata(
+            name: "Kitchen light",
+            kind: "light",
+            platform: "embedded",
+            device: ["model": "demo-bulb"],
+            application: ["name": "Lighting Agent"],
+            attributes: ["room": "kitchen"]
+        )
+
+        let config = try VifuEmbeddedGatewayConfig(
+            serverUrl: "https://runtime.example.com",
+            runtimeDatabasePath: "/tmp/runtime.sqlite",
+            serverCertificateDer: nil,
+            gatewayMetadata: metadata
+        )
+        let data = try XCTUnwrap(config.gatewayMetadataJson.data(using: .utf8))
+        let value = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: data) as? [String: Any]
+        )
+
+        XCTAssertEqual(value["name"] as? String, "Kitchen light")
+        XCTAssertEqual((value["device"] as? [String: String])?["model"], "demo-bulb")
+        XCTAssertEqual((value["attributes"] as? [String: String])?["room"], "kitchen")
+    }
+
+    func testLegacyGatewayConfigInitializerUsesEmptyMetadata() {
+        let config = VifuEmbeddedGatewayConfig(
+            serverUrl: "https://runtime.example.com",
+            runtimeDatabasePath: "/tmp/runtime.sqlite",
+            serverCertificateDer: nil
+        )
+
+        XCTAssertEqual(config.gatewayMetadataJson, "{}")
+    }
+
     func testGatewayPairingAcceptsSystemTrustedHTTPS() throws {
         let token = "vifu_ge_" + String(repeating: "a", count: 64)
         let pairing = try VifuGatewayPairingCode(

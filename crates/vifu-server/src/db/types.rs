@@ -88,6 +88,16 @@ pub struct NewProviderConnection<'a> {
     pub status: &'a str,
 }
 
+pub struct NewDiscoveredBinding<'a> {
+    pub project_id: Uuid,
+    pub gateway_id: &'a str,
+    pub agent_id: &'a str,
+    pub agent_name: &'a str,
+    pub provider_key: &'a str,
+    pub runtime_provider_key: &'a str,
+    pub provider_type: &'a str,
+}
+
 pub struct ProfilePatch<'a> {
     pub slug: Option<&'a str>,
     pub name: Option<&'a str>,
@@ -204,6 +214,7 @@ pub struct NewUploadedRuntimeTrace<'a> {
     pub id: Uuid,
     pub request_id: Uuid,
     pub project_id: Uuid,
+    pub gateway_session_id: Option<Uuid>,
     pub operation: &'a str,
     pub provider_key: Option<&'a str>,
     pub capability_kind: Option<&'a str>,

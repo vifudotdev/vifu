@@ -90,18 +90,32 @@ attached again later.
 
 ## Gateway monitoring
 
-For an installable app, parse the one-time pairing code created by the Vifu TUI
-or Dashboard. The parser validates the HTTPS origin, enrollment token, and
-optional certificate fingerprint:
+Use `connect` for an app that supports Vifu pairing:
 
 ```kotlin
-val pairing = VifuGatewayPairingCode(pairingCode)
-val connection = pairing.connectionConfig()
+val agent = VifuLlamaAgent.connect(
+    context = applicationContext,
+    model = VifuLlamaConfig(modelPath = modelFile.absolutePath),
+    pairingCode = pairingCode, // Use this parameter only after a new scan.
+    captureTraceContent = true, // Set this only after the user gives consent.
+)
 ```
 
-Pass the connection to Core, attach the desired providers, then start the
-Gateway. Starting it after registration ensures the first published manifest
-contains the active agents:
+The SDK validates the pairing code. It also stores the Server binding after a
+successful connection. On later app starts, omit `pairingCode`:
+
+```kotlin
+val agent = VifuLlamaAgent.connect(
+    context = applicationContext,
+    model = VifuLlamaConfig(modelPath = modelFile.absolutePath),
+    captureTraceContent = true,
+)
+```
+
+The SDK restores the binding and reconnects with the stored device identity.
+Call `VifuLlamaAgent.clearConnection(context)` to return to local-only use.
+
+Use Core directly when one Gateway must contain multiple providers:
 
 ```kotlin
 val runtime = VifuAndroidRuntime.open(
@@ -123,6 +137,24 @@ is sent only until the Server issues the device token. Later starts use the
 same Server binding and stored device token. Build-time App ID configuration is
 still available for managed application builds. App code does not manage
 runtime IDs.
+
+Android reports a readable Gateway name, application identity, device model,
+OS version, and supported ABIs automatically. An embedded host can replace the
+default mobile identity and add bounded product metadata:
+
+```kotlin
+val connection = pairing.connectionConfig().copy(
+    gatewayName = "Kitchen light",
+    gatewayKind = "light",
+    gatewayAttributes = mapOf(
+        "room" to "kitchen",
+        "hardwareRevision" to "rev-b",
+    ),
+)
+```
+
+The Dashboard uses this identity on the Overview and Trace pages. The stable
+Gateway ID remains available for diagnostics.
 
 ## Model-load diagnostics
 

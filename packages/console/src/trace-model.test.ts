@@ -54,6 +54,19 @@ describe("traceListPresentation", () => {
     });
   });
 
+  it("uses the reported Gateway name for trace attribution", () => {
+    const trace = endpointTrace({
+      gatewayId: "gateway-kitchen-light",
+      gatewayName: "Kitchen light",
+      gatewayMetadata: { kind: "light", room: "kitchen" },
+    });
+
+    expect(traceListPresentation(trace)).toMatchObject({
+      gateway: "Kitchen light",
+      gatewayId: "gateway-kitchen-light",
+    });
+  });
+
   it("leaves unavailable metrics unknown", () => {
     expect(traceListPresentation(endpointTrace()).model).toBeNull();
     expect(traceListPresentation(endpointTrace()).ttftMs).toBeNull();

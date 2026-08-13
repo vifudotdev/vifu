@@ -44,7 +44,16 @@ a role that runs elsewhere.
 | Remote | Remote or omitted | Neither network role | Remote Server monitor |
 
 The default first run uses the first row. It starts a local Server, a local
-Gateway, and the TUI. It also creates a temporary local Guest App.
+Gateway, and the TUI. If the Server has no Apps, it creates one permanent
+`Local app` and attaches the bundled Gateway during that startup. The generated
+configuration contains only the component addresses. App membership remains
+Server state and the Gateway reconnects with its Device Token.
+
+Vifu remains a multiple-App, multiple-deployment Server. Later startups do not
+create another App when Apps already exist, and they do not infer Gateway
+membership from the current TUI page or local network. A Server-only first run
+creates the `Local app` and its empty primary deployment, then waits for an
+explicit Gateway enrollment.
 
 Startup does not enroll another device. Press `P` to create an enrollment QR
 for another Runtime installation.
@@ -65,8 +74,8 @@ An account credential can monitor Apps owned by that account. A deployment
 operator can use `VIFU_ADMIN_KEY` or `VIFU_ADMIN_KEY_FILE` for deployment-wide
 access.
 
-A headless Gateway does not need a monitor key. A local Guest Gateway gives its
-App key to the TUI after bootstrap.
+A headless Gateway does not need a monitor key when it runs in the same process
+as the local Server. Remote Server monitoring still uses the credentials above.
 
 `server.address` is the Server API origin. Press `B` to open the Dashboard URL
 reported by that Server. A local Server serves the embedded Console from the
@@ -81,7 +90,7 @@ not pair a phone to a TUI, and it does not identify two processes as the same
 user.
 
 1. In Dashboard, open **App → Deployments → Pair gateway**, or press `P` in
-   a TUI whose Gateway owns a Guest App.
+   a TUI whose Gateway is connected to the App.
 2. Server creates a `vifu_ge_...` enrollment token with a five-minute lifetime.
 3. A mobile application scans the HTTPS pairing QR, or a CLI reads the token
    through `VIFU_AGENT_GATEWAY_ENROLLMENT_TOKEN_FILE`.
@@ -114,19 +123,24 @@ Server and Gateway roles started by the same deployment. It is not a user
 pairing code and is never emitted by the CLI pairing action or accepted by the
 mobile pairing parser.
 
-## Guest Bootstrap
+## Hosted First Use
 
-Guest bootstrap is an explicit Server policy. When enabled, a Gateway that
-connects without an App ID or enrollment token can receive one independent
-temporary App, deployment, App API key, and claim token. Each Gateway Machine
-identity receives its own Guest App. The returned App key has read access, so
-it can authenticate an App-scoped monitor without receiving
-deployment-admin authority.
+The official hosted Server gives a Gateway that has no App ID or enrollment
+token one temporary App, deployment, App API key, and claim token. Each stable
+Gateway Machine identity keeps the same temporary App across reconnects. The
+returned App key has read access, so it can authenticate an App-scoped monitor
+without receiving deployment-admin authority.
 
 A `vifu_ge_...` enrollment always selects its App deployment and never creates
 a Guest App. A managed `vifu_gb_...` credential never enters the Guest flow.
 Claiming a Guest App associates it with the signed-in owner but does not replace
 its App ID, Gateway identity, or traces.
+
+This is an official hosted-service policy, not a user configuration option.
+Local and self-hosted Vifu create a permanent zero-state App only when their
+database is empty. They can then host any number of Apps and deployments. The
+hosted claim flow encourages the user to retain the temporary App before it
+expires.
 
 ## Android Runtime Modes
 
@@ -136,7 +150,7 @@ device storage. It does not use a separate demo transport.
 
 | Application state | First connection | Later connections | Intended use |
 | --- | --- | --- | --- |
-| Unconfigured | Guest bootstrap or scan a one-time `vifu_ge_...` QR | Stored Device Token | Personal evaluation or an operator-selected App |
+| Unconfigured | Scan a one-time `vifu_ge_...` QR | Stored Device Token | An operator-selected App |
 | App configured | Present the editable `vifu_app_...` App ID | Stored Device Token | The same App installed on many devices |
 | Previously enrolled | Present the stored Device Token | Rotated Device Token | Normal restart and reconnect |
 
@@ -166,9 +180,6 @@ This path stays on infrastructure controlled by the user.
 ```toml
 [server]
 address = "https://192.168.1.20:6790"
-
-[server.guest_bootstrap]
-enabled = true
 
 [gateway]
 address = "http://127.0.0.1:6790"

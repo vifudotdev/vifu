@@ -1,6 +1,7 @@
 package dev.vifu.android
 
 import android.content.Context
+import android.os.Build
 import dev.vifu.runtime.VifuEmbeddedGateway
 import dev.vifu.runtime.VifuEmbeddedGatewayConfig
 import dev.vifu.runtime.VifuEmbeddedGatewayState as RawGatewayState
@@ -23,6 +24,8 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import org.json.JSONArray
+import org.json.JSONObject
 
 /** Core Vifu runtime. Provider modules are loaded only when attached to this object. */
 class VifuAndroidRuntime private constructor(
@@ -46,6 +49,9 @@ class VifuAndroidRuntime private constructor(
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val mutableConnectionState = MutableStateFlow<VifuConnectionState>(VifuConnectionState.Stopped)
     val connectionState: StateFlow<VifuConnectionState> = mutableConnectionState.asStateFlow()
+    val hasGatewayConnection: Boolean = connection != null
+    private val mutableConnectionError = MutableStateFlow<String?>(null)
+    val connectionError: StateFlow<String?> = mutableConnectionError.asStateFlow()
     private var gatewayStarted = false
     @Volatile
     private var lastDeviceToken: String? = identity?.deviceToken
@@ -133,6 +139,7 @@ class VifuAndroidRuntime private constructor(
             runtime.close()
         }
         mutableConnectionState.value = VifuConnectionState.Stopped
+        mutableConnectionError.value = null
     }
 
     private fun unloadProviderLocked(providerId: String, refreshGateway: Boolean): Boolean {
@@ -174,6 +181,7 @@ class VifuAndroidRuntime private constructor(
         while (scope.isActive) {
             runCatching { gateway.status() }
                 .onSuccess { status ->
+                    mutableConnectionError.value = status.lastError
                     status.authorization?.let { authorization ->
                         authorization.deviceToken.takeIf { it != lastDeviceToken }?.let {
                             val credentialStore = requireNotNull(store)
@@ -194,7 +202,10 @@ class VifuAndroidRuntime private constructor(
                         RawGatewayState.FAILED -> VifuConnectionState.Failed(status.lastError)
                     }
                 }
-                .onFailure { mutableConnectionState.value = VifuConnectionState.Failed(it.message) }
+                .onFailure {
+                    mutableConnectionError.value = it.message
+                    mutableConnectionState.value = VifuConnectionState.Failed(it.message)
+                }
             delay(GATEWAY_POLL_INTERVAL_MS)
         }
     }
@@ -242,6 +253,7 @@ class VifuAndroidRuntime private constructor(
                             serverUrl = connection.serverUrl,
                             runtimeDatabasePath = databasePath,
                             serverCertificateDer = connection.serverCertificateDer,
+                            gatewayMetadataJson = androidGatewayMetadata(appContext, connection),
                         ),
                     )
                     VifuAndroidRuntime(
@@ -266,6 +278,52 @@ class VifuAndroidRuntime private constructor(
 
         private const val GATEWAY_POLL_INTERVAL_MS = 500L
     }
+}
+
+internal fun androidGatewayMetadata(
+    context: Context,
+    connection: VifuConnectionConfig,
+): String {
+    val packageManager = context.packageManager
+    val applicationName = context.applicationInfo.loadLabel(packageManager).toString()
+        .trim()
+        .ifEmpty { context.packageName }
+    val packageInfo = packageManager.getPackageInfo(context.packageName, 0)
+    @Suppress("DEPRECATION")
+    val applicationVersionCode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+        packageInfo.longVersionCode
+    } else {
+        packageInfo.versionCode.toLong()
+    }
+    val deviceModel = Build.MODEL.trim().ifEmpty { Build.DEVICE }
+    val gatewayName = connection.gatewayName?.trim()
+        ?: "$applicationName · $deviceModel"
+    return JSONObject()
+        .put("name", gatewayName)
+        .put("kind", connection.gatewayKind ?: "mobile")
+        .put("platform", "android")
+        .put(
+            "device",
+            JSONObject()
+                .put("manufacturer", Build.MANUFACTURER)
+                .put("brand", Build.BRAND)
+                .put("model", Build.MODEL)
+                .put("device", Build.DEVICE)
+                .put("product", Build.PRODUCT)
+                .put("osVersion", Build.VERSION.RELEASE)
+                .put("sdk", Build.VERSION.SDK_INT)
+                .put("architectures", JSONArray(Build.SUPPORTED_ABIS.toList())),
+        )
+        .put(
+            "application",
+            JSONObject()
+                .put("id", context.packageName)
+                .put("name", applicationName)
+                .put("version", packageInfo.versionName.orEmpty())
+                .put("versionCode", applicationVersionCode),
+        )
+        .put("attributes", JSONObject(connection.gatewayAttributes))
+        .toString()
 }
 
 internal fun gatewayEnrollmentToken(

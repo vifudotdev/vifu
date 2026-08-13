@@ -1,15 +1,18 @@
 "use client";
 
 import {
+  Box,
   Check,
   Clipboard,
   CloudUpload,
   Download,
   Link2,
+  Monitor,
   Plus,
   RotateCcw,
   Settings2,
   ShieldOff,
+  Smartphone,
   Star,
   Unplug,
 } from "lucide-react";
@@ -75,6 +78,41 @@ export function latestGatewaySession(
       if (connectionOrder !== 0) return connectionOrder;
       return Date.parse(right.lastSeenAt) - Date.parse(left.lastSeenAt);
     })[0];
+}
+
+export function gatewayDeploymentPresentation(
+  gatewayId: string,
+  gateways: AgentGateway[],
+) {
+  const gateway = latestGatewaySession(gatewayId, gateways);
+  const metadata = gateway?.metadata ?? {};
+  const device = recordValue(metadata.device);
+  const application = recordValue(metadata.application);
+  const kind = stringValue(metadata.kind).trim();
+  const platform = stringValue(metadata.platform).trim();
+  const manufacturer = stringValue(device.manufacturer).trim();
+  const deviceName = firstString(device.model, device.hostname, device.product);
+  const applicationName = stringValue(application.name).trim();
+  const applicationVersion = stringValue(application.version).trim();
+
+  return {
+    gateway,
+    gatewayId,
+    name: stringValue(metadata.name).trim() || fallbackGatewayName(gatewayId),
+    typeLabel: gateway
+      ? [platformLabel(platform), kindLabel(kind)].filter(Boolean).join(" ") || "Gateway device"
+      : "Device identity pending",
+    deviceLabel: [manufacturer, deviceName].filter(Boolean).join(" ")
+      || (gateway ? "Device details not reported" : "Waiting for this device to connect"),
+    applicationLabel: applicationName || applicationVersion
+      ? [applicationName, applicationVersion ? versionLabel(applicationVersion) : ""].filter(Boolean).join(" · ")
+      : null,
+    agentLabel: gateway
+      ? `${gateway.agents.length} ${gateway.agents.length === 1 ? "agent" : "agents"}`
+      : "No agents reported",
+    kind,
+    platform,
+  };
 }
 
 export function RuntimeDeploymentsView({
@@ -319,8 +357,14 @@ export function RuntimeDeploymentsView({
       {message ? <div className={`action-message deployment-message ${message.tone}`} role={message.tone === "error" ? "alert" : "status"}>{message.text}</div> : null}
 
       <section className="deployment-grid" aria-label="Runtime deployments">
-        {deployments.map((deployment) => (
-          <article className="deployment-card" key={deployment.id}>
+        {deployments.map((deployment) => {
+          const gatewayCards = deployment.gatewayIds
+            .map((gatewayId) => gatewayDeploymentPresentation(gatewayId, agentGateways))
+            .sort((left, right) => gatewayConnectionRank(left.gateway?.status)
+              - gatewayConnectionRank(right.gateway?.status)
+              || left.name.localeCompare(right.name));
+          return (
+            <article className="deployment-card" key={deployment.id}>
             <header>
               <div>
                 <span className="deployment-icon"><Settings2 aria-hidden="true" /></span>
@@ -334,19 +378,25 @@ export function RuntimeDeploymentsView({
               <div><dt>Traces</dt><dd>{deployment.traceMode}</dd></div>
               <div><dt>Remote calls</dt><dd>{deployment.remoteInvocationEnabled ? "Allowed" : "Blocked"}</dd></div>
             </dl>
-            {deployment.gatewayIds.length > 0 ? (
+            {gatewayCards.length > 0 ? (
               <div className="deployment-gateways">
-                {deployment.gatewayIds.map((gatewayId) => (
-                  <div key={gatewayId}>
-                    <code>{gatewayId}</code>
-                    <GatewayConnectionStatus gateway={latestGatewaySession(gatewayId, agentGateways)} />
-                    <GatewayApplyStatus deployment={deployment} gatewayId={gatewayId} />
-                    <button className="icon-button" type="button" title="Detach from deployment" aria-label={`Detach ${gatewayId}`} onClick={() => detachGateway(deployment, gatewayId)} disabled={pending !== null}><Unplug aria-hidden="true" /></button>
-                    <button className="icon-button danger" type="button" title="Revoke gateway" aria-label={`Revoke ${gatewayId}`} onClick={() => revokeGateway(gatewayId)} disabled={pending !== null}><ShieldOff aria-hidden="true" /></button>
-                  </div>
+                {gatewayCards.map((presentation) => (
+                  <DeploymentGatewayCard
+                    deployment={deployment}
+                    presentation={presentation}
+                    pending={pending}
+                    onDetach={() => detachGateway(deployment, presentation.gatewayId)}
+                    onRevoke={() => revokeGateway(presentation.gatewayId)}
+                    key={presentation.gatewayId}
+                  />
                 ))}
               </div>
-            ) : null}
+            ) : (
+              <div className="deployment-gateways-empty">
+                <Link2 aria-hidden="true" />
+                <div><strong>No Gateway paired</strong><span>Pair a device to deploy settings and receive traces.</span></div>
+              </div>
+            )}
             <form className="deployment-policy-form" onSubmit={(event) => updatePolicies(deployment, event)}>
               <label><input type="checkbox" name="configSyncEnabled" defaultChecked={deployment.configSyncEnabled} />Sync settings</label>
               <label><input type="checkbox" name="remoteInvocationEnabled" defaultChecked={deployment.remoteInvocationEnabled} />Allow remote calls</label>
@@ -357,8 +407,9 @@ export function RuntimeDeploymentsView({
               <button className="secondary-button" type="button" onClick={() => pairGateway(deployment)} disabled={pending === `pair-${deployment.id}`}><Link2 aria-hidden="true" />Pair gateway</button>
               {!deployment.isPrimary ? <button className="quiet-button" type="button" onClick={() => promote(deployment)} disabled={pending === `promote-${deployment.id}`}><Star aria-hidden="true" />Make primary</button> : null}
             </footer>
-          </article>
-        ))}
+            </article>
+          );
+        })}
       </section>
 
       {enrollment ? <EnrollmentPanel enrollment={enrollment} onClose={() => setEnrollment(null)} /> : null}
@@ -395,7 +446,64 @@ export function RuntimeDeploymentsView({
   );
 }
 
-function GatewayConnectionStatus({ gateway }: { gateway?: AgentGateway }) {
+function DeploymentGatewayCard({
+  deployment,
+  presentation,
+  pending,
+  onDetach,
+  onRevoke,
+}: {
+  deployment: RuntimeDeployment;
+  presentation: ReturnType<typeof gatewayDeploymentPresentation>;
+  pending: string | null;
+  onDetach: () => void;
+  onRevoke: () => void;
+}) {
+  const connected = presentation.gateway?.status === "connected";
+  return (
+    <article className={`deployment-gateway-card ${connected ? "online" : "offline"}`}>
+      <i className="deployment-gateway-rail" aria-hidden="true" />
+      <div className="deployment-gateway-identity">
+        <span className="deployment-gateway-device" aria-hidden="true">
+          <GatewayDeviceIcon kind={presentation.kind} platform={presentation.platform} />
+        </span>
+        <div>
+          <div className="deployment-gateway-name">
+            <strong>{presentation.name}</strong>
+            <span>{presentation.typeLabel}</span>
+          </div>
+          <p>
+            <span>{presentation.deviceLabel}</span>
+            {presentation.applicationLabel ? <span>{presentation.applicationLabel}</span> : null}
+          </p>
+        </div>
+      </div>
+      <div className="deployment-gateway-state">
+        <GatewayConnectionStatus gateway={presentation.gateway} agentLabel={presentation.agentLabel} />
+        <GatewayApplyStatus deployment={deployment} gatewayId={presentation.gatewayId} />
+      </div>
+      <div className="deployment-gateway-id">
+        <span>Gateway ID</span>
+        <code title={presentation.gatewayId}>{presentation.gatewayId}</code>
+      </div>
+      <div className="deployment-gateway-actions">
+        <button className="icon-button" type="button" title="Detach from deployment" aria-label={`Detach ${presentation.name} from ${deployment.name}`} onClick={onDetach} disabled={pending !== null}><Unplug aria-hidden="true" /></button>
+        <button className="icon-button danger" type="button" title="Revoke Gateway access" aria-label={`Revoke access for ${presentation.name}`} onClick={onRevoke} disabled={pending !== null}><ShieldOff aria-hidden="true" /></button>
+      </div>
+    </article>
+  );
+}
+
+function GatewayDeviceIcon({ kind, platform }: { kind: string; platform: string }) {
+  const DeviceIcon = platform === "android" || platform === "ios"
+    ? Smartphone
+    : kind === "computer" || platform === "macos" || platform === "windows"
+      ? Monitor
+      : Box;
+  return <DeviceIcon />;
+}
+
+function GatewayConnectionStatus({ gateway, agentLabel }: { gateway?: AgentGateway; agentLabel: string }) {
   const connected = gateway?.status === "connected";
   return (
     <span className={`deployment-gateway-connection ${connected ? "online" : "offline"}`}>
@@ -403,7 +511,7 @@ function GatewayConnectionStatus({ gateway }: { gateway?: AgentGateway }) {
       <small>
         {gateway
           ? connected
-            ? `${gateway.agents.length} ${gateway.agents.length === 1 ? "agent" : "agents"}`
+            ? agentLabel
             : `Last seen ${formatDate(gateway.lastSeenAt)}`
           : "No session yet"}
       </small>
@@ -475,4 +583,56 @@ function formatDate(value: string): string {
   const date = new Date(value);
   if (!Number.isFinite(date.getTime())) return "Recently";
   return new Intl.DateTimeFormat("en", { month: "short", day: "numeric", year: "numeric", timeZone: "UTC" }).format(date);
+}
+
+function recordValue(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {};
+}
+
+function stringValue(value: unknown): string {
+  return typeof value === "string" ? value : "";
+}
+
+function firstString(...values: unknown[]): string {
+  for (const value of values) {
+    const text = stringValue(value).trim();
+    if (text) return text;
+  }
+  return "";
+}
+
+function fallbackGatewayName(gatewayId: string): string {
+  const value = gatewayId.replace(/^gateway-/, "");
+  return `Gateway ${value.length > 8 ? `${value.slice(0, 8)}…` : value}`;
+}
+
+function platformLabel(platform: string): string {
+  const labels: Record<string, string> = {
+    android: "Android",
+    ios: "iOS",
+    linux: "Linux",
+    macos: "macOS",
+    windows: "Windows",
+  };
+  return labels[platform.toLowerCase()] ?? titleLabel(platform);
+}
+
+function kindLabel(kind: string): string {
+  return kind.replace(/[._-]+/g, " ").toLowerCase();
+}
+
+function titleLabel(value: string): string {
+  if (!value) return "";
+  const spaced = value.replace(/[._-]+/g, " ");
+  return `${spaced.charAt(0).toUpperCase()}${spaced.slice(1)}`;
+}
+
+function versionLabel(version: string): string {
+  return version.toLowerCase().startsWith("v") ? version : `v${version}`;
+}
+
+function gatewayConnectionRank(status: string | undefined): number {
+  return status === "connected" ? 0 : status === "pending" ? 1 : 2;
 }

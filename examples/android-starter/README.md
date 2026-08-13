@@ -50,15 +50,19 @@ downloaded Vifu binary with a Server address that the phone can reach:
 ```bash
 ./vifu \
   -c server.address=https://<computer-lan-address>:6790 \
-  -c server.guest_bootstrap.enabled=true \
   -c gateway.address=http://127.0.0.1:6790
 ```
+
+On its first run, Vifu creates one permanent local App and connects its local
+Gateway. Later starts reuse the same App.
 
 Press `B`, open the project and its primary deployment in the Dashboard, then
 choose **Pair gateway** and **Copy pairing code**. Tap the Vifu status row in
 the app and paste the code. The app validates the one-time token and certificate
 pin, stores its device credential in Android Keystore, and reconnects on later
-launches.
+launches. Pairing also enables bounded chat input and output capture so the
+Dashboard can render the local conversation in the trace. **Use local only**
+disconnects the Server and keeps the chat on the phone.
 
 Create a new pairing code for the second application. Select the same Vifu
 project so both Agent traces appear together.
@@ -75,9 +79,10 @@ Run one chat turn. Success is visible in three places:
   errors.
 
 The model executes inside the Android app. Vifu stores monitoring data in the
-SQLite database on the developer computer. The default trace records timing,
-stage status, and bounded errors while prompt and response content remain in
-the app.
+SQLite database on the developer computer. The Starter's paired trace includes
+timing, stage status, bounded errors, and bounded chat input and output. The
+reusable Android API keeps content capture disabled by default. An application
+must enable it after user consent.
 
 ## Build from source
 
@@ -111,22 +116,18 @@ Demo APKs use runtime pairing and ignore `vifu.properties`.
 ## Minimal embedding API
 
 ```kotlin
-val agent = VifuLlamaAgent.open(
+val agent = VifuLlamaAgent.connect(
     context = applicationContext,
     model = VifuLlamaConfig(modelPath, contextSize = 2_048u),
+    pairingCode = pairingCode, // Omit after the first successful connection.
+    captureTraceContent = true,
 )
 
 agent.send("Hello").collect { token -> render(token) }
 ```
 
-`open` loads the selected llama module, registers its provider, and creates the
-agent endpoint. Use `VifuGatewayPairingCode` and the connection overload to add
-local monitoring:
-
-```kotlin
-val connection = VifuGatewayPairingCode(pairingCode).connectionConfig()
-val agent = VifuLlamaAgent.open(applicationContext, connection, model)
-```
+`connect` loads llama and creates the agent endpoint. It also validates and
+stores the Gateway binding. Later starts reconnect automatically.
 
 Cancelling collection cancels inference. Only successful turns are added to
 conversation history. Call `resetConversation()` to start over.

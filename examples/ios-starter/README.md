@@ -50,9 +50,11 @@ reach:
 ```bash
 ./vifu \
   -c server.address=https://<computer-lan-address>:6790 \
-  -c server.guest_bootstrap.enabled=true \
   -c gateway.address=http://127.0.0.1:6790
 ```
+
+On its first run, Vifu creates one permanent local App and connects its local
+Gateway. Later starts reuse the same App.
 
 Press `B`, open the project and its primary deployment in the Dashboard, then
 choose **Pair gateway** and **Copy pairing code**. In the Starter, open the

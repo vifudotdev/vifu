@@ -198,7 +198,7 @@ pub(crate) async fn run(
                     }));
                 } else {
                     app.notice = Some(
-                        "Device pairing is available when the Agent Gateway owns a Guest project"
+                        "Device pairing is available after the Agent Gateway selects an App"
                             .to_string(),
                     );
                 }
