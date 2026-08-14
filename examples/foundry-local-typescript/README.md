@@ -17,7 +17,7 @@ In a separate application workspace, install Foundry Local and the packed Vifu
 SDK:
 
 ```bash
-npm install foundry-local-sdk /path/to/vifu/vifu-sdk-0.1.12.tgz
+npm install foundry-local-sdk /path/to/vifu/vifu-sdk-0.1.13.tgz
 ```
 
 Use `foundry-local-sdk-winml` instead on supported Windows systems. Copy

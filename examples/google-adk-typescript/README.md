@@ -19,7 +19,7 @@ tools, Zod, and the packed Vifu SDK:
 cd npm-packages/sdk
 npm pack
 cd /path/to/your-adk-app
-npm install @google/adk zod /path/to/vifu/vifu-sdk-0.1.12.tgz
+npm install @google/adk zod /path/to/vifu/vifu-sdk-0.1.13.tgz
 npm install --save-dev @google/adk-devtools
 ```
 

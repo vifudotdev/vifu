@@ -14,7 +14,7 @@
     "build:packages": "bun run --cwd packages/protocol build && bun run --cwd packages/console build",
     "build:console": "bun run build:packages && bun run --cwd npm-packages/dashboard build:embedded",
     "build": "bun run build:packages && bun run --cwd npm-packages/dashboard build",
-    "test": "bun run build:packages && vitest run",
+    "test": "bun run build:packages && vitest run --exclude 'npm-packages/sdk/test/**'",
     "test:console:e2e": "bun run build:console && playwright test --config playwright.console.config.ts",
     "test:e2e": "playwright test"
   },

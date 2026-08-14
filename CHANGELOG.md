@@ -2,6 +2,17 @@
 
 All notable changes to Vifu are documented here.
 
+## 0.1.13 - 2026-08-15
+
+- Added Python and TypeScript SDKs for embedding Vifu Apps, Agents, Gateways,
+  local Server management, and trace reporting in application code.
+- Added prebuilt Python wheels with the embedded Dashboard and a one-command
+  Foundry Local research App example.
+- Improved multi-Gateway routing, reconnect behavior, device identity, Agent
+  version attribution, Provider/model details, and trace inspection.
+- Made device pairing the primary Dashboard flow and refreshed the Android Arm
+  optimized-versus-baseline development path.
+
 ## 0.1.12 - 2026-08-12
 
 - Added App IDs and deployment enrollment across the Server, Gateway, TUI, and

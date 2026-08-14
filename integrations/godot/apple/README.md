@@ -19,7 +19,7 @@ In Xcode, use **File > Add Package Dependencies** and enter:
 https://github.com/vifudotdev/VifuGodot
 ```
 
-Select version `0.1.12` or newer and add the `VifuGodot` product to the app
+Select version `0.1.13` or newer and add the `VifuGodot` product to the app
 target. SwiftPM resolves the matching Vifu Runtime, maintained SwiftGodot SDK,
 and platform libgodot binary from that single package dependency.
 
@@ -29,7 +29,7 @@ The package manifest resolves the maintained Git dependencies by default:
 
 | Package | Requirement |
 | --- | --- |
-| Vifu Agent Runtime | `vifudotdev/vifu`, version `0.1.12` |
+| Vifu Agent Runtime | `vifudotdev/vifu`, version `0.1.13` |
 | SwiftGodotKit | `vifudotdev/SwiftGodotKit`, version `4.5.1-vifu.1` |
 | SwiftGodot | `vifudotdev/SwiftGodot`, version `4.5.1-vifu.1` |
 | libgodot | Vifu release `libgodot-4.5.1-vifu.1`, selected for iOS or macOS by SwiftPM |

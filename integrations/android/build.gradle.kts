@@ -6,5 +6,5 @@ plugins {
 
 allprojects {
     group = "dev.vifu"
-    version = providers.gradleProperty("VERSION_NAME").getOrElse("0.1.12-SNAPSHOT")
+    version = providers.gradleProperty("VERSION_NAME").getOrElse("0.1.13-SNAPSHOT")
 }

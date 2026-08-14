@@ -33,7 +33,7 @@
     },
     "npm-packages/sdk": {
       "name": "@vifu/sdk",
-      "version": "0.1.12",
+      "version": "0.1.13",
     },
     "packages/console": {
       "name": "@vifu/console",

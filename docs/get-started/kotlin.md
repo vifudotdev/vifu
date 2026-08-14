@@ -9,11 +9,11 @@ For local chat:
 
 ```kotlin
 dependencies {
-    implementation("dev.vifu:vifu-android-llama:0.1.12")
+    implementation("dev.vifu:vifu-android-llama:0.1.13")
 }
 ```
 
-For chat and transcription, add `dev.vifu:vifu-android-whisper:0.1.12` too.
+For chat and transcription, add `dev.vifu:vifu-android-whisper:0.1.13` too.
 Gradle resolves the shared Core Runtime once.
 
 ## 2. Open The Agent

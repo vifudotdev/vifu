@@ -67,7 +67,7 @@ network.
 
 4. Start `./vifu` again. Keep the TUI open, then press `B` to open the Dashboard.
 
-5. Install the [optimized Android Starter APK](https://github.com/vifudotdev/vifu/releases/download/android-starter-v0.1.1/vifu-android-starter.apk).
+5. Install the [optimized Android Starter APK](https://github.com/vifudotdev/vifu/releases/download/android-starter-v0.1.2/vifu-android-starter.apk).
 
 6. Open the Starter. Tap the folder button in the lower-right corner and select
    a GGUF model.
@@ -82,7 +82,7 @@ network.
 10. Enter a message in the Starter. Inspect latency, first-token time, decode
     time, and token rate in the new Trace.
 
-11. Install the [baseline APK](https://github.com/vifudotdev/vifu/releases/download/android-starter-v0.1.1/vifu-android-starter-baseline.apk)
+11. Install the [baseline APK](https://github.com/vifudotdev/vifu/releases/download/android-starter-v0.1.2/vifu-android-starter-baseline.apk)
     beside the optimized APK. Select the same model and create a new pairing
     code for this application.
 

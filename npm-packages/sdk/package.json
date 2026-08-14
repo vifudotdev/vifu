@@ -1,6 +1,6 @@
 {
   "name": "@vifu/sdk",
-  "version": "0.1.12",
+  "version": "0.1.13",
   "description": "Embed Vifu Runtime, Gateway, and Server controls in TypeScript and JavaScript.",
   "type": "commonjs",
   "main": "./dist/index.js",

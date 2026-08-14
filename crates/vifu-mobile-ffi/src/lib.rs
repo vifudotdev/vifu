@@ -48,22 +48,22 @@ pub struct VifuOpenClawProbeReport {
 
 #[derive(Debug, thiserror::Error, uniffi::Error)]
 pub enum VifuRuntimeError {
-    #[error("{message}")]
-    InvalidConfig { message: String },
-    #[error("{message}")]
-    Runtime { message: String },
+    #[error("{reason}")]
+    InvalidConfig { reason: String },
+    #[error("{reason}")]
+    Runtime { reason: String },
 }
 
 impl From<String> for VifuRuntimeError {
     fn from(message: String) -> Self {
-        Self::Runtime { message }
+        Self::Runtime { reason: message }
     }
 }
 
 impl From<RuntimeError> for VifuRuntimeError {
     fn from(error: RuntimeError) -> Self {
         Self::Runtime {
-            message: error.public_message(),
+            reason: error.public_message(),
         }
     }
 }
@@ -71,7 +71,7 @@ impl From<RuntimeError> for VifuRuntimeError {
 impl From<RuntimeBridgeError> for VifuRuntimeError {
     fn from(error: RuntimeBridgeError) -> Self {
         Self::Runtime {
-            message: error.to_string(),
+            reason: error.to_string(),
         }
     }
 }
@@ -84,11 +84,11 @@ impl From<LlamaProviderError> for VifuRuntimeError {
             LlamaProviderError::ModelNotFound
             | LlamaProviderError::InvalidContextSize
             | LlamaProviderError::InvalidConfig(_)
-            | LlamaProviderError::ProjectorNotFound => Self::InvalidConfig { message },
+            | LlamaProviderError::ProjectorNotFound => Self::InvalidConfig { reason: message },
             LlamaProviderError::Backend(_)
             | LlamaProviderError::BackendDiscovery(_)
             | LlamaProviderError::Model(_)
-            | LlamaProviderError::Multimodal(_) => Self::Runtime { message },
+            | LlamaProviderError::Multimodal(_) => Self::Runtime { reason: message },
         }
     }
 }
@@ -113,7 +113,7 @@ pub fn default_vifu_runtime_config() -> VifuRuntimeConfig {
 #[uniffi::export]
 pub fn vifu_agent_gateway_websocket_url(server_url: String) -> Result<String, VifuRuntimeError> {
     relay::agent_gateway_websocket_url(&server_url)
-        .map_err(|message| VifuRuntimeError::InvalidConfig { message })
+        .map_err(|reason| VifuRuntimeError::InvalidConfig { reason })
 }
 
 #[uniffi::export]
@@ -122,7 +122,7 @@ pub fn parse_vifu_openclaw_endpoint(
 ) -> Result<VifuOpenClawEndpoint, VifuRuntimeError> {
     openclaw::parse_endpoint(&openclaw_url)
         .map(Into::into)
-        .map_err(|message| VifuRuntimeError::InvalidConfig { message })
+        .map_err(|reason| VifuRuntimeError::InvalidConfig { reason })
 }
 
 #[uniffi::export]
@@ -133,7 +133,7 @@ pub fn probe_vifu_openclaw_gateway(
         .enable_all()
         .build()
         .map_err(|error| VifuRuntimeError::Runtime {
-            message: error.to_string(),
+            reason: error.to_string(),
         })?;
     let report = runtime.block_on(openclaw::probe(&openclaw_url));
     let (status, message) = match report.status {
@@ -550,7 +550,7 @@ impl VifuEmbeddedRuntime {
         let provider_type = provider_type.trim();
         if provider_type.is_empty() {
             return Err(VifuRuntimeError::InvalidConfig {
-                message: "provider type is required".to_string(),
+                reason: "provider type is required".to_string(),
             });
         }
         self.runtime.register_provider(
@@ -570,7 +570,7 @@ impl VifuEmbeddedRuntime {
             self.provider_types
                 .write()
                 .map_err(|_| VifuRuntimeError::Runtime {
-                    message: "embedded provider registry is unavailable".to_string(),
+                    reason: "embedded provider registry is unavailable".to_string(),
                 })?
                 .remove(&provider_id);
         }
@@ -609,7 +609,7 @@ impl VifuEmbeddedRuntime {
         {
             let _ = (provider_id, config);
             Err(VifuRuntimeError::InvalidConfig {
-                message: "local llama is provided by the separate Android llama module".to_string(),
+                reason: "local llama is provided by the separate Android llama module".to_string(),
             })
         }
     }
@@ -642,7 +642,7 @@ impl VifuEmbeddedRuntime {
         {
             let _ = (provider_id, config, backend_library_directory);
             Err(VifuRuntimeError::InvalidConfig {
-                message: "local llama is provided by the separate Android llama module".to_string(),
+                reason: "local llama is provided by the separate Android llama module".to_string(),
             })
         }
     }
@@ -668,7 +668,7 @@ impl VifuEmbeddedRuntime {
         {
             let _ = (provider_id, config);
             Err(VifuRuntimeError::InvalidConfig {
-                message: "local Whisper is provided by the separate Android Whisper module"
+                reason: "local Whisper is provided by the separate Android Whisper module"
                     .to_string(),
             })
         }
@@ -864,7 +864,7 @@ impl VifuEmbeddedRuntime {
         self.provider_types
             .write()
             .map_err(|_| VifuRuntimeError::Runtime {
-                message: "embedded provider registry is unavailable".to_string(),
+                reason: "embedded provider registry is unavailable".to_string(),
             })?
             .insert(provider_id, provider_type.to_string());
         Ok(())
@@ -877,13 +877,13 @@ impl VifuEmbeddedRuntime {
             .provider_types
             .read()
             .map_err(|_| VifuRuntimeError::Runtime {
-                message: "embedded provider registry is unavailable".to_string(),
+                reason: "embedded provider registry is unavailable".to_string(),
             })?;
         let mut capabilities = BTreeMap::<String, BTreeSet<String>>::new();
         for agent in &agents {
             if !provider_types.contains_key(&agent.provider) {
                 return Err(VifuRuntimeError::InvalidConfig {
-                    message: format!(
+                    reason: format!(
                         "agent {} uses provider {} before it is registered",
                         agent.id, agent.provider
                     ),
@@ -930,7 +930,7 @@ impl VifuEmbeddedRuntime {
             .unwrap_or(0)
             .checked_add(1)
             .ok_or_else(|| VifuRuntimeError::Runtime {
-                message: "embedded Runtime release version is exhausted".to_string(),
+                reason: "embedded Runtime release version is exhausted".to_string(),
             })?;
         let release = RuntimeRelease::new(version, manifest)?;
         self.runtime.install_release(&release)?;
@@ -948,13 +948,13 @@ fn embedded_provider_settings(
         };
         if !settings.is_object() {
             return Err(VifuRuntimeError::InvalidConfig {
-                message: format!("agent {} providerSettings must be a JSON object", agent.id),
+                reason: format!("agent {} providerSettings must be a JSON object", agent.id),
             });
         }
         if let Some(existing) = settings_by_provider.get(&agent.provider) {
             if existing != settings {
                 return Err(VifuRuntimeError::InvalidConfig {
-                    message: format!(
+                    reason: format!(
                         "agents using provider {} must declare the same providerSettings",
                         agent.provider
                     ),
@@ -1055,9 +1055,9 @@ impl VifuEmbeddedGateway {
         let gateway_metadata = parse_json(&config.gateway_metadata_json, "gateway metadata")?;
         gateway_config = gateway_config
             .with_gateway_metadata(gateway_metadata)
-            .map_err(|message| VifuRuntimeError::InvalidConfig { message })?;
+            .map_err(|reason| VifuRuntimeError::InvalidConfig { reason })?;
         let gateway = EmbeddedRuntimeGateway::new(runtime.runtime.clone(), gateway_config)
-            .map_err(|message| VifuRuntimeError::InvalidConfig { message })?;
+            .map_err(|reason| VifuRuntimeError::InvalidConfig { reason })?;
         Ok(Arc::new(Self { runtime, gateway }))
     }
 

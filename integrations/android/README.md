@@ -25,7 +25,7 @@ For local chat:
 
 ```kotlin
 dependencies {
-    implementation("dev.vifu:vifu-android-llama:0.1.12")
+    implementation("dev.vifu:vifu-android-llama:0.1.13")
 }
 ```
 
@@ -33,8 +33,8 @@ For chat and transcription in the same app:
 
 ```kotlin
 dependencies {
-    implementation("dev.vifu:vifu-android-llama:0.1.12")
-    implementation("dev.vifu:vifu-android-whisper:0.1.12")
+    implementation("dev.vifu:vifu-android-llama:0.1.13")
+    implementation("dev.vifu:vifu-android-whisper:0.1.13")
 }
 ```
 
@@ -192,7 +192,7 @@ sources and an empty Javadoc artifact, so publishing does not depend on Dokka's
 bytecode parser.
 
 ```bash
-./gradlew -PVERSION_NAME=0.1.12 \
+./gradlew -PVERSION_NAME=0.1.13 \
   :vifu-android-core:publishToMavenLocal \
   :vifu-android-llama:publishToMavenLocal \
   :vifu-android-whisper:publishToMavenLocal

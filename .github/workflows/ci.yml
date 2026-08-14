@@ -302,13 +302,17 @@ jobs:
         env:
           VIFU_ANDROID_TEMP_DIR: ${{ runner.temp }}
         run: |
+          version="$(sed -n 's/^version = "\([^"]*\)"/\1/p' ../../Cargo.toml | head -1)"
+          ci_version="$version-CI"
+          test -n "$version"
+          echo "VIFU_ANDROID_CI_VERSION=$ci_version" >> "$GITHUB_ENV"
           ./gradlew :vifu-android-core:testDebugUnitTest
           ./gradlew publishToMavenLocal \
-            -PVERSION_NAME=0.1.12-CI
-          core_aar="$HOME/.m2/repository/dev/vifu/vifu-android-core/0.1.12-CI/vifu-android-core-0.1.12-CI.aar"
-          optimized_aar="$HOME/.m2/repository/dev/vifu/vifu-android-llama/0.1.12-CI/vifu-android-llama-0.1.12-CI.aar"
-          baseline_aar="$HOME/.m2/repository/dev/vifu/vifu-android-llama-baseline/0.1.12-CI/vifu-android-llama-baseline-0.1.12-CI.aar"
-          whisper_aar="$HOME/.m2/repository/dev/vifu/vifu-android-whisper/0.1.12-CI/vifu-android-whisper-0.1.12-CI.aar"
+            -PVERSION_NAME="$ci_version"
+          core_aar="$HOME/.m2/repository/dev/vifu/vifu-android-core/$ci_version/vifu-android-core-$ci_version.aar"
+          optimized_aar="$HOME/.m2/repository/dev/vifu/vifu-android-llama/$ci_version/vifu-android-llama-$ci_version.aar"
+          baseline_aar="$HOME/.m2/repository/dev/vifu/vifu-android-llama-baseline/$ci_version/vifu-android-llama-baseline-$ci_version.aar"
+          whisper_aar="$HOME/.m2/repository/dev/vifu/vifu-android-whisper/$ci_version/vifu-android-whisper-$ci_version.aar"
           test -s "$core_aar"
           unzip -l "$core_aar" | grep -F "jni/arm64-v8a/libvifu_mobile_ffi.so"
           unzip -l "$core_aar" | grep -F "jni/arm64-v8a/libc++_shared.so"
@@ -328,7 +332,7 @@ jobs:
         run: |
           ./gradlew testDebugUnitTest assembleDebug \
             -PvifuUseMavenLocal=true \
-            -PvifuVersion=0.1.12-CI \
+            -PvifuVersion="$VIFU_ANDROID_CI_VERSION" \
             -PvifuWhisper=true
 
   dashboard:
@@ -361,6 +365,30 @@ jobs:
           VIFU_PLAYWRIGHT_CHANNEL: chrome
       - name: Inspect public package artifacts
         run: npm pack --dry-run --json ./packages/protocol
+
+  typescript-sdk:
+    name: TypeScript SDK
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.9
+      - uses: dtolnay/rust-toolchain@1.95.0
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: typescript-sdk
+      - name: Install
+        run: bun install --frozen-lockfile
+      - name: Install matching WebAssembly bindings
+        run: cargo install wasm-bindgen-cli --version 0.2.126 --locked
+      - name: Build and test
+        run: bun run --cwd npm-packages/sdk test
 
   self-hosted-docker:
     name: Clean self-hosted Docker smoke

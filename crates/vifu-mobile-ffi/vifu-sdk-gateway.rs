@@ -511,7 +511,7 @@ fn send(writer: &Arc<Mutex<io::Stdout>>, value: &Value) -> Result<(), String> {
 
 fn runtime_error(message: impl Into<String>) -> VifuRuntimeError {
     VifuRuntimeError::Runtime {
-        message: message.into(),
+        reason: message.into(),
     }
 }
 

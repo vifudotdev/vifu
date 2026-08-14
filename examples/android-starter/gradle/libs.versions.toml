@@ -18,7 +18,7 @@ material = "1.13.0"
 espresso-core = "3.7.0"
 androidx-junit = "1.3.0"
 junit = "4.13.2"
-vifu = "0.1.12"
+vifu = "0.1.13"
 
 
 [plugins]

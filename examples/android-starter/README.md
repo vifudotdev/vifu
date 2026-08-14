@@ -18,7 +18,7 @@ Requirements:
 1. Download and extract the Vifu archive for your computer from the
    [latest release](https://github.com/vifudotdev/vifu/releases/latest).
 2. Download the
-   [optimized APK](https://github.com/vifudotdev/vifu/releases/download/android-starter-v0.1.1/vifu-android-starter.apk)
+   [optimized APK](https://github.com/vifudotdev/vifu/releases/download/android-starter-v0.1.2/vifu-android-starter.apk)
    and install it on the phone.
 3. Open **Vifu Starter**. Choose **Download 469 MiB** to fetch the verified
    Qwen2.5 0.5B model, or import another GGUF.
@@ -27,7 +27,7 @@ Requirements:
 
 The main APK uses Vifu's optimized ARM64 llama.cpp provider. If that provider
 cannot start on a specific phone, install the
-[baseline APK](https://github.com/vifudotdev/vifu/releases/download/android-starter-v0.1.1/vifu-android-starter-baseline.apk).
+[baseline APK](https://github.com/vifudotdev/vifu/releases/download/android-starter-v0.1.2/vifu-android-starter-baseline.apk).
 Android installs it beside the optimized APK. The launcher shows **Vifu Starter
 Optimized** and **Vifu Starter Baseline**. Pair both applications with the same
 Vifu project to compare their traces on one phone.
@@ -36,7 +36,7 @@ Android isolates the data for each application. Download the model in both
 applications, or import the same GGUF into each application.
 
 Release checksums are in
-[vifu-android-starter-checksums.sha256](https://github.com/vifudotdev/vifu/releases/download/android-starter-v0.1.1/vifu-android-starter-checksums.sha256).
+[vifu-android-starter-checksums.sha256](https://github.com/vifudotdev/vifu/releases/download/android-starter-v0.1.2/vifu-android-starter-checksums.sha256).
 
 These APKs use a test signature for direct device evaluation. They are not
 Google Play packages. If a future Demo uses another signature, uninstall both

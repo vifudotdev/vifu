@@ -54,14 +54,14 @@ Android packages Core and the local providers as separate AARs and native
 entry points:
 
 ```kotlin
-implementation("dev.vifu:vifu-android-core:0.1.12")
-implementation("dev.vifu:vifu-android-llama:0.1.12")
-implementation("dev.vifu:vifu-android-whisper:0.1.12")
+implementation("dev.vifu:vifu-android-core:0.1.13")
+implementation("dev.vifu:vifu-android-llama:0.1.13")
+implementation("dev.vifu:vifu-android-whisper:0.1.13")
 ```
 
 Provider artifacts depend on Core, so applications normally declare only the
 providers they use. The baseline llama coordinate is
-`dev.vifu:vifu-android-llama-baseline:0.1.12`.
+`dev.vifu:vifu-android-llama-baseline:0.1.13`.
 
 Build one Android `arm64-v8a` source set at a time from the repository root:
 
