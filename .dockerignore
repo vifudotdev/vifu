@@ -13,6 +13,9 @@ integrations
 npm-packages/*
 !npm-packages/dashboard/
 !npm-packages/dashboard/**
+!npm-packages/sdk/
+npm-packages/sdk/*
+!npm-packages/sdk/package.json
 Frameworks
 test-results
 **/test-results
