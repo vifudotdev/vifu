@@ -625,6 +625,18 @@ async function createProjectWithProvider({ name, slug, gatewayId, providerKey, m
     method: "PATCH",
     body: { gatewayId },
   });
+  const deployments = (await request(`/v1/apps/${slug}/deployments`)).deployments ?? [];
+  const primaryDeployment = deployments.find((deployment) => deployment.isPrimary);
+  assert(primaryDeployment, "App creation did not create a primary deployment");
+  assert(
+    primaryDeployment.remoteInvocationEnabled === false,
+    "A new deployment allowed remote calls before explicit approval",
+  );
+  const enabledDeployment = (await request(
+    `/v1/apps/${slug}/deployments/${primaryDeployment.name}`,
+    { method: "PATCH", body: { remoteInvocationEnabled: true } },
+  )).deployment;
+  assert(enabledDeployment.remoteInvocationEnabled === true, "Remote calls could not be enabled for the deployment");
   const provider = await request(`/v1/apps/${slug}/providers`, {
     method: "POST",
     body: {
