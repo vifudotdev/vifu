@@ -80,8 +80,8 @@ export function ProjectHome({
       ) : (
         <section className="project-home-empty">
           <span className="project-home-empty-icon"><FolderKanban aria-hidden="true" /></span>
-          <h2>Create your first project</h2>
-          <p>A project keeps its agents, endpoints, providers, and logs together.</p>
+          <h2>Create your first app</h2>
+          <p>An app keeps its agents, endpoints, providers, and logs together.</p>
           <ProjectCreateForm />
         </section>
       )}
