@@ -337,7 +337,7 @@ services:
     volumes:
       - vifu_server_state:/server-state
       - vifu_runtime_state:/gateway-state
-    command: ["sh", "-c", "cp /run/vifu/providers.json /server-state/providers.json && cp /run/vifu/providers.json /gateway-state/providers.json && chmod 0644 /server-state/providers.json /gateway-state/providers.json"]
+    command: ["sh", "-c", "cp /run/vifu/providers.json /server-state/providers.json && cp /run/vifu/providers.json /gateway-state/providers.json && chown -R 10001:10001 /server-state /gateway-state && chmod 0755 /server-state /gateway-state && chmod 0644 /server-state/providers.json /gateway-state/providers.json"]
   backend:
     image: $runtime_image
     depends_on:
@@ -424,7 +424,7 @@ services:
     volumes:
       - vifu_server_state:/server-state
       - vifu_runtime_state:/gateway-state
-    command: ["sh", "-c", "cp /run/vifu/providers.json /server-state/providers.json && cp /run/vifu/providers.json /gateway-state/providers.json && chmod 0644 /server-state/providers.json /gateway-state/providers.json"]
+    command: ["sh", "-c", "cp /run/vifu/providers.json /server-state/providers.json && cp /run/vifu/providers.json /gateway-state/providers.json && chown -R 10001:10001 /server-state /gateway-state && chmod 0755 /server-state /gateway-state && chmod 0644 /server-state/providers.json /gateway-state/providers.json"]
   backend:
     image: $runtime_image
     depends_on:
