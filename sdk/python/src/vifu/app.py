@@ -2,14 +2,12 @@
 
 from __future__ import annotations
 
-import hashlib
-import json
-import re
 import time
 from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import urlparse
 
+from .app_store import VifuAppRecord, VifuAppStore
 from .gateway import DEFAULT_LOCAL_SERVER_URL, VifuGateway
 from .runtime import AgentHandler, Invocation, JsonValue, VifuRuntime
 from .server import VifuServer
@@ -23,18 +21,21 @@ class Vifu:
         name: str,
         *,
         data_dir: str | Path | None = None,
+        workspace: str | Path | None = None,
         server_url: str = DEFAULT_LOCAL_SERVER_URL,
         capture_trace_content: bool = False,
     ):
         self.name = _display_name(name)
-        self.runtime = VifuRuntime(_runtime_id(self.name), data_dir=data_dir)
         self.server_url = server_url
         self.capture_trace_content = capture_trace_content
+        self._data_dir = data_dir
+        self._store = VifuAppStore(workspace)
+        self._app: VifuAppRecord | None = None
+        self._runtime: VifuRuntime | None = None
+        self._registrations: list[tuple[str, AgentHandler, dict[str, Any]]] = []
         self._gateway: VifuGateway | None = None
-        self._server: VifuServer | None = None
         self._resources: list[Any] = []
         self._prepared_resources: set[int] = set()
-        self._endpoints: list[str] = []
 
     def agent(
         self,
@@ -54,19 +55,19 @@ class Vifu:
             agent_metadata = metadata
             if agent_metadata is None:
                 agent_metadata = getattr(handler, "metadata", None)
-            self.runtime.agent(
-                agent_id,
-                handler,
-                name=name,
-                endpoint=endpoint,
-                provider_id=provider_id,
-                capability=capability,
-                timeout_ms=timeout_ms,
-                metadata=agent_metadata,
-            )
+            options = {
+                "name": name,
+                "endpoint": endpoint,
+                "provider_id": provider_id,
+                "capability": capability,
+                "timeout_ms": timeout_ms,
+                "metadata": agent_metadata,
+            }
+            self._registrations.append((agent_id, handler, options))
+            if self._runtime is not None:
+                self._runtime.agent(agent_id, handler, **options)
             if callable(getattr(handler, "prepare", None)):
                 self._resources.append(handler)
-            self._endpoints.append(endpoint or agent_id)
             return handler
 
         return register if handler is None else register(handler)
@@ -95,12 +96,14 @@ class Vifu:
         try:
             self._prepare_resources()
             if self._gateway is None:
+                runtime = self.runtime
                 if _is_loopback_server(self.server_url):
-                    self._server = VifuServer.ensure(self.server_url)
-                self._gateway = self.runtime.connect_local(
+                    assert self._app is not None
+                self._gateway = runtime.connect_local(
                     server_url=self.server_url,
                     name=f"Python: {self.name}",
                     capture_trace_content=self.capture_trace_content,
+                    app_id=self._app.app_id if self._app is not None else None,
                 )
             self._gateway.wait_until_connected(timeout)
         except (OSError, RuntimeError, TimeoutError) as error:
@@ -116,29 +119,17 @@ class Vifu:
 
     def run(
         self,
+        main: Callable[["Vifu"], Any] | None = None,
         *,
-        endpoint: str | None = None,
-        session_id: str = "terminal-chat",
         connect_timeout: float = 20.0,
-    ) -> None:
-        """Runs an Agent for terminal prompts and remote calls."""
-        selected_endpoint = endpoint or self._single_endpoint()
+    ) -> Any:
+        """Runs application code with the App connected to Vifu."""
         self.connect(timeout=connect_timeout)
         print(f"Vifu Dashboard: {self.server_url.rstrip('/')}")
-        print(f"Agent: {self.name} (connected)")
+        print(f"App: {self.name} (connected)")
         try:
-            self._run_terminal(selected_endpoint, session_id)
-        except KeyboardInterrupt:
-            pass
-        finally:
-            self.close()
-
-    def serve(self, *, connect_timeout: float = 20.0) -> None:
-        """Serves remote Agent calls until the process stops."""
-        self.connect(timeout=connect_timeout)
-        print(f"Vifu Dashboard: {self.server_url.rstrip('/')}")
-        print(f"Agent: {self.name} (connected)")
-        try:
+            if main is not None:
+                return main(self)
             while True:
                 time.sleep(3_600)
         except KeyboardInterrupt:
@@ -167,15 +158,35 @@ class Vifu:
                 except Exception as error:
                     first_error = first_error or error
             self._prepared_resources.discard(resource_id)
-        if self._server is not None:
-            server = self._server
-            self._server = None
-            try:
-                server.close()
-            except Exception as error:
-                first_error = first_error or error
         if first_error is not None:
             raise first_error
+
+    @property
+    def runtime(self) -> VifuRuntime:
+        """Returns the embedded Runtime for this stable Vifu App."""
+        self._ensure_local_app()
+        assert self._runtime is not None
+        return self._runtime
+
+    @property
+    def app_id(self) -> str:
+        """Returns the stable App ID assigned by the selected Vifu Server."""
+        self._ensure_local_app()
+        assert self._app is not None
+        return self._app.app_id
+
+    def _ensure_local_app(self) -> None:
+        if self._runtime is not None:
+            return
+        if not _is_loopback_server(self.server_url):
+            raise ValueError(
+                "automatic App creation requires a loopback Vifu Server URL"
+            )
+        VifuServer.ensure(self.server_url)
+        self._app = self._store.open(self.server_url, self.name)
+        self._runtime = VifuRuntime(self._app.app_id, data_dir=self._data_dir)
+        for agent_id, handler, options in self._registrations:
+            self._runtime.agent(agent_id, handler, **options)
 
     def _prepare_resources(self) -> None:
         for resource in self._resources:
@@ -185,36 +196,8 @@ class Vifu:
             resource.prepare()
             self._prepared_resources.add(resource_id)
 
-    def _run_terminal(self, endpoint: str, session_id: str) -> None:
-        print("Enter /quit to stop the Agent.")
-        while True:
-            try:
-                prompt = input("\nYou > ").strip()
-            except EOFError:
-                return
-            if prompt == "/quit":
-                return
-            if not prompt:
-                continue
-            try:
-                result = self.invoke(
-                    endpoint,
-                    {"prompt": prompt},
-                    session_id=session_id,
-                )
-            except Exception as error:
-                print(f"Agent error > {error}")
-                continue
-            print(f"Agent > {_terminal_output(result.output)}")
-            print(f"Trace > {result.invocation_id}")
-
-    def _single_endpoint(self) -> str:
-        unique = list(dict.fromkeys(self._endpoints))
-        if len(unique) != 1:
-            raise ValueError("endpoint is required when the application has multiple Agents")
-        return unique[0]
-
     def __enter__(self) -> "Vifu":
+        self.connect()
         return self
 
     def __exit__(self, *_args: object) -> None:
@@ -228,12 +211,6 @@ def _display_name(name: str) -> str:
     return value
 
 
-def _runtime_id(name: str) -> str:
-    readable = re.sub(r"[^A-Za-z0-9]+", "-", name).strip("-").lower()[:40]
-    digest = hashlib.sha256(name.encode("utf-8")).hexdigest()[:12]
-    return f"python-{readable or 'agent'}-{digest}"
-
-
 def _is_loopback_server(server_url: str) -> bool:
     parsed = urlparse(server_url)
     return parsed.scheme in {"http", "https"} and parsed.hostname in {
@@ -241,11 +218,3 @@ def _is_loopback_server(server_url: str) -> bool:
         "localhost",
         "::1",
     }
-
-
-def _terminal_output(value: JsonValue) -> str:
-    if isinstance(value, dict) and isinstance(value.get("text"), str):
-        return value["text"]
-    if isinstance(value, str):
-        return value
-    return json.dumps(value, ensure_ascii=False)

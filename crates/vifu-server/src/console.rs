@@ -310,7 +310,7 @@ fn asset_path_for_uri(uri: &Uri) -> Option<&str> {
         return None;
     }
     let first_segment = requested.split('/').next()?;
-    (first_segment == "project").then_some("index.html")
+    matches!(first_segment, "apps" | "project").then_some("index.html")
 }
 
 fn runtime_path_for_uri(uri: &Uri) -> Option<&str> {
@@ -640,6 +640,9 @@ mod tests {
         assert_eq!(asset_path_for_uri(&uri), Some("index.html"));
 
         let uri: Uri = "/project/demo/agents/".parse().unwrap();
+        assert_eq!(asset_path_for_uri(&uri), Some("index.html"));
+
+        let uri: Uri = "/apps/web-research/devices".parse().unwrap();
         assert_eq!(asset_path_for_uri(&uri), Some("index.html"));
     }
 

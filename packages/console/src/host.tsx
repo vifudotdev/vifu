@@ -60,9 +60,9 @@ const defaultHost: RuntimeConsoleHost = {
   },
   request: runtimeBrowserRequest,
   upload: runtimeBrowserUpload,
-  projectRootHref: () => "/project",
-  projectHref: (projectSlug) => `/project/${encodeURIComponent(projectSlug)}`,
-  projectSectionHref: (projectSlug, section) => `/project/${encodeURIComponent(projectSlug)}/${encodeURIComponent(section)}`,
+  projectRootHref: () => "/apps",
+  projectHref: (projectSlug) => `/apps/${encodeURIComponent(projectSlug)}`,
+  projectSectionHref: (projectSlug, section) => `/apps/${encodeURIComponent(projectSlug)}/${encodeURIComponent(section)}`,
   logoutAction: "/auth/logout",
   brand: {
     label: "Vifu Console",

@@ -4,7 +4,7 @@ import { consoleRouteHref, readConsoleRoute } from "./route";
 describe("embedded console route", () => {
   it("preserves trace deep-link query and fragment state", () => {
     const route = readConsoleRoute(
-      "/project/stardew-valley/logs",
+      "/apps/stardew-valley/logs",
       "?invocationId=request-1&observationId=span-1",
       "#detail",
     );
@@ -16,22 +16,24 @@ describe("embedded console route", () => {
       hash: "#detail",
     });
     expect(consoleRouteHref(route)).toBe(
-      "/project/stardew-valley/logs?invocationId=request-1&observationId=span-1#detail",
+      "/apps/stardew-valley/logs?invocationId=request-1&observationId=span-1#detail",
     );
   });
 
   it("allows ordinary project navigation to clear a prior trace selection", () => {
     expect(consoleRouteHref({ projectSlug: "stardew-valley", section: "agents" }))
-      .toBe("/project/stardew-valley/agents");
+      .toBe("/apps/stardew-valley/agents");
   });
 
   it("routes the ordinary pairing workflow through Devices", () => {
-    const route = readConsoleRoute("/project/arm-lab/devices");
+    const route = readConsoleRoute("/apps/arm-lab/devices");
     expect(route).toMatchObject({ projectSlug: "arm-lab", section: "devices" });
-    expect(consoleRouteHref(route)).toBe("/project/arm-lab/devices");
+    expect(consoleRouteHref(route)).toBe("/apps/arm-lab/devices");
   });
 
   it("keeps legacy deployment links available for advanced settings", () => {
     expect(readConsoleRoute("/project/arm-lab/deployments").section).toBe("deployments");
+    expect(consoleRouteHref(readConsoleRoute("/project/arm-lab/deployments")))
+      .toBe("/apps/arm-lab/deployments");
   });
 });

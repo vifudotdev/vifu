@@ -7,6 +7,7 @@ from pathlib import Path
 from unittest import mock
 
 from vifu import AgentResponse, GatewayPairing, Vifu, VifuRuntime, VifuServer
+from vifu.app_store import VifuAppRecord, VifuAppStore
 from vifu.gateway import (
     DEFAULT_LOCAL_BOOTSTRAP_TOKEN,
     _local_bootstrap_token,
@@ -17,16 +18,17 @@ from vifu.gateway import (
 class VifuRuntimeTests(unittest.TestCase):
     def test_high_level_app_registers_and_invokes_a_decorated_agent(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            app = Vifu("Python App Test", data_dir=directory)
+            app = Vifu("Python App Test", data_dir=directory, workspace=directory)
 
             @app.agent("guide")
             def guide(request):
                 return {"text": f"Hello, {request.input['name']}"}
 
-            result = app.invoke("guide", {"name": "Ada"})
+            with _local_app(APP_ID):
+                result = app.invoke("guide", {"name": "Ada"})
 
             self.assertEqual(result.output, {"text": "Hello, Ada"})
-            self.assertTrue(app.runtime.app_id.startswith("python-python-app-test-"))
+            self.assertEqual(app.runtime.app_id, APP_ID)
 
     def test_high_level_app_requires_a_name(self) -> None:
         with self.assertRaises(ValueError):
@@ -51,15 +53,40 @@ class VifuRuntimeTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as directory:
             handler = Handler()
-            app = Vifu("Managed Handler", data_dir=directory)
+            app = Vifu("Managed Handler", data_dir=directory, workspace=directory)
             app.agent("chat", handler)
 
-            result = app.invoke("chat", {"prompt": "hello"})
+            with _local_app(APP_ID):
+                result = app.invoke("chat", {"prompt": "hello"})
             app.close()
 
             self.assertEqual(result.output, {"text": "hello"})
             self.assertEqual(handler.prepared, 1)
             self.assertEqual(handler.closed, 1)
+
+    def test_high_level_app_context_connects_and_closes(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            app = Vifu("Context Lifecycle", data_dir=directory)
+            with mock.patch.object(app, "connect") as connect:
+                with mock.patch.object(app, "close") as close:
+                    with app as active:
+                        self.assertIs(active, app)
+
+            connect.assert_called_once_with()
+            close.assert_called_once_with()
+
+    def test_high_level_app_run_serves_without_reading_terminal_input(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            app = Vifu("Service Lifecycle", data_dir=directory)
+            with mock.patch.object(app, "connect") as connect:
+                with mock.patch.object(app, "close") as close:
+                    with mock.patch("vifu.app.time.sleep", side_effect=KeyboardInterrupt):
+                        with mock.patch("builtins.input") as terminal_input:
+                            app.run(connect_timeout=2.0)
+
+            connect.assert_called_once_with(timeout=2.0)
+            terminal_input.assert_not_called()
+            close.assert_called_once_with()
 
     def test_python_provider_invocation_produces_a_trace(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -145,6 +172,34 @@ class VifuRuntimeTests(unittest.TestCase):
         arguments = start.call_args.kwargs["arguments"]
         self.assertIn("--server-only", arguments)
         self.assertIn("server.address=http://127.0.0.1:6799", arguments)
+        self.assertTrue(start.call_args.kwargs["shared"])
+
+
+APP_ID = "vifu_app_" + "a" * 64
+
+
+def _local_app(app_id: str):
+    return _LocalAppFixture(app_id)
+
+
+class _LocalAppFixture:
+    def __init__(self, app_id: str):
+        self._app_id = app_id
+        self._server = mock.patch.object(VifuServer, "ensure", return_value=None)
+        self._store = mock.patch.object(
+            VifuAppStore,
+            "open",
+            return_value=VifuAppRecord(self._app_id, "python-app-test", "Python App Test"),
+        )
+
+    def __enter__(self):
+        self._server.start()
+        self._store.start()
+        return self
+
+    def __exit__(self, *args):
+        self._store.stop()
+        self._server.stop()
 
 
 if __name__ == "__main__":

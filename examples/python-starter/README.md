@@ -1,7 +1,8 @@
 # Python Starter
 
-This example runs a Python provider inside the native Vifu Runtime. The SDK
-starts or reuses the local Server. Then it joins the permanent Local app.
+This example creates a real App in the personal Vifu Server and runs a Python
+provider inside its native Runtime. Its project binding is stored in
+`.vifu/app.json` beside the example, so later starts reopen the same App.
 
 Create an environment from the repository root. Then install and run the
 example:
@@ -13,10 +14,14 @@ python -m pip install vifu
 python examples/python-starter/main.py
 ```
 
-The program registers the Agent and opens a terminal prompt. It also stays
-online for remote calls. Open the printed Dashboard URL to inspect the Python
-Gateway and traces. Enter `/quit` or press `Ctrl+C` to stop the program.
+The program registers the Agent and stays online for application calls. Open
+the printed Dashboard URL and select **My Apps → python-starter** to inspect its
+Device, Agent, and traces. Press
+`Ctrl+C` to stop the program. Vifu does not add a chat UI; your application
+defines the endpoint input, output, and interaction.
 
-The `--once` option runs only the in-process invocation.
+The `--once` option starts or reuses the Server, opens the same App, connects
+its Device, performs one in-process invocation, uploads its trace, and closes
+the example's resources.
 
 Continue with the complete [Python tutorial](../../docs/get-started/python.md).

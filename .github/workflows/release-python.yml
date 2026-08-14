@@ -67,9 +67,8 @@ jobs:
           wheel="$(find target/python-wheel -maxdepth 1 -name 'vifu-*.whl' -print -quit)"
           "$python_test" -m pip install --no-index "$wheel"
           "$python_test" -m unittest discover -s sdk/python/tests -p 'test_*.py' -v
-          printf 'release wheel test\n/quit\n' | \
-            VIFU_EXAMPLE_DATA_DIR="$RUNNER_TEMP/vifu-python-state" \
-            "$python_test" examples/python-starter/main.py
+          VIFU_EXAMPLE_DATA_DIR="$RUNNER_TEMP/vifu-python-state" \
+            "$python_test" examples/python-starter/main.py --once
       - uses: actions/upload-artifact@v7
         with:
           name: python-${{ matrix.platform }}
@@ -115,9 +114,8 @@ jobs:
           auditwheel show "$wheel"
           "$python_test" -m pip install --no-index "$wheel"
           "$python_test" -m unittest discover -s sdk/python/tests -p 'test_*.py' -v
-          printf 'release wheel test\n/quit\n' | \
-            VIFU_EXAMPLE_DATA_DIR="$RUNNER_TEMP/vifu-python-state" \
-            "$python_test" examples/python-starter/main.py
+          VIFU_EXAMPLE_DATA_DIR="$RUNNER_TEMP/vifu-python-state" \
+            "$python_test" examples/python-starter/main.py --once
       - uses: actions/upload-artifact@v7
         with:
           name: python-${{ matrix.platform }}

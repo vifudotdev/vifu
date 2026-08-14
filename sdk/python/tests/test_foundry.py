@@ -5,7 +5,7 @@ import unittest
 from types import SimpleNamespace
 
 from vifu import VifuRuntime
-from vifu.integrations.foundry import FoundryLocal
+from vifu.integrations.foundry import trace_foundry_stream
 
 
 class FakeFoundryClient:
@@ -20,72 +20,41 @@ class FakeFoundryClient:
             )
 
 
-class FoundryLocalTest(unittest.TestCase):
-    def test_manages_the_foundry_model_lifecycle(self) -> None:
-        client = FakeFoundryClient()
-
-        class Model:
-            def __init__(self):
-                self.downloaded = 0
-                self.loaded = 0
-                self.unloaded = 0
-
-            def download(self, _progress):
-                self.downloaded += 1
-
-            def load(self):
-                self.loaded += 1
-
-            def unload(self):
-                self.unloaded += 1
-
-            def get_chat_client(self):
-                return client
-
-        model = Model()
-        catalog = SimpleNamespace(get_model=lambda _alias: model)
-        manager = SimpleNamespace(
-            catalog=catalog,
-            download_and_register_eps=lambda **_kwargs: None,
-        )
-        integration = FoundryLocal("test-model", manager=manager)
-
-        integration.prepare()
-        integration.prepare()
-        integration.close()
-
-        self.assertEqual(model.downloaded, 1)
-        self.assertEqual(model.loaded, 1)
-        self.assertEqual(model.unloaded, 1)
-
-    def test_streams_chat_and_preserves_session_history(self) -> None:
+class FoundryTracingTest(unittest.TestCase):
+    def test_preserves_the_existing_client_call_and_original_chunks(self) -> None:
         with tempfile.TemporaryDirectory() as data_dir:
             runtime = VifuRuntime("foundry-test", data_dir=data_dir)
             client = FakeFoundryClient()
-            runtime.agent("chat", FoundryLocal("test-model", client=client))
 
-            first = runtime.invoke("chat", {"prompt": "hello"}, session_id="conversation")
-            second = runtime.invoke(
-                "chat",
-                {"prompt": "continue"},
-                session_id="conversation",
-            )
+            def researcher(request):
+                messages = [{"role": "user", "content": request.input["question"]}]
+                native_stream = client.complete_streaming_chat(messages)
+                observed_stream = trace_foundry_stream(
+                    request,
+                    native_stream,
+                    model="test-model",
+                )
+                text = "".join(
+                    chunk.choices[0].delta.content or ""
+                    for chunk in observed_stream
+                )
+                return {"answer": text, "source": "foundry-local"}
 
-            self.assertEqual(first.output, {"text": "local answer"})
+            runtime.agent("researcher", researcher, capability="research")
+            invocation = runtime.invoke("researcher", {"question": "What changed?"})
+
             self.assertEqual(
-                [stage["name"] for stage in first.trace],
+                client.requests,
+                [[{"role": "user", "content": "What changed?"}]],
+            )
+            self.assertEqual(
+                invocation.output,
+                {"answer": "local answer", "source": "foundry-local"},
+            )
+            self.assertEqual(
+                [stage["name"] for stage in invocation.trace],
                 ["first_token", "decode", "provider.invoke"],
             )
-            self.assertEqual(first.metadata["model"], "test-model")
-            self.assertEqual(
-                client.requests[1],
-                [
-                    {"role": "user", "content": "hello"},
-                    {"role": "assistant", "content": "local answer"},
-                    {"role": "user", "content": "continue"},
-                ],
-            )
-            self.assertEqual(len(second.state["messages"]), 4)
 
 
 if __name__ == "__main__":

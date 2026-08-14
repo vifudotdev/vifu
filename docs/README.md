@@ -1,15 +1,17 @@
 # Vifu Documentation
 
-Vifu is an on-device Agent Runtime and local operations platform. Product code
-owns domain state, UI, safety, and allowed actions. Vifu owns Provider
-connections, Agent identity, Project Settings, sessions, stable endpoints,
-Gateway transport, and attributable traces.
+Vifu is a development platform for Agent Apps. Each developer has a personal
+workspace for many Apps; every App groups its Agents, Providers, Devices,
+sessions, endpoints, settings, and attributable traces. Product code owns
+domain state, UI, safety, and allowed actions. Vifu supplies the embedded
+Runtime, Server, Gateway transport, and Dashboard used to build and operate it.
 
 ## Start
 
 - [Build with Vifu in Python, TypeScript, Swift, Kotlin, Godot, or Rust](get-started/README.md)
 - [Install Vifu](install.md)
 - [Apps and App IDs](apps-and-app-ids.md)
+- [Build and manage Agent Apps](agent-apps.md)
 - [Runtime topology, monitoring, and Gateway enrollment](topology-and-pairing.md)
 - [Embedded Console](embedded-console.md)
 - [Self-host a full or headless deployment with Docker](self-hosting.md)

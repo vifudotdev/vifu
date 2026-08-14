@@ -34,7 +34,7 @@ also needs the engine lifecycle and Runtime Bridge.
 | --- | --- |
 | [`google-adk-python`](google-adk-python/) | Expose a Vifu endpoint as an ADK Python function tool |
 | [`google-adk-typescript`](google-adk-typescript/) | Expose a Vifu endpoint as an ADK TypeScript `FunctionTool` |
-| [`foundry-local-python`](foundry-local-python/) | Run self-managed Foundry Local chat with session state and Dashboard traces |
+| [`foundry-local-python`](foundry-local-python/) | Build a cited Web Research App with real search and local Foundry inference |
 | [`foundry-local-typescript`](foundry-local-typescript/) | Wrap Foundry Local native streaming chat as a Vifu Provider |
 
 Each framework adapter has a focused fake-provider test. This verifies the

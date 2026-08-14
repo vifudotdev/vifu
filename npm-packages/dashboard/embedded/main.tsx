@@ -84,9 +84,9 @@ function EmbeddedRuntimeConsole() {
     },
     request: runtimeBrowserRequest,
     upload: runtimeBrowserUpload,
-    projectRootHref: () => "/project",
-    projectHref: (projectSlug: string) => `/project/${encodeURIComponent(projectSlug)}`,
-    projectSectionHref: (projectSlug: string, section: string) => `/project/${encodeURIComponent(projectSlug)}/${encodeURIComponent(section)}`,
+    projectRootHref: () => "/apps",
+    projectHref: (projectSlug: string) => `/apps/${encodeURIComponent(projectSlug)}`,
+    projectSectionHref: (projectSlug: string, section: string) => `/apps/${encodeURIComponent(projectSlug)}/${encodeURIComponent(section)}`,
     logoutAction: undefined,
     brand: {
       label: "Vifu Console",
@@ -201,7 +201,11 @@ function shouldHandleConsoleLink(
 }
 
 function isConsolePath(pathname: string): boolean {
-  return pathname === "/" || pathname === "/project" || pathname.startsWith("/project/");
+  return pathname === "/"
+    || pathname === "/apps"
+    || pathname.startsWith("/apps/")
+    || pathname === "/project"
+    || pathname.startsWith("/project/");
 }
 
 function navigateBrowserHref(href: string) {

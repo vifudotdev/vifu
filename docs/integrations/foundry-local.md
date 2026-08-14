@@ -1,71 +1,98 @@
-# Use Foundry Local With Vifu
+# Add Vifu to a Foundry Local App
 
-Foundry Local owns model discovery, download, hardware selection, loading, and
-native chat inference. Vifu wraps its native chat client as a Provider. This
-adds stable endpoints, sessions, Gateway routing, and comparable traces.
+Foundry Local keeps ownership of model discovery, download, hardware selection,
+loading, inference, and unloading. Vifu adds the application boundary, Agent
+identity, sessions, endpoints, Device connection, and inference-stage traces.
 
-The examples use the small `qwen2.5-0.5b` alias. Foundry Local selects an
-available variant for the device. The first run can download execution
-providers and model files. Later inference uses the local cache.
+## 1. Keep the Foundry Local Setup
 
-## Python
-
-Install the Python packages:
+Install the packages:
 
 ```bash
 python -m pip install --upgrade "vifu[foundry]"
 ```
 
-On Windows, install `"vifu[foundry-winml]"` for Windows ML acceleration. Install
-one Foundry Local package variant in an environment.
+On Windows, use `"vifu[foundry-winml]"` for Windows ML acceleration.
 
-Create the Vifu application:
+Start with the normal Foundry Local lifecycle:
+
+```python
+from foundry_local_sdk import Configuration, FoundryLocalManager
+
+FoundryLocalManager.initialize(Configuration(app_name="my-app"))
+model = FoundryLocalManager.instance.catalog.get_model("qwen2.5-0.5b")
+model.download()
+model.load()
+client = model.get_chat_client()
+```
+
+Vifu does not replace these objects or make lifecycle decisions for them.
+
+## 2. Add the Vifu App and Agent
+
+Register the application behavior that already uses `client`:
 
 ```python
 from vifu import Vifu
-from vifu.integrations.foundry import FoundryLocal
+from vifu.integrations.foundry import trace_foundry_stream
 
-app = Vifu("Foundry Local Chat", capture_trace_content=True)
-app.agent("chat", FoundryLocal("qwen2.5-0.5b"))
-app.run()
+app = Vifu("web-research", capture_trace_content=True)
+
+
+@app.agent(
+    "researcher",
+    capability="research",
+    metadata={"framework": "foundry-local", "model": "qwen2.5-0.5b"},
+)
+def research(request):
+    messages = [{"role": "user", "content": request.input["research_prompt"]}]
+    chunks = client.complete_streaming_chat(messages)
+    observed = trace_foundry_stream(
+        request,
+        chunks,
+        model="qwen2.5-0.5b",
+    )
+    answer = "".join(
+        chunk.choices[0].delta.content or ""
+        for chunk in observed
+    )
+    return {"answer": answer}
 ```
 
-The integration prepares the execution provider and loads the model. It
-downloads the model when necessary. Vifu starts the local Server and Agent
-Gateway. The application unloads its model and stops its owned processes when
-it exits.
+The Foundry method call and its native chunks remain visible in application
+code. `trace_foundry_stream` yields those same chunks. It records
+`first_token`, `decode`, and output-delta telemetry while they pass through.
 
-The complete application is in
+## 3. Run Existing Product Logic
+
+```python
+def run_my_app(vifu):
+    sources = search_web("Arm-optimized on-device AI")
+    result = vifu.invoke(
+        "researcher",
+        {"research_prompt": prompt_with_citations(sources)},
+        session_id="arm-research",
+    )
+    publish_brief(result.output["answer"], sources)
+
+
+try:
+    app.run(run_my_app)
+finally:
+    model.unload()
+```
+
+`search_web`, `prompt_with_citations`, `run_my_app`, and `publish_brief` belong
+to the developer's application. Vifu does not turn the program into a chat
+shell. On first run, it creates the App
+in the personal Server and stores the stable binding in `.vifu/app.json`.
+
+The complete runnable form is in
 [`foundry-local-python`](../../examples/foundry-local-python/).
 
-## TypeScript
+## Compare Arm Behavior
 
-```typescript
-const manager = FoundryLocalManager.create({ appName: "vifu-foundry-local" });
-const model = await manager.catalog.getModel("qwen2.5-0.5b");
-await model.download(() => {});
-await model.load();
-
-const runtime = new VifuRuntime("foundry-local-typescript");
-registerFoundryAgent(runtime, model.createChatClient(), {
-  model: "qwen2.5-0.5b",
-});
-```
-
-The complete adapter is in
-[`foundry-local-typescript`](../../examples/foundry-local-typescript/).
-
-## What The Adapter Reports
-
-Both adapters consume Foundry Local's streaming API. They report:
-
-- `first_token`: time until the first non-empty output chunk.
-- `decode`: time spent consuming the remaining chunks.
-- Output deltas for the host UI and optional content trace.
-- model and framework identity in bounded metadata.
-
-The Python example serves terminal prompts and remote endpoint calls through
-the same Agent.
-
-Use the same prompt to compare model aliases or hardware. Keep the generation
-settings and stopping rules fixed during each comparison.
+Keep the application input and generation settings fixed. Change the Foundry
+model variant or execution provider, then compare `first_token`, `decode`, and
+total latency in the App's Traces page. These measurements show the observed
+runtime behavior; Vifu does not claim to optimize the model itself.

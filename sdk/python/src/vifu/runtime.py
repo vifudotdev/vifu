@@ -238,8 +238,9 @@ class VifuRuntime:
         server_url: str = "http://127.0.0.1:6790",
         name: str | None = None,
         capture_trace_content: bool = False,
+        app_id: str | None = None,
     ) -> "VifuGateway":
-        """Connects this Runtime to the default App on a loopback Vifu Server."""
+        """Connects this Runtime to an App on a loopback Vifu Server."""
         from .gateway import VifuGateway
 
         return VifuGateway.connect(
@@ -248,6 +249,7 @@ class VifuRuntime:
             name=name,
             capture_trace_content=capture_trace_content,
             local_server_url=server_url,
+            local_app_id=app_id,
         )
 
 

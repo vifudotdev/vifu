@@ -85,6 +85,7 @@ class VifuGateway:
         name: str | None,
         capture_trace_content: bool,
         local_server_url: str | None = None,
+        local_app_id: str | None = None,
     ) -> VifuGateway:
         credentials_path = runtime.data_dir / "gateway.json"
         stored = _load_credentials(credentials_path)
@@ -130,7 +131,7 @@ class VifuGateway:
         )
         enrollment_token = pairing.enrollment_token if pairing is not None else None
         if local_server_url is not None and stored.device_token is None:
-            enrollment_token = _local_bootstrap_token()
+            enrollment_token = local_app_id or _local_bootstrap_token()
         if capture_trace_content:
             gateway.start_with_monitor_io(
                 stored.machine_private_key,

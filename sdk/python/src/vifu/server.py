@@ -31,21 +31,34 @@ class VifuServer:
         profile: str | None = None,
         arguments: list[str] | None = None,
         wait_seconds: float = 1.0,
+        shared: bool = False,
     ) -> VifuServer:
         resolved = _resolve_executable(executable)
         command = [resolved, *(arguments if arguments is not None else ["--no-browser"])]
         if arguments is None and profile is not None:
             command.extend(["--profile", profile])
-        process = subprocess.Popen(
-            command,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            bufsize=1,
-        )
+        process_options: dict[str, Any] = {
+            "stdout": subprocess.DEVNULL if shared else subprocess.PIPE,
+            "stderr": subprocess.DEVNULL if shared else subprocess.STDOUT,
+            "text": True,
+            "bufsize": 1,
+        }
+        if shared:
+            if sys.platform == "win32":
+                process_options["creationflags"] = (
+                    subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS
+                )
+            else:
+                process_options["start_new_session"] = True
+        process = subprocess.Popen(command, **process_options)
         output: deque[str] = deque(maxlen=100)
-        thread = threading.Thread(target=_drain_output, args=(process.stdout, output), daemon=True)
-        thread.start()
+        if process.stdout is not None:
+            thread = threading.Thread(
+                target=_drain_output,
+                args=(process.stdout, output),
+                daemon=True,
+            )
+            thread.start()
         deadline = time.monotonic() + wait_seconds
         while time.monotonic() < deadline:
             if process.poll() is not None:
@@ -61,7 +74,7 @@ class VifuServer:
         executable: str | None = None,
         timeout: float = 15.0,
     ) -> VifuServer | None:
-        """Reuses a ready local Server or starts the bundled Server."""
+        """Reuses a ready personal Server or starts one independently."""
         if cls.is_ready(server_url):
             return None
 
@@ -72,6 +85,7 @@ class VifuServer:
             executable=executable,
             arguments=arguments,
             wait_seconds=0.05,
+            shared=True,
         )
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:

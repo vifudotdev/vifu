@@ -29,8 +29,8 @@ export function ProjectHome({
     <div className="console-content project-home-content">
       <header className="project-home-heading">
         <div>
-          <h1>Apps</h1>
-          <p>Open an app or create a new agent runtime.</p>
+          <h1>My Apps</h1>
+          <p>Build, run, and inspect each agent application from your personal workspace.</p>
         </div>
         <ProjectCreateMenu />
       </header>

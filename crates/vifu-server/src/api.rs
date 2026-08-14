@@ -83,6 +83,13 @@ pub struct UploadRuntimeTraces {
     traces: Vec<RuntimeTraceRecord>,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct OpenLocalApp {
+    app_id: Option<String>,
+    name: String,
+}
+
 pub async fn health(State(state): State<AppState>) -> Json<impl Serialize> {
     Json(HealthResponse {
         service: "vifu-server",
@@ -103,6 +110,43 @@ pub async fn status(State(state): State<AppState>) -> Result<Json<impl Serialize
         agent_gateways: state.relay.connection_count().await,
         dashboard_url: state.config.public_dashboard_url.clone(),
     }))
+}
+
+/// Opens one SDK project App on a loopback-only local Server.
+pub async fn open_local_app(
+    State(state): State<AppState>,
+    Json(input): Json<OpenLocalApp>,
+) -> Result<(StatusCode, Json<Value>), ApiError> {
+    if state.config.deployment_mode != DeploymentMode::Local
+        || !state.config.addr.ip().is_loopback()
+    {
+        return Err(ApiError::Forbidden);
+    }
+    let name = required_text("name", &input.name, 128)?;
+    let projects = db::list_projects(&state.pool).await?;
+    if let Some(app_id) = input.app_id.as_deref() {
+        if let Some(project) = projects
+            .into_iter()
+            .find(|project| project.project.app_id == app_id)
+        {
+            return Ok((StatusCode::OK, Json(json!({ "app": project }))));
+        }
+    }
+    let slug = project_slug(None, name)?;
+    let project = db::create_project(
+        &state.pool,
+        NewProject {
+            id: Uuid::new_v4(),
+            owner_user_id: None,
+            slug: &slug,
+            name,
+            description: Some("Created by a local Vifu SDK project"),
+            gateway_id: "",
+            binding_ids: &[],
+        },
+    )
+    .await?;
+    Ok((StatusCode::CREATED, Json(json!({ "app": project }))))
 }
 
 pub async fn exchange_deployment_credential(

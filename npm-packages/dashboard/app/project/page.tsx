@@ -1,10 +1,5 @@
-import { RuntimeConsole } from "../../components/runtime-console-host";
-import { configuredBrowserApiBaseUrl } from "../../lib/config";
-import { loadDashboardData } from "../../lib/dashboard-data";
-
-export const dynamic = "force-dynamic";
+import { redirect } from "next/navigation";
 
 export default async function ProjectPage() {
-  const data = await loadDashboardData("/project");
-  return <RuntimeConsole section="overview" data={data} browserApiBaseUrl={configuredBrowserApiBaseUrl()} />;
+  redirect("/apps");
 }

@@ -1,5 +1,6 @@
 import os
 import sys
+from pathlib import Path
 
 from vifu import AgentResponse, Vifu
 
@@ -7,29 +8,35 @@ from vifu import AgentResponse, Vifu
 app = Vifu(
     "python-starter",
     data_dir=os.environ.get("VIFU_EXAMPLE_DATA_DIR"),
+    workspace=Path(__file__).parent,
     capture_trace_content=True,
 )
 
 
 @app.agent(
-    "guide",
-    name="Local Guide",
-    metadata={"model": "python-echo"},
+    "scene-planner",
+    name="Scene Planner",
+    capability="planning",
+    metadata={"provider": "python-rules"},
 )
-def guide(request):
-    with request.trace.stage("decode", metadata={"model": "python-echo"}):
+def scene_planner(request):
+    with request.trace.stage("plan", metadata={"provider": "python-rules"}):
         return AgentResponse(
-            output={"text": f"Local answer: {request.input['prompt']}"},
-            metadata={"model": "python-echo"},
+            output={
+                "action": "inspect",
+                "target": request.input["scene"],
+            },
+            metadata={"provider": "python-rules"},
         )
 
 
 if "--once" in sys.argv:
-    invocation = app.invoke(
-        "guide",
-        {"prompt": "Where did this agent run?"},
-        session_id="first-session",
-    )
+    with app:
+        invocation = app.invoke(
+            "scene-planner",
+            {"scene": "workshop-door"},
+            session_id="demo-run",
+        )
     print(invocation.output)
     print(
         {

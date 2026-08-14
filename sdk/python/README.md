@@ -1,8 +1,9 @@
 # Vifu Python SDK
 
 The Python SDK embeds the Vifu Runtime, Agent Gateway, and local Server. Python
-functions can become local Agent providers. `Vifu.run()` manages the complete
-local lifecycle and opens the same Dashboard and tracing path as the Vifu CLI.
+functions can become local Agent providers. `Vifu("name")` creates or reopens
+one real App in the personal Server and records its project binding in
+`.vifu/app.json`.
 
 Create an environment and install Vifu:
 
@@ -18,8 +19,8 @@ reuses a running local Server or starts its bundled Server.
 
 The public API provides:
 
-- `Vifu` for Agent registration, local Server connection, invocation, tracing,
-  and remote calls.
+- `Vifu` for App identity, Agent registration, local Server connection,
+  invocation, tracing, and remote calls.
 - `VifuRuntime` for persistent Runtime state, Agent registration, invocation,
   snapshots, and pending traces.
 - `AgentTrace` for activity, output deltas, and typed provider stages.

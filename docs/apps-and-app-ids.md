@@ -15,7 +15,7 @@ receives its own Server-issued Device Token after registration.
 
 The CLI configuration describes where the Server and Gateway run. It does not
 select an App. Pair an unconfigured CLI or device Gateway from **App →
-Deployments → Pair gateway**. The one-time QR identifies the exact deployment
+Devices → Pair device**. The one-time QR identifies the exact deployment
 that the Gateway joins. The Server then issues a Device Token for reconnects.
 
 On an empty local installation, Vifu creates one `Local app` so the TUI and
@@ -72,7 +72,7 @@ its App ID, Gateway installations, or existing traces. This hosted policy is
 not part of the user configuration file.
 
 QR pairing is the operator-directed enrollment path. Open
-**App → Deployments → Pair gateway**, or press `P` in a TUI connected to the
+**App → Devices → Pair device**, or press `P` in a TUI connected to the
 current App. The one-time QR selects that App deployment for the scanned
 installation. Packaged Apps can use an App ID when every installation should
 join the same App's primary deployment.

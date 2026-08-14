@@ -455,9 +455,13 @@ pub fn app(state: AppState) -> Router {
         .route("/project", get(console::serve_console_asset))
         .route("/project/", get(console::serve_console_asset))
         .route("/project/{*path}", get(console::serve_console_asset))
+        .route("/apps", get(console::serve_console_asset))
+        .route("/apps/", get(console::serve_console_asset))
+        .route("/apps/{*path}", get(console::serve_console_asset))
         .route("/assets/{*path}", get(console::serve_console_asset))
         .route("/brand/{*path}", get(console::serve_console_asset))
         .route("/v1/status", get(api::status))
+        .route("/v1/local/apps/open", post(api::open_local_app))
         .route(
             "/v1/auth/exchange",
             post(api::exchange_deployment_credential),
@@ -999,6 +1003,42 @@ mod tests {
         assert!(projects
             .iter()
             .any(|project| project.project.id == selected.project_id));
+        close_local_bootstrap_test_storage(path, storage).await;
+    }
+
+    #[tokio::test]
+    async fn local_sdk_opens_one_stable_app_without_admin_credentials() {
+        let (path, storage, state) = local_bootstrap_test_state("vifu-local-sdk-app").await;
+        let router = app(state);
+        let created = router
+            .clone()
+            .oneshot(
+                Request::post("/v1/local/apps/open")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"name":"Python Weather"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(created.status(), StatusCode::CREATED);
+        let created = response_json(created).await;
+        let app_id = created["app"]["appId"].as_str().unwrap();
+
+        let reopened = router
+            .oneshot(
+                Request::post("/v1/local/apps/open")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({"name": "Python Weather", "appId": app_id}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(reopened.status(), StatusCode::OK);
+        let reopened = response_json(reopened).await;
+        assert_eq!(reopened["app"]["appId"], app_id);
+        assert_eq!(crate::db::list_projects(&storage).await.unwrap().len(), 1);
         close_local_bootstrap_test_storage(path, storage).await;
     }
 

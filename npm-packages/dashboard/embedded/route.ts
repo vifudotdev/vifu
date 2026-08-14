@@ -20,7 +20,7 @@ export type ConsoleRoute = {
 
 export function readConsoleRoute(pathname: string, search = "", hash = ""): ConsoleRoute {
   const parts = pathname.split("/").filter(Boolean);
-  if (parts[0] !== "project") return { section: "overview", search, hash };
+  if (parts[0] !== "apps" && parts[0] !== "project") return { section: "overview", search, hash };
   const projectSlug = parts[1] ? decodeURIComponent(parts[1]) : undefined;
   const section = SECTION_IDS.has(parts[2] as DashboardSection)
     ? parts[2] as DashboardSection
@@ -30,7 +30,7 @@ export function readConsoleRoute(pathname: string, search = "", hash = ""): Cons
 
 export function consoleRouteHref(route: ConsoleRoute): string {
   const suffix = `${route.search ?? ""}${route.hash ?? ""}`;
-  if (!route.projectSlug) return `/project${suffix}`;
-  if (route.section === "overview") return `/project/${encodeURIComponent(route.projectSlug)}${suffix}`;
-  return `/project/${encodeURIComponent(route.projectSlug)}/${encodeURIComponent(route.section)}${suffix}`;
+  if (!route.projectSlug) return `/apps${suffix}`;
+  if (route.section === "overview") return `/apps/${encodeURIComponent(route.projectSlug)}${suffix}`;
+  return `/apps/${encodeURIComponent(route.projectSlug)}/${encodeURIComponent(route.section)}${suffix}`;
 }

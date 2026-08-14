@@ -9,7 +9,7 @@ export default async function LoginPage({ searchParams }: {
   searchParams: Promise<Record<string, string | string[] | undefined>>;
 }) {
   const params = await searchParams;
-  const returnTo = sanitizeReturnTo(readParam(params.returnTo) ?? "/project");
+  const returnTo = sanitizeReturnTo(readParam(params.returnTo) ?? "/apps");
   const adminKey = configuredAdminKey();
   if (adminKey && await hasValidAdminSession(adminKey)) redirect(returnTo);
   return (
