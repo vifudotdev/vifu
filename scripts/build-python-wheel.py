@@ -44,6 +44,10 @@ def _metadata(project: dict[str, object]) -> bytes:
         lines.append(f"Keywords: {','.join(keywords)}")
     for classifier in project.get("classifiers", []):
         lines.append(f"Classifier: {classifier}")
+    for extra, requirements in project.get("optional-dependencies", {}).items():
+        lines.append(f"Provides-Extra: {extra}")
+        for requirement in requirements:
+            lines.append(f'Requires-Dist: {requirement}; extra == "{extra}"')
     for label, url in project.get("urls", {}).items():
         lines.append(f"Project-URL: {label}, {url}")
     lines.extend(
@@ -62,10 +66,10 @@ def _digest(data: bytes) -> str:
     return f"sha256={value.decode()}"
 
 
-def _zip_info(path: str) -> zipfile.ZipInfo:
+def _zip_info(path: str, *, executable: bool = False) -> zipfile.ZipInfo:
     info = zipfile.ZipInfo(path, date_time=(1980, 1, 1, 0, 0, 0))
     info.compress_type = zipfile.ZIP_DEFLATED
-    info.external_attr = 0o100644 << 16
+    info.external_attr = (0o100755 if executable else 0o100644) << 16
     return info
 
 
@@ -96,6 +100,13 @@ def build_wheel(package_dir: Path, output_dir: Path, platform_tag: str) -> Path:
     ]
     if len(native_libraries) != 1:
         raise RuntimeError("The Python wheel requires exactly one Vifu native library")
+    server_candidates = (
+        package_dir / "_bin" / "vifu",
+        package_dir / "_bin" / "vifu.exe",
+    )
+    server_binaries = [path for path in server_candidates if path.is_file()]
+    if len(server_binaries) != 1:
+        raise RuntimeError("The Python wheel requires exactly one Vifu Server binary")
 
     files: dict[str, bytes] = {}
     for source in sorted(package_dir.rglob("*")):
@@ -122,7 +133,8 @@ def build_wheel(package_dir: Path, output_dir: Path, platform_tag: str) -> Path:
 
     with zipfile.ZipFile(wheel_path, "w") as archive:
         for path, data in sorted(files.items()):
-            archive.writestr(_zip_info(path), data)
+            executable = path in {"vifu/_bin/vifu", "vifu/_bin/vifu.exe"}
+            archive.writestr(_zip_info(path, executable=executable), data)
     return wheel_path
 
 

@@ -32,6 +32,35 @@ class VifuRuntimeTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             Vifu("  ")
 
+    def test_high_level_app_accepts_a_managed_handler(self) -> None:
+        class Handler:
+            metadata = {"model": "managed-fixture"}
+
+            def __init__(self):
+                self.prepared = 0
+                self.closed = 0
+
+            def prepare(self):
+                self.prepared += 1
+
+            def __call__(self, request):
+                return {"text": request.input["prompt"]}
+
+            def close(self):
+                self.closed += 1
+
+        with tempfile.TemporaryDirectory() as directory:
+            handler = Handler()
+            app = Vifu("Managed Handler", data_dir=directory)
+            app.agent("chat", handler)
+
+            result = app.invoke("chat", {"prompt": "hello"})
+            app.close()
+
+            self.assertEqual(result.output, {"text": "hello"})
+            self.assertEqual(handler.prepared, 1)
+            self.assertEqual(handler.closed, 1)
+
     def test_python_provider_invocation_produces_a_trace(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             runtime = VifuRuntime("python-test", data_dir=directory)
@@ -105,6 +134,17 @@ class VifuRuntimeTests(unittest.TestCase):
         self.assertTrue(server.running)
         server.close()
         self.assertFalse(server.running)
+
+    def test_server_ensure_starts_the_bundled_server_in_server_only_mode(self) -> None:
+        managed = mock.Mock(running=True)
+        with mock.patch.object(VifuServer, "is_ready", side_effect=[False, True]):
+            with mock.patch.object(VifuServer, "start", return_value=managed) as start:
+                result = VifuServer.ensure("http://127.0.0.1:6799")
+
+        self.assertIs(result, managed)
+        arguments = start.call_args.kwargs["arguments"]
+        self.assertIn("--server-only", arguments)
+        self.assertIn("server.address=http://127.0.0.1:6799", arguments)
 
 
 if __name__ == "__main__":

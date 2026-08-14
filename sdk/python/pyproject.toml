@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "vifu"
-version = "0.1.1"
-description = "Embed Vifu Runtime and Gateway in Python agent applications."
+version = "0.1.2"
+description = "Embed Vifu Runtime, Gateway, and local Server in Python agent applications."
 readme = "README.md"
 requires-python = ">=3.10"
 license = "Apache-2.0"
@@ -22,6 +22,10 @@ classifiers = [
   "Topic :: Software Development :: Libraries",
 ]
 
+[project.optional-dependencies]
+foundry = ["foundry-local-sdk>=1.0,<2"]
+foundry-winml = ["foundry-local-sdk-winml>=1.0,<2"]
+
 [project.urls]
 Homepage = "https://vifu.dev"
 Documentation = "https://github.com/vifudotdev/vifu/tree/main/docs/get-started"
@@ -35,4 +39,4 @@ package-dir = { "" = "src" }
 where = ["src"]
 
 [tool.setuptools.package-data]
-vifu = ["py.typed", "*.dylib", "*.so", "*.dll"]
+vifu = ["py.typed", "*.dylib", "*.so", "*.dll", "_bin/*", "integrations/*.py"]

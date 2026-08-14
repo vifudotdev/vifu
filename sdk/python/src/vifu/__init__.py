@@ -1,4 +1,4 @@
-"""Python SDK for the embedded Vifu Runtime and Gateway."""
+"""Python SDK for the embedded Vifu Runtime, Gateway, and local Server."""
 
 from ._version import __version__
 from .app import Vifu

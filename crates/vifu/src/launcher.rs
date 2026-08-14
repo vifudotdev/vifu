@@ -25,6 +25,7 @@ pub async fn execute(options: Options) -> Result<(), String> {
         config_profile,
         config_overrides,
         open_browser,
+        server_only,
     } = options;
     let load_config = || LoadedRuntimeConfig::load(config_profile.as_deref(), &config_overrides);
     match command {
@@ -36,13 +37,23 @@ pub async fn execute(options: Options) -> Result<(), String> {
             println!("vifu {}", env!("CARGO_PKG_VERSION"));
             Ok(())
         }
-        Command::Start => start(load_config()?, open_browser).await,
+        Command::Start => start(load_config()?, open_browser, server_only).await,
         Command::Status => status(load_config()?).await,
         Command::Doctor => doctor(load_config()?).await,
     }
 }
 
-async fn start(config: LoadedRuntimeConfig, open_browser: bool) -> Result<(), String> {
+async fn start(
+    config: LoadedRuntimeConfig,
+    open_browser: bool,
+    server_only: bool,
+) -> Result<(), String> {
+    if server_only {
+        if !config.server_is_local()? {
+            return Err("--server-only requires a configured local Server".to_string());
+        }
+        return run_server_only(config, open_browser).await;
+    }
     match start_plan(config.server_is_local()?, config.gateway_is_local()?) {
         StartPlan::Combined => run_combined(config, open_browser).await,
         StartPlan::ServerOnly => run_server_only(config, open_browser).await,

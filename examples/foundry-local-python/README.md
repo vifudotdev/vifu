@@ -1,22 +1,21 @@
 # Foundry Local With Vifu For Python
 
-This example registers a Foundry Local native chat client as a Vifu provider.
-Model inference stays in the Python process. Vifu adds a stable endpoint,
-session state, stage timing, output deltas, and optional Gateway monitoring.
+This example runs an interactive Foundry Local chat Agent. Foundry Local runs
+the model in the Python process. Vifu supplies the endpoint, session state,
+stage timing, output deltas, Gateway connection, and Dashboard traces.
 
 ## Run It
 
-Create an environment from the repository root. Then install Vifu and the
-Foundry Local package for your platform:
+Use Python 3.11 or a later version. Create an environment from the repository
+root:
 
 ```bash
-python3 -m venv .venv
+python3.11 -m venv .venv
 . .venv/bin/activate
-python -m pip install vifu foundry-local-sdk
+python -m pip install --upgrade "vifu[foundry]"
 ```
 
-Use `foundry-local-sdk-winml` instead on supported Windows systems. Do not
-install both variants in one environment.
+On Windows, install `"vifu[foundry-winml]"` for Windows ML acceleration.
 
 Run the example:
 
@@ -24,9 +23,14 @@ Run the example:
 python examples/foundry-local-python/main.py
 ```
 
-The first run can download execution providers and the selected model. Later
-inference uses the local model cache. The example reports `first_token` and
-`decode` stages to Vifu.
+The first run downloads the execution provider and the selected model. Later
+runs use the local model cache.
 
-See the [Foundry Local integration guide](../../docs/integrations/foundry-local.md)
-to connect this Runtime to the Dashboard.
+Enter prompts at the `You >` prompt. Enter `/quit` to stop the Agent. Open the
+printed Dashboard URL to inspect the Gateway, Agent, and traces.
+
+The example keeps one Vifu session for the terminal conversation. It reports
+the `first_token` and `decode` stages for each response.
+
+Read the [Foundry Local integration guide](../../docs/integrations/foundry-local.md)
+for integration details and platform notes.

@@ -6,25 +6,36 @@ adds stable endpoints, sessions, Gateway routing, and comparable traces.
 
 The examples use the small `qwen2.5-0.5b` alias. Foundry Local selects an
 available variant for the device. The first run can download execution
-providers and model files; later inference uses the local cache.
+providers and model files. Later inference uses the local cache.
 
 ## Python
 
-Initialize Foundry Local, load the model, and pass its native client to the
-adapter:
+Install the Python packages:
 
-```python
-FoundryLocalManager.initialize(Configuration(app_name="vifu-foundry-local"))
-manager = FoundryLocalManager.instance
-model = manager.catalog.get_model("qwen2.5-0.5b")
-model.download(lambda _progress: None)
-model.load()
-
-runtime = VifuRuntime("foundry-local-python")
-register_foundry_agent(runtime, model.get_chat_client(), model="qwen2.5-0.5b")
+```bash
+python -m pip install --upgrade "vifu[foundry]"
 ```
 
-The complete adapter is in
+On Windows, install `"vifu[foundry-winml]"` for Windows ML acceleration. Install
+one Foundry Local package variant in an environment.
+
+Create the Vifu application:
+
+```python
+from vifu import Vifu
+from vifu.integrations.foundry import FoundryLocal
+
+app = Vifu("Foundry Local Chat", capture_trace_content=True)
+app.agent("chat", FoundryLocal("qwen2.5-0.5b"))
+app.run()
+```
+
+The integration prepares the execution provider and loads the model. It
+downloads the model when necessary. Vifu starts the local Server and Agent
+Gateway. The application unloads its model and stops its owned processes when
+it exits.
+
+The complete application is in
 [`foundry-local-python`](../../examples/foundry-local-python/).
 
 ## TypeScript
@@ -48,11 +59,13 @@ The complete adapter is in
 
 Both adapters consume Foundry Local's streaming API. They report:
 
-- `first_token`: time until the first non-empty output chunk;
-- `decode`: time spent consuming the remaining chunks;
-- output deltas for the host UI and optional content trace;
+- `first_token`: time until the first non-empty output chunk.
+- `decode`: time spent consuming the remaining chunks.
+- Output deltas for the host UI and optional content trace.
 - model and framework identity in bounded metadata.
 
-Connect the Python Runtime to the local Vifu Server without a pairing code.
-Then compare the same prompt across model aliases or hardware. Keep the prompt,
-generation settings, and stopping rules fixed during the comparison.
+The Python example serves terminal prompts and remote endpoint calls through
+the same Agent.
+
+Use the same prompt to compare model aliases or hardware. Keep the generation
+settings and stopping rules fixed during each comparison.

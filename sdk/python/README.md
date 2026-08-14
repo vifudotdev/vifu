@@ -1,8 +1,8 @@
 # Vifu Python SDK
 
-The Python SDK embeds the Vifu Runtime and Agent Gateway. Python functions can
-become local Agent providers. The default API connects them to a local Vifu
-Server and its permanent Local app.
+The Python SDK embeds the Vifu Runtime, Agent Gateway, and local Server. Python
+functions can become local Agent providers. `Vifu.run()` manages the complete
+local lifecycle and opens the same Dashboard and tracing path as the Vifu CLI.
 
 Create an environment and install Vifu:
 
@@ -12,8 +12,9 @@ python3 -m venv .venv
 python -m pip install vifu
 ```
 
-The wheel contains the generated UniFFI binding and the native Rust library.
-The Python API calls that library in the application process.
+The wheel contains the generated UniFFI binding, native Rust library, and Vifu
+Server binary. The Python API calls the Runtime in the application process. It
+reuses a running local Server or starts its bundled Server.
 
 The public API provides:
 
@@ -23,7 +24,7 @@ The public API provides:
   snapshots, and pending traces.
 - `AgentTrace` for activity, output deltas, and typed provider stages.
 - `VifuGateway` for explicit remote enrollment and advanced Gateway control.
-- `VifuServer` for managing the complete installed Vifu process.
+- `VifuServer` for advanced control of the bundled Vifu Server process.
 
 Start with the [Python tutorial](../../docs/get-started/python.md). Runnable
 framework integrations are available for

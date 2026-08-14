@@ -1,20 +1,9 @@
 # Build a Python Agent With Vifu
 
-This tutorial creates a Python Agent and connects it to a local Vifu Server.
-The Server shows the Agent, Gateway, calls, and traces in its TUI and Dashboard.
+This tutorial creates a Python Agent with terminal chat and a local Dashboard.
+The Dashboard shows the Agent, Gateway, calls, and traces.
 
-## 1. Start Vifu
-
-Download the Vifu archive for your computer. Extract it and start Vifu:
-
-```bash
-./vifu
-```
-
-Vifu creates one permanent Local app on the first start. Python Agents on this
-computer join that App automatically.
-
-## 2. Install the Python SDK
+## 1. Install the Python SDK
 
 Create a virtual environment. Then install the prebuilt wheel:
 
@@ -24,10 +13,10 @@ python3 -m venv .venv
 python -m pip install vifu
 ```
 
-The wheel contains the Python API and the native Rust Runtime. The installation
-does not compile Rust code.
+The wheel contains the Python API, native Runtime, Agent Gateway, and local
+Server. The installation uses prebuilt files for your platform.
 
-## 3. Create an Agent
+## 2. Create an Agent
 
 Create `app.py`:
 
@@ -54,19 +43,13 @@ def assistant(request):
         )
 
 
-result = app.invoke(
-    "assistant",
-    {"prompt": "Where did this Agent run?"},
-)
-print(result.output)
-
 app.run()
 ```
 
 The example enables trace-content capture for local development. Add a user
 consent control before you enable this option in a distributed application.
 
-## 4. Run the Agent
+## 3. Run the Agent
 
 Run the Python process:
 
@@ -78,17 +61,17 @@ The SDK completes these actions:
 
 1. It opens the embedded Runtime.
 2. It registers the provider, Agent, and endpoint.
-3. It connects to `http://127.0.0.1:6790`.
-4. It joins the permanent Local app.
+3. It reuses or starts the Server at `http://127.0.0.1:6790`.
+4. It connects the Agent Gateway to the permanent Local app.
 5. It stores its Device Token for later starts.
-6. It uploads traces and accepts remote calls.
+6. It serves terminal prompts and remote endpoint calls.
+7. It sends each trace to the local Dashboard.
 
-The local path does not use a pairing code, App ID, API key, or configuration
-file. Stop the Python process with `Ctrl+C`.
+Enter a prompt at `You >`. Enter `/quit` or press `Ctrl+C` to stop the process.
 
-## 5. Inspect the Agent
+## 4. Inspect the Agent
 
-Press `B` in the Vifu TUI. Open the Local app in the Dashboard.
+Open the Dashboard URL that the Python process prints.
 
 The Gateway name is `Python: my-python-agent`. The Agent page shows the
 `assistant` Agent. The trace shows the `decode` and `provider.invoke` stages.
@@ -97,7 +80,7 @@ The Gateway name is `Python: my-python-agent`. The Agent page shows the
 
 Use `VifuRuntime` when the host application owns the lifecycle. Use
 `VifuGateway` when a remote Server or a selected deployment requires explicit
-enrollment.
+enrollment. Use `VifuServer` when the host must control the Server process.
 
 See the [Google ADK](../integrations/google-adk.md) and
 [Foundry Local](../integrations/foundry-local.md) guides for framework examples.

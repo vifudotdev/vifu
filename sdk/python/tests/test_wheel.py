@@ -23,24 +23,32 @@ class VifuWheelTests(unittest.TestCase):
             package = root / "package"
             package.mkdir()
             (package / "__init__.py").write_text("VALUE = 1\n", encoding="utf-8")
-            (package / "_version.py").write_text('__version__ = "0.1.1"\n', encoding="utf-8")
+            (package / "_version.py").write_text('__version__ = "0.1.2"\n', encoding="utf-8")
             (package / "libvifu_mobile_ffi.so").write_bytes(b"native-fixture")
+            binary = package / "_bin" / "vifu"
+            binary.parent.mkdir()
+            binary.write_bytes(b"server-fixture")
 
             wheel = BUILDER.build_wheel(package, root / "dist", "linux_x86_64")
 
             self.assertEqual(
                 wheel.name,
-                "vifu-0.1.1-py3-none-linux_x86_64.whl",
+                "vifu-0.1.2-py3-none-linux_x86_64.whl",
             )
             with zipfile.ZipFile(wheel) as archive:
                 names = set(archive.namelist())
                 self.assertIn("vifu/libvifu_mobile_ffi.so", names)
-                metadata = archive.read("vifu-0.1.1.dist-info/METADATA").decode()
+                self.assertIn("vifu/_bin/vifu", names)
+                mode = archive.getinfo("vifu/_bin/vifu").external_attr >> 16
+                self.assertEqual(mode & 0o111, 0o111)
+                metadata = archive.read("vifu-0.1.2.dist-info/METADATA").decode()
                 self.assertIn("Name: vifu\n", metadata)
                 self.assertEqual(metadata.count("Keywords:"), 1)
-                record = archive.read("vifu-0.1.1.dist-info/RECORD").decode()
+                self.assertIn("Provides-Extra: foundry\n", metadata)
+                self.assertIn('Requires-Dist: foundry-local-sdk>=1.0,<2; extra == "foundry"\n', metadata)
+                record = archive.read("vifu-0.1.2.dist-info/RECORD").decode()
                 rows = list(csv.reader(record.splitlines()))
-                self.assertEqual(rows[-1], ["vifu-0.1.1.dist-info/RECORD", "", ""])
+                self.assertEqual(rows[-1], ["vifu-0.1.2.dist-info/RECORD", "", ""])
                 self.assertEqual({row[0] for row in rows}, names)
 
     def test_wheel_requires_one_native_library(self) -> None:
@@ -49,9 +57,21 @@ class VifuWheelTests(unittest.TestCase):
             package = root / "package"
             package.mkdir()
             (package / "__init__.py").write_text("", encoding="utf-8")
-            (package / "_version.py").write_text('__version__ = "0.1.1"\n', encoding="utf-8")
+            (package / "_version.py").write_text('__version__ = "0.1.2"\n', encoding="utf-8")
 
             with self.assertRaisesRegex(RuntimeError, "exactly one"):
+                BUILDER.build_wheel(package, root / "dist", "linux_x86_64")
+
+    def test_wheel_requires_the_server_binary(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            package = root / "package"
+            package.mkdir()
+            (package / "__init__.py").write_text("", encoding="utf-8")
+            (package / "_version.py").write_text('__version__ = "0.1.2"\n', encoding="utf-8")
+            (package / "libvifu_mobile_ffi.so").write_bytes(b"native-fixture")
+
+            with self.assertRaisesRegex(RuntimeError, "Server binary"):
                 BUILDER.build_wheel(package, root / "dist", "linux_x86_64")
 
 

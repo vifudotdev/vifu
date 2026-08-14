@@ -24,21 +24,19 @@ def guide(request):
         )
 
 
-invocation = app.invoke(
-    "guide",
-    {"prompt": "Where did this agent run?"},
-    session_id="first-session",
-)
-
-print(invocation.output)
-print(
-    {
-        "invocation_id": invocation.invocation_id,
-        "duration_ms": invocation.trace[0]["durationMs"],
-        "pending_traces": len(app.runtime.pending_traces()),
-    }
-)
-
-if "--once" not in sys.argv:
-    print("Vifu: connecting to the local Server. Press Ctrl+C to stop.")
+if "--once" in sys.argv:
+    invocation = app.invoke(
+        "guide",
+        {"prompt": "Where did this agent run?"},
+        session_id="first-session",
+    )
+    print(invocation.output)
+    print(
+        {
+            "invocation_id": invocation.invocation_id,
+            "duration_ms": invocation.trace[0]["durationMs"],
+            "pending_traces": len(app.runtime.pending_traces()),
+        }
+    )
+else:
     app.run()

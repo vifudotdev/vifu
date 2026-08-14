@@ -13,6 +13,7 @@ pub struct Options {
     pub config_profile: Option<String>,
     pub config_overrides: Vec<String>,
     pub open_browser: bool,
+    pub server_only: bool,
 }
 
 impl Options {
@@ -25,6 +26,7 @@ impl Options {
         let mut config_profile = None;
         let mut config_overrides = Vec::new();
         let mut open_browser = true;
+        let mut server_only = false;
 
         let mut args = args.into_iter().map(Into::into);
         let _program_name = args.next();
@@ -36,6 +38,7 @@ impl Options {
                 "--status" => command = Command::Status,
                 "--doctor" => command = Command::Doctor,
                 "--no-browser" => open_browser = false,
+                "--server-only" => server_only = true,
                 "-p" | "--profile" => {
                     let value = args
                         .next()
@@ -72,6 +75,7 @@ impl Options {
             config_profile,
             config_overrides,
             open_browser,
+            server_only,
         })
     }
 }
@@ -113,6 +117,8 @@ Options:
   --no-browser           Compatibility option. Interactive Start opens the
                          Dashboard only when you press B; headless Start never
                          opens it automatically.
+  --server-only          Start the Server without the configured Agent Gateway.
+                         SDKs use this option for an embedded local Server.
   -h, --help             Show help
   -V, --version          Show version
 "
@@ -129,6 +135,7 @@ mod tests {
         assert!(options.config_profile.is_none());
         assert!(options.config_overrides.is_empty());
         assert!(options.open_browser);
+        assert!(!options.server_only);
     }
 
     #[test]
@@ -142,6 +149,12 @@ mod tests {
         let options = Options::parse(["vifu", "--no-browser"]).unwrap();
         assert_eq!(options.command, Command::Start);
         assert!(!options.open_browser);
+    }
+
+    #[test]
+    fn parses_server_only_flag() {
+        let options = Options::parse(["vifu", "--server-only"]).unwrap();
+        assert!(options.server_only);
     }
 
     #[test]
