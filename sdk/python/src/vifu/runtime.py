@@ -145,7 +145,10 @@ class VifuRuntime:
         self.app_id = app_id
         self.data_dir = root
         self.database_path = root / "runtime.sqlite"
-        self._native = native.VifuEmbeddedRuntime.open(app_id, str(self.database_path))
+        self._native: native.VifuEmbeddedRuntime | None = native.VifuEmbeddedRuntime.open(
+            app_id,
+            str(self.database_path),
+        )
         self._providers: list[_PythonProvider] = []
 
     def agent(
@@ -163,15 +166,16 @@ class VifuRuntime:
         provider_id = provider_id or f"{agent_id}-provider"
         endpoint = endpoint or agent_id
         provider = _PythonProvider(handler)
-        self._native.register_streaming_provider(provider_id, "python", provider)
-        self._native.register_agent(
+        runtime = self._native_runtime()
+        runtime.register_streaming_provider(provider_id, "python", provider)
+        runtime.register_agent(
             agent_id,
             name or agent_id,
             provider_id,
             [capability],
             _encode_json(metadata if metadata is not None else {}),
         )
-        self._native.register_endpoint(endpoint, agent_id, capability, timeout_ms)
+        runtime.register_endpoint(endpoint, agent_id, capability, timeout_ms)
         self._providers.append(provider)
         return self
 
@@ -184,7 +188,8 @@ class VifuRuntime:
         metadata: JsonValue = None,
         timeout: float = 35.0,
     ) -> Invocation:
-        handle = self._native.start_invoke(
+        runtime = self._native_runtime()
+        handle = runtime.start_invoke(
             endpoint,
             session_id,
             native.VifuInvocationData.JSON(_encode_json(input)),
@@ -192,7 +197,7 @@ class VifuRuntime:
         )
         deadline = time.monotonic() + timeout
         while True:
-            poll = self._native.take_invocation(handle)
+            poll = runtime.take_invocation(handle)
             if poll.state == native.VifuInvocationState.COMPLETED:
                 if poll.result is None:
                     raise RuntimeError("Vifu completed the invocation without a result")
@@ -200,21 +205,32 @@ class VifuRuntime:
             if poll.state in (native.VifuInvocationState.FAILED, native.VifuInvocationState.CANCELLED):
                 raise RuntimeError(poll.error or f"Vifu invocation ended with {poll.state.name.lower()}")
             if time.monotonic() >= deadline:
-                self._native.cancel_invocation(handle)
+                runtime.cancel_invocation(handle)
                 raise TimeoutError(f"Vifu invocation exceeded {timeout:.1f} seconds")
             time.sleep(0.005)
 
     def pending_traces(self, limit: int = 100) -> list[dict[str, Any]]:
-        return json.loads(self._native.pending_runtime_traces(limit))
+        return json.loads(self._native_runtime().pending_runtime_traces(limit))
 
     def acknowledge_traces(self, trace_ids: list[str]) -> None:
-        self._native.acknowledge_runtime_traces(trace_ids)
+        self._native_runtime().acknowledge_runtime_traces(trace_ids)
 
     def export_snapshot(self) -> bytes:
-        return self._native.export_snapshot()
+        return self._native_runtime().export_snapshot()
 
     def restore_snapshot(self, snapshot: bytes) -> None:
-        self._native.restore_snapshot(snapshot)
+        self._native_runtime().restore_snapshot(snapshot)
+
+    def close(self) -> None:
+        """Releases native providers and the Runtime database handle."""
+        self._providers.clear()
+        self._native = None
+
+    def _native_runtime(self) -> native.VifuEmbeddedRuntime:
+        runtime = self._native
+        if runtime is None:
+            raise RuntimeError("Vifu Runtime is closed")
+        return runtime
 
     def connect(
         self,

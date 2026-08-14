@@ -55,6 +55,7 @@ class FoundryTracingTest(unittest.TestCase):
                 [stage["name"] for stage in invocation.trace],
                 ["first_token", "decode", "provider.invoke"],
             )
+            runtime.close()
 
 
 if __name__ == "__main__":

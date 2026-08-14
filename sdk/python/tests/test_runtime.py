@@ -29,6 +29,7 @@ class VifuRuntimeTests(unittest.TestCase):
 
             self.assertEqual(result.output, {"text": "Hello, Ada"})
             self.assertEqual(app.runtime.app_id, APP_ID)
+            app.close()
 
     def test_high_level_app_requires_a_name(self) -> None:
         with self.assertRaises(ValueError):
@@ -106,6 +107,7 @@ class VifuRuntimeTests(unittest.TestCase):
             traces = runtime.pending_traces()
             self.assertEqual(len(traces), 1)
             self.assertEqual(traces[0]["invocationId"], invocation.invocation_id)
+            runtime.close()
 
     def test_python_provider_reports_typed_stages(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -123,6 +125,7 @@ class VifuRuntimeTests(unittest.TestCase):
                 [stage["name"] for stage in result.trace],
                 ["decode", "provider.invoke"],
             )
+            runtime.close()
 
     def test_pairing_parser_accepts_direct_and_web_codes(self) -> None:
         direct = GatewayPairing.parse(

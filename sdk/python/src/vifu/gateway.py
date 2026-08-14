@@ -121,7 +121,7 @@ class VifuGateway:
             "sdkVersion": __version__,
         }
         gateway = native.VifuEmbeddedGateway(
-            runtime._native,
+            runtime._native_runtime(),
             native.VifuEmbeddedGatewayConfig(
                 server_url=server_url,
                 runtime_database_path=str(runtime.database_path),

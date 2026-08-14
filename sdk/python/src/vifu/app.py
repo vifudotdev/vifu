@@ -158,6 +158,13 @@ class Vifu:
                 except Exception as error:
                     first_error = first_error or error
             self._prepared_resources.discard(resource_id)
+        if self._runtime is not None:
+            runtime = self._runtime
+            self._runtime = None
+            try:
+                runtime.close()
+            except Exception as error:
+                first_error = first_error or error
         if first_error is not None:
             raise first_error
 
