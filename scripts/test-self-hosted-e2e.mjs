@@ -59,7 +59,10 @@ async function setup() {
   });
   assert(dashboardAfterSignup.ok, "Dashboard did not accept the Admin Key session cookie");
   const dashboardHtml = await dashboardAfterSignup.text();
-  assert(dashboardHtml.includes("Create your first app"), "Dashboard did not render after Admin Key authentication");
+  assert(
+    dashboardHtml.includes("Open a project or create a new agent runtime."),
+    "Dashboard did not render after Admin Key authentication",
+  );
   assert(!dashboardHtml.includes(adminKey), "Dashboard HTML exposed the bootstrap admin key");
   const getLogoutResponse = await fetch(`${dashboardBaseUrl}/auth/logout`, {
     headers: { cookie: `vifu_admin_session=${initialCookie.cookieValue}` },
