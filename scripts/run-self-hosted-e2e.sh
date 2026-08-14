@@ -74,7 +74,6 @@ write_e2e_env() {
     printf '%s\n' "VIFU_AGENT_GATEWAY_BOOTSTRAP_TOKEN=$agent_gateway_bootstrap_token"
     printf '%s\n' "VIFU_API_KEY_PEPPER=$api_key_pepper"
     printf '%s\n' "VIFU_PROVIDER_SECRET_KEY=$provider_secret_key"
-    printf '%s\n' "VIFU_GUEST_BOOTSTRAP_ENABLED=false"
     printf '%s\n' "POSTGRES_DB=vifu"
     printf '%s\n' "POSTGRES_USER=vifu"
     printf '%s\n' "POSTGRES_PASSWORD=$postgres_password"
@@ -325,7 +324,6 @@ $providers_config
 
       [gateway]
       address = "http://localhost:6790"
-      guest_bootstrap = false
 
 services:
   runtime-state:
@@ -412,7 +410,6 @@ $providers_config
 
       [gateway]
       address = "http://localhost:6790"
-      guest_bootstrap = false
 
 services:
   runtime-state:

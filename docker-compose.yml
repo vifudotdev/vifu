@@ -10,10 +10,6 @@ configs:
       [server.dashboard]
       address = "dashboard:6791"
 
-      [server.guest_bootstrap]
-      enabled = ${VIFU_GUEST_BOOTSTRAP_ENABLED:-true}
-      ttl_hours = ${VIFU_GUEST_BOOTSTRAP_TTL_HOURS:-168}
-      max_projects = ${VIFU_GUEST_BOOTSTRAP_MAX_PROJECTS:-10000}
   gateway_runtime_config:
     content: |
       [server]
