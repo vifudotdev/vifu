@@ -31,13 +31,13 @@
         "typescript": "^5.9.3",
       },
     },
-    "packages/protocol": {
-      "name": "@vifu/protocol",
-      "version": "0.1.0",
+    "npm-packages/sdk": {
+      "name": "@vifu/sdk",
+      "version": "0.1.12",
     },
     "packages/console": {
       "name": "@vifu/console",
-      "version": "0.1.0",
+      "version": "0.2.3",
       "dependencies": {
         "lucide-react": "^0.468.0",
         "react-resizable-panels": "^4.12.2",
@@ -53,6 +53,10 @@
         "react": ">=18.0.0",
         "react-dom": ">=18.0.0",
       },
+    },
+    "packages/protocol": {
+      "name": "@vifu/protocol",
+      "version": "0.1.0",
     },
   },
   "packages": {
@@ -252,11 +256,13 @@
 
     "@types/react-dom": ["@types/react-dom@19.2.3", "", { "peerDependencies": { "@types/react": "^19.2.0" } }, "sha512-jp2L/eY6fn+KgVVQAOqYItbF0VY/YApe5Mz2F0aykSO8gx31bYCZyvSeYxCHKvzHG5eZjc+zyaS5BrBWya2+kQ=="],
 
+    "@vifu/console": ["@vifu/console@workspace:packages/console"],
+
     "@vifu/dashboard": ["@vifu/dashboard@workspace:npm-packages/dashboard"],
 
     "@vifu/protocol": ["@vifu/protocol@workspace:packages/protocol"],
 
-    "@vifu/console": ["@vifu/console@workspace:packages/console"],
+    "@vifu/sdk": ["@vifu/sdk@workspace:npm-packages/sdk"],
 
     "@vitest/expect": ["@vitest/expect@3.2.7", "", { "dependencies": { "@types/chai": "^5.2.2", "@vitest/spy": "3.2.7", "@vitest/utils": "3.2.7", "chai": "^5.2.0", "tinyrainbow": "^2.0.0" } }, "sha512-E8eBXaKibuvH2pSZErOjdVb5vF4PbKYcrnluBTYxEk1l/VhhwZg1kZQsdtjq+CsF5CFydf2Rdkz7jDHKSisi3w=="],
 
