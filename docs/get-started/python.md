@@ -34,7 +34,7 @@ app = Vifu("workshop-guide", capture_trace_content=True)
     metadata={"provider": "python-rules"},
 )
 def scene_planner(request):
-    with request.trace.stage("plan", metadata={"provider": "python-rules"}):
+    with request.trace.stage("validate", metadata={"provider": "python-rules"}):
         return AgentResponse(
             output={
                 "action": "inspect",
@@ -88,7 +88,8 @@ Open the Dashboard URL that the Python process prints.
 
 The **My Apps** page now contains `workshop-guide`. Its Device is named
 `Python: workshop-guide`. The Agents page shows the
-`scene-planner` Agent. The trace shows the `plan` and `provider.invoke` stages.
+`scene-planner` Agent. The trace shows the `validate` and `provider.invoke`
+stages.
 
 Create another directory with another `Vifu("name")` program to create another
 App. Both Apps stay available in the same personal Dashboard and keep separate

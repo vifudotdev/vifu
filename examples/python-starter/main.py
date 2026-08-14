@@ -9,6 +9,10 @@ app = Vifu(
     "python-starter",
     data_dir=os.environ.get("VIFU_EXAMPLE_DATA_DIR"),
     workspace=Path(__file__).parent,
+    server_url=os.environ.get(
+        "VIFU_EXAMPLE_SERVER_URL",
+        "http://127.0.0.1:6790",
+    ),
     capture_trace_content=True,
 )
 
@@ -20,7 +24,7 @@ app = Vifu(
     metadata={"provider": "python-rules"},
 )
 def scene_planner(request):
-    with request.trace.stage("plan", metadata={"provider": "python-rules"}):
+    with request.trace.stage("validate", metadata={"provider": "python-rules"}):
         return AgentResponse(
             output={
                 "action": "inspect",
