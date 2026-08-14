@@ -10,7 +10,7 @@ from .runtime import (
     Invocation,
     VifuRuntime,
 )
-from .server import VifuServer
+from .server import VifuServer, VifuServerConfig
 
 __all__ = [
     "AgentRequest",
@@ -22,5 +22,6 @@ __all__ = [
     "VifuGateway",
     "VifuRuntime",
     "VifuServer",
+    "VifuServerConfig",
     "__version__",
 ]

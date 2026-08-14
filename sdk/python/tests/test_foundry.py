@@ -5,7 +5,7 @@ import unittest
 from types import SimpleNamespace
 
 from vifu import VifuRuntime
-from vifu.integrations.foundry import trace_foundry_stream
+from vifu.integrations.foundry import foundry_chunk_text, trace_foundry_stream
 
 
 class FakeFoundryClient:
@@ -14,10 +14,12 @@ class FakeFoundryClient:
 
     def complete_streaming_chat(self, messages):
         self.requests.append(messages)
+        yield SimpleNamespace(choices=[])
+        yield SimpleNamespace(choices=[SimpleNamespace(delta=None)])
         for content in ("local ", "answer"):
-            yield SimpleNamespace(
-                choices=[SimpleNamespace(delta=SimpleNamespace(content=content))]
-            )
+            yield SimpleNamespace(choices=[SimpleNamespace(
+                delta=SimpleNamespace(content=content),
+            )])
 
 
 class FoundryTracingTest(unittest.TestCase):
@@ -34,10 +36,7 @@ class FoundryTracingTest(unittest.TestCase):
                     native_stream,
                     model="test-model",
                 )
-                text = "".join(
-                    chunk.choices[0].delta.content or ""
-                    for chunk in observed_stream
-                )
+                text = "".join(foundry_chunk_text(chunk) for chunk in observed_stream)
                 return {"answer": text, "source": "foundry-local"}
 
             runtime.agent("researcher", researcher, capability="research")

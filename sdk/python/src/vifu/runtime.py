@@ -123,15 +123,24 @@ class _PythonProvider:
         request: native.VifuProviderRequest,
         invocation: native.VifuProviderInvocation,
     ) -> native.VifuProviderResponse:
-        value = self._handler(_agent_request(request, invocation))
-        if inspect.isawaitable(value):
-            value = asyncio.run(value)
-        response = value if isinstance(value, AgentResponse) else AgentResponse(output=value)
-        return native.VifuProviderResponse(
-            data=native.VifuInvocationData.JSON(_encode_json(response.output)),
-            metadata_json=_encode_json(response.metadata if response.metadata is not None else {}),
-            state_json=None if response.state is None else _encode_json(response.state),
-        )
+        try:
+            value = self._handler(_agent_request(request, invocation))
+            if inspect.isawaitable(value):
+                value = asyncio.run(value)
+            response = value if isinstance(value, AgentResponse) else AgentResponse(output=value)
+            return native.VifuProviderResponse(
+                data=native.VifuInvocationData.JSON(_encode_json(response.output)),
+                metadata_json=_encode_json(
+                    response.metadata if response.metadata is not None else {}
+                ),
+                state_json=None if response.state is None else _encode_json(response.state),
+            )
+        except native.VifuRuntimeError:
+            raise
+        except Exception as error:
+            raise native.VifuRuntimeError.Runtime(
+                f"{type(error).__name__}: {error}"
+            ) from error
 
 
 class VifuRuntime:

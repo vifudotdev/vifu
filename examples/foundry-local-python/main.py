@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import time
 from pathlib import Path
 
 from foundry_local_sdk import Configuration, FoundryLocalManager
 
 from vifu import Vifu
-from vifu.integrations.foundry import trace_foundry_stream
+from vifu.integrations.foundry import foundry_chunk_text, trace_foundry_stream
 from web_search import search_web
 
 
@@ -28,7 +29,10 @@ def main() -> None:
 
     @app.agent("web-search", name="Web Search", capability="search")
     def web_search(request):
-        return {"query": request.input["query"], "sources": search_web(request.input["query"])}
+        return {
+            "query": request.input["query"],
+            "sources": search_web(request.input["query"], current=True),
+        }
 
     @app.agent(
         "researcher",
@@ -45,17 +49,18 @@ def main() -> None:
         messages = [{
             "role": "user",
             "content": (
-                "Write a concise research brief from the web sources below. "
-                "Cite factual claims with source numbers such as [1]. Do not invent facts.\n\n"
+                "Write a concise research draft using only the sources below. "
+                "Use one bullet per supported finding and begin every bullet with its "
+                "source number, such as [1]. If a source does not support a finding, "
+                "do not include it.\n\n"
                 f"Question: {request.input['question']}\n\n{source_text}"
             ),
         }]
         chunks = client.complete_streaming_chat(messages)
         observed = trace_foundry_stream(request, chunks, model=MODEL)
-        answer = "".join(
-            chunk.choices[0].delta.content or ""
-            for chunk in observed
-        )
+        answer = "".join(foundry_chunk_text(chunk) for chunk in observed)
+        if not answer.strip():
+            raise RuntimeError(f"Foundry Local model {MODEL} returned no text")
         return {"brief": answer, "sources": sources}
 
     def run_my_app(vifu: Vifu) -> None:
@@ -70,10 +75,14 @@ def main() -> None:
             {"question": question, "sources": search.output["sources"]},
             session_id="arm-research",
         )
+        print("Local research draft:\n")
         print(report.output["brief"])
         print("\nSources:")
-        for source in report.output["sources"]:
-            print(f"- {source['title']}: {source['url']}")
+        for index, source in enumerate(report.output["sources"], start=1):
+            print(f"[{index}] {source['title']}: {source['url']}")
+        print("\nWeb Research is running. Press Ctrl+C to stop.")
+        while True:
+            time.sleep(3_600)
 
     try:
         app.run(run_my_app)

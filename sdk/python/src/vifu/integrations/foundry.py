@@ -24,7 +24,7 @@ def trace_foundry_stream(
     owns messages, output assembly, and business behavior.
     """
 
-    read_content = content or _chunk_content
+    read_content = content or foundry_chunk_text
     stream = iter(chunks)
     with request.trace.stage("first_token", metadata={"model": model}):
         try:
@@ -45,8 +45,10 @@ def _report_delta(request: AgentRequest, value: str) -> None:
         request.trace.output_delta({"text": value})
 
 
-def _chunk_content(chunk: Any) -> str:
+def foundry_chunk_text(chunk: Any) -> str:
+    """Returns text from a Foundry chat chunk, or empty text for control chunks."""
     choices = getattr(chunk, "choices", None)
     if not choices:
         return ""
-    return getattr(choices[0].delta, "content", None) or ""
+    delta = getattr(choices[0], "delta", None)
+    return getattr(delta, "content", None) or ""

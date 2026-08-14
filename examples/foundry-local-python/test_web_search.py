@@ -38,6 +38,17 @@ class WebSearchTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             search_web("  ")
 
+    def test_current_research_uses_an_english_news_feed(self) -> None:
+        response = mock.MagicMock()
+        response.__enter__.return_value.read.return_value = RSS
+        with mock.patch("urllib.request.urlopen", return_value=response) as open_url:
+            search_web("Arm on-device AI", current=True)
+
+        request = open_url.call_args.args[0]
+        self.assertIn("news.google.com/rss/search", request.full_url)
+        self.assertIn("hl=en-US", request.full_url)
+        self.assertIn("ceid=US%3Aen", request.full_url)
+
 
 if __name__ == "__main__":
     unittest.main()

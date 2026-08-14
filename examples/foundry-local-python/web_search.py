@@ -11,15 +11,31 @@ import urllib.request
 import xml.etree.ElementTree as ET
 
 
-def search_web(query: str, limit: int = 5) -> list[dict[str, str]]:
+def search_web(
+    query: str,
+    limit: int = 5,
+    *,
+    current: bool = False,
+) -> list[dict[str, str]]:
     query = query.strip()
     if not query:
         raise ValueError("query must not be empty")
     if limit < 1 or limit > 10:
         raise ValueError("limit must be between 1 and 10")
-    url = "https://www.bing.com/search?" + urllib.parse.urlencode(
-        {"q": query, "format": "rss"}
-    )
+    if current:
+        url = "https://news.google.com/rss/search?" + urllib.parse.urlencode({
+            "q": query,
+            "hl": "en-US",
+            "gl": "US",
+            "ceid": "US:en",
+        })
+    else:
+        url = "https://www.bing.com/search?" + urllib.parse.urlencode({
+            "q": query,
+            "format": "rss",
+            "setlang": "en-US",
+            "cc": "US",
+        })
     request = urllib.request.Request(
         url,
         headers={"User-Agent": "Vifu Web Research Example/0.1"},
@@ -45,4 +61,4 @@ def clean_text(value: str) -> str:
 
 if __name__ == "__main__":
     query = " ".join(sys.argv[1:]).strip() or "Arm-optimized on-device AI"
-    print(json.dumps(search_web(query), indent=2, ensure_ascii=False))
+    print(json.dumps(search_web(query, current=True), indent=2, ensure_ascii=False))

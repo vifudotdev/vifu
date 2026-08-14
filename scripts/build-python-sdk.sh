@@ -6,8 +6,22 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TARGET_DIR="${CARGO_TARGET_DIR:-$REPO_ROOT/target}"
 DIST_DIR="${VIFU_PYTHON_DIST_DIR:-$TARGET_DIR/python-sdk}"
 SOURCE_DIR="$REPO_ROOT/sdk/python/src/vifu"
+CONSOLE_ASSETS_DIR="${VIFU_CONSOLE_ASSETS_DIR:-$REPO_ROOT/target/vifu-console-assets}"
 OS_NAME="$(uname -s)"
 IS_WINDOWS="false"
+
+if [[ -z "${VIFU_CONSOLE_ASSETS_DIR:-}" ]]; then
+    (
+        cd "$REPO_ROOT"
+        bun run build:console
+    )
+fi
+if [[ ! -s "$CONSOLE_ASSETS_DIR/index.html" ]]; then
+    echo "The Vifu Dashboard build did not produce $CONSOLE_ASSETS_DIR/index.html." >&2
+    exit 1
+fi
+export VIFU_CONSOLE_ASSETS_DIR="$CONSOLE_ASSETS_DIR"
+export VIFU_REQUIRE_CONSOLE_ASSETS=1
 
 case "$OS_NAME" in
     Darwin)
@@ -44,6 +58,7 @@ cargo build \
 cargo build \
     --manifest-path "$REPO_ROOT/Cargo.toml" \
     --locked \
+    --release \
     -p vifu-mobile-ffi \
     --no-default-features \
     --bin uniffi-bindgen
@@ -64,7 +79,7 @@ if [[ "$OS_NAME" == "Darwin" ]]; then
         -id "@rpath/$LIBRARY_NAME" \
         "$DIST_DIR/vifu/$LIBRARY_NAME"
 fi
-"$TARGET_DIR/debug/uniffi-bindgen" generate \
+"$TARGET_DIR/release/uniffi-bindgen" generate \
     --library "$TARGET_DIR/release/$LIBRARY_NAME" \
     --language python \
     --out-dir "$DIST_DIR/vifu" \

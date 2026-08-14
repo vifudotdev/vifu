@@ -10,7 +10,7 @@ from urllib.parse import urlparse
 from .app_store import VifuAppRecord, VifuAppStore
 from .gateway import DEFAULT_LOCAL_SERVER_URL, VifuGateway
 from .runtime import AgentHandler, Invocation, JsonValue, VifuRuntime
-from .server import VifuServer
+from .server import VifuServer, VifuServerConfig
 
 
 class Vifu:
@@ -23,10 +23,16 @@ class Vifu:
         data_dir: str | Path | None = None,
         workspace: str | Path | None = None,
         server_url: str = DEFAULT_LOCAL_SERVER_URL,
+        server_config: VifuServerConfig | None = None,
         capture_trace_content: bool = False,
     ):
+        if server_config is not None:
+            if server_url != DEFAULT_LOCAL_SERVER_URL and server_url != server_config.address:
+                raise ValueError("server_url and server_config.address must match")
+            server_url = server_config.address
         self.name = _display_name(name)
         self.server_url = server_url
+        self.server_config = server_config or VifuServerConfig(address=server_url)
         self.capture_trace_content = capture_trace_content
         self._data_dir = data_dir
         self._store = VifuAppStore(workspace)
@@ -189,7 +195,11 @@ class Vifu:
             raise ValueError(
                 "automatic App creation requires a loopback Vifu Server URL"
             )
-        VifuServer.ensure(self.server_url)
+        VifuServer.ensure(
+            self.server_url,
+            profile=self.server_config.profile,
+            overrides=self.server_config.overrides,
+        )
         self._app = self._store.open(self.server_url, self.name)
         self._runtime = VifuRuntime(self._app.app_id, data_dir=self._data_dir)
         for agent_id, handler, options in self._registrations:

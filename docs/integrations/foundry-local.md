@@ -34,7 +34,7 @@ Register the application behavior that already uses `client`:
 
 ```python
 from vifu import Vifu
-from vifu.integrations.foundry import trace_foundry_stream
+from vifu.integrations.foundry import foundry_chunk_text, trace_foundry_stream
 
 app = Vifu("web-research", capture_trace_content=True)
 
@@ -52,16 +52,15 @@ def research(request):
         chunks,
         model="qwen2.5-0.5b",
     )
-    answer = "".join(
-        chunk.choices[0].delta.content or ""
-        for chunk in observed
-    )
+    answer = "".join(foundry_chunk_text(chunk) for chunk in observed)
     return {"answer": answer}
 ```
 
 The Foundry method call and its native chunks remain visible in application
 code. `trace_foundry_stream` yields those same chunks. It records
 `first_token`, `decode`, and output-delta telemetry while they pass through.
+`foundry_chunk_text` returns empty text for Foundry control chunks, so output
+assembly does not assume every chunk contains a model choice.
 
 ## 3. Run Existing Product Logic
 

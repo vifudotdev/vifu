@@ -22,6 +22,8 @@ Server. The installation uses prebuilt files for your platform.
 Create `app.py`:
 
 ```python
+import time
+
 from vifu import AgentResponse, Vifu
 
 app = Vifu("workshop-guide", capture_trace_content=True)
@@ -51,6 +53,9 @@ def run_my_app(vifu):
         session_id="game-session-7",
     )
     print(result.output)
+    print("App and Agents are online. Press Ctrl+C to stop.")
+    while True:
+        time.sleep(3_600)
 
 
 app.run(run_my_app)
@@ -69,7 +74,8 @@ python app.py
 
 The SDK completes these actions:
 
-1. It reuses or starts your personal Server at `http://127.0.0.1:6790`.
+1. It reuses or starts your personal Server at `http://127.0.0.1:6790`. The
+   bundled Vifu binary serves the Dashboard at the same address.
 2. It creates this App on its first run and records the binding in
    `.vifu/app.json`.
 3. It opens the App's embedded Runtime.
@@ -94,6 +100,29 @@ stages.
 Create another directory with another `Vifu("name")` program to create another
 App. Both Apps stay available in the same personal Dashboard and keep separate
 Agents, sessions, endpoints, Devices, and traces.
+
+## Configure Local Server Startup From Python
+
+The default `Vifu("name")` path needs no Server configuration. When an App
+needs a different local address or an existing Vifu profile, configure the
+managed Server in Python:
+
+```python
+from vifu import Vifu, VifuServerConfig
+
+app = Vifu(
+    "workshop-guide",
+    server_config=VifuServerConfig(
+        address="http://127.0.0.1:6799",
+        profile="research",
+    ),
+)
+```
+
+`overrides` accepts scalar Vifu configuration overrides for advanced startup
+cases. These settings apply only when this Python process starts the local
+Server. If a Server is already ready at `address`, the SDK reuses that process
+and leaves its active configuration unchanged.
 
 ## Let Your Application Own The Loop
 

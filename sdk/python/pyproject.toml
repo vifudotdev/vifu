@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "vifu"
-version = "0.1.2"
+version = "0.1.3"
 description = "Embed Vifu Runtime, Gateway, and local Server in Python agent applications."
 readme = "README.md"
 requires-python = ">=3.10"

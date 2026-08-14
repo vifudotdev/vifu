@@ -6,7 +6,14 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from vifu import AgentResponse, GatewayPairing, Vifu, VifuRuntime, VifuServer
+from vifu import (
+    AgentResponse,
+    GatewayPairing,
+    Vifu,
+    VifuRuntime,
+    VifuServer,
+    VifuServerConfig,
+)
 from vifu.app_store import VifuAppRecord, VifuAppStore
 from vifu.gateway import (
     DEFAULT_LOCAL_BOOTSTRAP_TOKEN,
@@ -127,6 +134,26 @@ class VifuRuntimeTests(unittest.TestCase):
             )
             runtime.close()
 
+    def test_python_provider_exception_fails_without_panicking_worker(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = VifuRuntime("python-errors", data_dir=directory)
+
+            def broken(_request):
+                raise IndexError("missing model choice")
+
+            runtime.agent("broken", broken)
+            runtime.agent("healthy", lambda _request: {"text": "still running"})
+
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "provider broken-provider request failed",
+            ):
+                runtime.invoke("broken", {})
+            result = runtime.invoke("healthy", {})
+
+            self.assertEqual(result.output, {"text": "still running"})
+            runtime.close()
+
     def test_pairing_parser_accepts_direct_and_web_codes(self) -> None:
         direct = GatewayPairing.parse(
             "vifu://gateway/enroll?server=http%3A%2F%2F192.168.1.10%3A6790&token=vifu_ge_test"
@@ -176,6 +203,58 @@ class VifuRuntimeTests(unittest.TestCase):
         self.assertIn("--server-only", arguments)
         self.assertIn("server.address=http://127.0.0.1:6799", arguments)
         self.assertTrue(start.call_args.kwargs["shared"])
+
+    def test_high_level_app_passes_typed_server_startup_configuration(self) -> None:
+        config = VifuServerConfig(
+            address="http://127.0.0.1:6799",
+            profile="research",
+            overrides={"server.deployment_id": "local-research"},
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            app = Vifu("Configured App", data_dir=directory, server_config=config)
+
+            with mock.patch.object(VifuServer, "ensure", return_value=None) as ensure:
+                with mock.patch.object(
+                    VifuAppStore,
+                    "open",
+                    return_value=VifuAppRecord(APP_ID, "configured-app", "Configured App"),
+                ):
+                    _ = app.runtime
+
+            ensure.assert_called_once_with(
+                "http://127.0.0.1:6799",
+                profile="research",
+                overrides={"server.deployment_id": "local-research"},
+            )
+            app.close()
+
+    def test_server_config_serializes_overrides_for_the_cli(self) -> None:
+        managed = mock.Mock(running=True)
+        with mock.patch.object(VifuServer, "is_ready", side_effect=[False, True]):
+            with mock.patch.object(VifuServer, "start", return_value=managed) as start:
+                VifuServer.ensure(
+                    profile="research",
+                    overrides={
+                        "server.deployment_id": "local-research",
+                        "server.dashboard.address": "127.0.0.1:6791",
+                    },
+                )
+
+        self.assertEqual(
+            start.call_args.kwargs["arguments"],
+            [
+                "--no-browser",
+                "--server-only",
+                "--profile",
+                "research",
+                "-c",
+                "server.address=http://127.0.0.1:6790",
+                "-c",
+                'server.deployment_id="local-research"',
+                "-c",
+                'server.dashboard.address="127.0.0.1:6791"',
+            ],
+        )
 
 
 APP_ID = "vifu_app_" + "a" * 64

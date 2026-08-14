@@ -8,7 +8,9 @@ clickable source URLs.
 Foundry Local still downloads, loads, serves, and unloads the model. The
 program keeps its native client call and output assembly. Vifu adds the App,
 two Agent identities, inference-stage timing, Device connection, sessions, and
-Dashboard traces.
+Dashboard traces. The installed Vifu wheel contains the complete Vifu binary,
+including its embedded Dashboard; the example starts it automatically when a
+local Server is not already running.
 
 ## Run It
 
@@ -32,17 +34,20 @@ python examples/foundry-local-python/main.py
 The first run downloads the execution provider and the selected model. Later
 runs use the local model cache.
 
-The example searches for current uses of Arm-optimized on-device AI, sends the
-returned sources to the local model, prints the cited brief, and lists every
-source URL. Open the printed Dashboard URL and select **My Apps → Web
-Research** to inspect both Agents and their separate traces.
+The example searches an English-language current-news feed for uses of
+Arm-optimized on-device AI, sends the returned sources to the local model,
+prints a source-constrained draft, and lists every numbered source URL. Open
+the printed Dashboard URL and select **My Apps → Web
+Research** to inspect both Agents and their separate traces. The App and its
+Agents remain online until you press `Ctrl+C`.
 
 `trace_foundry_stream` yields the original Foundry chunks and reports the
 `first_token` and `decode` stages. It does not create a chat handler, manage
 conversation history, or own the model lifecycle.
 
-The example uses Bing's RSS search response so it needs network access for the
-search step. Model inference remains inside Foundry Local.
+The example uses Google News RSS for the current-research step and Bing RSS for
+general searches, so search needs network access. Model inference remains
+inside Foundry Local.
 
 Read the [Foundry Local integration guide](../../docs/integrations/foundry-local.md)
 for integration details and platform notes.

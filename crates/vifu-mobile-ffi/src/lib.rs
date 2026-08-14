@@ -47,7 +47,6 @@ pub struct VifuOpenClawProbeReport {
 }
 
 #[derive(Debug, thiserror::Error, uniffi::Error)]
-#[uniffi(flat_error)]
 pub enum VifuRuntimeError {
     #[error("{message}")]
     InvalidConfig { message: String },
