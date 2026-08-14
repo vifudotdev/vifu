@@ -446,20 +446,31 @@ async function verify() {
     headers: { cookie: `vifu_admin_session=${state.authCookieValue}` },
   });
   assert(dashboardSession.ok, "Dashboard web session did not survive restart");
-  const [apps, profiles, bindings, endpoints, agentGateways, traces] = await Promise.all([
-    request("/v1/apps"),
-    request("/v1/profiles"),
-    request("/v1/bindings"),
-    request("/v1/endpoints"),
-    request("/v1/agent-gateways"),
-    request("/v1/traces?limit=500"),
-  ]);
-  assert(apps.apps.some((item) => item.id === state.projectId), "App was not persisted");
-  assert(apps.apps.some((item) => item.id === state.scopeTargetProjectId), "API key target App was not persisted");
-  assert(state.profileIds.every((id) => profiles.profiles.some((item) => item.id === id)), "Profiles were not persisted");
-  assert(state.bindingIds.every((id) => bindings.bindings.some((item) => item.id === id)), "Bindings were not persisted");
-  assert(state.endpointIds.every((id) => endpoints.endpoints.some((item) => item.id === id)), "Endpoints were not persisted");
-  assert(state.requestIds.every((id) => traces.traces.some((item) => item.requestId === id)), "Traces were not persisted");
+  const { profiles, agentGateways, traces } = await waitFor(
+    "the complete persisted App state after deployment restart",
+    async () => {
+      const [apps, profiles, bindings, endpoints, agentGateways, traces] = await Promise.all([
+        request("/v1/apps"),
+        request("/v1/profiles"),
+        request("/v1/bindings"),
+        request("/v1/endpoints"),
+        request("/v1/agent-gateways"),
+        request("/v1/traces?limit=500"),
+      ]);
+      const missing = {
+        apps: [state.projectId, state.scopeTargetProjectId]
+          .filter((id) => !apps.apps.some((item) => item.id === id)),
+        profiles: state.profileIds.filter((id) => !profiles.profiles.some((item) => item.id === id)),
+        bindings: state.bindingIds.filter((id) => !bindings.bindings.some((item) => item.id === id)),
+        endpoints: state.endpointIds.filter((id) => !endpoints.endpoints.some((item) => item.id === id)),
+        traces: state.requestIds.filter((id) => !traces.traces.some((item) => item.requestId === id)),
+      };
+      if (Object.values(missing).some((ids) => ids.length > 0)) {
+        throw new Error(`missing persisted resources: ${JSON.stringify(missing)}`);
+      }
+      return { profiles, agentGateways, traces };
+    },
+  );
   assert(traces.traces.some((item) => item.projectId === state.projectId), "Project endpoint traces were not persisted");
   if (state.openAiProviderKey) {
     const providers = (await request(`/v1/apps/${state.projectSlug}/providers`)).providers ?? [];
