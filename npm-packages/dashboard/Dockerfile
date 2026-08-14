@@ -6,6 +6,7 @@ ENV NEXT_TELEMETRY_DISABLED=1
 WORKDIR /app
 COPY package.json bun.lock tsconfig.base.json ./
 COPY npm-packages/dashboard/package.json npm-packages/dashboard/package.json
+COPY npm-packages/sdk/package.json npm-packages/sdk/package.json
 COPY packages/protocol/package.json packages/protocol/package.json
 COPY packages/console/package.json packages/console/package.json
 RUN bun install --frozen-lockfile
