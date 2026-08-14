@@ -4,7 +4,7 @@
 
 <div align="center">
 
-<b>Build, connect, and inspect on-device AI agents.</b>
+<b>Build Agent Apps with on-device models.</b>
 
 [![Crates.io](https://img.shields.io/crates/v/vifu.svg)](https://crates.io/crates/vifu)
 [![PyPI](https://img.shields.io/pypi/v/vifu.svg)](https://pypi.org/project/vifu/)
