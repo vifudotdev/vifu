@@ -893,6 +893,7 @@ pub struct EndpointTrace {
     pub profile_version_number: Option<i32>,
     pub operation: String,
     pub provider_key: Option<String>,
+    pub provider_name: Option<String>,
     pub capability_kind: Option<String>,
     pub selection_key: Option<String>,
     pub status: String,

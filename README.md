@@ -12,136 +12,97 @@
 [![CI](https://github.com/vifudotdev/vifu/actions/workflows/ci.yml/badge.svg)](https://github.com/vifudotdev/vifu/actions/workflows/ci.yml)
 [![Discord](https://img.shields.io/badge/Discord-Join-5865F2?logo=discord&logoColor=white)](https://discord.com/invite/VdqqFwJbNE)
 
-[quick start](#quick-start) / [build with Vifu](docs/get-started/README.md) / [docs](docs/README.md) / [install](docs/install.md) / [traces](docs/observability.md) / [providers](providers/README.md) / [self-host](docs/self-hosting.md) / [build](BUILD.md)
+[quick start](#quick-start) / [developer guides](docs/get-started/README.md) / [examples](examples/README.md) / [documentation](docs/README.md) / [releases](https://github.com/vifudotdev/vifu/releases/latest)
 
 </div>
 
 ## Quick start
 
-### Build a local Python Agent App
+### Build a Python Agent App
 
-Install the Python SDK and run the Web Research Agent App:
+1. Run the [Web Research Agent App](examples/foundry-local-python/README.md).
 
 ```bash
-python3 -m venv .venv
-. .venv/bin/activate
-python -m pip install "vifu[foundry]"
-curl -LO https://raw.githubusercontent.com/vifudotdev/vifu/main/examples/foundry-local-python/main.py
-python main.py
+uv run --with "vifu[foundry]" https://raw.githubusercontent.com/vifudotdev/vifu/main/examples/foundry-local-python/main.py
 ```
 
-The Python package starts the local Vifu Server and Dashboard, creates the
-**Web Research** App, and connects its search and research Agents. Enter a
-topic in the terminal, then open the printed Dashboard URL to inspect the
-Agents and traces. Open **Agents → Local Researcher → Prompt** to see or edit
-the live research instructions. The next research request uses the saved
-prompt.
+2. Open the Dashboard at [http://127.0.0.1:6790](http://127.0.0.1:6790).
 
-Foundry Local runs the model on the development machine. The research example
-uses public web search to obtain current sources. See the
-[Python tutorial](docs/get-started/python.md) and the
-[complete example guide](examples/foundry-local-python/README.md) to build your
-own App and add more Agents.
+3. Open **Web Research -> Traces**.
 
-### Connect an Android on-device App
+4. Enter a topic at the `Research>` prompt. Open the new Trace and check:
 
-1. Download the archive for your platform from the
-   [latest release](https://github.com/vifudotdev/vifu/releases/latest), extract
-   it, and start `./vifu`.
-2. Install the
-   [optimized Android Starter APK](https://github.com/vifudotdev/vifu/releases/download/android-starter-v0.1.1/vifu-android-starter.apk).
-   You can also [build the Starter from source](examples/android-starter/README.md#build-from-source).
+   - **Latency**: total request time.
+   - **first_token**: time before the first model output.
+   - **decode**: time spent generating the remaining output.
 
-Vifu creates a local Runtime profile and opens the Runtime TUI. It stores local
-state in SQLite under `~/.vifu`.
+5. Open **Agents -> Local Researcher -> Prompt**, edit the Prompt, then select
+   **Save & make live**.
 
-Press `B` to open the Dashboard. The default Dashboard address is
-`http://127.0.0.1:6790`. Vifu continues to serve requests until you stop the
-TUI.
+6. Enter the same topic again.
 
-Pair the Android Starter with Vifu to inspect its inference stages. Install the
-[baseline APK](https://github.com/vifudotdev/vifu/releases/download/android-starter-v0.1.1/vifu-android-starter-baseline.apk)
-beside the optimized APK. Pair both applications with the same Vifu project to
-compare their traces on one device. Use a new one-time pairing code for each
-application. For iOS and other integrations, use the [examples guide](examples/README.md).
+7. Open the latest [Trace](docs/observability.md). Confirm **Configuration used**
+   shows the new Prompt, then compare its timings with the first Trace.
 
-## Description
+### Connect an on-device App
 
-Vifu is an on-device Agent Runtime and local operations platform. It gives
-applications stable endpoints for AI Agents that run across phones, computers,
-games, and embedded devices. Product code owns the UI, safety rules, and
-allowed actions.
+1. Download and extract the [latest Vifu release](https://github.com/vifudotdev/vifu/releases/latest).
+2. Start `./vifu`, then press `B` to open the Dashboard.
+3. Install the [optimized Android Starter APK](https://github.com/vifudotdev/vifu/releases/download/android-starter-v0.1.1/vifu-android-starter.apk).
+4. Open **Devices** in the Dashboard and pair the Starter.
 
-Vifu manages the provider connections, Agents, endpoints, sessions, keys,
-routes, and traces for each App.
+Install the [baseline APK](https://github.com/vifudotdev/vifu/releases/download/android-starter-v0.1.1/vifu-android-starter-baseline.apk)
+beside the optimized APK to compare both builds. The [Android guide](examples/android-starter/README.md)
+also explains how to build the Starter.
 
-- Connect local or external Providers to named endpoints.
-- Call endpoints through an OpenAI-compatible HTTP API.
-- Inspect stages, latency, model identity, Agents, and devices in the TUI or Dashboard.
-- Embed the Rust Runtime in an application.
-- Connect an embedded Runtime to a Server through Agent Gateway.
-- Compare model, Provider, build, and device performance with attributable traces.
-- Import or export Project Settings as JSON.
+## What Vifu does
 
-## Available surfaces
+Vifu is a development platform for Agent Apps that use on-device models. Each
+App groups its Agents, Providers, devices, endpoints, and traces.
 
-| Surface | Distribution | Start here |
-| --- | --- | --- |
-| Local Server and embedded Console | Release binary | [Install](docs/install.md) or [Embedded Console](docs/embedded-console.md) |
-| Self-host Server and Console | Docker Compose | [Self-host](docs/self-hosting.md) |
-| Agent Providers | Built-in and configurable adapters | [Provider integrations](providers/README.md) |
-| Rust embedding | crates.io package | [Embed the Runtime](docs/runtime-embedding.md) |
-| Python | `pip install vifu` | [Python tutorial](docs/get-started/python.md) |
-| TypeScript/Node.js | Rust Runtime through WebAssembly and native Gateway companion | [TypeScript tutorial](docs/get-started/typescript.md) |
-| Swift on iOS/macOS | SwiftPM package | [Apple application guide](docs/runtime-embedding.md#add-vifu-to-an-apple-application) |
-| Android Starter | Release APK and Kotlin source project | [Android Starter](examples/android-starter/README.md) |
-| iOS Starter | SwiftUI source and optional TestFlight beta | [iOS Starter](examples/ios-starter/README.md) |
-| Godot in an Apple host | VifuGodot SwiftPM package | [VifuGodot guide](integrations/godot/apple/README.md) |
-| Kotlin/Android | Modular Core, llama, and Whisper ARM64 Maven AARs | [Android Starter](examples/android-starter/README.md) |
+Your product owns its interface, domain state, safety rules, and allowed
+actions. Vifu supplies the Runtime, Gateway, Server, TUI, and Dashboard.
+
+- Register multiple Agents and Providers in one App.
+- Expose each Agent through a stable endpoint.
+- Inspect prompts, versions, model calls, inference stages, and performance.
+- Compare models, builds, Providers, and devices with attributable traces.
+- Call local Agents through one OpenAI-compatible API.
+- Manage many independent Apps from one Vifu installation.
+
+## Supported environments
+
+| Environment | Guide |
+| --- | --- |
+| macOS, Linux, or Windows | [Install Vifu](docs/install.md) |
+| Python | [Build a Python App](docs/get-started/python.md) |
+| Node.js | [Build a TypeScript App](docs/get-started/typescript.md) |
+| Android | [Use the Android Starter](examples/android-starter/README.md) |
+| iPhone, iPad, or macOS App | [Build with Swift](docs/get-started/swift.md) |
+| Godot on iPhone, iPad, or macOS | [Build with Godot](docs/get-started/godot.md) |
+| Rust or an embedded device | [Embed the Runtime](docs/runtime-embedding.md) |
 
 ## Documentation
 
-- [Dashboard architecture](docs/dashboard-architecture.md)
-- [Build with Vifu in each language](docs/get-started/README.md)
-- [Understand and compare trace data](docs/observability.md)
+#### Build applications
 
-#### Use Vifu
+- [Build with Python, TypeScript, Swift, Kotlin, Godot, or Rust](docs/get-started/README.md)
+- [Run the examples and mobile starters](examples/README.md)
+- [Add Providers](providers/README.md) and [integrate agent frameworks](docs/integrations/README.md)
+- [Embed the Runtime](docs/runtime-embedding.md)
+
+#### Operate Vifu
 
 - [Install Vifu](docs/install.md)
-- [Apps and App IDs](docs/apps-and-app-ids.md)
-- [Runtime topology and Gateway enrollment](docs/topology-and-pairing.md)
-- [Embedded Console](docs/embedded-console.md)
-- [ARM optimization TUI](docs/arm-optimization-tui.md)
-- [Self-host with Docker](docs/self-hosting.md)
-- [Project Settings](docs/project-settings.md)
-- [Provider integrations](providers/README.md)
-- [Framework and model integrations](docs/integrations/README.md)
-- [Google ADK](docs/integrations/google-adk.md)
-- [Foundry Local](docs/integrations/foundry-local.md)
-- [Local llama Provider](providers/llama/README.md)
-- [Local Whisper Provider](providers/local-whisper/README.md)
+- [Read traces and compare performance](docs/observability.md)
+- [Connect devices and Gateways](docs/topology-and-pairing.md)
+- [Self-host Vifu](docs/self-hosting.md)
+- [Read the full documentation index](docs/README.md)
 
-#### Embed Vifu
+## Contributing
 
-- [Embed the Runtime](docs/runtime-embedding.md)
-- [Python SDK](sdk/python/README.md)
-- [TypeScript SDK](npm-packages/sdk/README.md)
-- [vifu-runtime API](https://docs.rs/vifu-runtime)
-- [vifu-gateway](crates/vifu-gateway/README.md)
-- [VifuGodot for Apple hosts](integrations/godot/apple/README.md)
-- [Mobile FFI for Apple and Android hosts](crates/vifu-mobile-ffi/README.md)
-- [Runnable examples and mobile starters](examples/README.md)
-- [Android Starter](examples/android-starter/README.md)
-- [iOS Starter](examples/ios-starter/README.md)
-- [Godot iOS Starter](examples/godot-ios-starter/README.md)
-- [Android AAR reference](integrations/android/README.md)
-
-#### Development
-
-- [Build and test](BUILD.md)
-- [Positioning and related projects](docs/comparison.md)
-- [Contributing](CONTRIBUTING.md)
-- [Security](SECURITY.md)
+Read the [build guide](BUILD.md), [contribution guide](CONTRIBUTING.md), and
+[security policy](SECURITY.md).
 
 Vifu is licensed under [Apache-2.0](LICENSE). The license does not grant rights
 to the Vifu name and logos. See [TRADEMARKS.md](TRADEMARKS.md).

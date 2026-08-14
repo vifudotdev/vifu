@@ -301,6 +301,7 @@ export type EndpointTrace = {
   profileVersionNumber: number | null;
   operation: string;
   providerKey: string | null;
+  providerName?: string | null;
   capabilityKind: string | null;
   selectionKey: string | null;
   status: string;

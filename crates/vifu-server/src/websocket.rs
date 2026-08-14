@@ -386,13 +386,19 @@ async fn persist_runtime_telemetry(
         });
     let provider_key = runtime_provider_key
         .map(|provider_key| crate::gateway_identity::scoped_provider_key(gateway_id, provider_key));
-    let profile_identity = match deployment.active_release_version {
+    let release_manifest = match deployment.active_release_version {
         Some(version) => db::get_project_runtime_release(&state.pool, project.project.id, version)
             .await
             .ok()
-            .and_then(|release| runtime_trace_profile_identity(&release.manifest, &batch.agent_id)),
+            .map(|release| release.manifest),
         None => None,
     };
+    let profile_identity = release_manifest
+        .as_ref()
+        .and_then(|manifest| runtime_trace_profile_identity(manifest, &batch.agent_id));
+    let provider_name = release_manifest
+        .as_ref()
+        .and_then(|manifest| runtime_trace_provider_name(manifest, &batch.agent_id));
     let request = json!({
         "source": "embedded-runtime-live",
         "gatewayId": gateway_id,
@@ -402,6 +408,7 @@ async fn persist_runtime_telemetry(
         "endpoint": batch.endpoint,
         "agent": batch.agent_id,
         "runtimeProviderKey": runtime_provider_key,
+        "providerName": provider_name,
     });
     let request_id = crate::api::runtime_trace_uuid("request", gateway_id, &batch.trace_id);
     let trace_id = crate::api::runtime_trace_uuid("trace", gateway_id, &batch.trace_id);
@@ -503,17 +510,31 @@ pub(crate) fn runtime_trace_profile_identity(
     manifest: &Value,
     agent_id: &str,
 ) -> Option<(Uuid, Uuid)> {
-    let profile = manifest
-        .get("agents")?
-        .as_array()?
-        .iter()
-        .find(|agent| agent.get("id").and_then(Value::as_str) == Some(agent_id))?
-        .get("metadata")?
-        .get("agentProfile")?;
+    let profile = runtime_trace_agent_metadata(manifest, agent_id)?.get("agentProfile")?;
     Some((
         Uuid::parse_str(profile.get("id")?.as_str()?).ok()?,
         Uuid::parse_str(profile.get("versionId")?.as_str()?).ok()?,
     ))
+}
+
+pub(crate) fn runtime_trace_provider_name<'a>(
+    manifest: &'a Value,
+    agent_id: &str,
+) -> Option<&'a str> {
+    runtime_trace_agent_metadata(manifest, agent_id)?
+        .get("providerName")?
+        .as_str()
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+}
+
+fn runtime_trace_agent_metadata<'a>(manifest: &'a Value, agent_id: &str) -> Option<&'a Value> {
+    manifest
+        .get("agents")?
+        .as_array()?
+        .iter()
+        .find(|agent| agent.get("id").and_then(Value::as_str) == Some(agent_id))?
+        .get("metadata")
 }
 
 fn gateway_supports_feature(metadata: &serde_json::Value, feature: &str) -> bool {
@@ -853,40 +874,34 @@ async fn reconcile_project_agents(
         for (project_id, project_slug) in projects {
             db::archive_legacy_discovered_provider(&state.pool, project_id, runtime_provider_key)
                 .await?;
-            if !db::project_provider_is_assigned(&state.pool, project_id, &provider_key).await? {
-                let provider_name = agent
-                    .metadata
-                    .get("providerName")
-                    .and_then(serde_json::Value::as_str)
-                    .filter(|name| !name.trim().is_empty())
-                    .unwrap_or(&agent.name);
-                let provider_config = discovered_provider_config(
-                    agent,
-                    gateway_id,
-                    runtime_provider_key,
+            let provider_name = agent
+                .metadata
+                .get("providerName")
+                .and_then(serde_json::Value::as_str)
+                .filter(|name| !name.trim().is_empty())
+                .unwrap_or(&agent.name);
+            let provider_config =
+                discovered_provider_config(agent, gateway_id, runtime_provider_key, provider_type);
+            let encrypted_secret_json =
+                encrypt_secret_json("{}", &state.config.provider_secret_key)?;
+            db::upsert_provider_connection(
+                &state.pool,
+                &project_slug,
+                db::NewProviderConnection {
+                    provider_key: &provider_key,
+                    source_kind: "custom",
+                    source_key: runtime_provider_key,
+                    name: provider_name,
                     provider_type,
-                );
-                let encrypted_secret_json =
-                    encrypt_secret_json("{}", &state.config.provider_secret_key)?;
-                db::upsert_provider_connection(
-                    &state.pool,
-                    &project_slug,
-                    db::NewProviderConnection {
-                        provider_key: &provider_key,
-                        source_kind: "custom",
-                        source_key: runtime_provider_key,
-                        name: provider_name,
-                        provider_type,
-                        base_url: "",
-                        config: &provider_config,
-                        encrypted_secret_json: &encrypted_secret_json,
-                        secret_keys: &[],
-                        display_secret: None,
-                        status: "online",
-                    },
-                )
-                .await?;
-            }
+                    base_url: "",
+                    config: &provider_config,
+                    encrypted_secret_json: &encrypted_secret_json,
+                    secret_keys: &[],
+                    display_secret: None,
+                    status: "online",
+                },
+            )
+            .await?;
             match db::find_project_profile_by_provider_resource(
                 &state.pool,
                 project_id,
@@ -1106,7 +1121,8 @@ mod tests {
         authorize_gateway_machine, authorize_gateway_machine_with_local_access,
         can_recover_missing_guest_token, decode_command, discovered_provider_config,
         encode_command, gateway_pairing_url, reconcile_project_agents,
-        runtime_trace_profile_identity, scoped_provider_key, GatewayAuthorizationOutcome,
+        runtime_trace_profile_identity, runtime_trace_provider_name, scoped_provider_key,
+        GatewayAuthorizationOutcome,
     };
     use crate::auth::{encrypt_secret_json, hash_api_key};
     use crate::config::Config;
@@ -1239,6 +1255,21 @@ mod tests {
             Some((second_profile, second_version))
         );
         assert_eq!(runtime_trace_profile_identity(&manifest, "missing"), None);
+    }
+
+    #[test]
+    fn runtime_trace_provider_name_uses_the_invoked_agent_metadata() {
+        let manifest = json!({
+            "agents": [
+                { "id": "researcher", "metadata": { "providerName": "Foundry Local" } },
+                { "id": "editor", "metadata": { "providerName": "llama.cpp" } }
+            ]
+        });
+
+        assert_eq!(
+            runtime_trace_provider_name(&manifest, "researcher"),
+            Some("Foundry Local")
+        );
     }
 
     #[test]
@@ -1407,6 +1438,76 @@ mod tests {
         assert_eq!(providers.len(), 1);
         assert_eq!(providers[0].provider_key, provider_key);
         assert_eq!(providers[0].source_key, "openclaw-local");
+    }
+
+    #[tokio::test]
+    async fn gateway_reconnect_refreshes_discovered_provider_metadata() {
+        let Some(pool) = maybe_test_pool().await else {
+            return;
+        };
+        let gateway_id = format!("guest-gateway-{}", Uuid::new_v4().simple());
+        let project_id = Uuid::new_v4();
+        let project_slug = format!("guest-project-{}", Uuid::new_v4().simple());
+        db::create_project(
+            &pool,
+            NewProject {
+                id: project_id,
+                owner_user_id: None,
+                slug: &project_slug,
+                name: "Guest project",
+                description: None,
+                gateway_id: &gateway_id,
+                binding_ids: &[],
+            },
+        )
+        .await
+        .unwrap();
+        let state = state_with_storage(Config::from_env().unwrap(), pool);
+
+        reconcile_project_agents(
+            &state,
+            &gateway_id,
+            &[AgentDescriptor {
+                id: "researcher".to_string(),
+                name: "Local Researcher".to_string(),
+                metadata: json!({
+                    "providerKey": "researcher-provider",
+                    "providerType": "vifu-runtime"
+                }),
+            }],
+        )
+        .await
+        .unwrap();
+        reconcile_project_agents(
+            &state,
+            &gateway_id,
+            &[AgentDescriptor {
+                id: "researcher".to_string(),
+                name: "Local Researcher".to_string(),
+                metadata: json!({
+                    "providerKey": "researcher-provider",
+                    "providerType": "vifu-runtime",
+                    "providerName": "Foundry Local",
+                    "providerSettings": {
+                        "framework": "Foundry Local",
+                        "model": "qwen2.5-0.5b"
+                    }
+                }),
+            }],
+        )
+        .await
+        .unwrap();
+
+        let providers = db::list_provider_connections(&state.pool, &project_slug)
+            .await
+            .unwrap();
+        assert_eq!(
+            (&providers[0].name, &providers[0].config["settings"]),
+            (
+                &"Foundry Local".to_string(),
+                &json!({ "framework": "Foundry Local", "model": "qwen2.5-0.5b" })
+            )
+        );
     }
 
     #[tokio::test]

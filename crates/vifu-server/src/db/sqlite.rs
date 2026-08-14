@@ -4971,6 +4971,10 @@ pub async fn list_traces(
                 profile.name AS profile_name,
                 profile_version.version_number AS profile_version_number,
                 trace.operation, trace.provider_key,
+                (SELECT provider.name FROM provider_connections provider
+                 WHERE provider.project_id = trace.project_id
+                       AND provider.provider_key = trace.provider_key
+                 LIMIT 1) AS provider_name,
                 trace.capability_kind, trace.selection_key, trace.status, trace.latency_ms,
                 (SELECT span.model FROM trace_spans span
                  WHERE span.trace_id = trace.id AND span.parent_span_id IS NULL

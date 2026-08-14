@@ -1042,6 +1042,28 @@ mod tests {
         close_local_bootstrap_test_storage(path, storage).await;
     }
 
+    #[tokio::test]
+    async fn local_sdk_reopens_an_existing_named_app_without_a_manifest() {
+        let (path, storage, state) = local_bootstrap_test_state("vifu-local-sdk-name").await;
+        let router = app(state);
+        let request = || {
+            Request::post("/v1/local/apps/open")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"name":"Web Research"}"#))
+                .unwrap()
+        };
+        let created = router.clone().oneshot(request()).await.unwrap();
+        assert_eq!(created.status(), StatusCode::CREATED);
+        let created = response_json(created).await;
+
+        let reopened = router.oneshot(request()).await.unwrap();
+        assert_eq!(reopened.status(), StatusCode::OK);
+        let reopened = response_json(reopened).await;
+
+        assert_eq!(reopened["app"]["appId"], created["app"]["appId"]);
+        close_local_bootstrap_test_storage(path, storage).await;
+    }
+
     #[test]
     fn gateway_pairing_uri_contains_the_endpoint_token_and_pinned_certificate() {
         let endpoint = ServerEndpointIdentity {

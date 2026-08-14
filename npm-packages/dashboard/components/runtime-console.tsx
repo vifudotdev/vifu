@@ -19,6 +19,7 @@ import type {
   AgentGateway,
   AvailableAgent,
   EndpointTrace,
+  ProjectProvider,
   RuntimeProject,
   ServerCapabilities,
 } from "../lib/runtime-types";
@@ -223,7 +224,7 @@ function ProjectSectionView({
       />
     );
   }
-  if (section === "logs") return <LogsView project={project} traces={appTraces(data.runtime.traces, project)} />;
+  if (section === "logs") return <LogsView project={project} providers={data.projectProviders} traces={appTraces(data.runtime.traces, project)} />;
   if (section === "settings") {
     return (
       <SettingsView
@@ -442,10 +443,10 @@ function ErrorTraceList({ traces }: { traces: EndpointTrace[] }) {
   );
 }
 
-function LogsView({ project, traces }: { project: RuntimeProject; traces: EndpointTrace[] }) {
+function LogsView({ project, providers, traces }: { project: RuntimeProject; providers: ProjectProvider[]; traces: EndpointTrace[] }) {
   return (
     <section className="content-section trace-section convex-trace-section">
-      <RuntimeTraceWorkbench projectId={project.id} projectSlug={project.slug} traces={traces} />
+      <RuntimeTraceWorkbench projectId={project.id} projectSlug={project.slug} providers={providers} traces={traces} />
     </section>
   );
 }

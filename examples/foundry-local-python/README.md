@@ -15,22 +15,15 @@ local Server is not already running.
 
 ## Run It
 
-Use Python 3.11 or a later version. Create an environment from the repository
-root:
+Use Python 3.11 or a later version. Run the example from the repository root
+with [`uv`](https://docs.astral.sh/uv/getting-started/installation/):
 
 ```bash
-python3.11 -m venv .venv
-. .venv/bin/activate
-python -m pip install --upgrade "vifu[foundry]"
+uv run --with "vifu[foundry]" examples/foundry-local-python/main.py
 ```
 
-On Windows, install `"vifu[foundry-winml]"` for Windows ML acceleration.
-
-Run the example:
-
-```bash
-python examples/foundry-local-python/main.py
-```
+On Windows, replace `vifu[foundry]` with `vifu[foundry-winml]` for Windows ML
+acceleration.
 
 The first run downloads the execution provider and the selected model. Later
 runs use the local model cache.

@@ -126,13 +126,16 @@ pub async fn open_local_app(
     let projects = db::list_projects(&state.pool).await?;
     if let Some(app_id) = input.app_id.as_deref() {
         if let Some(project) = projects
-            .into_iter()
+            .iter()
             .find(|project| project.project.app_id == app_id)
         {
             return Ok((StatusCode::OK, Json(json!({ "app": project }))));
         }
     }
     let slug = project_slug(None, name)?;
+    if let Some(project) = projects.iter().find(|project| project.project.slug == slug) {
+        return Ok((StatusCode::OK, Json(json!({ "app": project }))));
+    }
     let project = db::create_project(
         &state.pool,
         NewProject {
@@ -2445,6 +2448,11 @@ pub async fn upload_agent_gateway_runtime_traces(
             .ok_or_else(|| ApiError::Invalid("runtime trace timestamp is invalid".to_string()))?;
         let latency_ms = i64::try_from(trace.duration_ms)
             .map_err(|_| ApiError::Invalid("runtime trace duration is invalid".to_string()))?;
+        let provider_name = trace.agent.as_deref().and_then(|agent_id| {
+            active_release.as_ref().and_then(|release| {
+                crate::websocket::runtime_trace_provider_name(&release.manifest, agent_id)
+            })
+        });
         let request = json!({
             "source": "embedded-runtime",
             "gatewayId": gateway_id,
@@ -2453,6 +2461,7 @@ pub async fn upload_agent_gateway_runtime_traces(
             "invocationId": trace.invocation_id,
             "endpoint": trace.endpoint,
             "agent": trace.agent,
+            "providerName": provider_name,
         });
         let request_id = runtime_trace_uuid("request", &gateway_id, &trace.id);
         let trace_id = runtime_trace_uuid("trace", &gateway_id, &trace.id);
@@ -9132,6 +9141,7 @@ mod tests {
             profile_version_number: None,
             operation: "chat".to_string(),
             provider_key: None,
+            provider_name: None,
             capability_kind: None,
             selection_key: None,
             status: "completed".to_string(),

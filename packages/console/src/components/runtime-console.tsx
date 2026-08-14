@@ -23,6 +23,7 @@ import type {
   AgentProfileDetail,
   AvailableAgent,
   EndpointTrace,
+  ProjectProvider,
   RuntimeProject,
   ServerCapabilities,
 } from "../types";
@@ -250,6 +251,7 @@ function ProjectSectionView({
         project={project}
         traces={appTraces(data.runtime.traces, project)}
         profileDetails={data.profileDetails}
+        providers={data.projectProviders}
       />
     );
   }
@@ -501,10 +503,12 @@ function ErrorTraceList({ traces }: { traces: EndpointTrace[] }) {
 function TracesView({
   profileDetails,
   project,
+  providers,
   traces,
 }: {
   profileDetails: AgentProfileDetail[];
   project: RuntimeProject;
+  providers: ProjectProvider[];
   traces: EndpointTrace[];
 }) {
   return (
@@ -513,6 +517,7 @@ function TracesView({
         profileDetails={profileDetails}
         projectId={project.id}
         projectSlug={project.slug}
+        providers={providers}
         traces={traces}
       />
     </section>

@@ -90,11 +90,19 @@ def main() -> None:
 
     app = Vifu(
         "Web Research",
-        workspace=Path(__file__).parent,
+        workspace=Path.cwd(),
         capture_trace_content=True,
     )
 
-    @app.agent("web-search", name="Web Search", capability="search")
+    @app.agent(
+        "web-search",
+        name="Web Search",
+        capability="search",
+        metadata={
+            "providerName": "Python Web Search",
+            "providerSettings": {"sources": ["Google News RSS", "Bing RSS"]},
+        },
+    )
     def web_search(request):
         search_query, search_mode, sources = find_sources(request.input["query"])
         return {
@@ -108,7 +116,12 @@ def main() -> None:
         "researcher",
         name="Local Researcher",
         capability="research",
-        metadata={"framework": "foundry-local", "model": MODEL},
+        metadata={
+            "framework": "foundry-local",
+            "model": MODEL,
+            "providerName": "Foundry Local",
+            "providerSettings": {"framework": "Foundry Local", "model": MODEL},
+        },
         instructions=(
             "Write a concise research brief using only the supplied sources. "
             "Use one bullet per supported finding and begin every bullet with "

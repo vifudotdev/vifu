@@ -15,6 +15,7 @@ import {
   traceIoValues,
   traceListPresentation,
   traceListPath,
+  traceProviderLabel,
   traceScoresForSelection,
   traceSelectionFromUrl,
   traceSelectionUrl,
@@ -112,6 +113,58 @@ describe("traceListPresentation", () => {
       .toBe("not applicable");
     expect(traceListPresentation(endpointTrace({ appOutcome: "unknown" })).appScore)
       .toBe("unknown");
+  });
+});
+
+describe("traceProviderLabel", () => {
+  it("uses the configured Provider name instead of its scoped key", () => {
+    const trace = endpointTrace({ providerKey: "foundry-local--device-hash" });
+
+    expect(traceProviderLabel(trace, [{
+      name: "Foundry Local",
+      providerKey: "foundry-local--device-hash",
+    }])).toBe("Foundry Local");
+  });
+
+  it("matches historical Provider records by Gateway and runtime Provider key", () => {
+    const trace = endpointTrace({
+      gatewayId: "gateway-phone",
+      providerKey: "researcher-provider--old-scope",
+      request: { runtimeProviderKey: "researcher-provider" },
+    });
+
+    expect(traceProviderLabel(trace, [{
+      name: "Foundry Local",
+      providerKey: "researcher-provider--new-scope",
+      config: {
+        gatewayId: "gateway-phone",
+        runtimeProviderKey: "researcher-provider",
+      },
+    }])).toBe("Foundry Local");
+  });
+
+  it("uses the Provider name recorded by the Runtime manifest", () => {
+    const trace = endpointTrace({
+      providerKey: "researcher-provider--device-hash",
+      request: { providerName: "Foundry Local" },
+    });
+
+    expect(traceProviderLabel(trace, [])).toBe("Foundry Local");
+  });
+
+  it("uses the Provider name resolved by the Trace API", () => {
+    const trace = endpointTrace({
+      providerKey: "researcher-provider--device-hash",
+      providerName: "Foundry Local",
+    });
+
+    expect(traceProviderLabel(trace, [])).toBe("Foundry Local");
+  });
+
+  it("does not invent a Provider name from an internal key", () => {
+    const trace = endpointTrace({ providerKey: "researcher-provider--device-hash" });
+
+    expect(traceProviderLabel(trace, [])).toBe("Unknown Provider");
   });
 });
 
@@ -389,6 +442,7 @@ function endpointTrace(overrides: Partial<EndpointTrace> = {}): EndpointTrace {
     profileVersionNumber: 1,
     operation: "chat.completions",
     providerKey: "local-llama",
+    providerName: null,
     capabilityKind: "chat",
     selectionKey: null,
     status: "completed",

@@ -143,6 +143,37 @@ export function traceAgentLabel(trace: EndpointTrace): string {
   return trace.gatewaySessionId ? `Gateway ${shortId(trace.gatewaySessionId, 8)}` : "Agent";
 }
 
+export function traceProviderLabel(
+  trace: EndpointTrace,
+  providers: ReadonlyArray<{
+    config?: Record<string, unknown>;
+    name: string;
+    providerKey: string;
+  }>,
+): string {
+  const declaredName = firstString(
+    trace.providerName,
+    nestedValue(trace.request, "providerName"),
+  );
+  if (declaredName) return declaredName;
+  if (!trace.providerKey) return "Unknown Provider";
+  const exact = providers.find((provider) => provider.providerKey === trace.providerKey);
+  if (exact) return exact.name;
+
+  const runtimeProviderKey = firstString(
+    nestedValue(trace.request, "runtimeProviderKey"),
+    trace.providerKey.split("--", 1)[0],
+  );
+  const gatewayId = firstString(trace.gatewayId, nestedValue(trace.request, "gatewayId"));
+  const compatible = providers.find((provider) => (
+    firstString(provider.config?.runtimeProviderKey) === runtimeProviderKey
+    && (!gatewayId || firstString(provider.config?.gatewayId) === gatewayId)
+  ));
+  if (compatible) return compatible.name;
+
+  return "Unknown Provider";
+}
+
 export function traceSearchText(trace: EndpointTrace): string {
   const presentation = traceListPresentation(trace);
   return [

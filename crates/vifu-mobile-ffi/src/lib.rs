@@ -894,6 +894,7 @@ impl VifuEmbeddedRuntime {
                 .or_default()
                 .extend(agent.capabilities.iter().cloned());
         }
+        let mut provider_settings = embedded_provider_settings(&agents)?;
         let providers = provider_types
             .iter()
             .map(|(id, provider_type)| ProviderRequirement {
@@ -904,7 +905,9 @@ impl VifuEmbeddedRuntime {
                     .unwrap_or_default()
                     .into_iter()
                     .collect(),
-                settings: serde_json::json!({}),
+                settings: provider_settings
+                    .remove(id)
+                    .unwrap_or_else(|| serde_json::json!({})),
                 resources: BTreeMap::new(),
             })
             .collect();
@@ -933,6 +936,35 @@ impl VifuEmbeddedRuntime {
         self.runtime.install_release(&release)?;
         Ok(self.runtime.activate_release(version)?.manifest)
     }
+}
+
+fn embedded_provider_settings(
+    agents: &[AgentDefinition],
+) -> Result<BTreeMap<String, Value>, VifuRuntimeError> {
+    let mut settings_by_provider = BTreeMap::new();
+    for agent in agents {
+        let Some(settings) = agent.metadata.get("providerSettings") else {
+            continue;
+        };
+        if !settings.is_object() {
+            return Err(VifuRuntimeError::InvalidConfig {
+                message: format!("agent {} providerSettings must be a JSON object", agent.id),
+            });
+        }
+        if let Some(existing) = settings_by_provider.get(&agent.provider) {
+            if existing != settings {
+                return Err(VifuRuntimeError::InvalidConfig {
+                    message: format!(
+                        "agents using provider {} must declare the same providerSettings",
+                        agent.provider
+                    ),
+                });
+            }
+        } else {
+            settings_by_provider.insert(agent.provider.clone(), settings.clone());
+        }
+    }
+    Ok(settings_by_provider)
 }
 
 #[derive(Debug, Clone, uniffi::Record)]
@@ -1335,6 +1367,43 @@ mod tests {
         assert_eq!(manifest.providers[0].provider_type, "native");
         assert_eq!(manifest.agents[0].id, "guide");
         assert_eq!(manifest.endpoints[0].name, "guide");
+    }
+
+    #[test]
+    fn embedded_gateway_manifest_preserves_declared_provider_settings() {
+        let runtime = VifuEmbeddedRuntime::new("gateway-provider-settings".to_string()).unwrap();
+        runtime
+            .register_streaming_provider(
+                "foundry-local".to_string(),
+                "python".to_string(),
+                Box::new(StreamingEchoProvider),
+            )
+            .unwrap();
+        runtime
+            .register_agent(
+                "researcher".to_string(),
+                "Local Researcher".to_string(),
+                "foundry-local".to_string(),
+                vec!["research".to_string()],
+                serde_json::json!({
+                    "providerSettings": {
+                        "framework": "Foundry Local",
+                        "model": "qwen2.5-0.5b"
+                    }
+                })
+                .to_string(),
+            )
+            .unwrap();
+
+        let manifest = runtime.prepare_gateway_release().unwrap();
+
+        assert_eq!(
+            manifest.providers[0].settings,
+            serde_json::json!({
+                "framework": "Foundry Local",
+                "model": "qwen2.5-0.5b"
+            })
+        );
     }
 
     #[test]

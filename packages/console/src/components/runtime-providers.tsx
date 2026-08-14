@@ -129,13 +129,14 @@ function ProjectProviderCard({
   }
 
   const status = online ? "Online" : provider.status === "configured" ? "Configured" : titleCase(provider.status);
+  const configuration = providerConfigurationSummary(provider);
   return (
     <article className="provider-resource-card project-provider-card">
       <button className="provider-resource-main" type="button" onClick={onConfigure}>
         <ProviderMark type={provider.providerType} />
         <div>
           <strong>{provider.name}</strong>
-          <p>{adapter?.description ?? provider.baseUrl}</p>
+          <p>{configuration ?? adapter?.description ?? provider.baseUrl}</p>
         </div>
         <span className={`provider-health ${online ? "online" : provider.status === "configured" ? "configured" : "offline"}`}>
           <i />{status}
@@ -448,12 +449,30 @@ function providerCapabilities(provider: ProjectProvider, fallback: string[]): st
   return declared.length > 0 ? declared : fallback;
 }
 
+function providerConfigurationSummary(provider: ProjectProvider): string | null {
+  const settings = recordValue(provider.config.settings);
+  const model = stringValue(settings?.model);
+  if (model) return `Model ${model}`;
+  const sources = Array.isArray(settings?.sources)
+    ? settings.sources.filter((value): value is string => typeof value === "string")
+    : [];
+  if (sources.length > 0) return sources.join(" · ");
+  const runtime = stringValue(provider.config.runtimeProviderType);
+  return runtime ? `${titleCase(runtime)} runtime` : null;
+}
+
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : "The request failed.";
 }
 
 function stringValue(value: unknown): string {
   return typeof value === "string" ? value : "";
+}
+
+function recordValue(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
 }
 
 function providerJsonFieldValue(value: unknown): string {

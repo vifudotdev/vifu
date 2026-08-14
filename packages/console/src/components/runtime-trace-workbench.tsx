@@ -28,6 +28,7 @@ import {
   sameTraceSpanRevision,
   traceListPresentation,
   traceListPath,
+  traceProviderLabel,
   traceIdForInvocation,
   traceEventSpansForSelection,
   traceSearchText,
@@ -44,6 +45,7 @@ import { traceDateWindowChanged } from "../trace-window";
 import type {
   AgentProfileDetail,
   EndpointTrace,
+  ProjectProvider,
   ProfileVersionWithCapabilities,
   TraceScore,
   TraceSpan,
@@ -59,6 +61,7 @@ type RuntimeTraceWorkbenchProps = {
   projectId: string;
   projectSlug: string;
   profileDetails?: AgentProfileDetail[];
+  providers?: ProjectProvider[];
   traces: EndpointTrace[];
 };
 
@@ -81,6 +84,7 @@ type RuntimeTraceScoresResponse = {
 
 type TraceListRow = {
   presentation: TraceListPresentation;
+  provider: string;
   searchText: string;
   trace: EndpointTrace;
 };
@@ -92,6 +96,7 @@ export function RuntimeTraceWorkbench({
   profileDetails = [],
   projectId,
   projectSlug,
+  providers = [],
   traces: initialTraces,
 }: RuntimeTraceWorkbenchProps) {
   const { request } = useRuntimeConsoleHost();
@@ -409,17 +414,25 @@ export function RuntimeTraceWorkbench({
     };
   }, [dateWindow.from, dateWindow.to, projectId, projectSlug, request]);
 
-  const rows = useMemo<TraceListRow[]>(() => traces.map((trace) => ({
-    presentation: traceListPresentation(trace),
-    searchText: traceSearchText(trace),
-    trace,
-  })), [traces]);
+  const rows = useMemo<TraceListRow[]>(() => traces.map((trace) => {
+    const provider = traceProviderLabel(trace, providers);
+    return {
+      presentation: traceListPresentation(trace),
+      provider,
+      searchText: `${traceSearchText(trace)} ${provider.toLowerCase()}`,
+      trace,
+    };
+  }), [providers, traces]);
 
-  const pausedRows = useMemo<TraceListRow[]>(() => pausedTraces.map((trace) => ({
-    presentation: traceListPresentation(trace),
-    searchText: traceSearchText(trace),
-    trace,
-  })), [pausedTraces]);
+  const pausedRows = useMemo<TraceListRow[]>(() => pausedTraces.map((trace) => {
+    const provider = traceProviderLabel(trace, providers);
+    return {
+      presentation: traceListPresentation(trace),
+      provider,
+      searchText: `${traceSearchText(trace)} ${provider.toLowerCase()}`,
+      trace,
+    };
+  }), [pausedTraces, providers]);
 
   const agentOptions = useMemo(
     () => uniqueSorted([...rows, ...pausedRows].map((row) => row.presentation.agent)),
@@ -708,6 +721,8 @@ export function RuntimeTraceWorkbench({
                 <div>Date / time</div>
                 <div>Status</div>
                 <div>Agent</div>
+                <div>Provider</div>
+                <div>Model</div>
                 <div>Gateway</div>
                 <div>Latency</div>
                 <div>TTFT</div>
@@ -750,6 +765,7 @@ export function RuntimeTraceWorkbench({
                   error={spansError}
                   selectedObservationId={selectedObservationId}
                   profileVersion={selectedProfileVersion}
+                  providerName={traceProviderLabel(selectedTrace, providers)}
                   onSelectObservation={setSelectedObservationId}
                   onClose={closeTrace}
                 />
@@ -795,6 +811,8 @@ function TraceRow({
         <time title={formatDate(trace.createdAt)}>{formatShortDateTime(trace.createdAt)}</time>
         <span className={`trace-status ${presentation.status}`}>{presentation.statusLabel}</span>
         <strong title={presentation.agent}>{presentation.agent}</strong>
+        <strong title={row.provider}>{row.provider}</strong>
+        <span title={presentation.model ?? undefined}>{presentation.model ?? "-"}</span>
         <code title={presentation.gatewayId ?? presentation.gateway}>{presentation.gateway}</code>
         <span>{formatMetric(presentation.latencyMs, "ms")}</span>
         <span>{formatMetric(presentation.ttftMs, "ms")}</span>
@@ -813,6 +831,7 @@ const TraceDetail = memo(function TraceDetail({
   scores,
   selectedObservationId,
   profileVersion,
+  providerName,
   spans,
   trace,
 }: {
@@ -823,6 +842,7 @@ const TraceDetail = memo(function TraceDetail({
   scores: TraceScore[];
   selectedObservationId: string | null;
   profileVersion: ProfileVersionWithCapabilities | null;
+  providerName: string;
   spans: TraceSpan[];
   trace: EndpointTrace;
 }) {
@@ -882,6 +902,7 @@ const TraceDetail = memo(function TraceDetail({
                   selectedSpan={selectedSpan}
                   scores={scores}
                   profileVersion={profileVersion}
+                  providerName={providerName}
                 />
               </div>
             </div>
@@ -977,6 +998,7 @@ function ObservationList({
 
 function TraceDetailTab({
   profileVersion,
+  providerName,
   scores,
   selectedSpan,
   spans,
@@ -984,6 +1006,7 @@ function TraceDetailTab({
   trace,
 }: {
   profileVersion: ProfileVersionWithCapabilities | null;
+  providerName: string;
   scores: TraceScore[];
   selectedSpan: TraceSpan | null;
   spans: TraceSpan[];
@@ -994,6 +1017,7 @@ function TraceDetailTab({
     return (
       <TraceSummary
         profileVersion={profileVersion}
+        providerName={providerName}
         trace={trace}
         spans={spans}
         selectedSpan={selectedSpan}
@@ -1024,8 +1048,9 @@ function TraceDetailTab({
   return <TraceEvents spans={spans} selectedSpan={selectedSpan} />;
 }
 
-function TraceSummary({ profileVersion, trace, spans, selectedSpan }: {
+function TraceSummary({ profileVersion, providerName, trace, spans, selectedSpan }: {
   profileVersion: ProfileVersionWithCapabilities | null;
+  providerName: string;
   trace: EndpointTrace;
   spans: TraceSpan[];
   selectedSpan: TraceSpan | null;
@@ -1044,7 +1069,7 @@ function TraceSummary({ profileVersion, trace, spans, selectedSpan }: {
 
   return (
     <div className="trace-summary-panel">
-      <TraceConfiguration profileVersion={profileVersion} trace={trace} />
+      <TraceConfiguration profileVersion={profileVersion} providerName={providerName} trace={trace} />
       <div className="trace-summary-io">
         <TracePayload title="Input" value={io.input} />
         <TracePayload title="Output" value={io.output} />
@@ -1054,7 +1079,7 @@ function TraceSummary({ profileVersion, trace, spans, selectedSpan }: {
         <div><dt>Type</dt><dd>{selectedSpan ? observationType(selectedSpan) : "trace"}</dd></div>
         <div><dt>Status</dt><dd>{selectedSpan?.status ?? trace.status}</dd></div>
         <div><dt>Duration</dt><dd>{formatMetric(selectedSpan?.durationMs ?? trace.latencyMs, "ms")}</dd></div>
-        <div><dt>Provider</dt><dd>{selectedSpan?.providerKey ?? trace.providerKey ?? "-"}</dd></div>
+        <div><dt>Provider</dt><dd>{providerName}</dd></div>
         <div><dt>Gateway</dt><dd title={trace.gatewayId ?? undefined}>{traceListPresentation(trace).gateway}</dd></div>
         <div><dt>Model</dt><dd>{selectedSpan ? observationModel(selectedSpan) ?? "-" : traceListPresentation(trace).model ?? "-"}</dd></div>
         <div><dt>TTFT</dt><dd>{formatMetric(selectedSpan ? observationTtftMs(selectedSpan) : traceListPresentation(trace).ttftMs, "ms")}</dd></div>
@@ -1080,9 +1105,11 @@ function TraceSummary({ profileVersion, trace, spans, selectedSpan }: {
 
 function TraceConfiguration({
   profileVersion,
+  providerName,
   trace,
 }: {
   profileVersion: ProfileVersionWithCapabilities | null;
+  providerName: string;
   trace: EndpointTrace;
 }) {
   const persona = profileVersion?.version.persona;
@@ -1117,7 +1144,7 @@ function TraceConfiguration({
             </div>
             <div>
               <dt>Provider</dt>
-              <dd>{profileVersion.capabilities.map((capability) => capability.providerKey).join(", ") || "Provider default"}</dd>
+              <dd>{providerName}</dd>
             </div>
             <div>
               <dt>Generation</dt>

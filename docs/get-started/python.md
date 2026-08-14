@@ -6,12 +6,12 @@ development.
 
 ## 1. Install the Python SDK
 
-Create a virtual environment. Then install the prebuilt wheel:
+Create a project and add the prebuilt wheel with
+[`uv`](https://docs.astral.sh/uv/getting-started/installation/):
 
 ```bash
-python3 -m venv .venv
-. .venv/bin/activate
-python -m pip install vifu
+uv init --python 3.11
+uv add vifu
 ```
 
 The wheel contains the Python API, native Runtime, Agent Gateway, and local
@@ -71,7 +71,7 @@ consent control before you enable this option in a distributed application.
 Run the Python process:
 
 ```bash
-python app.py
+uv run app.py
 ```
 
 The SDK completes these actions:

@@ -1738,6 +1738,7 @@ mod tests {
         .await
         .expect("traces should list");
         assert_eq!(traces.len(), 1);
+        assert_eq!(traces[0].provider_name.as_deref(), Some("Local provider"));
         assert_eq!(traces[0].app_outcome.as_deref(), Some("unknown"));
         assert_eq!(
             get_trace_project_id(&storage, trace_id)
