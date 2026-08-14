@@ -64,6 +64,8 @@ class VifuRuntimeTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "must not be empty"):
                     _ = app.runtime
 
+            self.assertIsNone(app._runtime)
+
     def test_high_level_app_requires_a_name(self) -> None:
         with self.assertRaises(ValueError):
             Vifu("  ")

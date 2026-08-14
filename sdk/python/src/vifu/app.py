@@ -219,6 +219,10 @@ class Vifu:
             for agent_id, handler, options in self._registrations:
                 self._runtime.agent(agent_id, handler, **options)
         except Exception:
+            if self._runtime is not None:
+                runtime = self._runtime
+                self._runtime = None
+                runtime.close()
             if self._server is not None:
                 server = self._server
                 self._server = None
