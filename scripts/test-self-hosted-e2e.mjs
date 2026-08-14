@@ -336,7 +336,7 @@ async function setup() {
   assert(
     visibleModelIds.size === expectedModelIds.length
       && expectedModelIds.every((modelId) => visibleModelIds.has(modelId)),
-    "Project key did not list all project models",
+    `Project key model mismatch: expected ${JSON.stringify(expectedModelIds)}, received ${JSON.stringify([...visibleModelIds])}`,
   );
 
   const missingModel = await rawRequest(
