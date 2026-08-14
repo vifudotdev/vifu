@@ -46,11 +46,11 @@ Run the complete
 [`google-adk-typescript`](../../examples/google-adk-typescript/) example with
 the official ADK development tools.
 
-## Pair The Delegated Runtime
+## Connect the Delegated Runtime
 
-Call `runtime.connect(...)` once the Vifu Agent is registered. Use a readable
-Gateway name such as `ADK local tools on MacBook`. The Dashboard then separates
-the ADK application's local task from other devices and Agents.
+Use the high-level `Vifu` API when the ADK process owns the application
+lifecycle. It connects to the local Vifu Server without a pairing code. Use the
+lower-level Gateway API for a remote Server or an explicit deployment.
 
 The Vifu trace covers work inside the Vifu endpoint. ADK's outer reasoning is
 owned by ADK. Correlate the two systems by returning the Vifu invocation ID

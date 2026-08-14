@@ -15,6 +15,9 @@ from urllib.parse import parse_qs, urlparse
 from . import vifu_mobile_ffi as native
 from ._version import __version__
 
+DEFAULT_LOCAL_SERVER_URL = "http://127.0.0.1:6790"
+DEFAULT_LOCAL_BOOTSTRAP_TOKEN = "vifu-local-agent-gateway-bootstrap-token"
+
 if TYPE_CHECKING:
     from .runtime import VifuRuntime
 
@@ -81,13 +84,22 @@ class VifuGateway:
         pairing_code: str | None,
         name: str | None,
         capture_trace_content: bool,
+        local_server_url: str | None = None,
     ) -> VifuGateway:
         credentials_path = runtime.data_dir / "gateway.json"
         stored = _load_credentials(credentials_path)
         pairing = GatewayPairing.parse(pairing_code) if pairing_code is not None else None
-        if pairing is None and stored is None:
+        if pairing is None and stored is None and local_server_url is None:
             raise ValueError("pairing_code is required for the first Gateway connection")
-        server_url = pairing.server_url if pairing is not None else stored.server_url
+        server_url = (
+            pairing.server_url
+            if pairing is not None
+            else local_server_url.rstrip("/")
+            if local_server_url is not None
+            else stored.server_url
+        )
+        if local_server_url is not None:
+            _validate_local_server_url(server_url)
         if stored is None or stored.server_url != server_url:
             identity = native.generate_vifu_gateway_identity()
             stored = _GatewayCredentials(
@@ -117,6 +129,8 @@ class VifuGateway:
             ),
         )
         enrollment_token = pairing.enrollment_token if pairing is not None else None
+        if local_server_url is not None and stored.device_token is None:
+            enrollment_token = _local_bootstrap_token()
         if capture_trace_content:
             gateway.start_with_monitor_io(
                 stored.machine_private_key,
@@ -188,3 +202,30 @@ def _save_credentials(path: Path, credentials: _GatewayCredentials) -> None:
     if os.name != "nt":
         temporary.chmod(0o600)
     temporary.replace(path)
+
+
+def _local_bootstrap_token() -> str:
+    value = os.environ.get("VIFU_AGENT_GATEWAY_BOOTSTRAP_TOKEN", "").strip()
+    if value:
+        return value
+    path = os.environ.get("VIFU_AGENT_GATEWAY_BOOTSTRAP_TOKEN_FILE", "").strip()
+    if path:
+        value = Path(path).read_text(encoding="utf-8").strip()
+        if not value:
+            raise ValueError("VIFU_AGENT_GATEWAY_BOOTSTRAP_TOKEN_FILE is empty")
+        return value
+    return DEFAULT_LOCAL_BOOTSTRAP_TOKEN
+
+
+def _validate_local_server_url(server_url: str) -> None:
+    parsed = urlparse(server_url)
+    if (
+        parsed.scheme not in {"http", "https"}
+        or parsed.hostname not in {"127.0.0.1", "localhost", "::1"}
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.query
+        or parsed.fragment
+        or parsed.path not in {"", "/"}
+    ):
+        raise ValueError("automatic local connection requires a loopback Vifu Server URL")

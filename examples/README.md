@@ -25,7 +25,7 @@ also needs the engine lifecycle and Runtime Bridge.
 
 | Example | Embedded Runtime | What it proves |
 | --- | --- | --- |
-| [`python-starter`](python-starter/) | Rust through UniFFI | Python Provider registration, invocation, and local trace |
+| [`python-starter`](python-starter/) | Rust through UniFFI | Automatic local connection, Python Agent invocation, and trace upload |
 | [`typescript-starter`](typescript-starter/) | Rust through WebAssembly | TypeScript Provider registration, invocation, and local trace |
 
 ## Framework and model adapters

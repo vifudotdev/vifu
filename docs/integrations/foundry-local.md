@@ -53,6 +53,6 @@ Both adapters consume Foundry Local's streaming API. They report:
 - output deltas for the host UI and optional content trace;
 - model and framework identity in bounded metadata.
 
-Pair the Runtime and compare the same prompt across model aliases or hardware.
-Keep the prompt, generation settings, and stopping rules fixed when comparing
-performance.
+Connect the Python Runtime to the local Vifu Server without a pairing code.
+Then compare the same prompt across model aliases or hardware. Keep the prompt,
+generation settings, and stopping rules fixed during the comparison.

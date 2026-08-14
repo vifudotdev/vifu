@@ -29,4 +29,4 @@ inference uses the local model cache. The example reports `first_token` and
 `decode` stages to Vifu.
 
 See the [Foundry Local integration guide](../../docs/integrations/foundry-local.md)
-to pair this Runtime with the Dashboard.
+to connect this Runtime to the Dashboard.

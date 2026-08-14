@@ -1,8 +1,8 @@
 # Build With Vifu
 
 Vifu embeds a Rust Agent Runtime in your application. Your code registers a
-Provider, an Agent, and a stable endpoint. The same Runtime can pair with a
-Vifu Server so the Dashboard can show device status and inference traces.
+Provider, an Agent, and a stable endpoint. The Runtime connects to a Vifu
+Server so the Dashboard can show device status and inference traces.
 
 Choose the language used by your application:
 
@@ -24,11 +24,11 @@ Every SDK follows the same six tasks:
 3. Register an Agent and give it a stable endpoint.
 4. Invoke the endpoint from product code.
 5. Report model stages such as `load`, `prefill`, `first_token`, and `decode`.
-6. Pair the Runtime with Vifu when you want remote calls and Dashboard traces.
+6. Connect the Runtime to Vifu for remote calls and Dashboard traces.
 
 The Runtime is the in-process application API. Gateway is the secure Server
-connection for that Runtime. Server operates multiple Apps, deployments, and
-Gateways. Most application code starts with Runtime and adds Gateway later.
+connection for that Runtime. Python joins the local App automatically. Remote
+devices use an App ID or explicit enrollment.
 
 ## Choose What Vifu Records
 

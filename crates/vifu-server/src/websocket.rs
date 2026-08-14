@@ -1,9 +1,10 @@
 use std::time::Duration;
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::State;
+use axum::extract::{ConnectInfo, State};
 use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Response};
+use axum::Extension;
 use chrono::Utc;
 use futures_util::{SinkExt, StreamExt};
 use serde_json::json;
@@ -30,19 +31,21 @@ const PAIRING_LIFETIME_MINUTES: i64 = 10;
 
 pub async fn upgrade(
     State(state): State<AppState>,
+    peer: Option<Extension<ConnectInfo<std::net::SocketAddr>>>,
     headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> Result<Response, ApiError> {
     let audience = gateway_audience(&headers);
+    let local_peer = peer.is_some_and(|Extension(ConnectInfo(peer))| peer.ip().is_loopback());
     Ok(ws
         .max_message_size(gateway_frame::MAX_GATEWAY_FRAME_BYTES)
         .max_frame_size(gateway_frame::MAX_GATEWAY_FRAME_BYTES)
-        .on_upgrade(move |socket| handle_socket(state, socket, audience))
+        .on_upgrade(move |socket| handle_socket(state, socket, audience, local_peer))
         .into_response())
 }
 
-async fn handle_socket(state: AppState, mut socket: WebSocket, audience: String) {
-    if let Err(error) = run_socket(&state, &mut socket, &audience).await {
+async fn handle_socket(state: AppState, mut socket: WebSocket, audience: String, local_peer: bool) {
+    if let Err(error) = run_socket(&state, &mut socket, &audience, local_peer).await {
         warn!(error = %error, "agent gateway websocket closed with an error");
         let protocol_error = AgentGatewayCommand::Error {
             request_id: None,
@@ -61,6 +64,7 @@ async fn run_socket(
     state: &AppState,
     socket: &mut WebSocket,
     audience: &str,
+    local_peer: bool,
 ) -> Result<(), String> {
     let nonce = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
     let challenge_timestamp = unix_time_ms()?;
@@ -110,11 +114,12 @@ async fn run_socket(
         .await
         .map_err(|error| error.to_string())?;
 
-    let authorization = authorize_gateway_machine(
+    let authorization = authorize_gateway_machine_with_local_access(
         state,
         &machine.id,
         auth.device_token.as_deref(),
         followup.as_deref(),
+        local_peer,
     )
     .await?;
     let (authorization, device_token, enrollment_id) = match authorization {
@@ -503,11 +508,23 @@ enum GatewayAuthorizationOutcome {
     },
 }
 
+#[cfg(test)]
 async fn authorize_gateway_machine(
     state: &AppState,
     machine_id: &str,
     device_token: Option<&str>,
     followup: Option<&str>,
+) -> Result<GatewayAuthorizationOutcome, String> {
+    authorize_gateway_machine_with_local_access(state, machine_id, device_token, followup, false)
+        .await
+}
+
+async fn authorize_gateway_machine_with_local_access(
+    state: &AppState,
+    machine_id: &str,
+    device_token: Option<&str>,
+    followup: Option<&str>,
+    local_peer: bool,
 ) -> Result<GatewayAuthorizationOutcome, String> {
     let mut authorization =
         db::get_agent_gateway_authorization_for_machine(&state.pool, machine_id)
@@ -564,6 +581,25 @@ async fn authorize_gateway_machine(
         .is_some_and(|value| is_secret_match(value, &state.config.agent_gateway_bootstrap_token))
     {
         explicitly_approved = true;
+        if local_peer && state.config.deployment_mode == crate::config::DeploymentMode::Local {
+            let app = crate::ensure_local_bootstrap_app(state, None)
+                .await
+                .map_err(|error| error.to_string())?;
+            let suggested_gateway_id = authorization
+                .as_ref()
+                .map(|value| value.gateway_id.clone())
+                .unwrap_or_else(new_gateway_id);
+            let assignment = db::authorize_runtime_distribution_gateway(
+                &state.pool,
+                &app.app_id,
+                machine_id,
+                &suggested_gateway_id,
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+            approved_owner = assignment.owner_user_id;
+            preferred_gateway_id = Some(assignment.gateway_id);
+        }
     }
 
     if !explicitly_approved {
@@ -1035,9 +1071,10 @@ mod tests {
     use vifu_gateway::session::SessionSummary;
 
     use super::{
-        authorize_gateway_machine, can_recover_missing_guest_token, decode_command,
-        discovered_provider_config, encode_command, gateway_pairing_url, reconcile_project_agents,
-        scoped_provider_key, GatewayAuthorizationOutcome,
+        authorize_gateway_machine, authorize_gateway_machine_with_local_access,
+        can_recover_missing_guest_token, decode_command, discovered_provider_config,
+        encode_command, gateway_pairing_url, reconcile_project_agents, scoped_provider_key,
+        GatewayAuthorizationOutcome,
     };
     use crate::auth::{encrypt_secret_json, hash_api_key};
     use crate::config::Config;
@@ -1707,6 +1744,86 @@ mod tests {
             _ => panic!("a valid App ID must authorize the installation"),
         };
         assert_eq!(authorization.owner_user_id.as_deref(), Some("app-owner"));
+    }
+
+    #[tokio::test]
+    async fn local_bootstrap_assigns_a_new_gateway_to_the_local_app() {
+        let Some(pool) = maybe_test_pool().await else {
+            return;
+        };
+        let config = Config::from_env().unwrap();
+        let bootstrap_token = config.agent_gateway_bootstrap_token.clone();
+        let state = state_with_storage(config, pool);
+        let app = crate::ensure_local_bootstrap_app(&state, None)
+            .await
+            .unwrap();
+        let machine = MachineIdentity::generate().unwrap();
+        db::upsert_agent_gateway_machine(&state.pool, &machine.machine_id, &machine.public_key)
+            .await
+            .unwrap();
+
+        let authorization = match authorize_gateway_machine_with_local_access(
+            &state,
+            &machine.machine_id,
+            None,
+            Some(&bootstrap_token),
+            true,
+        )
+        .await
+        .unwrap()
+        {
+            GatewayAuthorizationOutcome::Authorized {
+                authorization,
+                device_token: Some(_),
+                ..
+            } => authorization,
+            _ => panic!("the local bootstrap token must authorize the installation"),
+        };
+
+        assert!(
+            db::list_runtime_deployment_gateway_ids(&state.pool, app.deployment_id)
+                .await
+                .unwrap()
+                .contains(&authorization.gateway_id)
+        );
+    }
+
+    #[tokio::test]
+    async fn local_bootstrap_does_not_assign_a_remote_gateway() {
+        let Some(pool) = maybe_test_pool().await else {
+            return;
+        };
+        let config = Config::from_env().unwrap();
+        let bootstrap_token = config.agent_gateway_bootstrap_token.clone();
+        let state = state_with_storage(config, pool);
+        let app = crate::ensure_local_bootstrap_app(&state, None)
+            .await
+            .unwrap();
+        let machine = MachineIdentity::generate().unwrap();
+        db::upsert_agent_gateway_machine(&state.pool, &machine.machine_id, &machine.public_key)
+            .await
+            .unwrap();
+
+        let authorization = match authorize_gateway_machine_with_local_access(
+            &state,
+            &machine.machine_id,
+            None,
+            Some(&bootstrap_token),
+            false,
+        )
+        .await
+        .unwrap()
+        {
+            GatewayAuthorizationOutcome::Authorized { authorization, .. } => authorization,
+            _ => panic!("the deployment bootstrap token must authorize the installation"),
+        };
+
+        assert!(
+            !db::list_runtime_deployment_gateway_ids(&state.pool, app.deployment_id)
+                .await
+                .unwrap()
+                .contains(&authorization.gateway_id)
+        );
     }
 
     #[tokio::test]

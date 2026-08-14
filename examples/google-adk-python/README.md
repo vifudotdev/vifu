@@ -25,8 +25,8 @@ Ask ADK to run a task on the local device. Replace `local_provider` in
 `vifu_adk_agent/agent.py` with the model or framework used by your application.
 
 The ADK model in this example selects when to call the tool. The provider
-inside Vifu runs in the Python process. Pair the Runtime with a Vifu Server if
-you also want its Vifu trace in the Dashboard.
+inside Vifu runs in the Python process. A local Vifu connection does not use a
+pairing code.
 
 See the [Google ADK integration guide](../../docs/integrations/google-adk.md)
-for pairing and production boundaries.
+for connection and production boundaries.

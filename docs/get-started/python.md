@@ -1,15 +1,22 @@
-# Build A Python Agent With Vifu
+# Build a Python Agent With Vifu
 
-This tutorial embeds the native Vifu Runtime in a Python process, registers a
-Python callable as an Agent, invokes it, and makes it ready for Dashboard
-pairing.
+This tutorial creates a Python Agent and connects it to a local Vifu Server.
+The Server shows the Agent, Gateway, calls, and traces in its TUI and Dashboard.
 
-The `vifu` package contains generated UniFFI bindings and the native Rust core.
-It does not call a remote API for Runtime operations.
+## 1. Start Vifu
 
-## 1. Install Vifu
+Download the Vifu archive for your computer. Extract it and start Vifu:
 
-Create a virtual environment. Then install the package:
+```bash
+./vifu
+```
+
+Vifu creates one permanent Local app on the first start. Python Agents on this
+computer join that App automatically.
+
+## 2. Install the Python SDK
+
+Create a virtual environment. Then install the prebuilt wheel:
 
 ```bash
 python3 -m venv .venv
@@ -17,100 +24,80 @@ python3 -m venv .venv
 python -m pip install vifu
 ```
 
-## 2. Register An Agent
+The wheel contains the Python API and the native Rust Runtime. The installation
+does not compile Rust code.
+
+## 3. Create an Agent
 
 Create `app.py`:
 
 ```python
-from vifu import AgentResponse, VifuRuntime
+from vifu import AgentResponse, Vifu
 
-runtime = VifuRuntime("my-python-app")
+app = Vifu(
+    "my-python-agent",
+    capture_trace_content=True,
+)
 
-def answer(request):
+
+@app.agent(
+    "assistant",
+    name="Python Assistant",
+    metadata={"model": "python-example"},
+)
+def assistant(request):
     prompt = request.input["prompt"]
-    with request.trace.stage("decode", metadata={"model": "my-local-model"}):
+    with request.trace.stage("decode", metadata={"model": "python-example"}):
         return AgentResponse(
-            output={"text": f"Local answer: {prompt}"},
-            metadata={"model": "my-local-model"},
+            output={"text": f"Hello from Python: {prompt}"},
+            metadata={"model": "python-example"},
         )
 
-runtime.agent(
-    "guide",
-    answer,
-    endpoint="chat",
-    metadata={"model": "my-local-model"},
+
+result = app.invoke(
+    "assistant",
+    {"prompt": "Where did this Agent run?"},
 )
-```
-
-The Runtime stores session state and pending traces under
-`~/.vifu/sdk/python/my-python-app` by default. Pass `data_dir=` to use an
-application-owned directory.
-
-## 3. Invoke The Endpoint
-
-Add:
-
-```python
-result = runtime.invoke(
-    "chat",
-    {"prompt": "Explain the next step."},
-    session_id="player-42",
-)
-
 print(result.output)
-print(result.invocation_id)
-print(result.trace)
+
+app.run()
 ```
 
-Run it:
+The example enables trace-content capture for local development. Add a user
+consent control before you enable this option in a distributed application.
+
+## 4. Run the Agent
+
+Run the Python process:
 
 ```bash
-python3 app.py
+python app.py
 ```
 
-The trace contains the completed provider stages followed by the total
-`provider.invoke` stage. Long-running providers call
-`request.trace.activity()` to report activity. Streaming providers can call
-`request.trace.output_delta(...)`.
+The SDK completes these actions:
 
-## 4. Pair With The Dashboard
+1. It opens the embedded Runtime.
+2. It registers the provider, Agent, and endpoint.
+3. It connects to `http://127.0.0.1:6790`.
+4. It joins the permanent Local app.
+5. It stores its Device Token for later starts.
+6. It uploads traces and accepts remote calls.
 
-Start Vifu, open the Dashboard, select the App, and create a one-time device
-pairing code. Pass that code on the first connection:
+The local path does not use a pairing code, App ID, API key, or configuration
+file. Stop the Python process with `Ctrl+C`.
 
-```python
-gateway = runtime.connect(
-    pairing_code,
-    name="Python model on my laptop",
-)
-gateway.wait_until_connected()
-```
+## 5. Inspect the Agent
 
-The SDK stores the device identity and Server token with restricted file
-permissions. On later starts, reconnect with `runtime.connect(name=...)` and
-omit the consumed pairing code.
+Press `B` in the Vifu TUI. Open the Local app in the Dashboard.
 
-Content capture is off by default. Set `capture_trace_content=True` only after
-the application has obtained user consent.
+The Gateway name is `Python: my-python-agent`. The Agent page shows the
+`assistant` Agent. The trace shows the `decode` and `provider.invoke` stages.
 
-## 5. Let Python Manage A Local Server
+## Use the Lower-Level API
 
-An application can start the installed Vifu binary:
+Use `VifuRuntime` when the host application owns the lifecycle. Use
+`VifuGateway` when a remote Server or a selected deployment requires explicit
+enrollment.
 
-```python
-from vifu import VifuServer
-
-with VifuServer.start() as server:
-    assert server.running
-    # Start or pair application Runtimes here.
-```
-
-This is process management for the complete Vifu Server. It is not an HTTP
-client wrapper.
-
-## 6. Continue From A Working Example
-
-Run [`examples/python-starter`](../../examples/python-starter/) first. Then use
-the [Google ADK](../integrations/google-adk.md) or
-[Foundry Local](../integrations/foundry-local.md) guides to replace the example
-Provider with a real framework or on-device model.
+See the [Google ADK](../integrations/google-adk.md) and
+[Foundry Local](../integrations/foundry-local.md) guides for framework examples.

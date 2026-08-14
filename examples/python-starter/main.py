@@ -1,15 +1,22 @@
 import os
+import sys
 
-from vifu import AgentResponse, VifuRuntime
+from vifu import AgentResponse, Vifu
 
 
-runtime = VifuRuntime(
+app = Vifu(
     "python-starter",
     data_dir=os.environ.get("VIFU_EXAMPLE_DATA_DIR"),
+    capture_trace_content=True,
 )
 
 
-def local_guide(request):
+@app.agent(
+    "guide",
+    name="Local Guide",
+    metadata={"model": "python-echo"},
+)
+def guide(request):
     with request.trace.stage("decode", metadata={"model": "python-echo"}):
         return AgentResponse(
             output={"text": f"Local answer: {request.input['prompt']}"},
@@ -17,14 +24,7 @@ def local_guide(request):
         )
 
 
-runtime.agent(
-    "guide",
-    local_guide,
-    name="Local Guide",
-    metadata={"model": "python-echo"},
-)
-
-invocation = runtime.invoke(
+invocation = app.invoke(
     "guide",
     {"prompt": "Where did this agent run?"},
     session_id="first-session",
@@ -35,6 +35,10 @@ print(
     {
         "invocation_id": invocation.invocation_id,
         "duration_ms": invocation.trace[0]["durationMs"],
-        "pending_traces": len(runtime.pending_traces()),
+        "pending_traces": len(app.runtime.pending_traces()),
     }
 )
+
+if "--once" not in sys.argv:
+    print("Vifu: connecting to the local Server. Press Ctrl+C to stop.")
+    app.run()

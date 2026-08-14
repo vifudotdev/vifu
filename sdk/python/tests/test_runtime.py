@@ -1,14 +1,37 @@
 from __future__ import annotations
 
+import sys
 import tempfile
 import unittest
 from pathlib import Path
-import sys
+from unittest import mock
 
-from vifu import AgentResponse, GatewayPairing, VifuRuntime, VifuServer
+from vifu import AgentResponse, GatewayPairing, Vifu, VifuRuntime, VifuServer
+from vifu.gateway import (
+    DEFAULT_LOCAL_BOOTSTRAP_TOKEN,
+    _local_bootstrap_token,
+    _validate_local_server_url,
+)
 
 
 class VifuRuntimeTests(unittest.TestCase):
+    def test_high_level_app_registers_and_invokes_a_decorated_agent(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            app = Vifu("Python App Test", data_dir=directory)
+
+            @app.agent("guide")
+            def guide(request):
+                return {"text": f"Hello, {request.input['name']}"}
+
+            result = app.invoke("guide", {"name": "Ada"})
+
+            self.assertEqual(result.output, {"text": "Hello, Ada"})
+            self.assertTrue(app.runtime.app_id.startswith("python-python-app-test-"))
+
+    def test_high_level_app_requires_a_name(self) -> None:
+        with self.assertRaises(ValueError):
+            Vifu("  ")
+
     def test_python_provider_invocation_produces_a_trace(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             runtime = VifuRuntime("python-test", data_dir=directory)
@@ -59,6 +82,18 @@ class VifuRuntimeTests(unittest.TestCase):
             GatewayPairing.parse(
                 "https://vifu.ai/docs#server=http%3A%2F%2F127.0.0.1%3A6790&token=vifu_ge_test"
             )
+
+    def test_local_gateway_uses_the_implicit_local_bootstrap_token(self) -> None:
+        with mock.patch.dict(
+            "os.environ",
+            {},
+            clear=True,
+        ):
+            self.assertEqual(_local_bootstrap_token(), DEFAULT_LOCAL_BOOTSTRAP_TOKEN)
+
+    def test_automatic_local_connection_rejects_a_remote_server(self) -> None:
+        with self.assertRaises(ValueError):
+            _validate_local_server_url("https://api.vifu.dev")
 
     def test_server_manages_a_native_process(self) -> None:
         fixture = Path(__file__).with_name("server_fixture.py")

@@ -1,11 +1,17 @@
 # Python Starter
 
-This example runs a Python provider inside the native Vifu Runtime. It
-registers one Agent, reports a `decode` stage, invokes its endpoint, and prints
-the local trace count.
+This example runs a Python provider inside the native Vifu Runtime. It connects
+to the local Vifu Server and joins its permanent Local app. It does not use a
+pairing code.
 
-Create an environment from the repository root. Then install and run the
-example:
+Start the Vifu release binary in one terminal:
+
+```bash
+./vifu
+```
+
+Create an environment from the repository root in another terminal. Then
+install and run the example:
 
 ```bash
 python3 -m venv .venv
@@ -14,13 +20,11 @@ python -m pip install vifu
 python examples/python-starter/main.py
 ```
 
-To add Dashboard monitoring, create a one-time pairing code and connect after
-registering the Agent:
+The program registers the Agent, invokes it once, uploads its trace, and stays
+online for remote calls. Press `B` in Vifu to inspect the Python Gateway and
+trace. Stop the program with `Ctrl+C`.
 
-```python
-gateway = runtime.connect(pairing_code, name="Python Starter")
-gateway.wait_until_connected()
-```
+The `--once` option runs only the in-process invocation. The release workflow
+uses this option to test each wheel.
 
-Omit the pairing code on later starts. Continue with the complete
-[Python tutorial](../../docs/get-started/python.md).
+Continue with the complete [Python tutorial](../../docs/get-started/python.md).

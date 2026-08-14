@@ -1,6 +1,7 @@
 """Python SDK for the embedded Vifu Runtime and Gateway."""
 
 from ._version import __version__
+from .app import Vifu
 from .gateway import GatewayPairing, VifuGateway
 from .runtime import (
     AgentRequest,
@@ -17,6 +18,7 @@ __all__ = [
     "AgentTrace",
     "GatewayPairing",
     "Invocation",
+    "Vifu",
     "VifuGateway",
     "VifuRuntime",
     "VifuServer",
