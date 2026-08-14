@@ -43,9 +43,13 @@ app = Vifu("web-research", capture_trace_content=True)
     "researcher",
     capability="research",
     metadata={"framework": "foundry-local", "model": "qwen2.5-0.5b"},
+    instructions="Use only the supplied sources and cite every finding.",
 )
 def research(request):
-    messages = [{"role": "user", "content": request.input["research_prompt"]}]
+    messages = [{
+        "role": "user",
+        "content": f"{request.instructions or ''}\n\n{request.input['research_prompt']}",
+    }]
     chunks = client.complete_streaming_chat(messages)
     observed = trace_foundry_stream(
         request,
@@ -62,17 +66,25 @@ code. `trace_foundry_stream` yields those same chunks. It records
 `foundry_chunk_text` returns empty text for Foundry control chunks, so output
 assembly does not assume every chunk contains a model choice.
 
+The Python `instructions=` value creates the first visible Agent prompt. Edit
+it later in **Dashboard → Agents → Researcher → Prompt**. After you select
+**Save & make live**, the connected Runtime supplies the new value as
+`request.instructions` on the next invocation.
+
 ## 3. Run Existing Product Logic
 
 ```python
 def run_my_app(vifu):
-    sources = search_web("Arm-optimized on-device AI")
-    result = vifu.invoke(
-        "researcher",
-        {"research_prompt": prompt_with_citations(sources)},
-        session_id="arm-research",
-    )
-    publish_brief(result.output["answer"], sources)
+    research_number = 0
+    while question := input("Research> ").strip():
+        research_number += 1
+        sources = search_web(question)
+        result = vifu.invoke(
+            "researcher",
+            {"research_prompt": prompt_with_citations(question, sources)},
+            session_id=f"research-{research_number}",
+        )
+        publish_brief(result.output["answer"], sources)
 
 
 try:

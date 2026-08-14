@@ -41,7 +41,14 @@ import {
 } from "../trace-model";
 import { decodeTracePayload } from "../trace-payload";
 import { traceDateWindowChanged } from "../trace-window";
-import type { EndpointTrace, TraceScore, TraceSpan, TraceUsage } from "../types";
+import type {
+  AgentProfileDetail,
+  EndpointTrace,
+  ProfileVersionWithCapabilities,
+  TraceScore,
+  TraceSpan,
+  TraceUsage,
+} from "../types";
 
 const TRACE_PAGE_SIZE = 100;
 const ROW_HEIGHT = 42;
@@ -51,6 +58,7 @@ const TRACE_REQUEST_TIMEOUT_MS = 8_000;
 type RuntimeTraceWorkbenchProps = {
   projectId: string;
   projectSlug: string;
+  profileDetails?: AgentProfileDetail[];
   traces: EndpointTrace[];
 };
 
@@ -80,7 +88,12 @@ type TraceListRow = {
 type ObservationView = "tree" | "timeline";
 type DetailTab = "summary" | "io" | "metadata" | "scores" | "events";
 
-export function RuntimeTraceWorkbench({ projectId, projectSlug, traces: initialTraces }: RuntimeTraceWorkbenchProps) {
+export function RuntimeTraceWorkbench({
+  profileDetails = [],
+  projectId,
+  projectSlug,
+  traces: initialTraces,
+}: RuntimeTraceWorkbenchProps) {
   const { request } = useRuntimeConsoleHost();
   const [traces, setTraces] = useState(() => sortTraces(initialTraces));
   const [pausedTraces, setPausedTraces] = useState<EndpointTrace[]>([]);
@@ -105,6 +118,7 @@ export function RuntimeTraceWorkbench({ projectId, projectSlug, traces: initialT
   const [spansError, setSpansError] = useState<string | null>(null);
   const [pollError, setPollError] = useState<string | null>(null);
   const [selectionError, setSelectionError] = useState<string | null>(null);
+  const [loadedProfileDetails, setLoadedProfileDetails] = useState<AgentProfileDetail[]>([]);
   const [traceListLoading, setTraceListLoading] = useState(initialTraces.length === 0);
   const [urlSelectionReady, setUrlSelectionReady] = useState(false);
   const tracesRef = useRef(traces);
@@ -140,6 +154,7 @@ export function RuntimeTraceWorkbench({ projectId, projectSlug, traces: initialT
     setSpansError(null);
     setPollError(null);
     setSelectionError(null);
+    setLoadedProfileDetails([]);
     setTraceListLoading(true);
     setUrlSelectionReady(false);
     initialPageLoadedRef.current = false;
@@ -425,6 +440,32 @@ export function RuntimeTraceWorkbench({ projectId, projectSlug, traces: initialT
 
   const traceById = useMemo(() => new Map(traces.map((trace) => [trace.id, trace])), [traces]);
   const selectedTrace = selectedTraceId ? traceById.get(selectedTraceId) ?? null : null;
+  const selectedProfileVersion = useMemo(() => {
+    if (!selectedTrace?.profileId || !selectedTrace.profileVersionId) return null;
+    return [...loadedProfileDetails, ...profileDetails]
+      .find((detail) => detail.profile.id === selectedTrace.profileId)
+      ?.versions.find((item) => item.version.id === selectedTrace.profileVersionId) ?? null;
+  }, [loadedProfileDetails, profileDetails, selectedTrace]);
+
+  useEffect(() => {
+    if (!selectedTrace?.profileId || !selectedTrace.profileVersionId || selectedProfileVersion) return;
+    const controller = new AbortController();
+    void request<AgentProfileDetail>(
+      `apps/${encodeURIComponent(projectSlug)}/profiles/${encodeURIComponent(selectedTrace.profileId)}`,
+      "GET",
+      undefined,
+      controller.signal,
+    ).then((detail) => {
+      if (controller.signal.aborted) return;
+      setLoadedProfileDetails((current) => [
+        detail,
+        ...current.filter((item) => item.profile.id !== detail.profile.id),
+      ]);
+    }).catch(() => {
+      // The unavailable state in the configuration card explains archived or removed data.
+    });
+    return () => controller.abort();
+  }, [projectSlug, request, selectedProfileVersion, selectedTrace]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -618,8 +659,10 @@ export function RuntimeTraceWorkbench({ projectId, projectSlug, traces: initialT
           <span>From</span>
           <input
             aria-label="Show traces from date"
-            max={dateTo || undefined}
-            type="date"
+            inputMode="numeric"
+            pattern="[0-9]{4}-[0-9]{2}-[0-9]{2}"
+            placeholder="YYYY-MM-DD"
+            type="text"
             value={dateFrom}
             onChange={(event) => setDateFrom(event.target.value)}
           />
@@ -628,8 +671,10 @@ export function RuntimeTraceWorkbench({ projectId, projectSlug, traces: initialT
           <span>To</span>
           <input
             aria-label="Show traces through date"
-            min={dateFrom || undefined}
-            type="date"
+            inputMode="numeric"
+            pattern="[0-9]{4}-[0-9]{2}-[0-9]{2}"
+            placeholder="YYYY-MM-DD"
+            type="text"
             value={dateTo}
             onChange={(event) => setDateTo(event.target.value)}
           />
@@ -672,7 +717,11 @@ export function RuntimeTraceWorkbench({ projectId, projectSlug, traces: initialT
               {visibleRows.length === 0 ? (
                 <div className="trace-explorer-empty">
                   {rows.length === 0
-                    ? traceListLoading ? "Loading traces..." : "Waiting for the first trace..."
+                    ? traceListLoading
+                      ? "Loading traces..."
+                      : dateWindow.from || dateWindow.to
+                        ? "No traces in this date range."
+                        : "Waiting for the first trace..."
                     : "No traces match these filters."}
                 </div>
               ) : (
@@ -700,6 +749,7 @@ export function RuntimeTraceWorkbench({ projectId, projectSlug, traces: initialT
                   loading={spansLoading}
                   error={spansError}
                   selectedObservationId={selectedObservationId}
+                  profileVersion={selectedProfileVersion}
                   onSelectObservation={setSelectedObservationId}
                   onClose={closeTrace}
                 />
@@ -762,6 +812,7 @@ const TraceDetail = memo(function TraceDetail({
   onSelectObservation,
   scores,
   selectedObservationId,
+  profileVersion,
   spans,
   trace,
 }: {
@@ -771,6 +822,7 @@ const TraceDetail = memo(function TraceDetail({
   onSelectObservation: (spanId: string | null) => void;
   scores: TraceScore[];
   selectedObservationId: string | null;
+  profileVersion: ProfileVersionWithCapabilities | null;
   spans: TraceSpan[];
   trace: EndpointTrace;
 }) {
@@ -786,7 +838,10 @@ const TraceDetail = memo(function TraceDetail({
       <header className="trace-detail-header">
         <div>
           <span className={`trace-status ${presentation.status}`}>{presentation.statusLabel}</span>
-          <strong>{presentation.agent}</strong>
+          <span className="trace-detail-identity">
+            <strong>{trace.profileName ?? presentation.agent}</strong>
+            <small>{trace.profileVersionNumber ? `Version ${trace.profileVersionNumber}` : "Version unavailable"}</small>
+          </span>
           <code title={trace.requestId}>{shortId(trace.requestId, 12)}</code>
         </div>
         <button className="icon-button" type="button" aria-label="Close trace details" onClick={onClose}>
@@ -801,43 +856,60 @@ const TraceDetail = memo(function TraceDetail({
         <div><span>Tokens/s</span><strong>{formatMetric(presentation.tokensPerSecond, "", 1)}</strong></div>
       </div>
 
-      <section className="observation-browser">
-        <header>
-          <div><strong>Observations</strong><span>{spans.length}</span></div>
-          <div className="trace-segmented-control" role="group" aria-label="Observation view">
-            <button className={view === "tree" ? "active" : ""} type="button" onClick={() => setView("tree")}>Tree</button>
-            <button className={view === "timeline" ? "active" : ""} type="button" onClick={() => setView("timeline")}>Timeline</button>
-          </div>
-        </header>
-        {loading ? <p className="trace-detail-message">Loading observations...</p> : null}
-        {error ? <p className="trace-detail-message error" role="alert">{error}</p> : null}
-        {!loading && !error ? (
-          <ObservationList
-            trace={trace}
-            spans={spans}
-            view={view}
-            selectedObservationId={selectedObservationId}
-            onSelectObservation={onSelectObservation}
-          />
-        ) : null}
-      </section>
-
-      <div className="trace-detail-tabs" role="tablist" aria-label="Trace details">
-        {(["summary", "io", "metadata", "scores", "events"] as const).map((item) => (
-          <button
-            aria-selected={tab === item}
-            className={tab === item ? "active" : ""}
-            key={item}
-            onClick={() => setTab(item)}
-            role="tab"
-            type="button"
-          >
-            {detailTabLabel(item)}
-          </button>
-        ))}
-      </div>
-      <div className="trace-detail-tab-panel" role="tabpanel">
-        <TraceDetailTab tab={tab} trace={trace} spans={spans} selectedSpan={selectedSpan} scores={scores} />
+      <div className="trace-detail-workspace">
+        <PanelGroup orientation="vertical" id="vifu-trace-detail-content" className="trace-detail-panels">
+          <Panel id="trace-summary-panel" minSize="32" defaultSize="72">
+            <div className="trace-detail-primary">
+              <div className="trace-detail-tabs" role="tablist" aria-label="Trace details">
+                {(["summary", "io", "metadata", "scores", "events"] as const).map((item) => (
+                  <button
+                    aria-selected={tab === item}
+                    className={tab === item ? "active" : ""}
+                    key={item}
+                    onClick={() => setTab(item)}
+                    role="tab"
+                    type="button"
+                  >
+                    {detailTabLabel(item)}
+                  </button>
+                ))}
+              </div>
+              <div className="trace-detail-tab-panel" role="tabpanel">
+                <TraceDetailTab
+                  tab={tab}
+                  trace={trace}
+                  spans={spans}
+                  selectedSpan={selectedSpan}
+                  scores={scores}
+                  profileVersion={profileVersion}
+                />
+              </div>
+            </div>
+          </Panel>
+          <PanelResizeHandle className="trace-detail-resize-handle" />
+          <Panel id="trace-observations-panel" minSize="14" defaultSize="28">
+            <section className="observation-browser">
+              <header>
+                <div><strong>Observations</strong><span>{spans.length}</span></div>
+                <div className="trace-segmented-control" role="group" aria-label="Observation view">
+                  <button className={view === "tree" ? "active" : ""} type="button" onClick={() => setView("tree")}>Tree</button>
+                  <button className={view === "timeline" ? "active" : ""} type="button" onClick={() => setView("timeline")}>Timeline</button>
+                </div>
+              </header>
+              {loading ? <p className="trace-detail-message">Loading observations...</p> : null}
+              {error ? <p className="trace-detail-message error" role="alert">{error}</p> : null}
+              {!loading && !error ? (
+                <ObservationList
+                  trace={trace}
+                  spans={spans}
+                  view={view}
+                  selectedObservationId={selectedObservationId}
+                  onSelectObservation={onSelectObservation}
+                />
+              ) : null}
+            </section>
+          </Panel>
+        </PanelGroup>
       </div>
     </aside>
   );
@@ -904,19 +976,30 @@ function ObservationList({
 }
 
 function TraceDetailTab({
+  profileVersion,
   scores,
   selectedSpan,
   spans,
   tab,
   trace,
 }: {
+  profileVersion: ProfileVersionWithCapabilities | null;
   scores: TraceScore[];
   selectedSpan: TraceSpan | null;
   spans: TraceSpan[];
   tab: DetailTab;
   trace: EndpointTrace;
 }) {
-  if (tab === "summary") return <TraceSummary trace={trace} spans={spans} selectedSpan={selectedSpan} />;
+  if (tab === "summary") {
+    return (
+      <TraceSummary
+        profileVersion={profileVersion}
+        trace={trace}
+        spans={spans}
+        selectedSpan={selectedSpan}
+      />
+    );
+  }
   if (tab === "io") {
     const io = traceIoValues(trace, spans, selectedSpan);
     return (
@@ -941,7 +1024,8 @@ function TraceDetailTab({
   return <TraceEvents spans={spans} selectedSpan={selectedSpan} />;
 }
 
-function TraceSummary({ trace, spans, selectedSpan }: {
+function TraceSummary({ profileVersion, trace, spans, selectedSpan }: {
+  profileVersion: ProfileVersionWithCapabilities | null;
   trace: EndpointTrace;
   spans: TraceSpan[];
   selectedSpan: TraceSpan | null;
@@ -960,6 +1044,7 @@ function TraceSummary({ trace, spans, selectedSpan }: {
 
   return (
     <div className="trace-summary-panel">
+      <TraceConfiguration profileVersion={profileVersion} trace={trace} />
       <div className="trace-summary-io">
         <TracePayload title="Input" value={io.input} />
         <TracePayload title="Output" value={io.output} />
@@ -990,6 +1075,68 @@ function TraceSummary({ trace, spans, selectedSpan }: {
       {selectedSpan?.error ? <TracePayload title="Error" value={selectedSpan.error} tone="error" /> : null}
       {!selectedSpan && trace.error ? <TracePayload title="Error" value={trace.error} tone="error" /> : null}
     </div>
+  );
+}
+
+function TraceConfiguration({
+  profileVersion,
+  trace,
+}: {
+  profileVersion: ProfileVersionWithCapabilities | null;
+  trace: EndpointTrace;
+}) {
+  const persona = profileVersion?.version.persona;
+  const runtime = profileVersion?.version.runtime;
+  const generation = isRecord(runtime?.generation) ? runtime.generation : null;
+  const systemPrompt = typeof persona?.systemPrompt === "string" && persona.systemPrompt.trim()
+    ? persona.systemPrompt
+    : null;
+  const generationSummary = generation
+    ? [
+        numberSetting("Max tokens", generation.maxTokens),
+        numberSetting("Temperature", generation.temperature),
+        numberSetting("Top P", generation.topP),
+      ].filter((value): value is string => value !== null)
+    : [];
+
+  return (
+    <section className="trace-configuration">
+      <header>
+        <div>
+          <span>Configuration used</span>
+          <strong>{trace.profileName ?? traceListPresentation(trace).agent}</strong>
+        </div>
+        <code>{trace.profileVersionNumber ? `Version ${trace.profileVersionNumber}` : "Unattributed"}</code>
+      </header>
+      {profileVersion ? (
+        <>
+          <dl>
+            <div>
+              <dt>Version ID</dt>
+              <dd title={profileVersion.version.id}>{shortId(profileVersion.version.id, 12)}</dd>
+            </div>
+            <div>
+              <dt>Provider</dt>
+              <dd>{profileVersion.capabilities.map((capability) => capability.providerKey).join(", ") || "Provider default"}</dd>
+            </div>
+            <div>
+              <dt>Generation</dt>
+              <dd>{generationSummary.join(" · ") || "Provider defaults"}</dd>
+            </div>
+          </dl>
+          <div className="trace-configuration-prompt">
+            <span>System prompt</span>
+            <p>{systemPrompt ?? "No system prompt was configured for this version."}</p>
+          </div>
+        </>
+      ) : (
+        <p className="trace-configuration-missing">
+          {trace.profileVersionId
+            ? "The exact Agent Version is no longer available in this app."
+            : "This trace was recorded before Agent Version attribution was enabled."}
+        </p>
+      )}
+    </section>
   );
 }
 
@@ -1387,6 +1534,10 @@ function firstNumber(...values: unknown[]): number | null {
     if (typeof value === "number" && Number.isFinite(value)) return value;
   }
   return null;
+}
+
+function numberSetting(label: string, value: unknown): string | null {
+  return typeof value === "number" && Number.isFinite(value) ? `${label} ${value}` : null;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

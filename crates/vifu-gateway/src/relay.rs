@@ -1105,7 +1105,7 @@ async fn run_agent_gateway_inner(
 
         tokio::select! {
             _ = tokio::time::sleep(reconnect_delay) => {}
-            _ = tokio::signal::ctrl_c() => return Ok(()),
+            _ = gateway_shutdown_signal(runtime.embedded_runtime.is_none()) => return Ok(()),
         }
         reconnect_delay = reconnect_delay
             .saturating_mul(2)
@@ -1122,6 +1122,14 @@ fn reconnect_delay_ceiling(server_url: &str) -> Duration {
         MAX_LOCAL_RECONNECT_DELAY
     } else {
         MAX_REMOTE_RECONNECT_DELAY
+    }
+}
+
+async fn gateway_shutdown_signal(enabled: bool) {
+    if enabled {
+        let _ = tokio::signal::ctrl_c().await;
+    } else {
+        std::future::pending::<()>().await;
     }
 }
 
@@ -2146,7 +2154,7 @@ async fn run_connection(
     let outcome = loop {
         reap_finished(&mut calls);
         tokio::select! {
-            _ = tokio::signal::ctrl_c() => break ConnectionOutcome::Shutdown,
+            _ = gateway_shutdown_signal(runtime.embedded_runtime.is_none()) => break ConnectionOutcome::Shutdown,
             _ = configuration_sync.tick() => {
                 for command in expire_embedded_runtime_traces(
                     runtime.embedded_monitor.as_ref(),
@@ -3160,12 +3168,13 @@ async fn sync_runtime_state(
             )
         })
     });
+    let embedded_deployment_id = embedded_deployment.map(|deployment| deployment.deployment_id);
     for mut deployment in deployments {
         if deployment.policies.config_sync {
             if deployment.release.is_none() {
                 if let Some(embedded) = runtime
                     .embedded_runtime
-                    .filter(|embedded| embedded.project_id() == deployment.project_slug)
+                    .filter(|_| embedded_deployment_id == Some(deployment.deployment_id))
                 {
                     if let Some(manifest) = embedded
                         .current_manifest()
@@ -3186,7 +3195,7 @@ async fn sync_runtime_state(
                     .map_err(|error| error.to_string())?;
                 if let Some(embedded) = runtime
                     .embedded_runtime
-                    .filter(|embedded| embedded.project_id() == deployment.project_slug)
+                    .filter(|_| embedded_deployment_id == Some(deployment.deployment_id))
                 {
                     embedded
                         .install_release(release)

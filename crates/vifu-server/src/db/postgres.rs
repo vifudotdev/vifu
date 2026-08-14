@@ -749,12 +749,13 @@ pub async fn activate_profile_runtime_release(
     profile_version_id: Uuid,
     deployment_id: Uuid,
     release: NewProjectRuntimeRelease<'_>,
-) -> Result<(), ApiError> {
+) -> Result<i64, ApiError> {
     let mut transaction = pool.begin().await?;
     sqlx::query(
         "INSERT INTO project_runtime_releases(
             id, project_id, version, content_hash, manifest, created_by
-         ) VALUES ($1, $2, $3, $4, $5, $6)",
+         ) VALUES ($1, $2, $3, $4, $5, $6)
+         ON CONFLICT(project_id, content_hash) DO NOTHING",
     )
     .bind(release.id)
     .bind(release.project_id)
@@ -765,6 +766,14 @@ pub async fn activate_profile_runtime_release(
     .execute(&mut *transaction)
     .await
     .map_err(map_database_error)?;
+    let stored_version = sqlx::query_scalar::<_, i64>(
+        "SELECT version FROM project_runtime_releases
+         WHERE project_id = $1 AND content_hash = $2",
+    )
+    .bind(release.project_id)
+    .bind(release.content_hash)
+    .fetch_one(&mut *transaction)
+    .await?;
     sqlx::query("DELETE FROM agent_profile_rollouts WHERE profile_id = $1")
         .bind(profile_id)
         .execute(&mut *transaction)
@@ -790,7 +799,7 @@ pub async fn activate_profile_runtime_release(
          WHERE id = $1 AND project_id = $3 AND is_primary",
     )
     .bind(deployment_id)
-    .bind(release.version)
+    .bind(stored_version)
     .bind(release.project_id)
     .execute(&mut *transaction)
     .await?;
@@ -800,7 +809,7 @@ pub async fn activate_profile_runtime_release(
         ));
     }
     transaction.commit().await?;
-    Ok(())
+    Ok(stored_version)
 }
 
 pub async fn create_guest_project(
@@ -2609,6 +2618,7 @@ pub async fn ensure_discovered_binding(
         provider_key,
         runtime_provider_key,
         provider_type,
+        persona,
     } = input;
     if let Some(binding) =
         find_binding_by_agent_gateway_agent(pool, project_id, gateway_id, agent_id, provider_key)
@@ -2653,7 +2663,11 @@ pub async fn ensure_discovered_binding(
         "providerKey": provider_key,
         "runtimeProviderKey": runtime_provider_key,
     });
-    let persona = json!({ "files": {} });
+    let persona = if persona.is_object() {
+        persona
+    } else {
+        json!({ "files": {} })
+    };
     let runtime = json!({});
     let presentation = json!({});
     let source = json!({
@@ -4323,16 +4337,19 @@ pub async fn create_uploaded_runtime_trace(
     let request = redact_trace_value(trace.request);
     let result = sqlx::query(
         "INSERT INTO endpoint_traces
-            (id, request_id, project_id, gateway_session_id, operation, provider_key,
-             capability_kind, status, latency_ms, request, created_at, completed_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11,
-                 CASE WHEN $8 = 'pending' THEN NULL ELSE $11 END)
+            (id, request_id, project_id, gateway_session_id, profile_id,
+             profile_version_id, operation, provider_key, capability_kind, status,
+             latency_ms, request, created_at, completed_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
+                 CASE WHEN $10 = 'pending' THEN NULL ELSE $13 END)
          ON CONFLICT (request_id) DO NOTHING",
     )
     .bind(trace.id)
     .bind(trace.request_id)
     .bind(trace.project_id)
     .bind(trace.gateway_session_id)
+    .bind(trace.profile_id)
+    .bind(trace.profile_version_id)
     .bind(trace.operation)
     .bind(trace.provider_key)
     .bind(trace.capability_kind)

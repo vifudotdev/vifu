@@ -7,7 +7,7 @@ use axum::response::{IntoResponse, Response};
 use axum::Extension;
 use chrono::Utc;
 use futures_util::{SinkExt, StreamExt};
-use serde_json::json;
+use serde_json::{json, Value};
 use tokio::time::{Instant, MissedTickBehavior};
 use tracing::{info, warn};
 use uuid::Uuid;
@@ -386,6 +386,13 @@ async fn persist_runtime_telemetry(
         });
     let provider_key = runtime_provider_key
         .map(|provider_key| crate::gateway_identity::scoped_provider_key(gateway_id, provider_key));
+    let profile_identity = match deployment.active_release_version {
+        Some(version) => db::get_project_runtime_release(&state.pool, project.project.id, version)
+            .await
+            .ok()
+            .and_then(|release| runtime_trace_profile_identity(&release.manifest, &batch.agent_id)),
+        None => None,
+    };
     let request = json!({
         "source": "embedded-runtime-live",
         "gatewayId": gateway_id,
@@ -405,6 +412,8 @@ async fn persist_runtime_telemetry(
             request_id,
             project_id: project.project.id,
             gateway_session_id: Some(gateway_session_id),
+            profile_id: profile_identity.map(|identity| identity.0),
+            profile_version_id: profile_identity.map(|identity| identity.1),
             operation: "runtime.invoke",
             provider_key: provider_key.as_deref(),
             capability_kind,
@@ -488,6 +497,23 @@ async fn persist_runtime_telemetry(
         .map_err(|error| RuntimeTelemetryPersistError::Storage(error.to_string()))?;
     }
     Ok(true)
+}
+
+pub(crate) fn runtime_trace_profile_identity(
+    manifest: &Value,
+    agent_id: &str,
+) -> Option<(Uuid, Uuid)> {
+    let profile = manifest
+        .get("agents")?
+        .as_array()?
+        .iter()
+        .find(|agent| agent.get("id").and_then(Value::as_str) == Some(agent_id))?
+        .get("metadata")?
+        .get("agentProfile")?;
+    Some((
+        Uuid::parse_str(profile.get("id")?.as_str()?).ok()?,
+        Uuid::parse_str(profile.get("versionId")?.as_str()?).ok()?,
+    ))
 }
 
 fn gateway_supports_feature(metadata: &serde_json::Value, feature: &str) -> bool {
@@ -876,6 +902,7 @@ async fn reconcile_project_agents(
                         binding_id,
                         gateway_id,
                         &agent.name,
+                        agent.metadata.get("persona"),
                     )
                     .await?;
                 }
@@ -890,6 +917,11 @@ async fn reconcile_project_agents(
                             provider_key: &provider_key,
                             runtime_provider_key,
                             provider_type,
+                            persona: agent
+                                .metadata
+                                .get("persona")
+                                .cloned()
+                                .unwrap_or_else(|| serde_json::json!({ "files": {} })),
                         },
                     )
                     .await?;
@@ -1073,8 +1105,8 @@ mod tests {
     use super::{
         authorize_gateway_machine, authorize_gateway_machine_with_local_access,
         can_recover_missing_guest_token, decode_command, discovered_provider_config,
-        encode_command, gateway_pairing_url, reconcile_project_agents, scoped_provider_key,
-        GatewayAuthorizationOutcome,
+        encode_command, gateway_pairing_url, reconcile_project_agents,
+        runtime_trace_profile_identity, scoped_provider_key, GatewayAuthorizationOutcome,
     };
     use crate::auth::{encrypt_secret_json, hash_api_key};
     use crate::config::Config;
@@ -1175,6 +1207,38 @@ mod tests {
                 }))
             })
         }
+    }
+
+    #[test]
+    fn runtime_trace_profile_identity_uses_the_invoked_agent_version() {
+        let first_profile = Uuid::new_v4();
+        let first_version = Uuid::new_v4();
+        let second_profile = Uuid::new_v4();
+        let second_version = Uuid::new_v4();
+        let manifest = json!({
+            "agents": [
+                {
+                    "id": "researcher",
+                    "metadata": { "agentProfile": {
+                        "id": first_profile,
+                        "versionId": first_version,
+                    }}
+                },
+                {
+                    "id": "editor",
+                    "metadata": { "agentProfile": {
+                        "id": second_profile,
+                        "versionId": second_version,
+                    }}
+                }
+            ]
+        });
+
+        assert_eq!(
+            runtime_trace_profile_identity(&manifest, "editor"),
+            Some((second_profile, second_version))
+        );
+        assert_eq!(runtime_trace_profile_identity(&manifest, "missing"), None);
     }
 
     #[test]
@@ -1412,6 +1476,7 @@ mod tests {
                 provider_key: "android-llama",
                 runtime_provider_key: "android-llama",
                 provider_type: "vifu-runtime",
+                persona: json!({ "files": {} }),
             },
         )
         .await

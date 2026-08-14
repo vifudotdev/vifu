@@ -60,7 +60,7 @@ export function RuntimeAgentsView(props: AgentsViewProps) {
           <button className="resource-empty-action" type="button" onClick={() => setAdding(true)}>
             <span className="resource-empty-icon"><Bot aria-hidden="true" /></span>
             <strong>Add the first agent</strong>
-            <span>Choose an available provider agent or create a new game character.</span>
+            <span>Choose an available provider agent or create a new app agent.</span>
           </button>
         )}
       </main>
@@ -124,6 +124,7 @@ function AgentCard({
         ? { label: "Configured", className: "configured" }
         : { label: "Unavailable", className: "offline" };
   const capabilities = active?.capabilities.map((capability) => capability.kind) ?? [];
+  const prompt = stringValue(active?.version.persona.systemPrompt);
   return (
     <button className="agent-library-card" type="button" onClick={onSelect}>
       <header>
@@ -132,7 +133,7 @@ function AgentCard({
       </header>
       <div className="agent-card-copy">
         <strong>{profile.name}</strong>
-        <p>{profile.description || "No role description yet."}</p>
+        <p title={prompt}>{prompt ? `Prompt: ${prompt}` : profile.description || "No prompt yet. Open this agent to add one."}</p>
       </div>
       <div className="agent-card-capabilities">
         {capabilities.length > 0
@@ -300,7 +301,7 @@ function AddAgentDialog({
         ) : creatableProviders.length > 0 ? (
           <form id="create-agent-form" className="resource-dialog-fields agent-create-fields" onSubmit={create}>
             <label><span>Name</span><input name="name" required maxLength={128} autoFocus placeholder="Town guide" /></label>
-            <label><span>Role</span><textarea name="description" maxLength={4096} placeholder="How this agent appears in the game" /></label>
+            <label><span>Role</span><textarea name="description" maxLength={4096} placeholder="What this agent does in the app" /></label>
             <label><span>Provider</span><select value={providerKey} onChange={(event) => selectProvider(event.target.value)}>{creatableProviders.map((provider) => <option key={provider.id} value={provider.providerKey}>{provider.name}</option>)}</select></label>
             <label><span>Ability</span><select value={capability} onChange={(event) => setCapability(event.target.value as ProfileCapabilityKind)}>{supported.map((item) => <option key={item} value={item}>{capabilityLabel(item)}</option>)}</select></label>
             <label><span>{resourceLabel(capability)}</span><input name="resourceId" required placeholder={resourcePlaceholder(capability)} /></label>

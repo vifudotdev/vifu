@@ -18,16 +18,37 @@
 
 ## Quick start
 
-1. Download the archive for your platform from the
-   [latest release](https://github.com/vifudotdev/vifu/releases/latest).
-2. Extract the archive.
-3. Start Vifu:
+### Build a local Python Agent App
+
+Install the Python SDK and run the Web Research Agent App:
 
 ```bash
-./vifu
+python3 -m venv .venv
+. .venv/bin/activate
+python -m pip install "vifu[foundry]"
+curl -LO https://raw.githubusercontent.com/vifudotdev/vifu/main/examples/foundry-local-python/main.py
+python main.py
 ```
 
-4. Install the
+The Python package starts the local Vifu Server and Dashboard, creates the
+**Web Research** App, and connects its search and research Agents. Enter a
+topic in the terminal, then open the printed Dashboard URL to inspect the
+Agents and traces. Open **Agents → Local Researcher → Prompt** to see or edit
+the live research instructions. The next research request uses the saved
+prompt.
+
+Foundry Local runs the model on the development machine. The research example
+uses public web search to obtain current sources. See the
+[Python tutorial](docs/get-started/python.md) and the
+[complete example guide](examples/foundry-local-python/README.md) to build your
+own App and add more Agents.
+
+### Connect an Android on-device App
+
+1. Download the archive for your platform from the
+   [latest release](https://github.com/vifudotdev/vifu/releases/latest), extract
+   it, and start `./vifu`.
+2. Install the
    [optimized Android Starter APK](https://github.com/vifudotdev/vifu/releases/download/android-starter-v0.1.1/vifu-android-starter.apk).
    You can also [build the Starter from source](examples/android-starter/README.md#build-from-source).
 

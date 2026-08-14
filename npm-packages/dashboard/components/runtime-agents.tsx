@@ -123,6 +123,7 @@ function AgentCard({
         ? { label: "Configured", className: "configured" }
         : { label: "Unavailable", className: "offline" };
   const capabilities = active?.capabilities.map((capability) => capability.kind) ?? [];
+  const prompt = stringValue(active?.version.persona.systemPrompt);
   return (
     <button className="agent-library-card" type="button" onClick={onSelect}>
       <header>
@@ -131,7 +132,7 @@ function AgentCard({
       </header>
       <div className="agent-card-copy">
         <strong>{profile.name}</strong>
-        <p>{profile.description || "No role description yet."}</p>
+        <p title={prompt}>{prompt ? `Prompt: ${prompt}` : profile.description || "No prompt yet. Open this agent to add one."}</p>
       </div>
       <div className="agent-card-capabilities">
         {capabilities.length > 0

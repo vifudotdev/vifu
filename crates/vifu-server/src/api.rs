@@ -1288,7 +1288,7 @@ pub async fn activate_project_profile_version(
     let manifest =
         serde_json::to_value(&runtime_release.manifest).map_err(|_| ApiError::Internal)?;
     let release_id = Uuid::new_v4();
-    db::activate_profile_runtime_release(
+    let activated_release_version = db::activate_profile_runtime_release(
         &state.pool,
         profile_id,
         version_id,
@@ -1310,7 +1310,7 @@ pub async fn activate_project_profile_version(
     Ok(Json(json!({
         "profile": db::get_profile(&state.pool, profile_id).await?,
         "rollout": rollout,
-        "runtimeRelease": db::get_project_runtime_release(&state.pool, project.project.id, next_version).await?,
+        "runtimeRelease": db::get_project_runtime_release(&state.pool, project.project.id, activated_release_version).await?,
         "deployment": runtime_deployment_view(&state, deployment).await?,
     })))
 }
@@ -2425,6 +2425,12 @@ pub async fn upload_agent_gateway_runtime_traces(
     }
     let project = db::get_project(&state.pool, deployment.project_id).await?;
     let gateway_session_id = state.relay.session_for(&gateway_id).await;
+    let active_release = match deployment.active_release_version {
+        Some(version) => db::get_project_runtime_release(&state.pool, project.project.id, version)
+            .await
+            .ok(),
+        None => None,
+    };
     let mut accepted = Vec::with_capacity(input.traces.len());
     for trace in input.traces {
         trace
@@ -2450,6 +2456,11 @@ pub async fn upload_agent_gateway_runtime_traces(
         });
         let request_id = runtime_trace_uuid("request", &gateway_id, &trace.id);
         let trace_id = runtime_trace_uuid("trace", &gateway_id, &trace.id);
+        let profile_identity = trace.agent.as_deref().and_then(|agent_id| {
+            active_release.as_ref().and_then(|release| {
+                crate::websocket::runtime_trace_profile_identity(&release.manifest, agent_id)
+            })
+        });
         let inserted = db::create_uploaded_runtime_trace(
             &state.pool,
             db::NewUploadedRuntimeTrace {
@@ -2457,6 +2468,8 @@ pub async fn upload_agent_gateway_runtime_traces(
                 request_id,
                 project_id: project.project.id,
                 gateway_session_id,
+                profile_id: profile_identity.map(|identity| identity.0),
+                profile_version_id: profile_identity.map(|identity| identity.1),
                 operation: "runtime.invoke",
                 provider_key: trace.provider.as_deref(),
                 capability_kind: trace.capability.as_deref(),
@@ -3533,7 +3546,14 @@ pub async fn import_project_agent(
         )
         .await?
     {
-        db::refresh_discovered_binding(&state.pool, binding_id, gateway_id, &agent.name).await?;
+        db::refresh_discovered_binding(
+            &state.pool,
+            binding_id,
+            gateway_id,
+            &agent.name,
+            agent.metadata.get("persona"),
+        )
+        .await?;
         if archived {
             db::restore_project_profile(&state.pool, project.project.id, profile_id).await?
         } else {
@@ -3551,6 +3571,11 @@ pub async fn import_project_agent(
                 provider_key,
                 runtime_provider_key,
                 provider_type,
+                persona: agent
+                    .metadata
+                    .get("persona")
+                    .cloned()
+                    .unwrap_or_else(|| json!({ "files": {} })),
             },
         )
         .await?;
@@ -8117,6 +8142,7 @@ async fn reconcile_project_provider_agents(
                     binding_id,
                     &agent.gateway_id,
                     &agent.name,
+                    agent.metadata.get("persona"),
                 )
                 .await?;
             }
@@ -8126,6 +8152,7 @@ async fn reconcile_project_provider_agents(
                     binding_id,
                     &agent.gateway_id,
                     &agent.name,
+                    agent.metadata.get("persona"),
                 )
                 .await?;
                 db::assign_project_binding(&state.pool, project.project.id, binding_id).await?;
@@ -8141,6 +8168,11 @@ async fn reconcile_project_provider_agents(
                         provider_key: &connection.provider_key,
                         runtime_provider_key,
                         provider_type,
+                        persona: agent
+                            .metadata
+                            .get("persona")
+                            .cloned()
+                            .unwrap_or_else(|| json!({ "files": {} })),
                     },
                 )
                 .await?;
@@ -8911,6 +8943,7 @@ mod tests {
                 provider_key: "android-llama",
                 runtime_provider_key: "android-llama",
                 provider_type: "vifu-runtime",
+                persona: json!({ "files": {} }),
             },
         )
         .await

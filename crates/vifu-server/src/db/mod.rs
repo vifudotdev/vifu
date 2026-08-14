@@ -180,7 +180,7 @@ dispatch! {
     pub async fn get_project_runtime_release(storage: &Storage, project_id: Uuid, version: i64) -> Result<ProjectRuntimeRelease, ApiError>;
     pub async fn activate_runtime_deployment_release(storage: &Storage, project_id: Uuid, deployment_name: &str, version: i64) -> Result<RuntimeDeployment, ApiError>;
     pub async fn activate_runtime_configuration_release(storage: &Storage, deployment_id: Uuid, release: NewProjectRuntimeRelease<'_>) -> Result<(), ApiError>;
-    pub async fn activate_profile_runtime_release(storage: &Storage, profile_id: Uuid, profile_version_id: Uuid, deployment_id: Uuid, release: NewProjectRuntimeRelease<'_>) -> Result<(), ApiError>;
+    pub async fn activate_profile_runtime_release(storage: &Storage, profile_id: Uuid, profile_version_id: Uuid, deployment_id: Uuid, release: NewProjectRuntimeRelease<'_>) -> Result<i64, ApiError>;
     pub async fn create_guest_project(storage: &Storage, input: NewGuestProject<'_>) -> Result<(), ApiError>;
     pub async fn promote_guest_project(storage: &Storage, project_id: Uuid) -> Result<bool, ApiError>;
     pub async fn get_active_guest_project_for_gateway(storage: &Storage, gateway_id: &str) -> Result<Option<(ProjectWithBindings, DateTime<Utc>)>, ApiError>;
@@ -314,6 +314,7 @@ pub async fn refresh_discovered_binding(
     binding_id: Uuid,
     gateway_id: &str,
     agent_name: &str,
+    discovered_persona: Option<&Value>,
 ) -> Result<(), ApiError> {
     refresh_discovered_binding_record(storage, binding_id, gateway_id, agent_name).await?;
 
@@ -364,6 +365,21 @@ pub async fn refresh_discovered_binding(
             Value::String(gateway_id.to_string()),
         );
     }
+    let mut persona = active_version.persona.clone();
+    let active_prompt = persona
+        .get("systemPrompt")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|prompt| !prompt.is_empty());
+    let discovered_prompt = discovered_persona
+        .and_then(|value| value.get("systemPrompt"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|prompt| !prompt.is_empty());
+    if active_prompt.is_none() && discovered_prompt.is_some() {
+        persona = discovered_persona.cloned().ok_or(ApiError::Internal)?;
+        changed = true;
+    }
 
     let capabilities = list_profile_capabilities(storage, active_version_id).await?;
     let capability_drafts = capabilities
@@ -400,7 +416,7 @@ pub async fn refresh_discovered_binding(
         storage,
         profile.id,
         NewProfileVersion {
-            persona: &active_version.persona,
+            persona: &persona,
             runtime: &active_version.runtime,
             presentation: &active_version.presentation,
             source: &source,
@@ -479,6 +495,147 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn sqlite_profile_rollback_reuses_the_existing_runtime_release() {
+        let (storage, path) = sqlite_storage().await;
+        let project_id = Uuid::new_v4();
+        let profile_id = Uuid::new_v4();
+        create_project(
+            &storage,
+            NewProject {
+                id: project_id,
+                owner_user_id: None,
+                slug: "profile-rollback",
+                name: "Profile rollback",
+                description: None,
+                gateway_id: "gateway-rollback",
+                binding_ids: &[],
+            },
+        )
+        .await
+        .expect("project should be created");
+        create_profile(
+            &storage,
+            profile_id,
+            project_id,
+            "researcher",
+            "Researcher",
+            None,
+        )
+        .await
+        .expect("profile should be created");
+        let empty = json!({});
+        let first = create_profile_version(
+            &storage,
+            profile_id,
+            NewProfileVersion {
+                persona: &json!({ "systemPrompt": "First prompt" }),
+                runtime: &empty,
+                presentation: &empty,
+                source: &empty,
+                capabilities: &[],
+                change_summary: None,
+            },
+        )
+        .await
+        .expect("first profile version should be created");
+        let second = create_profile_version(
+            &storage,
+            profile_id,
+            NewProfileVersion {
+                persona: &json!({ "systemPrompt": "Second prompt" }),
+                runtime: &empty,
+                presentation: &empty,
+                source: &empty,
+                capabilities: &[],
+                change_summary: None,
+            },
+        )
+        .await
+        .expect("second profile version should be created");
+        let deployment_id = primary_deployment_id(&storage, project_id).await;
+        let first_manifest =
+            json!({ "schemaVersion": 1, "projectId": "profile-rollback", "prompt": "first" });
+        let second_manifest =
+            json!({ "schemaVersion": 1, "projectId": "profile-rollback", "prompt": "second" });
+
+        let first_release = activate_profile_runtime_release(
+            &storage,
+            profile_id,
+            first.id,
+            deployment_id,
+            NewProjectRuntimeRelease {
+                id: Uuid::new_v4(),
+                project_id,
+                version: 1,
+                content_hash: "sha256:first",
+                manifest: &first_manifest,
+                created_by: None,
+            },
+        )
+        .await
+        .expect("first version should be activated");
+        assert_eq!(first_release, 1);
+        let second_release = activate_profile_runtime_release(
+            &storage,
+            profile_id,
+            second.id,
+            deployment_id,
+            NewProjectRuntimeRelease {
+                id: Uuid::new_v4(),
+                project_id,
+                version: 2,
+                content_hash: "sha256:second",
+                manifest: &second_manifest,
+                created_by: None,
+            },
+        )
+        .await
+        .expect("second version should be activated");
+        assert_eq!(second_release, 2);
+        let restored_release = activate_profile_runtime_release(
+            &storage,
+            profile_id,
+            first.id,
+            deployment_id,
+            NewProjectRuntimeRelease {
+                id: Uuid::new_v4(),
+                project_id,
+                version: 3,
+                content_hash: "sha256:first",
+                manifest: &first_manifest,
+                created_by: None,
+            },
+        )
+        .await
+        .expect("the existing first release should be reusable");
+
+        assert_eq!(restored_release, 1);
+        assert_eq!(
+            get_profile(&storage, profile_id)
+                .await
+                .expect("profile should exist")
+                .active_version_id,
+            Some(first.id)
+        );
+        assert_eq!(
+            get_runtime_deployment(&storage, project_id, "development")
+                .await
+                .expect("deployment should exist")
+                .active_release_version,
+            Some(1)
+        );
+        assert_eq!(
+            list_project_runtime_releases(&storage, project_id)
+                .await
+                .expect("releases should list")
+                .len(),
+            2
+        );
+
+        close_and_remove(storage, &path).await;
+    }
+
+    #[tokio::test]
     async fn sqlite_refresh_discovered_binding_moves_profile_route_to_new_gateway() {
         let (storage, path) = sqlite_storage().await;
         let project_id = Uuid::new_v4();
@@ -506,6 +663,9 @@ mod tests {
                 provider_key: "android-local-model",
                 runtime_provider_key: "android-local-model",
                 provider_type: "vifu-runtime",
+                persona: serde_json::json!({
+                    "systemPrompt": "Help the player understand the garden."
+                }),
             },
         )
         .await
@@ -519,12 +679,26 @@ mod tests {
         )
         .await
         .expect("profile should exist");
+        let version = get_profile_version(
+            &storage,
+            profile.id,
+            profile
+                .active_version_id
+                .expect("profile should have a live version"),
+        )
+        .await
+        .expect("profile version should exist");
+        assert_eq!(
+            version.persona["systemPrompt"],
+            "Help the player understand the garden."
+        );
 
         refresh_discovered_binding(
             &storage,
             binding_id,
             "gateway-new",
             "Android Local Companion",
+            None,
         )
         .await
         .expect("discovered binding should refresh");
@@ -533,6 +707,7 @@ mod tests {
             binding_id,
             "gateway-new",
             "Android Local Companion",
+            None,
         )
         .await
         .expect("repeated refresh should be idempotent");
@@ -556,6 +731,53 @@ mod tests {
                 .expect("profile versions should list")
                 .len(),
             2
+        );
+
+        let legacy_binding_id = ensure_discovered_binding(
+            &storage,
+            NewDiscoveredBinding {
+                project_id,
+                gateway_id: "gateway-legacy",
+                agent_id: "legacy-researcher",
+                agent_name: "Legacy Researcher",
+                provider_key: "legacy-local-model",
+                runtime_provider_key: "legacy-local-model",
+                provider_type: "vifu-runtime",
+                persona: json!({ "files": {} }),
+            },
+        )
+        .await
+        .expect("legacy discovered binding should be created");
+        refresh_discovered_binding(
+            &storage,
+            legacy_binding_id,
+            "gateway-legacy",
+            "Legacy Researcher",
+            Some(&json!({ "systemPrompt": "Use only the supplied sources." })),
+        )
+        .await
+        .expect("legacy Agent prompt should be backfilled");
+        let legacy_profile = get_profile(
+            &storage,
+            get_binding(&storage, legacy_binding_id)
+                .await
+                .expect("legacy binding should exist")
+                .profile_id,
+        )
+        .await
+        .expect("legacy profile should exist");
+        let legacy_version = get_profile_version(
+            &storage,
+            legacy_profile.id,
+            legacy_profile
+                .active_version_id
+                .expect("legacy profile should have a live version"),
+        )
+        .await
+        .expect("backfilled version should exist");
+        assert_eq!(
+            legacy_version.persona["systemPrompt"],
+            "Use only the supplied sources."
         );
 
         close_and_remove(storage, &path).await;
@@ -772,6 +994,8 @@ mod tests {
                 request_id: Uuid::new_v4(),
                 project_id,
                 gateway_session_id: Some(gateway_session_id),
+                profile_id: None,
+                profile_version_id: None,
                 operation: "runtime.invoke",
                 provider_key: Some("light-provider"),
                 capability_kind: Some("control"),
@@ -844,6 +1068,8 @@ mod tests {
                     request_id: Uuid::new_v4(),
                     project_id,
                     gateway_session_id: None,
+                    profile_id: None,
+                    profile_version_id: None,
                     operation: "runtime.invoke",
                     provider_key: Some("local-provider"),
                     capability_kind: Some("chat"),
@@ -1263,9 +1489,15 @@ mod tests {
         attach_project_binding(&storage, project_id, binding_id)
             .await
             .expect("binding should be attached");
-        refresh_discovered_binding(&storage, binding_id, "gateway-local", "Mizuki Tsukishiro")
-            .await
-            .expect("discovered binding should refresh");
+        refresh_discovered_binding(
+            &storage,
+            binding_id,
+            "gateway-local",
+            "Mizuki Tsukishiro",
+            None,
+        )
+        .await
+        .expect("discovered binding should refresh");
 
         let endpoint_id = Uuid::new_v4();
         create_endpoint(

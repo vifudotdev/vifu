@@ -914,15 +914,8 @@ impl VifuEmbeddedRuntime {
         manifest.endpoints = endpoints;
         manifest.metadata = serde_json::json!({ "source": "embedded-runtime" });
         let releases = self.runtime.releases()?;
-        if let Some(active_version) = self.runtime.active_release_version()? {
-            if let Some(active) = releases
-                .iter()
-                .find(|release| release.version == active_version)
-            {
-                if active.manifest == manifest {
-                    return Ok(self.runtime.activate_release(active_version)?.manifest);
-                }
-            }
+        if let Some(existing) = releases.iter().find(|release| release.manifest == manifest) {
+            return Ok(self.runtime.activate_release(existing.version)?.manifest);
         }
         if releases.is_empty() {
             return Ok(self.runtime.bootstrap_release(manifest)?.manifest);
@@ -1467,6 +1460,22 @@ mod tests {
             Some(2)
         );
         drop(configured);
+
+        let empty_again = VifuEmbeddedRuntime::open(
+            "distribution-project".to_string(),
+            database.display().to_string(),
+        )
+        .unwrap();
+        assert!(empty_again
+            .prepare_gateway_release()
+            .unwrap()
+            .agents
+            .is_empty());
+        assert_eq!(
+            empty_again.runtime.active_release_version().unwrap(),
+            Some(1)
+        );
+        drop(empty_again);
         std::fs::remove_dir_all(directory).unwrap();
     }
 

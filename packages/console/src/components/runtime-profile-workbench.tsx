@@ -6,7 +6,6 @@ import {
   BrainCircuit,
   Check,
   Download,
-  Gamepad2,
   History,
   Braces,
   Play,
@@ -71,11 +70,11 @@ type TestExecution = {
 
 const TABS = [
   { id: "overview", label: "Agent", icon: Bot },
-  { id: "persona", label: "Behavior", icon: BrainCircuit },
-  { id: "generation", label: "Generation", icon: SlidersHorizontal },
+  { id: "persona", label: "Prompt", icon: BrainCircuit },
+  { id: "generation", label: "Model", icon: SlidersHorizontal },
   { id: "capabilities", label: "Abilities", icon: Sparkles },
   { id: "versions", label: "Versions", icon: History },
-  { id: "test", label: "Playtest", icon: Gamepad2 },
+  { id: "test", label: "Test", icon: Play },
   { id: "json", label: "JSON", icon: Braces },
 ] satisfies Array<{ id: WorkbenchTab; label: string; icon: typeof Bot }>;
 
@@ -155,9 +154,21 @@ export function RuntimeProfileWorkbench({
       );
       const nextVersionId = payload.version.id;
       setChangeSummary("");
+      if (deviceRuntime) {
+        await request(
+          `apps/${project.slug}/profiles/${profile.id}/versions/${nextVersionId}/activate`,
+          "POST",
+          {},
+        );
+        await load(nextVersionId);
+        router.refresh();
+        setTab("persona");
+        setMessage({ tone: "success", text: "Prompt saved and is now live in the connected app." });
+        return;
+      }
       await load(nextVersionId);
       setTab("test");
-      setMessage({ tone: "success", text: `Version ${payload.version.versionNumber} saved. Playtest it, then make it live when ready.` });
+      setMessage({ tone: "success", text: `Version ${payload.version.versionNumber} saved. Test it, then make it live when ready.` });
     } catch (error) {
       setMessage({ tone: "error", text: errorMessage(error) });
     } finally {
@@ -186,7 +197,7 @@ export function RuntimeProfileWorkbench({
 
   async function activateVersion(versionId: string) {
     const version = detail?.versions.find((item) => item.version.id === versionId)?.version;
-    if (!window.confirm(`Make version ${version?.versionNumber ?? ""} live for this game?`)) return;
+    if (!window.confirm(`Make version ${version?.versionNumber ?? ""} live for this app?`)) return;
     setPending(`activate:${versionId}`);
     setMessage(null);
     try {
@@ -197,7 +208,7 @@ export function RuntimeProfileWorkbench({
       );
       await load(versionId);
       router.refresh();
-      setMessage({ tone: "success", text: "Version is now live in the game." });
+      setMessage({ tone: "success", text: "Version is now live in the app." });
     } catch (error) {
       setMessage({ tone: "error", text: errorMessage(error) });
     } finally {
@@ -409,7 +420,7 @@ export function RuntimeProfileWorkbench({
             <input value={changeSummary} maxLength={1024} onChange={(event) => setChangeSummary(event.target.value)} placeholder="What changed?" />
           </label>
           <button className="primary-button" type="button" disabled={!dirty || pending !== null} onClick={saveVersion}>
-            <Save aria-hidden="true" />{pending === "save-version" ? "Saving" : "Save as new version"}
+            <Save aria-hidden="true" />{pending === "save-version" ? "Saving" : deviceRuntime ? "Save & make live" : "Save as new version"}
           </button>
         </footer>
       ) : null}
@@ -518,7 +529,7 @@ function OverviewPanel({
         <div className="profile-section-heading"><h3>Agent details</h3><p>The name and role used while building this app.</p></div>
         <div className="profile-identity-fields">
           <label><span>Agent name</span><input value={name} maxLength={128} onChange={(event) => setName(event.target.value)} /></label>
-          <label><span>Role in your game</span><textarea value={description} maxLength={4096} onChange={(event) => setDescription(event.target.value)} placeholder="Welcomes players and helps them explore the world" /></label>
+          <label><span>Role in your app</span><textarea value={description} maxLength={4096} onChange={(event) => setDescription(event.target.value)} placeholder="Researches current topics and produces cited briefs" /></label>
         </div>
         <dl><div><dt>Agent ID</dt><dd><code>{detail.profile.slug}</code></dd></div><div><dt>App</dt><dd>{project.name}</dd></div></dl>
         <button className="secondary-button" type="button" disabled={!metadataDirty || !name.trim() || pending !== null} onClick={() => onUpdateProfile(name, description)}>{pending === "profile" ? "Saving" : "Save agent details"}</button>
@@ -595,11 +606,11 @@ function PersonaPanel({
   return (
     <div className="profile-panel-stack">
       <section className="profile-text-editor">
-        <div><h3>Behavior instructions</h3><p>Define how this agent speaks, decides, and responds inside the game.</p></div>
+        <div><h3>System prompt</h3><p>Define how this agent reasons, responds, and handles its task.</p></div>
         <textarea
           value={stringValue(draft.persona.systemPrompt)}
           onChange={(event) => onDraft({ ...draft, persona: { ...draft.persona, systemPrompt: event.target.value } })}
-          placeholder="Describe the agent's role, voice, goals, and boundaries."
+          placeholder="Describe the agent's task, response format, goals, and boundaries."
         />
       </section>
     </div>
@@ -744,7 +755,7 @@ function VersionsPanel({
   const active = detail.versions.find((item) => item.version.id === detail.profile.activeVersionId);
   return (
     <div className="profile-versions">
-      <header><div><h3>Version history</h3><p>Playtest any saved version. Only the live version answers new game requests.</p></div></header>
+      <header><div><h3>Version history</h3><p>Test any saved version. Only the live version answers new app requests.</p></div></header>
       <div className="profile-version-list">
         {detail.versions.map((item) => {
           const isActive = item.version.id === detail.profile.activeVersionId;
@@ -867,12 +878,12 @@ function TestPanel({
   const selectableVersions = versions.filter((item) => !item.version.archivedAt);
   return (
     <div className="profile-test-panel">
-      <header><div><h3>Playtest this agent</h3><p>Talk to a saved version before making it live in your game.</p></div></header>
+      <header><div><h3>Test this agent</h3><p>Send an input to a saved version before making it live in your app.</p></div></header>
       <div className="profile-test-version-fields">
         <label><span>Version</span><select value={versionId} onChange={(event) => { setVersionId(event.target.value); if (compareVersionId === event.target.value) setCompareVersionId(""); }}>{selectableVersions.map((item) => <option value={item.version.id} key={item.version.id}>v{item.version.versionNumber}{item.version.id === profile.activeVersionId ? " - live" : ""}</option>)}</select></label>
         <label><span>Compare with</span><select value={compareVersionId} onChange={(event) => setCompareVersionId(event.target.value)}><option value="">No comparison</option>{selectableVersions.filter((item) => item.version.id !== versionId).map((item) => <option value={item.version.id} key={item.version.id}>v{item.version.versionNumber}{item.version.id === profile.activeVersionId ? " - live" : ""}</option>)}</select></label>
       </div>
-      <label className="profile-test-input"><span>Player message</span><textarea value={prompt} onChange={(event) => setPrompt(event.target.value)} placeholder="What would a player say to this agent?" /></label>
+      <label className="profile-test-input"><span>Message</span><textarea value={prompt} onChange={(event) => setPrompt(event.target.value)} placeholder="Enter an input for this agent" /></label>
       <button className="primary-button" type="button" disabled={pending || !prompt.trim() || !versionId} onClick={run}><Play aria-hidden="true" />{pending ? "Waiting for reply" : compareVersionId ? "Compare replies" : "Send message"}</button>
       {executions.length > 0 ? <div className={executions.length > 1 ? "profile-test-results comparison" : "profile-test-results"}>{executions.map(({ versionId: testedVersionId, execution }) => <ProfileTestResult key={testedVersionId} version={versions.find((item) => item.version.id === testedVersionId)?.version} execution={execution} />)}</div> : null}
     </div>
@@ -904,11 +915,11 @@ function GameIdentityPanel({
 }) {
   return (
     <section className="profile-presentation-editor">
-      <div><h3>In-game identity</h3><p>Optional presentation data your game can use for this agent.</p></div>
-      <label><span>Name shown in game</span><input value={stringValue(presentation.displayName)} onChange={(event) => onChange({ ...presentation, displayName: event.target.value })} placeholder="Display name" /></label>
+      <div><h3>App presentation</h3><p>Optional presentation data your app can use for this agent.</p></div>
+      <label><span>Name shown in app</span><input value={stringValue(presentation.displayName)} onChange={(event) => onChange({ ...presentation, displayName: event.target.value })} placeholder="Display name" /></label>
       <label><span>Portrait URL</span><input type="url" value={stringValue(presentation.avatarUrl)} onChange={(event) => onChange({ ...presentation, avatarUrl: event.target.value })} placeholder="https://..." /></label>
       <label><span>Voice direction</span><input value={stringValue(presentation.voiceStyle)} onChange={(event) => onChange({ ...presentation, voiceStyle: event.target.value })} placeholder="Calm, warm, concise" /></label>
-      <label><span>Game role</span><input value={stringValue(presentation.uiHint)} onChange={(event) => onChange({ ...presentation, uiHint: event.target.value })} placeholder="Merchant, guide, rival" /></label>
+      <label><span>Interface role</span><input value={stringValue(presentation.uiHint)} onChange={(event) => onChange({ ...presentation, uiHint: event.target.value })} placeholder="Researcher, assistant, reviewer" /></label>
     </section>
   );
 }
@@ -1018,7 +1029,7 @@ function changedSections(left: ProfileVersionWithCapabilities, right: ProfileVer
   if (JSON.stringify(left.version.persona) !== JSON.stringify(right.version.persona)) sections.push("behavior");
   if (JSON.stringify(left.capabilities) !== JSON.stringify(right.capabilities)) sections.push("abilities");
   if (JSON.stringify(left.version.runtime) !== JSON.stringify(right.version.runtime)) sections.push("runtime");
-  if (JSON.stringify(left.version.presentation) !== JSON.stringify(right.version.presentation)) sections.push("game identity");
+  if (JSON.stringify(left.version.presentation) !== JSON.stringify(right.version.presentation)) sections.push("presentation");
   return sections;
 }
 

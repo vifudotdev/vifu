@@ -35,8 +35,34 @@ class VifuRuntimeTests(unittest.TestCase):
                 result = app.invoke("guide", {"name": "Ada"})
 
             self.assertEqual(result.output, {"text": "Hello, Ada"})
-            self.assertEqual(app.runtime.app_id, APP_ID)
+            self.assertEqual(app.runtime.app_id, "python-app-test")
             app.close()
+
+    def test_high_level_app_exposes_developer_instructions_to_the_agent(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            app = Vifu("Prompt Test", data_dir=directory, workspace=directory)
+
+            @app.agent("guide", instructions="Answer with one short sentence.")
+            def guide(request):
+                return {"instructions": request.instructions}
+
+            with _local_app(APP_ID):
+                result = app.invoke("guide", {})
+
+            self.assertEqual(
+                result.output,
+                {"instructions": "Answer with one short sentence."},
+            )
+            app.close()
+
+    def test_high_level_app_rejects_empty_agent_instructions(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            app = Vifu("Prompt Test", data_dir=directory, workspace=directory)
+            app.agent("guide", lambda _request: {}, instructions="  ")
+
+            with _local_app(APP_ID):
+                with self.assertRaisesRegex(ValueError, "must not be empty"):
+                    _ = app.runtime
 
     def test_high_level_app_requires_a_name(self) -> None:
         with self.assertRaises(ValueError):
@@ -81,6 +107,20 @@ class VifuRuntimeTests(unittest.TestCase):
                         self.assertIs(active, app)
 
             connect.assert_called_once_with()
+            close.assert_called_once_with()
+
+    def test_high_level_app_cleans_up_after_a_native_connection_error(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            app = Vifu("Connection Failure", data_dir=directory)
+            runtime = mock.Mock()
+            runtime.connect_local.side_effect = ValueError("native start failed")
+            app._runtime = runtime
+            app._app = VifuAppRecord(APP_ID, "connection-failure", "Connection Failure")
+
+            with mock.patch.object(app, "close") as close:
+                with self.assertRaisesRegex(ConnectionError, "native start failed"):
+                    app.connect()
+
             close.assert_called_once_with()
 
     def test_high_level_app_run_serves_without_reading_terminal_input(self) -> None:
@@ -227,6 +267,57 @@ class VifuRuntimeTests(unittest.TestCase):
                 overrides={"server.deployment_id": "local-research"},
             )
             app.close()
+
+    def test_high_level_app_closes_the_server_it_started(self) -> None:
+        managed_server = mock.Mock()
+        with tempfile.TemporaryDirectory() as directory:
+            app = Vifu("Owned Server", data_dir=directory, workspace=directory)
+
+            with mock.patch.object(VifuServer, "ensure", return_value=managed_server):
+                with mock.patch.object(
+                    VifuAppStore,
+                    "open",
+                    return_value=VifuAppRecord(APP_ID, "owned-server", "Owned Server"),
+                ):
+                    _ = app.runtime
+
+            app.close()
+            app.close()
+
+        managed_server.close.assert_called_once_with()
+
+    def test_high_level_app_does_not_close_a_reused_server(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            app = Vifu("Reused Server", data_dir=directory, workspace=directory)
+
+            with mock.patch.object(VifuServer, "ensure", return_value=None):
+                with mock.patch.object(
+                    VifuAppStore,
+                    "open",
+                    return_value=VifuAppRecord(APP_ID, "reused-server", "Reused Server"),
+                ):
+                    _ = app.runtime
+
+            app.close()
+
+        self.assertIsNone(app._server)
+
+    def test_high_level_app_closes_started_server_when_setup_fails(self) -> None:
+        managed_server = mock.Mock()
+        with tempfile.TemporaryDirectory() as directory:
+            app = Vifu("Failed Setup", data_dir=directory, workspace=directory)
+
+            with mock.patch.object(VifuServer, "ensure", return_value=managed_server):
+                with mock.patch.object(
+                    VifuAppStore,
+                    "open",
+                    side_effect=RuntimeError("app setup failed"),
+                ):
+                    with self.assertRaisesRegex(RuntimeError, "app setup failed"):
+                        _ = app.runtime
+
+        managed_server.close.assert_called_once_with()
+        self.assertIsNone(app._server)
 
     def test_server_config_serializes_overrides_for_the_cli(self) -> None:
         managed = mock.Mock(running=True)

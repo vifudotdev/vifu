@@ -55,12 +55,12 @@ export function ProjectCreateForm({
             name="name"
             required
             maxLength={128}
-            placeholder="My game"
+            placeholder="My app"
             value={projectName}
             onChange={(event) => setProjectName(event.target.value)}
           />
         </Field>
-        {isMenu ? null : <Field label="Description" wide><input name="description" maxLength={4096} placeholder="Agent runtime for your game" /></Field>}
+        {isMenu ? null : <Field label="Description" wide><input name="description" maxLength={4096} placeholder="Agent runtime for your app" /></Field>}
       </div>
       <div className="form-actions">
         <button className="primary-button" type="submit" disabled={pending}><Plus aria-hidden="true" />{pending ? "Creating" : "Create app"}</button>

@@ -20,6 +20,7 @@ import type {
   AgentBinding,
   AgentEndpoint,
   AgentGateway,
+  AgentProfileDetail,
   AvailableAgent,
   EndpointTrace,
   RuntimeProject,
@@ -243,7 +244,15 @@ function ProjectSectionView({
       />
     );
   }
-  if (section === "logs") return <TracesView project={project} traces={appTraces(data.runtime.traces, project)} />;
+  if (section === "logs") {
+    return (
+      <TracesView
+        project={project}
+        traces={appTraces(data.runtime.traces, project)}
+        profileDetails={data.profileDetails}
+      />
+    );
+  }
   if (section === "settings" || section === "deployments") {
     return (
       <SettingsView
@@ -489,10 +498,23 @@ function ErrorTraceList({ traces }: { traces: EndpointTrace[] }) {
   );
 }
 
-function TracesView({ project, traces }: { project: RuntimeProject; traces: EndpointTrace[] }) {
+function TracesView({
+  profileDetails,
+  project,
+  traces,
+}: {
+  profileDetails: AgentProfileDetail[];
+  project: RuntimeProject;
+  traces: EndpointTrace[];
+}) {
   return (
     <section className="content-section trace-section convex-trace-section">
-      <RuntimeTraceWorkbench projectId={project.id} projectSlug={project.slug} traces={traces} />
+      <RuntimeTraceWorkbench
+        profileDetails={profileDetails}
+        projectId={project.id}
+        projectSlug={project.slug}
+        traces={traces}
+      />
     </section>
   );
 }

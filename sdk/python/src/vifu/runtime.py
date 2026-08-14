@@ -35,6 +35,11 @@ class AgentRequest:
     state_revision: int
     trace: "AgentTrace"
 
+    @property
+    def instructions(self) -> str | None:
+        """Returns the active Agent prompt supplied by Vifu."""
+        return _agent_instructions(self.agent_metadata)
+
 
 @dataclass(frozen=True)
 class AgentResponse:
@@ -171,6 +176,7 @@ class VifuRuntime:
         capability: str = "chat",
         timeout_ms: int = 30_000,
         metadata: JsonValue = None,
+        instructions: str | None = None,
     ) -> VifuRuntime:
         provider_id = provider_id or f"{agent_id}-provider"
         endpoint = endpoint or agent_id
@@ -182,7 +188,7 @@ class VifuRuntime:
             name or agent_id,
             provider_id,
             [capability],
-            _encode_json(metadata if metadata is not None else {}),
+            _encode_json(_agent_metadata(metadata, instructions)),
         )
         runtime.register_endpoint(endpoint, agent_id, capability, timeout_ms)
         self._providers.append(provider)
@@ -276,6 +282,40 @@ class VifuRuntime:
             local_server_url=server_url,
             local_app_id=app_id,
         )
+
+
+def _agent_metadata(metadata: JsonValue, instructions: str | None) -> JsonValue:
+    if metadata is None:
+        value: dict[str, JsonValue] = {}
+    elif isinstance(metadata, dict):
+        value = dict(metadata)
+    else:
+        if instructions is not None:
+            raise ValueError("Agent metadata must be an object when instructions are set")
+        return metadata
+    if instructions is None:
+        return value
+    prompt = instructions.strip()
+    if not prompt:
+        raise ValueError("Agent instructions must not be empty")
+    persona = value.get("persona")
+    next_persona = dict(persona) if isinstance(persona, dict) else {}
+    next_persona["systemPrompt"] = prompt
+    value["persona"] = next_persona
+    return value
+
+
+def _agent_instructions(metadata: JsonValue) -> str | None:
+    if not isinstance(metadata, dict):
+        return None
+    persona = metadata.get("persona")
+    sources = [persona, metadata] if isinstance(persona, dict) else [metadata]
+    for source in sources:
+        for key in ("systemPrompt", "instructions"):
+            value = source.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+    return None
 
 
 def _agent_request(

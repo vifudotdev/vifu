@@ -96,6 +96,7 @@ pub struct NewDiscoveredBinding<'a> {
     pub provider_key: &'a str,
     pub runtime_provider_key: &'a str,
     pub provider_type: &'a str,
+    pub persona: Value,
 }
 
 pub struct ProfilePatch<'a> {
@@ -215,6 +216,8 @@ pub struct NewUploadedRuntimeTrace<'a> {
     pub request_id: Uuid,
     pub project_id: Uuid,
     pub gateway_session_id: Option<Uuid>,
+    pub profile_id: Option<Uuid>,
+    pub profile_version_id: Option<Uuid>,
     pub operation: &'a str,
     pub provider_key: Option<&'a str>,
     pub capability_kind: Option<&'a str>,

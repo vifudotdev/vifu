@@ -70,7 +70,7 @@ type TestExecution = {
 
 const TABS = [
   { id: "overview", label: "Agent", icon: Bot },
-  { id: "persona", label: "Behavior", icon: BrainCircuit },
+  { id: "persona", label: "Prompt", icon: BrainCircuit },
   { id: "capabilities", label: "Abilities", icon: Sparkles },
   { id: "versions", label: "Versions", icon: History },
   { id: "test", label: "Playtest", icon: Gamepad2 },
@@ -137,6 +137,7 @@ export function RuntimeProfileWorkbench({
   const dirty = draft ? draftSignature(draft) !== initialDraftSignature : false;
   const activeVersion = detail?.versions.find((item) => item.version.id === detail.profile.activeVersionId);
   const sourceManaged = draft?.source.type === "openclaw" && draft.source.managed !== false;
+  const activateOnSave = draft?.source.type === "vifu-runtime";
 
   async function saveVersion() {
     if (!draft) return;
@@ -150,6 +151,18 @@ export function RuntimeProfileWorkbench({
       );
       const nextVersionId = payload.version.id;
       setChangeSummary("");
+      if (activateOnSave) {
+        await runtimeRequest(
+          `apps/${project.slug}/profiles/${profile.id}/versions/${nextVersionId}/activate`,
+          "POST",
+          {},
+        );
+        await load(nextVersionId);
+        router.refresh();
+        setTab("persona");
+        setMessage({ tone: "success", text: "Prompt saved and is now live in the connected app." });
+        return;
+      }
       await load(nextVersionId);
       setTab("test");
       setMessage({ tone: "success", text: `Version ${payload.version.versionNumber} saved. Playtest it, then make it live when ready.` });
@@ -397,7 +410,7 @@ export function RuntimeProfileWorkbench({
             <input value={changeSummary} maxLength={1024} onChange={(event) => setChangeSummary(event.target.value)} placeholder="What changed?" />
           </label>
           <button className="primary-button" type="button" disabled={!dirty || pending !== null} onClick={saveVersion}>
-            <Save aria-hidden="true" />{pending === "save-version" ? "Saving" : "Save as new version"}
+            <Save aria-hidden="true" />{pending === "save-version" ? "Saving" : activateOnSave ? "Save & make live" : "Save as new version"}
           </button>
         </footer>
       ) : null}
@@ -534,11 +547,11 @@ function PersonaPanel({
   return (
     <div className="profile-panel-stack">
       <section className="profile-text-editor">
-        <div><h3>Behavior instructions</h3><p>Define how this agent speaks, decides, and responds inside the game.</p></div>
+        <div><h3>Agent prompt</h3><p>This prompt is passed to the agent on every invocation. Save it to update the connected app.</p></div>
         <textarea
           value={stringValue(draft.persona.systemPrompt)}
           onChange={(event) => onDraft({ ...draft, persona: { ...draft.persona, systemPrompt: event.target.value } })}
-          placeholder="Describe the agent's role, voice, goals, and boundaries."
+          placeholder="Describe the agent's role, task, rules, and response format."
         />
       </section>
     </div>

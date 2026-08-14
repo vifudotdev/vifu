@@ -7769,8 +7769,10 @@ button:disabled {
 }
 
 .trace-date-filter input {
-  max-width: 142px;
+  width: 112px;
   padding: 0 7px;
+  font-family: var(--font-mono);
+  letter-spacing: 0.01em;
 }
 
 .trace-explorer-search {
@@ -8047,12 +8049,24 @@ button:disabled {
 }
 
 .trace-detail-header strong {
-  font-size: 12px;
+  font-size: 14px;
 }
 
 .trace-detail-header code {
   color: var(--text-muted);
+  font-size: 11px;
+}
+
+.trace-detail-identity {
+  display: grid;
+  min-width: 0;
+  gap: 1px;
+}
+
+.trace-detail-identity small {
+  color: var(--text-muted);
   font-size: 10px;
+  font-weight: 650;
 }
 
 .trace-detail-kpis {
@@ -8076,7 +8090,7 @@ button:disabled {
 .trace-summary-grid dt,
 .trace-summary-findings article > span {
   color: var(--text-muted);
-  font-size: 9px;
+  font-size: 10px;
   font-weight: 750;
   letter-spacing: 0.03em;
   text-transform: uppercase;
@@ -8087,19 +8101,62 @@ button:disabled {
   margin-top: 3px;
   overflow: hidden;
   font-family: var(--font-mono);
-  font-size: 10px;
+  font-size: 12px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .observation-browser {
   display: flex;
-  min-height: 150px;
-  max-height: 42%;
-  flex: 0 1 42%;
+  height: 100%;
+  min-height: 0;
+  flex: 1;
   flex-direction: column;
-  border-bottom: 1px solid var(--line);
   background: #f8fafc;
+}
+
+.trace-detail-workspace,
+.trace-detail-panels,
+.trace-detail-primary {
+  min-height: 0;
+  flex: 1;
+}
+
+.trace-detail-workspace {
+  display: flex;
+}
+
+.trace-detail-primary {
+  display: flex;
+  height: 100%;
+  flex-direction: column;
+}
+
+.trace-detail-resize-handle {
+  position: relative;
+  height: 9px;
+  flex: 0 0 9px;
+  border-top: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+  background: #f3f5f8;
+  cursor: row-resize;
+}
+
+.trace-detail-resize-handle::before {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 34px;
+  height: 2px;
+  transform: translate(-50%, -50%);
+  border-radius: 999px;
+  background: #b9c2cf;
+  content: "";
+}
+
+.trace-detail-resize-handle:hover::before,
+.trace-detail-resize-handle[data-resize-handle-state="drag"]::before {
+  background: #526273;
 }
 
 .observation-browser > header {
@@ -8252,7 +8309,7 @@ button:disabled {
 
 .trace-detail-tabs {
   display: flex;
-  min-height: 37px;
+  min-height: 42px;
   flex: 0 0 auto;
   overflow-x: auto;
   border-bottom: 1px solid var(--line);
@@ -8266,9 +8323,9 @@ button:disabled {
   background: transparent;
   color: var(--text-muted);
   cursor: pointer;
-  padding: 7px 8px 5px;
+  padding: 9px 9px 7px;
   font: inherit;
-  font-size: 10px;
+  font-size: 11px;
   font-weight: 700;
 }
 
@@ -8281,7 +8338,7 @@ button:disabled {
   min-height: 0;
   flex: 1;
   overflow: auto;
-  padding: 10px;
+  padding: 14px;
 }
 
 .trace-detail-message {
@@ -8297,7 +8354,98 @@ button:disabled {
 
 .trace-summary-panel {
   display: grid;
-  gap: 10px;
+  gap: 14px;
+}
+
+.trace-configuration {
+  overflow: hidden;
+  border: 1px solid #c9d5e3;
+  border-radius: 8px;
+  background: #f4f8fd;
+}
+
+.trace-configuration > header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  border-bottom: 1px solid #d8e1eb;
+  padding: 11px 12px;
+}
+
+.trace-configuration > header > div {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.trace-configuration > header span,
+.trace-configuration-prompt > span,
+.trace-configuration dt {
+  color: var(--text-muted);
+  font-size: 10px;
+  font-weight: 750;
+  letter-spacing: 0.035em;
+  text-transform: uppercase;
+}
+
+.trace-configuration > header strong {
+  overflow: hidden;
+  font-size: 14px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.trace-configuration > header code {
+  flex: 0 0 auto;
+  border-radius: 5px;
+  background: #dce9f7;
+  color: #23415f;
+  padding: 4px 6px;
+  font-size: 11px;
+  font-weight: 750;
+}
+
+.trace-configuration > dl {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  margin: 0;
+  border-bottom: 1px solid #d8e1eb;
+}
+
+.trace-configuration > dl > div {
+  min-width: 0;
+  border-right: 1px solid #d8e1eb;
+  padding: 9px 11px;
+}
+
+.trace-configuration > dl > div:last-child {
+  border-right: 0;
+}
+
+.trace-configuration dd {
+  margin: 4px 0 0;
+  overflow-wrap: anywhere;
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.trace-configuration-prompt {
+  padding: 11px 12px 13px;
+}
+
+.trace-configuration-prompt p,
+.trace-configuration-missing {
+  margin: 6px 0 0;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.trace-configuration-missing {
+  color: var(--text-muted);
+  padding: 3px 12px 13px;
 }
 
 .trace-summary-io {
@@ -8323,7 +8471,7 @@ button:disabled {
 .trace-summary-grid dd {
   margin: 3px 0 0;
   overflow-wrap: anywhere;
-  font-size: 10px;
+  font-size: 12px;
   font-weight: 650;
 }
 
@@ -8344,14 +8492,14 @@ button:disabled {
 .trace-summary-findings strong {
   display: block;
   margin-top: 3px;
-  font-size: 11px;
+  font-size: 13px;
 }
 
 .trace-summary-findings p {
   margin: 4px 0 0;
   color: var(--text-muted);
-  font-size: 10px;
-  line-height: 1.45;
+  font-size: 12px;
+  line-height: 1.55;
 }
 
 .trace-detail-tab-panel .trace-payload-grid {
@@ -8360,7 +8508,8 @@ button:disabled {
 
 .trace-detail-tab-panel .trace-payload pre {
   max-height: 320px;
-  font-size: 10px;
+  font-size: 12px;
+  line-height: 1.55;
 }
 
 .trace-conversation {
@@ -8415,8 +8564,8 @@ button:disabled {
   margin: 0;
   overflow-wrap: anywhere;
   white-space: pre-wrap;
-  font-size: 11px;
-  line-height: 1.5;
+  font-size: 12px;
+  line-height: 1.55;
 }
 
 .trace-tool-call {
@@ -8527,6 +8676,19 @@ button:disabled {
 }
 
 @container (max-width: 560px) {
+  .trace-configuration > dl {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .trace-configuration > dl > div {
+    border-right: 0;
+    border-bottom: 1px solid #d8e1eb;
+  }
+
+  .trace-configuration > dl > div:last-child {
+    border-bottom: 0;
+  }
+
   .trace-explorer-list-header,
   .trace-explorer-row {
     grid-template-columns: 66px 84px minmax(100px, 1fr) 62px;

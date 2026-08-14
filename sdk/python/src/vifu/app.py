@@ -40,6 +40,7 @@ class Vifu:
         self._runtime: VifuRuntime | None = None
         self._registrations: list[tuple[str, AgentHandler, dict[str, Any]]] = []
         self._gateway: VifuGateway | None = None
+        self._server: VifuServer | None = None
         self._resources: list[Any] = []
         self._prepared_resources: set[int] = set()
 
@@ -54,6 +55,7 @@ class Vifu:
         capability: str = "chat",
         timeout_ms: int = 30_000,
         metadata: JsonValue = None,
+        instructions: str | None = None,
     ) -> Callable[[AgentHandler], AgentHandler] | AgentHandler:
         """Registers a function or integration as an Agent."""
 
@@ -68,6 +70,7 @@ class Vifu:
                 "capability": capability,
                 "timeout_ms": timeout_ms,
                 "metadata": agent_metadata,
+                "instructions": instructions,
             }
             self._registrations.append((agent_id, handler, options))
             if self._runtime is not None:
@@ -112,7 +115,7 @@ class Vifu:
                     app_id=self._app.app_id if self._app is not None else None,
                 )
             self._gateway.wait_until_connected(timeout)
-        except (OSError, RuntimeError, TimeoutError) as error:
+        except Exception as error:
             try:
                 self.close()
             except Exception:
@@ -171,6 +174,13 @@ class Vifu:
                 runtime.close()
             except Exception as error:
                 first_error = first_error or error
+        if self._server is not None:
+            server = self._server
+            self._server = None
+            try:
+                server.close()
+            except Exception as error:
+                first_error = first_error or error
         if first_error is not None:
             raise first_error
 
@@ -195,15 +205,25 @@ class Vifu:
             raise ValueError(
                 "automatic App creation requires a loopback Vifu Server URL"
             )
-        VifuServer.ensure(
+        self._server = VifuServer.ensure(
             self.server_url,
             profile=self.server_config.profile,
             overrides=self.server_config.overrides,
         )
-        self._app = self._store.open(self.server_url, self.name)
-        self._runtime = VifuRuntime(self._app.app_id, data_dir=self._data_dir)
-        for agent_id, handler, options in self._registrations:
-            self._runtime.agent(agent_id, handler, **options)
+        try:
+            self._app = self._store.open(self.server_url, self.name)
+            runtime_data_dir = self._data_dir
+            if runtime_data_dir is None:
+                runtime_data_dir = Path.home() / ".vifu" / "sdk" / "python" / self._app.app_id
+            self._runtime = VifuRuntime(self._app.slug, data_dir=runtime_data_dir)
+            for agent_id, handler, options in self._registrations:
+                self._runtime.agent(agent_id, handler, **options)
+        except Exception:
+            if self._server is not None:
+                server = self._server
+                self._server = None
+                server.close()
+            raise
 
     def _prepare_resources(self) -> None:
         for resource in self._resources:

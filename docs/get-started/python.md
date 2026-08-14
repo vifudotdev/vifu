@@ -34,6 +34,7 @@ app = Vifu("workshop-guide", capture_trace_content=True)
     name="Python Scene Planner",
     capability="planning",
     metadata={"provider": "python-rules"},
+    instructions="Inspect the scene and return the safest next action.",
 )
 def scene_planner(request):
     with request.trace.stage("validate", metadata={"provider": "python-rules"}):
@@ -41,6 +42,7 @@ def scene_planner(request):
             output={
                 "action": "inspect",
                 "target": request.input["scene"],
+                "guidance": request.instructions,
             },
             metadata={"provider": "python-rules"},
         )
@@ -93,9 +95,16 @@ and `run_my_app` define the product.
 Open the Dashboard URL that the Python process prints.
 
 The **My Apps** page now contains `workshop-guide`. Its Device is named
-`Python: workshop-guide`. The Agents page shows the
-`scene-planner` Agent. The trace shows the `validate` and `provider.invoke`
-stages.
+`Python: workshop-guide`. The Agents page shows the `scene-planner` Agent and
+its current prompt. Open **scene-planner → Prompt**, edit the instructions, and
+select **Save & make live**. Vifu sends the live prompt to the connected Python
+Runtime; the next call receives it through `request.instructions`. The trace
+shows the `validate` and `provider.invoke` stages.
+
+The `instructions=` value in Python seeds the first Agent version. Later
+Dashboard edits are versioned and become the active instructions only after
+you save them. This keeps the initial behavior visible in source while making
+development changes explicit in Vifu.
 
 Create another directory with another `Vifu("name")` program to create another
 App. Both Apps stay available in the same personal Dashboard and keep separate
