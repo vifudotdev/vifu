@@ -18,7 +18,7 @@
 
 ## Quick start
 
-### Build a Python Agent App
+### Desktop Arm: Build a Python Agent App on macOS
 
 1. Run the [Web Research Agent App](examples/foundry-local-python/README.md).
 
@@ -44,16 +44,53 @@ uv run --with "vifu[foundry]" https://raw.githubusercontent.com/vifudotdev/vifu/
 7. Open the latest [Trace](docs/observability.md). Confirm **Configuration used**
    shows the new Prompt, then compare its timings with the first Trace.
 
-### Connect an on-device App
+### Mobile Arm: Trace On-device Model Performance on Android
 
 1. Download and extract the [latest Vifu release](https://github.com/vifudotdev/vifu/releases/latest).
-2. Start `./vifu`, then press `B` to open the Dashboard.
-3. Install the [optimized Android Starter APK](https://github.com/vifudotdev/vifu/releases/download/android-starter-v0.1.1/vifu-android-starter.apk).
-4. Open **Devices** in the Dashboard and pair the Starter.
 
-Install the [baseline APK](https://github.com/vifudotdev/vifu/releases/download/android-starter-v0.1.1/vifu-android-starter-baseline.apk)
-beside the optimized APK to compare both builds. The [Android guide](examples/android-starter/README.md)
-also explains how to build the Starter.
+2. Start `./vifu` once. When the TUI opens, press `q` and confirm the stop.
+
+3. Find the LAN IPv4 address of the computer. Edit `~/.vifu/config.toml`:
+
+```toml
+[server]
+address = "https://<computer-lan-ip>:6790"
+
+[gateway]
+address = "http://127.0.0.1:6790"
+```
+
+Replace the complete `server.address`. Set its scheme to `https://`. Replace
+`127.0.0.1` with the LAN IPv4 address of the computer. Keep `gateway.address`
+on `http://127.0.0.1:6790`. Connect the phone and the computer to the same
+network.
+
+4. Start `./vifu` again. Keep the TUI open, then press `B` to open the Dashboard.
+
+5. Install the [optimized Android Starter APK](https://github.com/vifudotdev/vifu/releases/download/android-starter-v0.1.1/vifu-android-starter.apk).
+
+6. Open the Starter. Tap the folder button in the lower-right corner and select
+   a GGUF model.
+
+7. In **Overview**, select **Pair device**, then select **Copy pairing code**.
+
+8. In the Starter, tap the Vifu status row at the top. Paste the code, select
+   **Pair**, and wait for `Vifu: connected`.
+
+9. Open **Traces** in the Dashboard. Keep the Dashboard and TUI visible.
+
+10. Enter a message in the Starter. Inspect latency, first-token time, decode
+    time, and token rate in the new Trace.
+
+11. Install the [baseline APK](https://github.com/vifudotdev/vifu/releases/download/android-starter-v0.1.1/vifu-android-starter-baseline.apk)
+    beside the optimized APK. Select the same model and create a new pairing
+    code for this application.
+
+12. Enter the same message in both applications. Compare their Traces to measure
+    the ARM optimization on the same phone and model.
+
+The [Android guide](examples/android-starter/README.md) includes model setup,
+pairing details, and source-build instructions.
 
 ## What Vifu does
 

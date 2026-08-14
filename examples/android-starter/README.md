@@ -44,39 +44,57 @@ old Demo applications before installation.
 
 ## Pair and inspect
 
-Connect the phone and developer computer to the same local network. Start the
-downloaded Vifu binary with a Server address that the phone can reach:
+Connect the phone and developer computer to the same local network.
 
-```bash
-./vifu \
-  -c server.address=https://<computer-lan-address>:6790 \
-  -c gateway.address=http://127.0.0.1:6790
+Start `./vifu` once to create `~/.vifu/config.toml`. Press `q` and confirm the
+stop. Find the LAN IPv4 address of the computer, then edit the configuration:
+
+```toml
+[server]
+address = "https://<computer-lan-ip>:6790"
+
+[gateway]
+address = "http://127.0.0.1:6790"
 ```
 
-On its first run, Vifu creates one permanent local App and connects its local
-Gateway. Later starts reuse the same App.
+Replace the complete `server.address`. Set its scheme to `https://`. Replace
+`127.0.0.1` with the LAN IPv4 address of the computer. Keep `gateway.address`
+on `http://127.0.0.1:6790`.
 
-Press `B`, open the project and its primary deployment in the Dashboard, then
-choose **Pair gateway** and **Copy pairing code**. Tap the Vifu status row in
-the app and paste the code. The app validates the one-time token and certificate
-pin, stores its device credential in Android Keystore, and reconnects on later
-launches. Pairing also enables bounded chat input and output capture so the
-Dashboard can render the local conversation in the trace. **Use local only**
-disconnects the Server and keeps the chat on the phone.
+Start `./vifu` again and keep the TUI open. Vifu reuses the permanent local App
+from the first start.
+
+Open the Starter. Tap the folder button in the lower-right corner and select a
+GGUF model. The Runtime starts after the model loads.
+
+Press `B` to open the Dashboard. In **Overview**, select **Pair device**, then
+select **Copy pairing code**. Tap the Vifu status row at the top of the Starter.
+Paste the code, select **Pair**, and wait for `Vifu: connected`.
+
+The app validates the one-time token, stores its device credential in Android
+Keystore, and reconnects on later starts. Pairing also enables bounded chat
+input and output capture for the Trace. **Use local only** disconnects the
+Server and keeps the chat on the phone.
 
 Create a new pairing code for the second application. Select the same Vifu
 project so both Agent traces appear together.
 
-The Dashboard QR is also available for camera-based application links. The
-copied native code is the reliable path for a local Server certificate because
-it carries the complete trust anchor.
+The Dashboard also shows a QR for camera-based application links. The QR and
+the copied code contain the Server address, certificate trust data, and
+one-time token.
 
-Run one chat turn. Success is visible in three places:
+Open **Traces** in the Dashboard. Keep the Dashboard and TUI visible, then run
+one chat turn. Success is visible in three places:
 
 - the app shows `Vifu: connected`.
 - the TUI lists `Android llama (ARM optimized)` or `Android llama (baseline)`.
 - the Dashboard shows the invocation model, stages, timings, and bounded
   errors.
+
+Install the baseline APK beside the optimized APK. Select the same GGUF, create
+a new pairing code, and pair it with the same App. Enter the same message in
+both applications. Compare latency, first-token time, decode time, and token
+rate in their Traces.
 
 The model executes inside the Android app. Vifu stores monitoring data in the
 SQLite database on the developer computer. The Starter's paired trace includes
