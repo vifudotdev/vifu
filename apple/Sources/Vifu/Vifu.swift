@@ -2825,9 +2825,9 @@ public enum VifuRuntimeError: Swift.Error, Equatable, Hashable, Foundation.Local
 
 
 
-    case InvalidConfig(message: String
+    case InvalidConfig(reason: String
     )
-    case Runtime(message: String
+    case Runtime(reason: String
     )
 
 
@@ -2857,10 +2857,10 @@ public struct FfiConverterTypeVifuRuntimeError: FfiConverterRustBuffer {
 
 
         case 1: return .InvalidConfig(
-            message: try FfiConverterString.read(from: &buf)
+            reason: try FfiConverterString.read(from: &buf)
             )
         case 2: return .Runtime(
-            message: try FfiConverterString.read(from: &buf)
+            reason: try FfiConverterString.read(from: &buf)
             )
 
          default: throw UniffiInternalError.unexpectedEnumCase
@@ -2874,14 +2874,14 @@ public struct FfiConverterTypeVifuRuntimeError: FfiConverterRustBuffer {
 
 
 
-        case let .InvalidConfig(message):
+        case let .InvalidConfig(reason):
             writeInt(&buf, Int32(1))
-            FfiConverterString.write(message, into: &buf)
+            FfiConverterString.write(reason, into: &buf)
 
 
-        case let .Runtime(message):
+        case let .Runtime(reason):
             writeInt(&buf, Int32(2))
-            FfiConverterString.write(message, into: &buf)
+            FfiConverterString.write(reason, into: &buf)
 
         }
     }
