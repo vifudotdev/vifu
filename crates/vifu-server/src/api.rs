@@ -7799,10 +7799,11 @@ fn upsert_available_provider(
     local_provider_type: Option<&str>,
     capabilities: Vec<String>,
 ) -> Result<(), ApiError> {
-    let provider_key = required_identifier("provider key", provider_key)?.to_string();
+    let runtime_provider_key = required_identifier("provider key", provider_key)?.to_string();
+    let provider_key = scoped_provider_key(&session.gateway_id, &runtime_provider_key);
     let provider_type = required_identifier("provider type", provider_type)?.to_string();
     let name = optional_text("provider name", Some(name), 128)?
-        .unwrap_or(&provider_key)
+        .unwrap_or(&runtime_provider_key)
         .to_string();
     let provider = providers
         .entry(provider_key.clone())
@@ -7814,6 +7815,7 @@ fn upsert_available_provider(
             base_url: String::new(),
             config: json!({
                 "gatewayId": session.gateway_id.clone(),
+                "runtimeProviderKey": runtime_provider_key,
                 "source": "agent-gateway",
             }),
             secret_keys: Vec::new(),

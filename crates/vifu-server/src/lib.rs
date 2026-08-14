@@ -3004,21 +3004,30 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         let payload = response_json(response).await;
         let providers = payload["custom"].as_array().unwrap();
+        let local_openai =
+            crate::gateway_identity::scoped_provider_key("gateway-project", "local-openai");
+        let local_llama =
+            crate::gateway_identity::scoped_provider_key("gateway-project", "local-llama");
+        let local_whisper =
+            crate::gateway_identity::scoped_provider_key("gateway-project", "local-whisper");
+        let other_openai =
+            crate::gateway_identity::scoped_provider_key("gateway-other", "other-openai");
         let keys = providers
             .iter()
             .map(|provider| provider["providerKey"].as_str().unwrap())
             .collect::<Vec<_>>();
-        assert!(keys.contains(&"local-openai"));
-        assert!(keys.contains(&"local-llama"));
-        assert!(keys.contains(&"local-whisper"));
-        assert!(!keys.contains(&"other-openai"));
+        assert!(keys.contains(&local_openai.as_str()));
+        assert!(keys.contains(&local_llama.as_str()));
+        assert!(keys.contains(&local_whisper.as_str()));
+        assert!(!keys.contains(&other_openai.as_str()));
         let openai = providers
             .iter()
-            .find(|provider| provider["providerKey"] == "local-openai")
+            .find(|provider| provider["providerKey"] == local_openai)
             .unwrap();
         assert_eq!(openai["providerType"], "vifu-runtime");
         assert_eq!(openai["status"], "online");
         assert_eq!(openai["config"]["gatewayId"], "gateway-project");
+        assert_eq!(openai["config"]["runtimeProviderKey"], "local-openai");
         assert_eq!(openai["config"]["localProviderType"], "openai-compatible");
         assert_eq!(
             openai["config"]["capabilities"],

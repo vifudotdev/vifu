@@ -106,23 +106,25 @@ async function setup() {
     ? agentGateway.agents?.find((item) => item.id === expectedMockAgent)
     : agentGateway.agents?.[0];
   assert(agent?.id, "The Agent Gateway did not report an agent");
-  const providerKey = agent.metadata?.providerKey;
-  assert(providerKey, "The Agent Gateway did not identify the source provider");
+  const runtimeProviderKey = agent.metadata?.providerKey;
+  assert(runtimeProviderKey, "The Agent Gateway did not identify the source provider");
   const secondaryAgent = agentGateway.agents?.find((item) =>
     item.id
       && item.id !== agent.id
-      && item.metadata?.providerKey === providerKey
+      && item.metadata?.providerKey === runtimeProviderKey
   ) ?? null;
   const projectAgentIds = secondaryAgent ? [agent.id, secondaryAgent.id] : [agent.id];
   const providerCatalog = await request("/v1/provider-catalog");
-  assert(
-    providerCatalog.custom?.some((provider) => provider.providerKey === providerKey),
-    "The Agent Gateway provider is missing from the provider catalog",
+  const catalogProvider = providerCatalog.custom?.find((provider) =>
+    provider.config?.gatewayId === agentGateway.gatewayId
+      && provider.config?.runtimeProviderKey === runtimeProviderKey
   );
+  assert(catalogProvider, "The Agent Gateway provider is missing from the provider catalog");
+  const providerKey = catalogProvider.providerKey;
   if (openAiProviderBaseUrl) {
     assert(
       providerCatalog.custom?.some((provider) =>
-        provider.providerKey === "openai-compatible-e2e"
+        provider.config?.runtimeProviderKey === "openai-compatible-e2e"
           && provider.providerType === "vifu-runtime"
           && provider.config?.localProviderType === "openai-compatible"
           && provider.config?.capabilities?.includes("chat")
@@ -664,8 +666,12 @@ async function createProjectWithProvider({ name, slug, gatewayId, providerKey, m
 async function exerciseOpenAiCompatibleProjectFlow({ project, projectKey, suffix }) {
   assert(openAiProviderBaseUrl, "VIFU_E2E_OPENAI_PROVIDER_BASE_URL is required for OpenAI-compatible E2E");
   const projectCatalog = await request(`/v1/apps/${project.slug}/provider-catalog`);
-  const availableOpenAi = projectCatalog.custom?.find((provider) => provider.providerKey === "openai-compatible-e2e");
-  const availableOpenAiAlt = projectCatalog.custom?.find((provider) => provider.providerKey === "openai-compatible-e2e-alt");
+  const availableOpenAi = projectCatalog.custom?.find((provider) =>
+    provider.config?.runtimeProviderKey === "openai-compatible-e2e"
+  );
+  const availableOpenAiAlt = projectCatalog.custom?.find((provider) =>
+    provider.config?.runtimeProviderKey === "openai-compatible-e2e-alt"
+  );
   assert(availableOpenAi, "Project provider catalog did not include the providers.json OpenAI-compatible provider");
   assert(availableOpenAiAlt, "Project provider catalog did not include the second providers.json OpenAI-compatible provider");
   assert(availableOpenAi.providerType === "vifu-runtime", "providers.json OpenAI-compatible provider must be exposed as vifu-runtime");
@@ -684,11 +690,11 @@ async function exerciseOpenAiCompatibleProjectFlow({ project, projectKey, suffix
   const attachedAvailable = await request(`/v1/apps/${project.slug}/providers`, {
     method: "POST",
     body: {
-      source: { kind: "custom", key: "openai-compatible-e2e" },
+      source: { kind: "custom", key: availableOpenAi.providerKey },
     },
   });
   assert(attachedAvailable.provider?.sourceKind === "custom", "Available provider attach did not preserve sourceKind=custom");
-  assert(attachedAvailable.provider?.sourceKey === "openai-compatible-e2e", "Available provider attach used the wrong source key");
+  assert(attachedAvailable.provider?.sourceKey === availableOpenAi.providerKey, "Available provider attach used the wrong source key");
   assert(attachedAvailable.provider?.status === "online", "Available providers.json provider was not online after attach");
   assert(attachedAvailable.addedAgents >= 1, "Available providers.json provider did not add its discovered agent");
   const profilesAfterAttach = ((await request(`/v1/apps/${project.slug}/profiles`)).profiles ?? [])
