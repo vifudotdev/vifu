@@ -7,6 +7,7 @@
 <b>Build, connect, and inspect on-device AI agents.</b>
 
 [![Crates.io](https://img.shields.io/crates/v/vifu.svg)](https://crates.io/crates/vifu)
+[![PyPI](https://img.shields.io/pypi/v/vifu.svg)](https://pypi.org/project/vifu/)
 [![Runtime API](https://docs.rs/vifu-runtime/badge.svg)](https://docs.rs/vifu-runtime)
 [![CI](https://github.com/vifudotdev/vifu/actions/workflows/ci.yml/badge.svg)](https://github.com/vifudotdev/vifu/actions/workflows/ci.yml)
 [![Discord](https://img.shields.io/badge/Discord-Join-5865F2?logo=discord&logoColor=white)](https://discord.com/invite/VdqqFwJbNE)
@@ -69,7 +70,7 @@ routes, and traces for each App.
 | Self-host Server and Console | Docker Compose | [Self-host](docs/self-hosting.md) |
 | Agent Providers | Built-in and configurable adapters | [Provider integrations](providers/README.md) |
 | Rust embedding | crates.io package | [Embed the Runtime](docs/runtime-embedding.md) |
-| Python | Rust Runtime and Gateway through UniFFI | [Python tutorial](docs/get-started/python.md) |
+| Python | `pip install vifu` | [Python tutorial](docs/get-started/python.md) |
 | TypeScript/Node.js | Rust Runtime through WebAssembly and native Gateway companion | [TypeScript tutorial](docs/get-started/typescript.md) |
 | Swift on iOS/macOS | SwiftPM package | [Apple application guide](docs/runtime-embedding.md#add-vifu-to-an-apple-application) |
 | Android Starter | Release APK and Kotlin source project | [Android Starter](examples/android-starter/README.md) |

@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Any
 from urllib.parse import parse_qs, urlparse
 
 from . import vifu_mobile_ffi as native
+from ._version import __version__
 
 if TYPE_CHECKING:
     from .runtime import VifuRuntime
@@ -104,7 +105,7 @@ class VifuGateway:
             "name": name or f"Python on {platform.node() or 'local device'}",
             "platform": platform.system().lower(),
             "runtime": "python",
-            "sdkVersion": "0.1.12",
+            "sdkVersion": __version__,
         }
         gateway = native.VifuEmbeddedGateway(
             runtime._native,

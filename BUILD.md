@@ -178,6 +178,16 @@ PYTHONPATH=target/python-sdk python3 -m unittest discover -s sdk/python/tests -v
 PYTHONPATH=target/python-sdk python3 examples/python-starter/main.py
 ```
 
+Build the platform wheel and install it in a clean environment:
+
+```bash
+scripts/build-python-wheel.sh
+python3 -m venv target/python-wheel-test
+target/python-wheel-test/bin/python -m pip install target/python-wheel/vifu-*.whl
+VIFU_EXAMPLE_DATA_DIR=target/python-wheel-state \
+  target/python-wheel-test/bin/python examples/python-starter/main.py
+```
+
 Build and test the WebAssembly-backed TypeScript SDK:
 
 ```bash

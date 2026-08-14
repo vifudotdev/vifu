@@ -3,16 +3,36 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "vifu-sdk"
-version = "0.1.12"
+name = "vifu"
+version = "0.1.0"
 description = "Embed Vifu Runtime and Gateway in Python agent applications."
 readme = "README.md"
 requires-python = ">=3.10"
-license = { text = "Apache-2.0" }
+license = "Apache-2.0"
+authors = [{ name = "Vifu Contributors" }]
 keywords = ["agents", "on-device-ai", "gateway", "tracing"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Developers",
+  "Operating System :: MacOS",
+  "Operating System :: POSIX :: Linux",
+  "Operating System :: Microsoft :: Windows",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Topic :: Software Development :: Libraries",
+]
+
+[project.urls]
+Homepage = "https://vifu.dev"
+Documentation = "https://github.com/vifudotdev/vifu/tree/main/docs/get-started"
+Repository = "https://github.com/vifudotdev/vifu"
+Issues = "https://github.com/vifudotdev/vifu/issues"
 
 [tool.setuptools]
 package-dir = { "" = "src" }
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+vifu = ["py.typed", "*.dylib", "*.so", "*.dll"]

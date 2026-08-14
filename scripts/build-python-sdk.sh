@@ -14,8 +14,11 @@ case "$(uname -s)" in
     Linux)
         LIBRARY_NAME="libvifu_mobile_ffi.so"
         ;;
+    MINGW*|MSYS*|CYGWIN*)
+        LIBRARY_NAME="vifu_mobile_ffi.dll"
+        ;;
     *)
-        echo "The source build currently supports macOS and Linux." >&2
+        echo "The source build supports macOS, Linux, and Windows." >&2
         exit 1
         ;;
 esac
@@ -38,6 +41,11 @@ mkdir -p "$DIST_DIR/vifu"
 cp "$SOURCE_DIR"/*.py "$DIST_DIR/vifu/"
 cp "$SOURCE_DIR/py.typed" "$DIST_DIR/vifu/"
 cp "$TARGET_DIR/release/$LIBRARY_NAME" "$DIST_DIR/vifu/$LIBRARY_NAME"
+if [[ "$(uname -s)" == "Darwin" ]]; then
+    install_name_tool \
+        -id "@rpath/$LIBRARY_NAME" \
+        "$DIST_DIR/vifu/$LIBRARY_NAME"
+fi
 "$TARGET_DIR/debug/uniffi-bindgen" generate \
     --library "$TARGET_DIR/release/$LIBRARY_NAME" \
     --language python \

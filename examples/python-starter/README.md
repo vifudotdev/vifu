@@ -4,11 +4,14 @@ This example runs a Python provider inside the native Vifu Runtime. It
 registers one Agent, reports a `decode` stage, invokes its endpoint, and prints
 the local trace count.
 
-From the repository root:
+Create an environment from the repository root. Then install and run the
+example:
 
 ```bash
-scripts/build-python-sdk.sh
-PYTHONPATH=target/python-sdk python3 examples/python-starter/main.py
+python3 -m venv .venv
+. .venv/bin/activate
+python -m pip install vifu
+python examples/python-starter/main.py
 ```
 
 To add Dashboard monitoring, create a one-time pairing code and connect after

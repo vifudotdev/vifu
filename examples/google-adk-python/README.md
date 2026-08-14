@@ -6,25 +6,18 @@ session state, Gateway connection, and trace for the delegated task.
 
 ## Run It
 
-From the repository root, build the Vifu Python SDK:
-
-```bash
-scripts/build-python-sdk.sh
-```
-
-Create an environment for this example and install Google ADK. Use the
-constraints file recommended by Google for your Python version.
+Create an environment from the repository root. Then install Vifu and Google
+ADK. Use the constraints file that Google recommends for your Python version.
 
 ```bash
 python3 -m venv .venv
 . .venv/bin/activate
-pip install google-adk
+python -m pip install vifu google-adk
 ```
 
-Make the generated Vifu package visible, then start the ADK development CLI:
+Start the ADK development CLI:
 
 ```bash
-export PYTHONPATH="$PWD/target/python-sdk"
 adk run examples/google-adk-python/vifu_adk_agent
 ```
 

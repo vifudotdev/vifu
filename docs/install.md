@@ -47,17 +47,16 @@ Each platform guide contains pairing and source-build instructions.
 
 Choose the task-based tutorial for the application host:
 
-- [Python](get-started/python.md): build the UniFFI package and native Rust library.
+- [Python](get-started/python.md): install the native Runtime and Gateway with `pip install vifu`.
 - [TypeScript](get-started/typescript.md): build the Rust WebAssembly Runtime and native Gateway companion.
 - [Swift](get-started/swift.md): add the Vifu Swift package in Xcode.
 - [Kotlin](get-started/kotlin.md): add the modular Android AAR for each local Provider.
 - [Godot](get-started/godot.md): add VifuGodot to the Apple host.
 - [Rust](get-started/rust.md): add `vifu-runtime` to the Cargo application.
 
-Python and TypeScript use source-built packages in this revision. Their
-tutorials show the exact build and local installation path. Do not substitute
-an OpenAI HTTP client when the application needs embedded Runtime, Gateway, or
-Server control.
+The Python package contains the native Rust Runtime and Gateway. The TypeScript
+package uses a source build in this revision. Do not use an OpenAI HTTP client
+when the application needs embedded Runtime, Gateway, or Server control.
 
 ## Build From Source
 

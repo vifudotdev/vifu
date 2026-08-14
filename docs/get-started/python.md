@@ -4,16 +4,17 @@ This tutorial embeds the native Vifu Runtime in a Python process, registers a
 Python callable as an Agent, invokes it, and makes it ready for Dashboard
 pairing.
 
-The Python SDK is currently built from this repository. It uses generated
-UniFFI bindings and the same Rust core as the mobile SDKs.
+The `vifu` package contains generated UniFFI bindings and the native Rust core.
+It does not call a remote API for Runtime operations.
 
-## 1. Build The SDK
+## 1. Install Vifu
 
-From the Vifu repository root:
+Create a virtual environment. Then install the package:
 
 ```bash
-scripts/build-python-sdk.sh
-export PYTHONPATH="$PWD/target/python-sdk"
+python3 -m venv .venv
+. .venv/bin/activate
+python -m pip install vifu
 ```
 
 ## 2. Register An Agent
@@ -68,8 +69,8 @@ python3 app.py
 ```
 
 The trace contains the completed provider stages followed by the total
-`provider.invoke` stage. Long-running providers should call
-`request.trace.activity()`. Streaming providers can call
+`provider.invoke` stage. Long-running providers call
+`request.trace.activity()` to report activity. Streaming providers can call
 `request.trace.output_delta(...)`.
 
 ## 4. Pair With The Dashboard
