@@ -3099,6 +3099,8 @@ mod tests {
         create_test_project(&storage, "provider-runtime-sync", "gateway-runtime-sync").await;
         open_provider_gateway_session(&storage, "gateway-runtime-sync").await;
         let runtime_app = app(state_with_storage(config, storage.clone()));
+        let provider_key =
+            crate::gateway_identity::scoped_provider_key("gateway-runtime-sync", "local-llama");
 
         let assigned = runtime_app
             .clone()
@@ -3107,7 +3109,7 @@ mod tests {
                     .header("authorization", admin.clone())
                     .header("content-type", "application/json")
                     .body(Body::from(
-                        r#"{"source":{"kind":"custom","key":"local-llama"}}"#,
+                        json!({"source":{"kind":"custom","key": provider_key.clone()}}).to_string(),
                     ))
                     .unwrap(),
             )
@@ -3168,11 +3170,13 @@ mod tests {
 
         let updated = runtime_app
             .oneshot(
-                Request::patch("/v1/apps/provider-runtime-sync/providers/local-llama")
-                    .header("authorization", admin)
-                    .header("content-type", "application/json")
-                    .body(Body::from(
-                        r#"{
+                Request::patch(format!(
+                    "/v1/apps/provider-runtime-sync/providers/{provider_key}"
+                ))
+                .header("authorization", admin)
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{
                         "config": {
                             "settings": {
                                 "generation": {"maxTokens": 96, "temperature": 0.3}
@@ -3180,8 +3184,8 @@ mod tests {
                             "resources": {}
                         }
                     }"#,
-                    ))
-                    .unwrap(),
+                ))
+                .unwrap(),
             )
             .await
             .unwrap();
@@ -3269,6 +3273,8 @@ mod tests {
         create_test_project(&storage, "provider-offline-project", "gateway-project").await;
         let session_id = open_provider_gateway_session(&storage, "gateway-project").await;
         let runtime_app = app(state_with_storage(config, storage.clone()));
+        let provider_key =
+            crate::gateway_identity::scoped_provider_key("gateway-project", "local-openai");
 
         let assigned = runtime_app
             .clone()
@@ -3277,10 +3283,11 @@ mod tests {
                     .header("authorization", admin.clone())
                     .header("content-type", "application/json")
                     .body(Body::from(
-                        r#"{
-                            "source": {"kind": "custom", "key": "local-openai"},
+                        json!({
+                            "source": {"kind": "custom", "key": provider_key.clone()},
                             "name": "Local OpenAI"
-                        }"#,
+                        })
+                        .to_string(),
                     ))
                     .unwrap(),
             )
@@ -3293,11 +3300,13 @@ mod tests {
             .unwrap();
         let tested = runtime_app
             .oneshot(
-                Request::post("/v1/apps/provider-offline-project/providers/local-openai/test")
-                    .header("authorization", admin)
-                    .header("content-type", "application/json")
-                    .body(Body::from("{}"))
-                    .unwrap(),
+                Request::post(format!(
+                    "/v1/apps/provider-offline-project/providers/{provider_key}/test"
+                ))
+                .header("authorization", admin)
+                .header("content-type", "application/json")
+                .body(Body::from("{}"))
+                .unwrap(),
             )
             .await
             .unwrap();

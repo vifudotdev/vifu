@@ -22,18 +22,18 @@ test("session remains valid across sidebar navigation on the bind address", asyn
   expect(session?.path).toBe("/");
   expect(session?.domain).toBe(new URL(page.url()).hostname);
   expect(session?.value).not.toContain(adminKey!);
-  await expect(page).toHaveURL(/\/project$/);
+  await expect(page).toHaveURL(/\/apps$/);
   await expect(page.getByRole("heading", { level: 1, name: "Apps" })).toBeVisible();
   const projectCards = page.locator(".project-home-card");
   await expect(projectCards.first()).toBeVisible();
   expect(await projectCards.count()).toBeGreaterThanOrEqual(2);
   await projectCards.first().click();
-  await expect(page).toHaveURL(/\/project\/[^/]+(?:\/overview)?$/);
+  await expect(page).toHaveURL(/\/apps\/[^/]+(?:\/overview)?$/);
   await expect(page.getByText("App ID", { exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: "Copy App ID" })).toBeVisible();
 
   await page.getByRole("link", { name: "Agents", exact: true }).click();
-  await expect(page).toHaveURL(/\/project\/[^/]+\/agents$/);
+  await expect(page).toHaveURL(/\/apps\/[^/]+\/agents$/);
   await expect(page.getByRole("heading", { level: 1, name: "Agents" })).toBeVisible();
   const projectSwitcher = page.locator(".project-switcher");
   const projectSearch = projectSwitcher.getByLabel("Search apps");
@@ -48,7 +48,7 @@ test("session remains valid across sidebar navigation on the bind address", asyn
   await expect(projectLinks.first()).toBeVisible();
   expect(await projectLinks.count()).toBeGreaterThanOrEqual(2);
   const targetAgentsHref = await projectLinks.nth(1).getAttribute("href");
-  expect(targetAgentsHref).toMatch(/^\/project\/[^/]+\/agents$/);
+  expect(targetAgentsHref).toMatch(/^\/apps\/[^/]+\/agents$/);
   const targetProjectRoot = targetAgentsHref!.replace(/\/agents$/, "");
   await projectLinks.nth(1).click();
   await expect(page).toHaveURL(new URL(targetAgentsHref!, page.url()).toString());
@@ -77,7 +77,7 @@ test("session remains valid across sidebar navigation on the bind address", asyn
   if (statePath) {
     const state = JSON.parse(await readFile(statePath, "utf8"));
     if (state.openAiProviderKey) {
-      await page.goto(`/project/${state.projectSlug}/providers`);
+      await page.goto(`/apps/${state.projectSlug}/providers`);
       await expect(page.getByRole("heading", { level: 1, name: "Providers" })).toBeVisible();
       await expect(page.getByText("OpenAI Compatible E2E", { exact: true })).toBeVisible();
       await expect(page.getByText("E2E OpenAI Project Provider", { exact: true })).toBeVisible();

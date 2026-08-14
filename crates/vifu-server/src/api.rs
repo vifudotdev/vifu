@@ -1271,7 +1271,8 @@ pub async fn activate_project_profile_version(
         serde_json::from_value::<ProjectSettings>(active_release.manifest).map_err(|error| {
             ApiError::Invalid(format!("active runtime release is invalid: {error}"))
         })?;
-    let provider_connections = db::list_provider_connections(&state.pool, &project_slug).await?;
+    let provider_connections =
+        effective_project_provider_connections(&state, &project_slug).await?;
     let manifest = compile_profile_runtime_manifest(
         manifest,
         &profile,
@@ -1493,7 +1494,7 @@ async fn sync_runtime_provider_configuration(
         }
     }
 
-    let provider_connections = db::list_provider_connections(&state.pool, project_slug).await?;
+    let provider_connections = effective_project_provider_connections(state, project_slug).await?;
     for profile in db::list_project_profiles(&state.pool, project_id).await? {
         let Some(version_id) = profile.active_version_id else {
             continue;
@@ -3377,12 +3378,13 @@ pub async fn update_project_provider(
     .await?;
     let runtime_sync = if current.source_kind == "custom" && current.provider_type == "vifu-runtime"
     {
+        let effective = effective_provider_connection(&state, connection.clone()).await?;
         sync_runtime_provider_configuration(
             &state,
             project.project.id,
             &slug,
             provider_key,
-            &connection.config,
+            &effective.config,
         )
         .await?
     } else {
@@ -8102,6 +8104,17 @@ async fn effective_provider_connection(
     connection.secret_keys.sort();
     connection.secret_keys.dedup();
     Ok(connection)
+}
+
+async fn effective_project_provider_connections(
+    state: &AppState,
+    project_slug: &str,
+) -> Result<Vec<ProviderConnection>, ApiError> {
+    let mut effective = Vec::new();
+    for connection in db::list_provider_connections(&state.pool, project_slug).await? {
+        effective.push(effective_provider_connection(state, connection).await?);
+    }
+    Ok(effective)
 }
 
 fn provider_connection_gateway_id(config: &Value) -> Option<&str> {
