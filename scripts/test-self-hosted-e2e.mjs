@@ -60,7 +60,7 @@ async function setup() {
   assert(dashboardAfterSignup.ok, "Dashboard did not accept the Admin Key session cookie");
   const dashboardHtml = await dashboardAfterSignup.text();
   assert(
-    dashboardHtml.includes("Open a project or create a new agent runtime."),
+    dashboardHtml.includes("My Apps"),
     "Dashboard did not render after Admin Key authentication",
   );
   assert(!dashboardHtml.includes(adminKey), "Dashboard HTML exposed the bootstrap admin key");
