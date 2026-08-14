@@ -1979,6 +1979,13 @@ async fn run_connection(
                 .as_ref()
                 .map(|pairing| pairing.request_id.to_string())
         });
+    let bootstrap_guest_after_authorization = should_bootstrap_guest_project(
+        runtime.allow_guest_bootstrap,
+        runtime.agent_gateway_bootstrap_token.is_some(),
+        followup.is_some(),
+        session.device_token.is_some(),
+        session.guest_project.is_some(),
+    );
     let identity_reassignment_authorized = followup.is_some();
     let signature_payload = protocol::gateway_signature_payload(
         &audience,
@@ -2088,10 +2095,7 @@ async fn run_connection(
         });
     }
 
-    if runtime.allow_guest_bootstrap
-        && runtime.agent_gateway_bootstrap_token.is_none()
-        && session.guest_project.is_none()
-    {
+    if bootstrap_guest_after_authorization {
         let guest = RuntimeControlClient::bootstrap_guest_project_with_server_certificate(
             runtime.server_url,
             session.device_token()?,
@@ -2748,6 +2752,20 @@ async fn run_connection(
     }
     let _ = socket.close(None).await;
     Ok(outcome)
+}
+
+fn should_bootstrap_guest_project(
+    allow_guest_bootstrap: bool,
+    has_agent_gateway_bootstrap_token: bool,
+    has_authorization_followup: bool,
+    has_device_token: bool,
+    has_guest_project: bool,
+) -> bool {
+    allow_guest_bootstrap
+        && !has_agent_gateway_bootstrap_token
+        && !has_authorization_followup
+        && !has_device_token
+        && !has_guest_project
 }
 
 fn gateway_hello_metadata(runtime: &AgentGatewayRuntime<'_>, features: Vec<&str>) -> Value {
@@ -3523,9 +3541,10 @@ mod tests {
         observe_capture_dropped, pairing_authorization_url, parse_proc_kib_value, queue_error,
         reconnect_delay_ceiling, record_embedded_runtime_io, resolve_provider,
         runtime_profile_name, runtime_trace_for_deployment, safe_observer_error,
-        safe_trace_telemetry, sanitize_error, select_embedded_deployment, trigger_telemetry_flush,
-        try_capture, validate_authenticated_gateway_identity, write_terminal_line,
-        AgentGatewayProvider, AgentGatewayRuntime, EmbeddedRuntimeMonitor, GatewayCaptureEvent,
+        safe_trace_telemetry, sanitize_error, select_embedded_deployment,
+        should_bootstrap_guest_project, trigger_telemetry_flush, try_capture,
+        validate_authenticated_gateway_identity, write_terminal_line, AgentGatewayProvider,
+        AgentGatewayRuntime, EmbeddedRuntimeMonitor, GatewayCaptureEvent,
         GatewayInvocationTerminal, GatewayOutputPolicy, GatewayRuntimeEvent,
         InProcessGatewayProvider, InvocationDelivery, InvocationTelemetry, OpenClawGatewayProvider,
         PendingTelemetryBatch, RuntimeControlClient, SessionRouteOverrides, TelemetryBacklogState,
@@ -3545,6 +3564,28 @@ mod tests {
         ProviderFuture, ProviderRequest, ProviderResponse, ProviderStage, RuntimeMonitorEvent,
         RuntimeMonitorStageStatus, RuntimeTraceRecord,
     };
+
+    #[test]
+    fn only_an_unassigned_first_connection_can_bootstrap_a_guest_project() {
+        assert!(should_bootstrap_guest_project(
+            true, false, false, false, false,
+        ));
+        assert!(!should_bootstrap_guest_project(
+            true, false, true, false, false,
+        ));
+        assert!(!should_bootstrap_guest_project(
+            true, false, false, true, false,
+        ));
+        assert!(!should_bootstrap_guest_project(
+            true, false, false, false, true,
+        ));
+        assert!(!should_bootstrap_guest_project(
+            true, true, false, false, false,
+        ));
+        assert!(!should_bootstrap_guest_project(
+            false, false, false, false, false,
+        ));
+    }
 
     #[test]
     fn local_network_gateways_use_a_short_reconnect_ceiling() {
