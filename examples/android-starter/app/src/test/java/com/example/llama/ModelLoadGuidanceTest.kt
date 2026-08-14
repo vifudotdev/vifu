@@ -5,6 +5,12 @@ import org.junit.Test
 
 class ModelLoadGuidanceTest {
     @Test
+    fun keepsReadyInputReadyWhileGatewayReconnects() {
+        assertEquals("Type and send a message!", modelInputHint(isModelReady = true))
+        assertEquals("Loading model...", modelInputHint(isModelReady = false))
+    }
+
+    @Test
     fun recommendsBaselineOnlyForBackendFailures() {
         assertEquals(
             "The optimized backend could not start. Install the baseline build on this device.",

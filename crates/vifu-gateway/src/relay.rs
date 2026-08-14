@@ -39,7 +39,9 @@ use vifu_runtime::{
 };
 pub use vifu_runtime::{CancellationToken, ProviderEvent, ProviderEventSink, ProviderStage};
 #[cfg(feature = "sqlite")]
-use vifu_runtime::{RuntimeStore, RuntimeTraceRecord, SqliteRuntimeStore};
+use vifu_runtime::{
+    RuntimeManifest, RuntimeRelease, RuntimeStore, RuntimeTraceRecord, SqliteRuntimeStore,
+};
 
 const MAX_CONCURRENT_CALLS: usize = 64;
 const OUTBOUND_QUEUE_CAPACITY: usize = 128;
@@ -3198,6 +3200,7 @@ async fn sync_runtime_state(
                         .current_manifest()
                         .map_err(|error| error.to_string())?
                     {
+                        let manifest = manifest_for_project(&manifest, &deployment.project_slug)?;
                         deployment.release = Some(
                             client
                                 .bootstrap_runtime_release(deployment.deployment_id, &manifest)
@@ -3215,11 +3218,14 @@ async fn sync_runtime_state(
                     .embedded_runtime
                     .filter(|_| embedded_deployment_id == Some(deployment.deployment_id))
                 {
+                    let installed = embedded.releases().map_err(|error| error.to_string())?;
+                    let local_release =
+                        local_embedded_release(release, embedded.project_id(), &installed)?;
                     embedded
-                        .install_release(release)
+                        .install_release(&local_release)
                         .map_err(|error| error.to_string())?;
                     embedded
-                        .activate_release(release.version)
+                        .activate_release(local_release.version)
                         .map_err(|error| error.to_string())?;
                 }
                 store
@@ -3256,6 +3262,49 @@ async fn sync_runtime_state(
         }
     }
     Ok(())
+}
+
+#[cfg(feature = "sqlite")]
+fn manifest_for_project(
+    manifest: &RuntimeManifest,
+    project_id: &str,
+) -> Result<RuntimeManifest, String> {
+    let mut mapped = manifest.clone();
+    mapped.project_id = project_id.to_string();
+    mapped.validate().map_err(|error| error.to_string())?;
+    Ok(mapped)
+}
+
+#[cfg(feature = "sqlite")]
+fn local_embedded_release(
+    remote: &RuntimeRelease,
+    embedded_project_id: &str,
+    installed: &[RuntimeRelease],
+) -> Result<RuntimeRelease, String> {
+    let manifest = manifest_for_project(&remote.manifest, embedded_project_id)?;
+    let candidate =
+        RuntimeRelease::new(remote.version, manifest.clone()).map_err(|error| error.to_string())?;
+    if let Some(existing) = installed
+        .iter()
+        .find(|release| release.content_hash == candidate.content_hash)
+    {
+        return Ok(existing.clone());
+    }
+    let version = if installed
+        .iter()
+        .any(|release| release.version == remote.version)
+    {
+        installed
+            .iter()
+            .map(|release| release.version)
+            .max()
+            .unwrap_or(0)
+            .checked_add(1)
+            .ok_or_else(|| "embedded runtime release version is exhausted".to_string())?
+    } else {
+        remote.version
+    };
+    RuntimeRelease::new(version, manifest).map_err(|error| error.to_string())
 }
 
 #[cfg(feature = "sqlite")]
@@ -3538,13 +3587,13 @@ mod tests {
         dispatch_preflight_failure, embedded_runtime_telemetry_command, encode_command,
         enqueue_telemetry_batch, expire_embedded_runtime_traces, gateway_hello_metadata,
         gateway_protocol_error, guest_claim_url, handle_telemetry_flush_result,
-        observe_capture_dropped, pairing_authorization_url, parse_proc_kib_value, queue_error,
-        reconnect_delay_ceiling, record_embedded_runtime_io, resolve_provider,
-        runtime_profile_name, runtime_trace_for_deployment, safe_observer_error,
-        safe_trace_telemetry, sanitize_error, select_embedded_deployment,
-        should_bootstrap_guest_project, trigger_telemetry_flush, try_capture,
-        validate_authenticated_gateway_identity, write_terminal_line, AgentGatewayProvider,
-        AgentGatewayRuntime, EmbeddedRuntimeMonitor, GatewayCaptureEvent,
+        local_embedded_release, manifest_for_project, observe_capture_dropped,
+        pairing_authorization_url, parse_proc_kib_value, queue_error, reconnect_delay_ceiling,
+        record_embedded_runtime_io, resolve_provider, runtime_profile_name,
+        runtime_trace_for_deployment, safe_observer_error, safe_trace_telemetry, sanitize_error,
+        select_embedded_deployment, should_bootstrap_guest_project, trigger_telemetry_flush,
+        try_capture, validate_authenticated_gateway_identity, write_terminal_line,
+        AgentGatewayProvider, AgentGatewayRuntime, EmbeddedRuntimeMonitor, GatewayCaptureEvent,
         GatewayInvocationTerminal, GatewayOutputPolicy, GatewayRuntimeEvent,
         InProcessGatewayProvider, InvocationDelivery, InvocationTelemetry, OpenClawGatewayProvider,
         PendingTelemetryBatch, RuntimeControlClient, SessionRouteOverrides, TelemetryBacklogState,
@@ -3723,6 +3772,49 @@ mod tests {
             .map(|deployment| deployment.deployment_id),
             Some(paired.deployment_id)
         );
+    }
+
+    #[test]
+    fn embedded_manifest_is_scoped_to_the_selected_app_before_bootstrap() {
+        let manifest = vifu_runtime::RuntimeManifest::new("android-app");
+
+        let mapped = manifest_for_project(&manifest, "research-app")
+            .expect("the selected App should accept the embedded manifest");
+
+        assert_eq!(mapped.project_id, "research-app");
+        assert_eq!(manifest.project_id, "android-app");
+    }
+
+    #[test]
+    fn conflicting_remote_release_gets_a_new_local_version() {
+        let mut optimized = vifu_runtime::RuntimeManifest::new("android-app");
+        optimized.metadata = json!({"buildProfile": "optimized"});
+        let installed = vifu_runtime::RuntimeRelease::new(1, optimized).unwrap();
+        let mut baseline = vifu_runtime::RuntimeManifest::new("shared-app");
+        baseline.metadata = json!({"buildProfile": "baseline"});
+        let remote = vifu_runtime::RuntimeRelease::new(1, baseline).unwrap();
+
+        let local = local_embedded_release(&remote, "android-app", &[installed])
+            .expect("remote App release should be installable beside local version 1");
+
+        assert_eq!(local.version, 2);
+        assert_eq!(local.manifest.project_id, "android-app");
+        assert_eq!(local.manifest.metadata["buildProfile"], "baseline");
+    }
+
+    #[test]
+    fn matching_remote_release_reuses_the_existing_local_version() {
+        let mut local_manifest = vifu_runtime::RuntimeManifest::new("android-app");
+        local_manifest.metadata = json!({"prompt": "Be concise"});
+        let installed = vifu_runtime::RuntimeRelease::new(4, local_manifest).unwrap();
+        let mut remote_manifest = installed.manifest.clone();
+        remote_manifest.project_id = "shared-app".to_string();
+        let remote = vifu_runtime::RuntimeRelease::new(1, remote_manifest).unwrap();
+
+        let local = local_embedded_release(&remote, "android-app", &[installed.clone()])
+            .expect("the content-addressed local release should be reused");
+
+        assert_eq!(local, installed);
     }
 
     fn runtime_trace(project_id: &str) -> RuntimeTraceRecord {

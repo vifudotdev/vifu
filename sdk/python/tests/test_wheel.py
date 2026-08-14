@@ -7,6 +7,7 @@ import tempfile
 import unittest
 import zipfile
 from pathlib import Path
+from unittest import mock
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
@@ -18,6 +19,11 @@ SPEC.loader.exec_module(BUILDER)
 PACKAGE_VERSION = re.search(
     r'^version = "([^"]+)"$',
     (REPOSITORY_ROOT / "sdk/python/pyproject.toml").read_text(encoding="utf-8"),
+    re.MULTILINE,
+).group(1)
+RUNTIME_VERSION = re.search(
+    r'^version = "([^"]+)"$',
+    (REPOSITORY_ROOT / "Cargo.toml").read_text(encoding="utf-8"),
     re.MULTILINE,
 ).group(1)
 
@@ -32,12 +38,18 @@ class VifuWheelTests(unittest.TestCase):
             (package / "_version.py").write_text(
                 f'__version__ = "{PACKAGE_VERSION}"\n', encoding="utf-8"
             )
+            (package / "_runtime_version.py").write_text(
+                f'__runtime_version__ = "{RUNTIME_VERSION}"\n', encoding="utf-8"
+            )
             (package / "libvifu_mobile_ffi.so").write_bytes(b"native-fixture")
             binary = package / "_bin" / "vifu"
             binary.parent.mkdir()
             binary.write_bytes(b"server-fixture")
 
-            wheel = BUILDER.build_wheel(package, root / "dist", "linux_x86_64")
+            with mock.patch.object(
+                BUILDER, "_server_runtime_version", return_value=RUNTIME_VERSION
+            ):
+                wheel = BUILDER.build_wheel(package, root / "dist", "linux_x86_64")
 
             self.assertEqual(
                 wheel.name,
@@ -47,6 +59,7 @@ class VifuWheelTests(unittest.TestCase):
                 names = set(archive.namelist())
                 self.assertIn("vifu/libvifu_mobile_ffi.so", names)
                 self.assertIn("vifu/_bin/vifu", names)
+                self.assertIn("vifu/_runtime_version.py", names)
                 mode = archive.getinfo("vifu/_bin/vifu").external_attr >> 16
                 self.assertEqual(mode & 0o111, 0o111)
                 metadata = archive.read(
@@ -72,6 +85,9 @@ class VifuWheelTests(unittest.TestCase):
             (package / "_version.py").write_text(
                 f'__version__ = "{PACKAGE_VERSION}"\n', encoding="utf-8"
             )
+            (package / "_runtime_version.py").write_text(
+                f'__runtime_version__ = "{RUNTIME_VERSION}"\n', encoding="utf-8"
+            )
 
             with self.assertRaisesRegex(RuntimeError, "exactly one"):
                 BUILDER.build_wheel(package, root / "dist", "linux_x86_64")
@@ -85,10 +101,38 @@ class VifuWheelTests(unittest.TestCase):
             (package / "_version.py").write_text(
                 f'__version__ = "{PACKAGE_VERSION}"\n', encoding="utf-8"
             )
+            (package / "_runtime_version.py").write_text(
+                f'__runtime_version__ = "{RUNTIME_VERSION}"\n', encoding="utf-8"
+            )
             (package / "libvifu_mobile_ffi.so").write_bytes(b"native-fixture")
 
             with self.assertRaisesRegex(RuntimeError, "Server binary"):
                 BUILDER.build_wheel(package, root / "dist", "linux_x86_64")
+
+    def test_wheel_rejects_a_stale_bundled_server(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            package = root / "package"
+            package.mkdir()
+            (package / "__init__.py").write_text("", encoding="utf-8")
+            (package / "_version.py").write_text(
+                f'__version__ = "{PACKAGE_VERSION}"\n', encoding="utf-8"
+            )
+            (package / "_runtime_version.py").write_text(
+                f'__runtime_version__ = "{RUNTIME_VERSION}"\n', encoding="utf-8"
+            )
+            (package / "libvifu_mobile_ffi.so").write_bytes(b"native-fixture")
+            binary = package / "_bin" / "vifu"
+            binary.parent.mkdir()
+            binary.write_bytes(b"server-fixture")
+
+            with mock.patch.object(
+                BUILDER, "_server_runtime_version", return_value="0.1.12"
+            ):
+                with self.assertRaisesRegex(
+                    RuntimeError, rf"0\.1\.12.*{re.escape(RUNTIME_VERSION)}"
+                ):
+                    BUILDER.build_wheel(package, root / "dist", "linux_x86_64")
 
 
 if __name__ == "__main__":

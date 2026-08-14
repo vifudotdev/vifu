@@ -1,6 +1,7 @@
 """Python SDK for the embedded Vifu Runtime, Gateway, and local Server."""
 
 from ._version import __version__
+from ._runtime_version import __runtime_version__
 from .app import Vifu
 from .gateway import GatewayPairing, VifuGateway
 from .runtime import (
@@ -24,4 +25,5 @@ __all__ = [
     "VifuServer",
     "VifuServerConfig",
     "__version__",
+    "__runtime_version__",
 ]

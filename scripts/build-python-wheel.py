@@ -10,6 +10,7 @@ import hashlib
 import io
 import os
 import re
+import subprocess
 import sys
 import tomllib
 import zipfile
@@ -20,6 +21,7 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 PYPROJECT_PATH = REPOSITORY_ROOT / "sdk" / "python" / "pyproject.toml"
 README_PATH = REPOSITORY_ROOT / "sdk" / "python" / "README.md"
 LICENSE_PATHS = (REPOSITORY_ROOT / "LICENSE", REPOSITORY_ROOT / "NOTICE")
+CARGO_PATH = REPOSITORY_ROOT / "Cargo.toml"
 
 
 def _wheel_name(value: str) -> str:
@@ -73,6 +75,38 @@ def _zip_info(path: str, *, executable: bool = False) -> zipfile.ZipInfo:
     return info
 
 
+def _declared_runtime_version(package_dir: Path) -> str:
+    source = package_dir / "_runtime_version.py"
+    match = re.search(
+        r'^__runtime_version__\s*=\s*["\']([^"\']+)["\']$',
+        source.read_text(encoding="utf-8"),
+        flags=re.MULTILINE,
+    )
+    if match is None:
+        raise RuntimeError("The Python package must declare its bundled Runtime version")
+    return match.group(1)
+
+
+def _workspace_runtime_version() -> str:
+    configuration = tomllib.loads(CARGO_PATH.read_text(encoding="utf-8"))
+    return str(configuration["workspace"]["package"]["version"])
+
+
+def _server_runtime_version(server_binary: Path) -> str:
+    result = subprocess.run(
+        [str(server_binary), "--version"],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    output = (result.stdout or result.stderr).strip()
+    match = re.search(r"(?:^|\s)(\d+\.\d+\.\d+(?:[-+][^\s]+)?)$", output)
+    if match is None:
+        raise RuntimeError("The bundled Vifu Server returned an invalid version")
+    return match.group(1)
+
+
 def build_wheel(package_dir: Path, output_dir: Path, platform_tag: str) -> Path:
     configuration = tomllib.loads(PYPROJECT_PATH.read_text(encoding="utf-8"))
     project = configuration["project"]
@@ -107,6 +141,19 @@ def build_wheel(package_dir: Path, output_dir: Path, platform_tag: str) -> Path:
     server_binaries = [path for path in server_candidates if path.is_file()]
     if len(server_binaries) != 1:
         raise RuntimeError("The Python wheel requires exactly one Vifu Server binary")
+    declared_runtime_version = _declared_runtime_version(package_dir)
+    workspace_runtime_version = _workspace_runtime_version()
+    if declared_runtime_version != workspace_runtime_version:
+        raise RuntimeError(
+            "The Python package declares Runtime "
+            f"{declared_runtime_version}, but the workspace is {workspace_runtime_version}"
+        )
+    bundled_runtime_version = _server_runtime_version(server_binaries[0])
+    if bundled_runtime_version != declared_runtime_version:
+        raise RuntimeError(
+            "The bundled Vifu Server is Runtime "
+            f"{bundled_runtime_version}, but the Python package declares {declared_runtime_version}"
+        )
 
     files: dict[str, bytes] = {}
     for source in sorted(package_dir.rglob("*")):

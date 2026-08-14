@@ -288,7 +288,9 @@ class MainActivity : AppCompatActivity() {
         allowGateway: Boolean = true,
     ) = withContext(Dispatchers.Default) {
         vifuConnectionMutex.withLock {
-            withContext(Dispatchers.Main) { userInputEt.hint = "Loading model..." }
+            withContext(Dispatchers.Main) {
+                userInputEt.hint = modelInputHint(isModelReady)
+            }
             gatewayStatusJob?.cancel()
             gatewayStatusJob = null
             vifuAgent?.close()
@@ -345,6 +347,14 @@ class MainActivity : AppCompatActivity() {
                     withContext(Dispatchers.Main) {
                         vifuStatusTv.text = "Vifu: local · tap to pair"
                     }
+                }
+            }
+            withContext(Dispatchers.Main) {
+                if (isModelReady) {
+                    userInputEt.hint = modelInputHint(isModelReady = true)
+                    userInputEt.isEnabled = true
+                    userActionFab.setImageResource(R.drawable.outline_send_24)
+                    userActionFab.isEnabled = true
                 }
             }
         }
@@ -532,6 +542,9 @@ class MainActivity : AppCompatActivity() {
 
     }
 }
+
+internal fun modelInputHint(isModelReady: Boolean): String =
+    if (isModelReady) "Type and send a message!" else "Loading model..."
 
 internal fun modelLoadGuidance(message: String, backend: String): String = when {
     "VIFU-LLAMA-BACKEND-" in message ->
