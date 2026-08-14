@@ -8217,12 +8217,10 @@ async fn refresh_project_provider(
             };
         let updated =
             db::update_provider_connection_status(&state.pool, connection.id, status).await?;
-        let added_agents = reconcile_project_provider_agents(state, project_slug, &updated).await?;
-        return Ok((
-            effective_provider_connection(state, updated).await?,
-            message,
-            added_agents,
-        ));
+        let effective = effective_provider_connection(state, updated).await?;
+        let added_agents =
+            reconcile_project_provider_agents(state, project_slug, &effective).await?;
+        return Ok((effective, message, added_agents));
     }
     let resolved = resolve_runtime_provider(state, project_slug, &connection.provider_key).await?;
     let (status, message) = probe_runtime_provider(

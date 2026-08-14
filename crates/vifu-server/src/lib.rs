@@ -3045,6 +3045,8 @@ mod tests {
         create_test_project(&storage, "provider-assign-project", "gateway-project").await;
         open_provider_gateway_session(&storage, "gateway-project").await;
         let runtime_app = app(state_with_storage(config, storage.clone()));
+        let provider_key =
+            crate::gateway_identity::scoped_provider_key("gateway-project", "local-openai");
 
         let response = runtime_app
             .clone()
@@ -3053,10 +3055,11 @@ mod tests {
                     .header("authorization", admin.clone())
                     .header("content-type", "application/json")
                     .body(Body::from(
-                        r#"{
-                            "source": {"kind": "custom", "key": "local-openai"},
+                        json!({
+                            "source": {"kind": "custom", "key": provider_key.clone()},
                             "name": "Local OpenAI"
-                        }"#,
+                        })
+                        .to_string(),
                     ))
                     .unwrap(),
             )
@@ -3064,9 +3067,9 @@ mod tests {
             .unwrap();
         assert_eq!(response.status(), StatusCode::CREATED);
         let payload = response_json(response).await;
-        assert_eq!(payload["provider"]["providerKey"], "local-openai");
+        assert_eq!(payload["provider"]["providerKey"], provider_key);
         assert_eq!(payload["provider"]["sourceKind"], "custom");
-        assert_eq!(payload["provider"]["sourceKey"], "local-openai");
+        assert_eq!(payload["provider"]["sourceKey"], provider_key);
         assert_eq!(payload["provider"]["status"], "online");
         assert_eq!(payload["provider"]["baseUrl"], "");
         assert_eq!(payload["addedAgents"], 1);
@@ -3074,12 +3077,12 @@ mod tests {
         let stored = crate::db::get_provider_connection_secret_by_key(
             &storage,
             "provider-assign-project",
-            "local-openai",
+            &provider_key,
         )
         .await
         .unwrap();
         assert_eq!(stored.source_kind, "custom");
-        assert_eq!(stored.source_key, "local-openai");
+        assert_eq!(stored.source_key, provider_key);
         assert!(stored.base_url.is_empty());
         assert_eq!(stored.config, json!({}));
         assert!(stored.secret_keys.is_empty());
