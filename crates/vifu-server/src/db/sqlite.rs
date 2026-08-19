@@ -1947,15 +1947,6 @@ pub async fn refresh_discovered_binding_record(
     .bind(agent_name)
     .execute(&mut *transaction)
     .await?;
-    sqlx::query(
-        "UPDATE agent_profiles
-         SET name = $2, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-         WHERE id = (SELECT profile_id FROM agent_bindings WHERE id = $1)",
-    )
-    .bind(binding_id)
-    .bind(agent_name)
-    .execute(&mut *transaction)
-    .await?;
     transaction.commit().await?;
     Ok(())
 }

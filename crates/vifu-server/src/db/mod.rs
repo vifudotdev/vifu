@@ -692,12 +692,24 @@ mod tests {
             version.persona["systemPrompt"],
             "Help the player understand the garden."
         );
+        update_profile(
+            &storage,
+            profile.id,
+            ProfilePatch {
+                slug: None,
+                name: Some("Village Guide"),
+                description_changed: false,
+                description: None,
+            },
+        )
+        .await
+        .expect("profile name should update");
 
         refresh_discovered_binding(
             &storage,
             binding_id,
             "gateway-new",
-            "Android Local Companion",
+            "Renamed Android Resource",
             None,
         )
         .await
@@ -706,7 +718,7 @@ mod tests {
             &storage,
             binding_id,
             "gateway-new",
-            "Android Local Companion",
+            "Renamed Android Resource",
             None,
         )
         .await
@@ -715,6 +727,10 @@ mod tests {
         let route = resolve_profile_route(&storage, project_id, &profile.slug, "chat", None, None)
             .await
             .expect("profile route should resolve");
+        let refreshed_profile = get_profile(&storage, profile.id)
+            .await
+            .expect("profile should still exist");
+        assert_eq!(refreshed_profile.name, "Village Guide");
         assert_eq!(
             (
                 route.source.get("gatewayId").and_then(Value::as_str),
