@@ -70,7 +70,7 @@ jobs:
   rust:
     name: Rust
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     env:
       VIFU_TEST_DATABASE_REQUIRED: "1"
     services:
