@@ -3092,6 +3092,93 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn legacy_unscoped_gateway_provider_sources_are_resolved_and_normalized() {
+        let (storage, path) = temp_sqlite_storage("provider-legacy-source").await;
+        let config = Config::from_env().unwrap();
+        let admin = admin_authorization(&config);
+        create_test_project(
+            &storage,
+            "provider-legacy-source-project",
+            "gateway-project",
+        )
+        .await;
+        open_provider_gateway_session(&storage, "gateway-project").await;
+        let runtime_app = app(state_with_storage(config, storage.clone()));
+        let provider_key =
+            crate::gateway_identity::scoped_provider_key("gateway-project", "local-openai");
+
+        let created = runtime_app
+            .clone()
+            .oneshot(
+                Request::post("/v1/apps/provider-legacy-source-project/providers")
+                    .header("authorization", admin.clone())
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({"source":{"kind":"custom","key":provider_key.clone()}}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(created.status(), StatusCode::CREATED);
+
+        match &storage {
+            Storage::Sqlite(pool) => {
+                sqlx::query("UPDATE provider_connections SET source_key = 'local-openai'")
+                    .execute(pool)
+                    .await
+                    .unwrap();
+            }
+            Storage::Postgres(pool) => {
+                sqlx::query("UPDATE provider_connections SET source_key = 'local-openai'")
+                    .execute(pool)
+                    .await
+                    .unwrap();
+            }
+        }
+
+        let listed = runtime_app
+            .clone()
+            .oneshot(
+                Request::get("/v1/apps/provider-legacy-source-project/providers")
+                    .header("authorization", admin.clone())
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(listed.status(), StatusCode::OK);
+        let payload = response_json(listed).await;
+        assert_eq!(payload["providers"][0]["status"], "online");
+        assert_eq!(payload["providers"][0]["sourceKey"], provider_key);
+
+        let updated = runtime_app
+            .oneshot(
+                Request::patch(format!(
+                    "/v1/apps/provider-legacy-source-project/providers/{provider_key}"
+                ))
+                .header("authorization", admin)
+                .header("content-type", "application/json")
+                .body(Body::from(json!({"name":"Local OpenAI"}).to_string()))
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(updated.status(), StatusCode::OK);
+        let stored = crate::db::get_provider_connection_secret_by_key(
+            &storage,
+            "provider-legacy-source-project",
+            &provider_key,
+        )
+        .await
+        .unwrap();
+        assert_eq!(stored.name, "Local OpenAI");
+        assert_eq!(stored.source_key, provider_key);
+
+        close_temp_storage(storage, path).await;
+    }
+
+    #[tokio::test]
     async fn runtime_provider_settings_activate_a_new_primary_release() {
         let (storage, path) = temp_sqlite_storage("provider-runtime-sync").await;
         let config = Config::from_env().unwrap();

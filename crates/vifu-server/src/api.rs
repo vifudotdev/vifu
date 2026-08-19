@@ -3368,14 +3368,24 @@ pub async fn update_project_provider(
             secrets,
         )?
     };
-    let connection = save_provider_connection(
-        &state,
-        &slug,
-        &current.source_kind,
-        &current.source_key,
-        prepared,
-    )
-    .await?;
+    let normalized_source_key = if source.is_none() && current.source_kind == "custom" {
+        let gateway_id =
+            provider_connection_gateway_id(&current.config).unwrap_or(&project.project.gateway_id);
+        match available_provider_for_source(&state, Some(gateway_id), &current.source_key).await {
+            Ok(provider) => Some(provider.provider_key),
+            Err(ApiError::NotFound) => None,
+            Err(error) => return Err(error),
+        }
+    } else {
+        None
+    };
+    let source_key = source
+        .as_ref()
+        .map(|source| source.key.as_str())
+        .or(normalized_source_key.as_deref())
+        .unwrap_or(&current.source_key);
+    let connection =
+        save_provider_connection(&state, &slug, &current.source_kind, source_key, prepared).await?;
     let runtime_sync = if current.source_kind == "custom" && current.provider_type == "vifu-runtime"
     {
         let effective = effective_provider_connection(&state, connection.clone()).await?;
@@ -7738,6 +7748,25 @@ async fn available_provider(
         .ok_or(ApiError::NotFound)
 }
 
+async fn available_provider_for_source(
+    state: &AppState,
+    gateway_id: Option<&str>,
+    provider_key: &str,
+) -> Result<CustomProvider, ApiError> {
+    match available_provider(state, gateway_id, provider_key).await {
+        Ok(provider) => Ok(provider),
+        Err(ApiError::NotFound) => {
+            let gateway_id = gateway_id.ok_or(ApiError::NotFound)?;
+            let scoped_key = scoped_provider_key(gateway_id, provider_key);
+            if scoped_key == provider_key {
+                return Err(ApiError::NotFound);
+            }
+            available_provider(state, Some(gateway_id), &scoped_key).await
+        }
+        Err(error) => Err(error),
+    }
+}
+
 fn collect_session_declared_providers(
     providers: &mut BTreeMap<String, CustomProvider>,
     session: &AgentGatewaySession,
@@ -7948,10 +7977,10 @@ async fn resolve_project_provider_source(
             })
         }
         "custom" => {
-            let provider = available_provider(state, gateway_id, key).await?;
+            let provider = available_provider_for_source(state, gateway_id, key).await?;
             Ok(ProjectProviderSource {
                 kind: kind.to_string(),
-                key: key.to_string(),
+                key: provider.provider_key.clone(),
                 name: provider.name,
                 provider_type: provider.provider_type,
                 base_url: provider.base_url,
@@ -8094,7 +8123,13 @@ async fn effective_provider_connection(
     let project = db::get_project(&state.pool, connection.project_id).await?;
     let gateway_id =
         provider_connection_gateway_id(&connection.config).unwrap_or(&project.project.gateway_id);
-    let source = match available_provider(state, Some(gateway_id), &connection.source_key).await {
+    let source = match available_provider_for_source(
+        state,
+        Some(gateway_id),
+        &connection.source_key,
+    )
+    .await
+    {
         Ok(source) => source,
         Err(ApiError::NotFound) => {
             if connection.status != "offline" {
@@ -8107,6 +8142,7 @@ async fn effective_provider_connection(
     if connection.base_url.trim().is_empty() {
         connection.base_url = source.base_url;
     }
+    connection.source_key = source.provider_key;
     connection.provider_type = source.provider_type;
     connection.config = merge_json_objects(&source.config, &connection.config)?;
     connection.secret_keys.extend(source.secret_keys);
