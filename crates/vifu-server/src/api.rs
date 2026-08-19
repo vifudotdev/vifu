@@ -6259,12 +6259,11 @@ async fn create_profile_chat_completion(
     }
 }
 
-pub(crate) async fn invoke_runtime_extension_profile(
+pub(crate) async fn resolve_runtime_extension_profile_route(
     state: &AppState,
     project: &crate::models::ProjectWithBindings,
     input: &vifu_gateway::runtime_extension::RuntimeProfileInvocation,
-    request_id: Uuid,
-) -> Result<Value, ApiError> {
+) -> Result<crate::models::ProfileRoute, ApiError> {
     let capability = required_identifier("capability", &input.capability)?;
     if !matches!(capability, "chat" | "tool") {
         return Err(ApiError::Invalid(
@@ -6272,7 +6271,7 @@ pub(crate) async fn invoke_runtime_extension_profile(
         ));
     }
     let operation_id = required_identifier("operation ID", &input.operation_id)?;
-    let route = db::resolve_profile_route(
+    db::resolve_profile_route(
         &state.pool,
         project.project.id,
         &input.profile_id.to_string(),
@@ -6280,7 +6279,17 @@ pub(crate) async fn invoke_runtime_extension_profile(
         Some(operation_id),
         Some(input.profile_version_id),
     )
-    .await?;
+    .await
+}
+
+pub(crate) async fn invoke_runtime_extension_profile(
+    state: &AppState,
+    project: &crate::models::ProjectWithBindings,
+    input: &vifu_gateway::runtime_extension::RuntimeProfileInvocation,
+    request_id: Uuid,
+    route: &crate::models::ProfileRoute,
+) -> Result<Value, ApiError> {
+    let capability = input.capability.as_str();
     let timeout = profile_timeout(&route.runtime, state.config.request_timeout);
     match capability {
         "chat" => {
@@ -6763,7 +6772,7 @@ fn map_runtime_error(error: RuntimeError) -> ApiError {
     }
 }
 
-fn profile_gateway_id(route: &crate::models::ProfileRoute) -> Option<String> {
+pub(crate) fn profile_gateway_id(route: &crate::models::ProfileRoute) -> Option<String> {
     route
         .capability_config
         .get("gatewayId")
@@ -6789,7 +6798,7 @@ fn completion_start_ms(metadata: &Value) -> Option<i64> {
         .and_then(|value| i64::try_from(value).ok())
 }
 
-fn trace_model_parameters(config: &Value) -> Value {
+pub(crate) fn trace_model_parameters(config: &Value) -> Value {
     const SAFE_KEYS: [&str; 14] = [
         "backend",
         "contextSize",

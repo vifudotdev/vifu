@@ -221,7 +221,14 @@ pub async fn invoke_project_profile_for_extension(
         .filter(|attachment| extension_allows_effects(attachment, &definition.manifest.id))
         .ok_or(ApiError::Forbidden)?;
     let project = db::get_project(&state.pool, project_id).await?;
+    let route =
+        crate::api::resolve_runtime_extension_profile_route(&state, &project, &input).await?;
     let request_id = Uuid::new_v4();
+    let gateway_id = crate::api::profile_gateway_id(&route);
+    let gateway_session_id = match gateway_id.as_deref() {
+        Some(gateway_id) => state.relay.session_for(gateway_id).await,
+        None => None,
+    };
     let request_summary = json!({
         "extensionId": definition.manifest.id,
         "profileId": input.profile_id,
@@ -235,11 +242,11 @@ pub async fn invoke_project_profile_for_extension(
             request_id,
             endpoint_id: None,
             project_id: Some(project_id),
-            gateway_session_id: None,
+            gateway_session_id,
             profile_id: Some(input.profile_id),
             profile_version_id: Some(input.profile_version_id),
             operation: "runtime.extension.effect",
-            provider_key: None,
+            provider_key: Some(&route.provider_key),
             capability_kind: Some(&input.capability),
             selection_key: Some(&input.operation_id),
             request: &request_summary,
@@ -254,18 +261,22 @@ pub async fn invoke_project_profile_for_extension(
             parent_span_id: None,
             name: "runtime.extension.effect",
             kind: "runtime_extension",
-            observation_type: "span",
-            provider_key: None,
+            observation_type: "generation",
+            provider_key: Some(&route.provider_key),
             capability_kind: Some(&input.capability),
-            model: None,
-            model_parameters: None,
+            model: route.resource_id.as_deref().or(Some(&route.profile_slug)),
+            model_parameters: Some(&crate::api::trace_model_parameters(
+                &route.capability_config,
+            )),
             input_summary: Some(&request_summary),
             attributes: &json!({ "extensionId": definition.manifest.id }),
         },
     )
     .await?;
     let started_at = Instant::now();
-    match crate::api::invoke_runtime_extension_profile(&state, &project, &input, request_id).await {
+    match crate::api::invoke_runtime_extension_profile(&state, &project, &input, request_id, &route)
+        .await
+    {
         Ok(output) => {
             db::complete_trace_span(
                 &state.pool,
