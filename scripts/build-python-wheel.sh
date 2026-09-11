@@ -2,6 +2,10 @@
 
 set -euo pipefail
 
+# Release wheels use whisper-rs' checked-in bindings so cross-platform builds do
+# not depend on a host libclang installation.
+export WHISPER_DONT_GENERATE_BINDINGS="${WHISPER_DONT_GENERATE_BINDINGS:-1}"
+
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 MACHINE="$(uname -m)"
@@ -14,8 +18,8 @@ case "$(uname -s)" in
                 export MACOSX_DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET:-11.0}"
                 ;;
             x86_64)
-                DEFAULT_PLATFORM_TAG="macosx_10_12_x86_64"
-                export MACOSX_DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET:-10.12}"
+                DEFAULT_PLATFORM_TAG="macosx_10_15_x86_64"
+                export MACOSX_DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET:-10.15}"
                 ;;
             *)
                 echo "Unsupported macOS architecture: $MACHINE" >&2
