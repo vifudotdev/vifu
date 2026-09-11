@@ -159,7 +159,10 @@ class VifuGateway:
         deadline = time.monotonic() + timeout
         while True:
             status = self.refresh()
-            if status.state == native.VifuEmbeddedGatewayState.CONNECTED:
+            if status.state in (
+                native.VifuEmbeddedGatewayState.CONNECTED,
+                native.VifuEmbeddedGatewayState.DEGRADED,
+            ):
                 return status
             if status.state in (
                 native.VifuEmbeddedGatewayState.AUTHORIZATION_REQUIRED,

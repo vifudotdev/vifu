@@ -47,20 +47,17 @@ cargo build \
     --manifest-path "$REPO_ROOT/Cargo.toml" \
     --locked \
     --release \
-    -p vifu-mobile-ffi \
-    --no-default-features
+    -p vifu-mobile-ffi
 cargo build \
     --manifest-path "$REPO_ROOT/Cargo.toml" \
     --locked \
     --release \
-    -p vifu \
-    --no-default-features
+    -p vifu
 cargo build \
     --manifest-path "$REPO_ROOT/Cargo.toml" \
     --locked \
     --release \
     -p vifu-mobile-ffi \
-    --no-default-features \
     --bin uniffi-bindgen
 
 rm -rf "$DIST_DIR"

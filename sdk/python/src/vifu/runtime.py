@@ -120,8 +120,13 @@ class Invocation:
 
 
 class _PythonProvider:
-    def __init__(self, handler: AgentHandler):
+    def __init__(
+        self,
+        handler: AgentHandler,
+        on_complete: Callable[[], None] | None = None,
+    ):
         self._handler = handler
+        self._on_complete = on_complete
 
     def invoke(
         self,
@@ -146,6 +151,9 @@ class _PythonProvider:
             raise native.VifuRuntimeError.Runtime(
                 f"{type(error).__name__}: {error}"
             ) from error
+        finally:
+            if self._on_complete is not None:
+                self._on_complete()
 
 
 class VifuRuntime:
@@ -177,10 +185,11 @@ class VifuRuntime:
         timeout_ms: int = 30_000,
         metadata: JsonValue = None,
         instructions: str | None = None,
+        _on_complete: Callable[[], None] | None = None,
     ) -> VifuRuntime:
         provider_id = provider_id or f"{agent_id}-provider"
         endpoint = endpoint or agent_id
-        provider = _PythonProvider(handler)
+        provider = _PythonProvider(handler, _on_complete)
         runtime = self._native_runtime()
         runtime.register_streaming_provider(provider_id, "python", provider)
         runtime.register_agent(

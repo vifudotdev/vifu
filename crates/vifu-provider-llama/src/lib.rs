@@ -96,6 +96,9 @@ fn configure_llama_logging() {
 
 #[cfg(not(target_os = "android"))]
 fn configure_llama_logging() {
+    if std::env::var_os("VIFU_LLAMA_DIAGNOSTICS").is_some() {
+        return;
+    }
     send_logs_to_tracing(LogOptions::default());
 }
 
@@ -412,7 +415,23 @@ impl LlamaProvider {
             )));
         }
         let backend_summary = backend_device_summary(&backend_devices);
-        let model_params = LlamaModelParams::default().with_n_gpu_layers(config.gpu_layers);
+        if std::env::var_os("VIFU_LLAMA_DIAGNOSTICS").is_some() {
+            eprintln!("local llama provider backends: {backend_summary}");
+        }
+        let mut model_params = LlamaModelParams::default().with_n_gpu_layers(config.gpu_layers);
+        if config.gpu_layers == 0 {
+            let cpu_device = backend_devices
+                .iter()
+                .find(|device| device.backend.eq_ignore_ascii_case("cpu"))
+                .ok_or_else(|| {
+                    LlamaProviderError::Backend(
+                        "CPU execution was selected but no CPU backend is registered".to_string(),
+                    )
+                })?;
+            model_params = model_params
+                .with_devices(&[cpu_device.index])
+                .map_err(|error| LlamaProviderError::Backend(error.to_string()))?;
+        }
         let model = Arc::new(
             LlamaModel::load_from_file(&backend, &config.model_path, &model_params)
                 .map_err(|error| {
@@ -866,7 +885,7 @@ fn generate_chat(
             backend,
             LlamaContextParams::default().with_n_ctx(Some(context_size)),
         )
-        .map_err(|_error| provider_error("model context could not be created"))?;
+        .map_err(|error| provider_error(&format!("model context could not be created: {error}")))?;
     let (input_tokens, mut position) = if image_buffers.is_empty() {
         evaluate_text_prompt(
             model,

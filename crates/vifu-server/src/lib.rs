@@ -479,6 +479,10 @@ pub fn app(state: AppState) -> Router {
         .route("/v1/admin/verify", get(api::verify_admin))
         .route("/v1/admin/app-ownership", get(api::list_project_ownership))
         .route(
+            "/v1/admin/agent-gateway-enrollments/{enrollment_id}/revoke",
+            post(api::revoke_agent_gateway_enrollment),
+        )
+        .route(
             "/v1/admin/app-ownership/{project_id}",
             axum::routing::patch(api::assign_project_owner),
         )
@@ -1512,6 +1516,7 @@ mod tests {
         crate::db::migrate(&storage).await.unwrap();
         let config = Config::from_env().unwrap();
         let api_key_pepper = config.api_key_pepper.clone();
+        let admin_key = config.admin_key.clone();
         let (owner_state, owner_credential) = state_with_storage_access_token_auth(
             config,
             storage.clone(),
@@ -1857,6 +1862,7 @@ mod tests {
             .await
             .unwrap();
         let staging_enrollment: Value = serde_json::from_slice(&body).unwrap();
+        let staging_enrollment_id = staging_enrollment["enrollmentId"].as_str().unwrap();
         let staging_token = staging_enrollment["enrollmentToken"].as_str().unwrap();
         let staging_hash =
             crate::auth::hash_agent_gateway_enrollment(staging_token, &api_key_pepper);
@@ -1944,6 +1950,40 @@ mod tests {
             .await,
             Err(ApiError::Unauthorized)
         ));
+
+        let owner_cleanup = owner_app
+            .clone()
+            .oneshot(
+                Request::post(format!(
+                    "/v1/admin/agent-gateway-enrollments/{staging_enrollment_id}/revoke"
+                ))
+                .header("authorization", format!("Vifu {owner_credential}"))
+                .body(Body::empty())
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(owner_cleanup.status(), StatusCode::FORBIDDEN);
+        let admin_cleanup = owner_app
+            .clone()
+            .oneshot(
+                Request::post(format!(
+                    "/v1/admin/agent-gateway-enrollments/{staging_enrollment_id}/revoke"
+                ))
+                .header("authorization", format!("Bearer {admin_key}"))
+                .body(Body::empty())
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(admin_cleanup.status(), StatusCode::OK);
+        assert_eq!(
+            crate::db::get_agent_gateway_authorization(&storage, "gateway-account")
+                .await
+                .unwrap()
+                .status,
+            "revoked"
+        );
 
         match storage {
             Storage::Postgres(pool) => pool.close().await,

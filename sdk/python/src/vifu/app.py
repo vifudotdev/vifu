@@ -2,15 +2,24 @@
 
 from __future__ import annotations
 
+import asyncio
+import inspect
+import json
+import os
+import tempfile
+import threading
 import time
 from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import urlparse
+from urllib.request import Request, urlopen
 
 from .app_store import VifuAppRecord, VifuAppStore
-from .gateway import DEFAULT_LOCAL_SERVER_URL, VifuGateway
+from .gateway import DEFAULT_LOCAL_SERVER_URL, GatewayPairing, VifuGateway
 from .runtime import AgentHandler, Invocation, JsonValue, VifuRuntime
 from .server import VifuServer, VifuServerConfig
+
+_MAX_MANAGED_CONTROL_BYTES = 64 * 1024
 
 
 class Vifu:
@@ -43,6 +52,10 @@ class Vifu:
         self._server: VifuServer | None = None
         self._resources: list[Any] = []
         self._prepared_resources: set[int] = set()
+        self._foreground_lifecycles: list[Any] = []
+        self._cloud_app_id = os.environ.get("VIFU_APP_ID", "").strip() or None
+        self._cloud_app_slug = os.environ.get("VIFU_APP_SLUG", "").strip() or None
+        self._managed_invocation_complete = threading.Event()
 
     def agent(
         self,
@@ -52,8 +65,8 @@ class Vifu:
         name: str | None = None,
         endpoint: str | None = None,
         provider_id: str | None = None,
-        capability: str = "chat",
-        timeout_ms: int = 30_000,
+        capability: str | None = None,
+        timeout_ms: int | None = None,
         metadata: JsonValue = None,
         instructions: str | None = None,
     ) -> Callable[[AgentHandler], AgentHandler] | AgentHandler:
@@ -62,20 +75,46 @@ class Vifu:
         def register(handler: AgentHandler) -> AgentHandler:
             agent_metadata = metadata
             if agent_metadata is None:
-                agent_metadata = getattr(handler, "metadata", None)
+                agent_metadata = getattr(
+                    handler,
+                    "vifu_metadata",
+                    getattr(handler, "metadata", None),
+                )
+            resolved_endpoint = endpoint or getattr(handler, "vifu_endpoint", None)
             options = {
-                "name": name,
-                "endpoint": endpoint,
-                "provider_id": provider_id,
-                "capability": capability,
-                "timeout_ms": timeout_ms,
+                "name": name or getattr(handler, "vifu_name", None),
+                "endpoint": resolved_endpoint,
+                "provider_id": provider_id
+                or getattr(handler, "vifu_provider_id", None),
+                "capability": capability
+                or getattr(handler, "vifu_capability", "chat"),
+                "timeout_ms": timeout_ms
+                or getattr(handler, "vifu_timeout_ms", 30_000),
                 "metadata": agent_metadata,
-                "instructions": instructions,
+                "instructions": instructions
+                or getattr(handler, "vifu_instructions", None),
             }
+            bind = getattr(handler, "vifu_bind", None)
+            if callable(bind):
+                bind(
+                    self,
+                    agent_id=agent_id,
+                    endpoint=resolved_endpoint or agent_id,
+                )
             self._registrations.append((agent_id, handler, options))
             if self._runtime is not None:
-                self._runtime.agent(agent_id, handler, **options)
-            if callable(getattr(handler, "prepare", None)):
+                self._runtime.agent(
+                    agent_id,
+                    handler,
+                    _on_complete=self._managed_invocation_complete.set,
+                    **options,
+                )
+            if callable(getattr(handler, "vifu_run", None)):
+                self._foreground_lifecycles.append(handler)
+            if any(
+                callable(getattr(handler, method, None))
+                for method in ("prepare", "vifu_run", "close")
+            ) and all(existing is not handler for existing in self._resources):
                 self._resources.append(handler)
             return handler
 
@@ -102,26 +141,38 @@ class Vifu:
 
     def connect(self, *, timeout: float = 20.0) -> VifuGateway:
         """Connects to the local Server and waits until the Gateway is ready."""
+        self._prepare_resources()
         try:
-            self._prepare_resources()
             if self._gateway is None:
                 runtime = self.runtime
-                if _is_loopback_server(self.server_url):
-                    assert self._app is not None
-                self._gateway = runtime.connect_local(
-                    server_url=self.server_url,
-                    name=f"Python: {self.name}",
-                    capture_trace_content=self.capture_trace_content,
-                    app_id=self._app.app_id if self._app is not None else None,
-                )
+                pairing_path = os.environ.get("VIFU_GATEWAY_PAIRING_FILE", "").strip()
+                if pairing_path:
+                    pairing_code = _read_pairing_file(pairing_path)
+                    pairing = GatewayPairing.parse(pairing_code)
+                    self.server_url = pairing.server_url
+                    self._gateway = runtime.connect(
+                        pairing_code,
+                        name=f"Python: {self.name}",
+                        capture_trace_content=self.capture_trace_content,
+                    )
+                else:
+                    if _is_loopback_server(self.server_url):
+                        assert self._app is not None
+                    self._gateway = runtime.connect_local(
+                        server_url=self.server_url,
+                        name=f"Python: {self.name}",
+                        capture_trace_content=self.capture_trace_content,
+                        app_id=self._app.app_id if self._app is not None else None,
+                    )
             self._gateway.wait_until_connected(timeout)
+            _notify_managed_ready()
         except Exception as error:
             try:
                 self.close()
             except Exception:
                 pass
             raise ConnectionError(
-                f"Vifu could not connect to the local Server at {self.server_url}: {error}"
+                f"Vifu could not connect to the Server at {self.server_url}: {error}"
             ) from error
         assert self._gateway is not None
         return self._gateway
@@ -132,13 +183,31 @@ class Vifu:
         *,
         connect_timeout: float = 20.0,
     ) -> Any:
-        """Runs application code with the App connected to Vifu."""
+        """Runs a local entrypoint or serves one managed Endpoint invocation."""
         self.connect(timeout=connect_timeout)
-        print(f"Vifu Dashboard: {self.server_url.rstrip('/')}")
+        managed = bool(os.environ.get("VIFU_GATEWAY_PAIRING_FILE", "").strip())
+        if not managed:
+            print(f"Vifu Dashboard: {self.server_url.rstrip('/')}")
         print(f"App: {self.name} (connected)")
         try:
-            if main is not None:
-                return main(self)
+            if main is not None and not managed:
+                result = main(self)
+                if inspect.isawaitable(result):
+                    result = asyncio.run(result)
+                return result
+            if len(self._foreground_lifecycles) > 1:
+                raise RuntimeError(
+                    "a Vifu App can have only one foreground Agent lifecycle"
+                )
+            if self._foreground_lifecycles:
+                result = self._foreground_lifecycles[0].vifu_run()
+                if inspect.isawaitable(result):
+                    result = asyncio.run(result)
+                return result
+            if managed:
+                while not self._managed_invocation_complete.wait(3_600):
+                    pass
+                return None
             while True:
                 time.sleep(3_600)
         except KeyboardInterrupt:
@@ -158,7 +227,10 @@ class Vifu:
                 first_error = error
         for resource in reversed(self._resources):
             resource_id = id(resource)
-            if resource_id not in self._prepared_resources:
+            if resource_id not in self._prepared_resources and not any(
+                callable(getattr(resource, method, None))
+                for method in ("vifu_bind", "vifu_run")
+            ):
                 continue
             close = getattr(resource, "close", None)
             if callable(close):
@@ -187,19 +259,50 @@ class Vifu:
     @property
     def runtime(self) -> VifuRuntime:
         """Returns the embedded Runtime for this stable Vifu App."""
-        self._ensure_local_app()
+        self._ensure_runtime()
         assert self._runtime is not None
         return self._runtime
 
     @property
     def app_id(self) -> str:
         """Returns the stable App ID assigned by the selected Vifu Server."""
-        self._ensure_local_app()
-        assert self._app is not None
-        return self._app.app_id
+        self._ensure_runtime()
+        if self._app is not None:
+            return self._app.app_id
+        assert self._cloud_app_id is not None
+        return self._cloud_app_id
 
-    def _ensure_local_app(self) -> None:
+    @property
+    def slug(self) -> str:
+        """Returns the App slug assigned by the selected Vifu Server."""
+        self._ensure_runtime()
+        if self._app is not None:
+            return self._app.slug
+        if self._cloud_app_slug is None:
+            raise ValueError("VIFU_APP_SLUG is required for a managed App")
+        return self._cloud_app_slug
+
+    def _ensure_runtime(self) -> None:
         if self._runtime is not None:
+            return
+        pairing_path = os.environ.get("VIFU_GATEWAY_PAIRING_FILE", "").strip()
+        if pairing_path:
+            if self._cloud_app_id is None:
+                raise ValueError("VIFU_APP_ID is required for a managed App")
+            runtime_data_dir = self._data_dir
+            if runtime_data_dir is None:
+                workspace = os.environ.get("VIFU_EPHEMERAL_WORKSPACE", "").strip()
+                root = Path(workspace) if workspace else Path(tempfile.gettempdir()) / "vifu-run"
+                execution_id = os.environ.get("VIFU_MANAGED_EXECUTION_ID", "").strip()
+                runtime_data_dir = root / (execution_id or "managed")
+            self._runtime = VifuRuntime(self._cloud_app_id, data_dir=runtime_data_dir)
+            for agent_id, handler, options in self._registrations:
+                self._runtime.agent(
+                    agent_id,
+                    handler,
+                    _on_complete=self._managed_invocation_complete.set,
+                    **options,
+                )
             return
         if not _is_loopback_server(self.server_url):
             raise ValueError(
@@ -234,7 +337,9 @@ class Vifu:
             resource_id = id(resource)
             if resource_id in self._prepared_resources:
                 continue
-            resource.prepare()
+            prepare = getattr(resource, "prepare", None)
+            if callable(prepare):
+                prepare()
             self._prepared_resources.add(resource_id)
 
     def __enter__(self) -> "Vifu":
@@ -259,3 +364,81 @@ def _is_loopback_server(server_url: str) -> bool:
         "localhost",
         "::1",
     }
+
+
+def _secure_callback_url(value: str) -> bool:
+    parsed = urlparse(value)
+    if parsed.hostname is None or parsed.username is not None or parsed.password is not None:
+        return False
+    return parsed.scheme == "https" or (
+        parsed.scheme == "http"
+        and parsed.hostname in {"127.0.0.1", "localhost", "::1"}
+    )
+
+
+def _read_pairing_file(path: str | Path) -> str:
+    source = Path(path)
+    data = source.read_bytes()
+    if len(data) > 64 * 1024:
+        raise ValueError("VIFU_GATEWAY_PAIRING_FILE exceeds 64 KiB")
+    try:
+        text = data.decode("utf-8").strip()
+    except UnicodeDecodeError as error:
+        raise ValueError("VIFU_GATEWAY_PAIRING_FILE must be UTF-8") from error
+    if not text:
+        raise ValueError("VIFU_GATEWAY_PAIRING_FILE is empty")
+    if text.startswith("{"):
+        try:
+            value = json.loads(text)
+        except json.JSONDecodeError as error:
+            raise ValueError("VIFU_GATEWAY_PAIRING_FILE contains invalid JSON") from error
+        if not isinstance(value, dict):
+            raise ValueError("VIFU_GATEWAY_PAIRING_FILE must contain an object")
+        text = str(value.get("pairingCode") or value.get("pairing_code") or "").strip()
+        if not text:
+            raise ValueError("VIFU_GATEWAY_PAIRING_FILE is missing pairingCode")
+    return text
+
+
+def _notify_managed_ready() -> None:
+    control_file = os.environ.get("VIFU_MANAGED_CONTROL_FILE", "").strip()
+    if not control_file:
+        return
+    source = Path(control_file)
+    try:
+        data = source.read_bytes()
+    except OSError as error:
+        raise RuntimeError("managed Vifu control data is unavailable") from error
+    if len(data) > _MAX_MANAGED_CONTROL_BYTES:
+        raise ValueError("managed Vifu control data exceeds 64 KiB")
+    try:
+        value = json.loads(data)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ValueError("managed Vifu control data is invalid") from error
+    if not isinstance(value, dict):
+        raise ValueError("managed Vifu control data must be an object")
+    ready_url = value.get("readyUrl")
+    token = value.get("token")
+    execution_id = value.get("executionId")
+    if not all(isinstance(item, str) and item for item in (ready_url, token, execution_id)):
+        raise ValueError("managed Vifu control data is incomplete")
+    if not _secure_callback_url(ready_url):
+        raise ValueError("managed Vifu ready URL must use HTTPS or loopback HTTP")
+    request = Request(
+        ready_url,
+        data=json.dumps(
+            {"executionId": execution_id},
+            separators=(",", ":"),
+        ).encode("utf-8"),
+        method="POST",
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+        },
+    )
+    try:
+        with urlopen(request, timeout=10) as response:
+            if response.status < 200 or response.status >= 300:
+                raise RuntimeError("managed Vifu ready notification was rejected")
+    except OSError as error:
+        raise RuntimeError("managed Vifu ready notification failed") from error

@@ -69,6 +69,11 @@ class VifuWheelTests(unittest.TestCase):
                 self.assertEqual(metadata.count("Keywords:"), 1)
                 self.assertIn("Provides-Extra: foundry\n", metadata)
                 self.assertIn('Requires-Dist: foundry-local-sdk>=1.0,<2; extra == "foundry"\n', metadata)
+                self.assertIn("Provides-Extra: strands\n", metadata)
+                self.assertIn(
+                    'Requires-Dist: strands-agents>=1.0,<2; extra == "strands"\n',
+                    metadata,
+                )
                 record = archive.read(f"vifu-{PACKAGE_VERSION}.dist-info/RECORD").decode()
                 rows = list(csv.reader(record.splitlines()))
                 self.assertEqual(

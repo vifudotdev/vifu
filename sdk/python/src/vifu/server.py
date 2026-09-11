@@ -180,9 +180,12 @@ def _resolve_executable(executable: str | None) -> str:
         raise FileNotFoundError(f"Vifu executable was not found: {executable}")
 
     name = "vifu.exe" if sys.platform == "win32" else "vifu"
-    bundled = Path(__file__).resolve().parent / "_bin" / name
-    if bundled.is_file():
-        return str(bundled)
+    import vifu
+
+    for package_dir in vifu.__path__:
+        bundled = Path(package_dir) / "_bin" / name
+        if bundled.is_file():
+            return str(bundled)
     resolved = shutil.which(name)
     if resolved is not None:
         return resolved

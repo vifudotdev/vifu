@@ -2,6 +2,15 @@
 
 All notable changes to Vifu are documented here.
 
+## Unreleased
+
+- Added local/cloud App lifecycle support, including optional local entrypoints
+  that stay out of managed Endpoint execution.
+- Added code-configured local Whisper and llama.cpp Providers, plus a Strands
+  model adapter for local, OpenAI-compatible, and Vifu Agent Profile inference.
+- Added an administrator-only, enrollment-scoped Gateway revocation endpoint so
+  ephemeral cloud Runners can detach cleanly without changing other Gateways.
+
 ## 0.1.13 - 2026-08-15
 
 - Added Python and TypeScript SDKs for embedding Vifu Apps, Agents, Gateways,

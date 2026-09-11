@@ -3219,8 +3219,15 @@ async fn sync_runtime_state(
                     .filter(|_| embedded_deployment_id == Some(deployment.deployment_id))
                 {
                     let installed = embedded.releases().map_err(|error| error.to_string())?;
-                    let local_release =
-                        local_embedded_release(release, embedded.project_id(), &installed)?;
+                    let source_manifest = embedded
+                        .current_manifest()
+                        .map_err(|error| error.to_string())?;
+                    let local_release = local_embedded_release(
+                        release,
+                        embedded.project_id(),
+                        &installed,
+                        source_manifest.as_ref(),
+                    )?;
                     embedded
                         .install_release(&local_release)
                         .map_err(|error| error.to_string())?;
@@ -3280,8 +3287,13 @@ fn local_embedded_release(
     remote: &RuntimeRelease,
     embedded_project_id: &str,
     installed: &[RuntimeRelease],
+    source_manifest: Option<&RuntimeManifest>,
 ) -> Result<RuntimeRelease, String> {
-    let manifest = manifest_for_project(&remote.manifest, embedded_project_id)?;
+    let mut manifest = manifest_for_project(&remote.manifest, embedded_project_id)?;
+    if let Some(source_manifest) = source_manifest {
+        preserve_embedded_python_agents(&mut manifest, source_manifest);
+        manifest.validate().map_err(|error| error.to_string())?;
+    }
     let candidate =
         RuntimeRelease::new(remote.version, manifest.clone()).map_err(|error| error.to_string())?;
     if let Some(existing) = installed
@@ -3305,6 +3317,93 @@ fn local_embedded_release(
         remote.version
     };
     RuntimeRelease::new(version, manifest).map_err(|error| error.to_string())
+}
+
+#[cfg(feature = "sqlite")]
+fn preserve_embedded_python_agents(remote: &mut RuntimeManifest, source: &RuntimeManifest) {
+    let python_provider_ids = source
+        .providers
+        .iter()
+        .filter(|provider| provider.provider_type == "python")
+        .map(|provider| provider.id.as_str())
+        .collect::<Vec<_>>();
+    if python_provider_ids.is_empty() {
+        return;
+    }
+    for provider in source
+        .providers
+        .iter()
+        .filter(|provider| python_provider_ids.contains(&provider.id.as_str()))
+    {
+        if let Some(existing) = remote
+            .providers
+            .iter_mut()
+            .find(|existing| existing.id == provider.id)
+        {
+            existing.clone_from(provider);
+        } else {
+            remote.providers.push(provider.clone());
+        }
+    }
+    let python_agent_ids = source
+        .agents
+        .iter()
+        .filter(|agent| python_provider_ids.contains(&agent.provider.as_str()))
+        .map(|agent| agent.id.as_str())
+        .collect::<Vec<_>>();
+    let displaced_provider_ids = remote
+        .agents
+        .iter()
+        .filter(|agent| python_agent_ids.contains(&agent.id.as_str()))
+        .map(|agent| agent.provider.clone())
+        .collect::<Vec<_>>();
+    for source_agent in source
+        .agents
+        .iter()
+        .filter(|agent| python_agent_ids.contains(&agent.id.as_str()))
+    {
+        if let Some(remote_agent) = remote
+            .agents
+            .iter_mut()
+            .find(|agent| agent.id == source_agent.id)
+        {
+            let remote_metadata = remote_agent.metadata.clone();
+            remote_agent.provider.clone_from(&source_agent.provider);
+            remote_agent
+                .capabilities
+                .clone_from(&source_agent.capabilities);
+            remote_agent.metadata = merged_agent_metadata(&source_agent.metadata, &remote_metadata);
+        } else {
+            remote.agents.push(source_agent.clone());
+        }
+    }
+    remote
+        .endpoints
+        .retain(|endpoint| !python_agent_ids.contains(&endpoint.agent.as_str()));
+    remote.endpoints.extend(
+        source
+            .endpoints
+            .iter()
+            .filter(|endpoint| python_agent_ids.contains(&endpoint.agent.as_str()))
+            .cloned(),
+    );
+    remote.providers.retain(|provider| {
+        !displaced_provider_ids.contains(&provider.id)
+            || remote
+                .agents
+                .iter()
+                .any(|agent| agent.provider == provider.id)
+    });
+}
+
+#[cfg(feature = "sqlite")]
+fn merged_agent_metadata(source: &Value, remote: &Value) -> Value {
+    let (Some(source), Some(remote)) = (source.as_object(), remote.as_object()) else {
+        return remote.clone();
+    };
+    let mut merged = source.clone();
+    merged.extend(remote.clone());
+    Value::Object(merged)
 }
 
 #[cfg(feature = "sqlite")]
@@ -3794,7 +3893,7 @@ mod tests {
         baseline.metadata = json!({"buildProfile": "baseline"});
         let remote = vifu_runtime::RuntimeRelease::new(1, baseline).unwrap();
 
-        let local = local_embedded_release(&remote, "android-app", &[installed])
+        let local = local_embedded_release(&remote, "android-app", &[installed], None)
             .expect("remote App release should be installable beside local version 1");
 
         assert_eq!(local.version, 2);
@@ -3811,10 +3910,91 @@ mod tests {
         remote_manifest.project_id = "shared-app".to_string();
         let remote = vifu_runtime::RuntimeRelease::new(1, remote_manifest).unwrap();
 
-        let local = local_embedded_release(&remote, "android-app", &[installed.clone()])
-            .expect("the content-addressed local release should be reused");
+        let local = local_embedded_release(
+            &remote,
+            "android-app",
+            std::slice::from_ref(&installed),
+            None,
+        )
+        .expect("the content-addressed local release should be reused");
 
         assert_eq!(local, installed);
+    }
+
+    #[test]
+    fn remote_profiles_keep_embedded_python_agents_executable() {
+        let mut source = vifu_runtime::RuntimeManifest::new("python-source");
+        source.providers.push(vifu_runtime::ProviderRequirement {
+            id: "nihongo-provider".to_string(),
+            provider_type: "python".to_string(),
+            capabilities: vec!["call-assist".to_string()],
+            settings: json!({}),
+            resources: Default::default(),
+        });
+        source.agents.push(vifu_runtime::AgentDefinition {
+            id: "nihongo".to_string(),
+            name: "Nihongo".to_string(),
+            provider: "nihongo-provider".to_string(),
+            capabilities: vec!["call-assist".to_string()],
+            metadata: json!({
+                "framework": "strands-agents",
+                "persona": {"systemPrompt": "Source prompt"}
+            }),
+        });
+        source.endpoints.push(vifu_runtime::EndpointDefinition {
+            name: "nihongo".to_string(),
+            agent: "nihongo".to_string(),
+            capability: "call-assist".to_string(),
+            timeout_ms: 60_000,
+        });
+
+        let mut remote_manifest = vifu_runtime::RuntimeManifest::new("vifu-app");
+        remote_manifest
+            .providers
+            .push(vifu_runtime::ProviderRequirement {
+                id: "vifu-agent-profile".to_string(),
+                provider_type: "openai-compatible".to_string(),
+                capabilities: vec!["chat".to_string()],
+                settings: json!({}),
+                resources: Default::default(),
+            });
+        remote_manifest.agents.push(vifu_runtime::AgentDefinition {
+            id: "nihongo".to_string(),
+            name: "Nihongo from Dashboard".to_string(),
+            provider: "vifu-agent-profile".to_string(),
+            capabilities: vec!["chat".to_string()],
+            metadata: json!({
+                "persona": {"systemPrompt": "Dashboard prompt"},
+                "generation": {"temperature": 0.1}
+            }),
+        });
+        remote_manifest
+            .endpoints
+            .push(vifu_runtime::EndpointDefinition {
+                name: "profile-chat".to_string(),
+                agent: "nihongo".to_string(),
+                capability: "chat".to_string(),
+                timeout_ms: 30_000,
+            });
+        let remote = vifu_runtime::RuntimeRelease::new(5, remote_manifest).unwrap();
+
+        let local = local_embedded_release(&remote, "python-source", &[], Some(&source))
+            .expect("the Dashboard profile should overlay the Python source Agent");
+
+        assert_eq!(local.manifest.providers.len(), 1);
+        assert_eq!(local.manifest.providers[0].id, "nihongo-provider");
+        assert_eq!(local.manifest.agents[0].provider, "nihongo-provider");
+        assert_eq!(
+            local.manifest.agents[0].metadata["framework"],
+            "strands-agents"
+        );
+        assert_eq!(
+            local.manifest.agents[0].metadata["persona"]["systemPrompt"],
+            "Dashboard prompt"
+        );
+        assert_eq!(local.manifest.endpoints.len(), 1);
+        assert_eq!(local.manifest.endpoints[0].name, "nihongo");
+        assert_eq!(local.manifest.endpoints[0].capability, "call-assist");
     }
 
     fn runtime_trace(project_id: &str) -> RuntimeTraceRecord {

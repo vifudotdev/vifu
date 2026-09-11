@@ -3052,6 +3052,33 @@ pub async fn revoke_agent_gateway(
     Ok(Json(json!({ "agentGatewayAuthorization": authorization })))
 }
 
+pub async fn revoke_agent_gateway_enrollment(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(enrollment_id): Path<Uuid>,
+) -> Result<Json<Value>, ApiError> {
+    deployment_admin(&state, &headers, Operation::DeploymentWrite).await?;
+    let revoked = db::revoke_agent_gateway_enrollment(&state.pool, enrollment_id).await?;
+    if revoked.revoke_gateway {
+        let gateway_id = revoked.gateway_id.as_deref().ok_or(ApiError::Internal)?;
+        match db::revoke_agent_gateway_authorization(&state.pool, gateway_id).await {
+            Ok(_) | Err(ApiError::NotFound) => {}
+            Err(error) => return Err(error),
+        }
+        match db::revoke_agent_gateway_credential(&state.pool, gateway_id).await {
+            Ok(_) | Err(ApiError::NotFound) => {}
+            Err(error) => return Err(error),
+        }
+        state.relay.disconnect(gateway_id, "JOB_FINISHED").await;
+    }
+    Ok(Json(json!({
+        "enrollmentId": enrollment_id,
+        "gatewayId": revoked.gateway_id,
+        "gatewayRevoked": revoked.revoke_gateway,
+        "revoked": true,
+    })))
+}
+
 pub async fn get_agent_gateway_pairing(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -6308,7 +6335,7 @@ pub(crate) async fn invoke_runtime_extension_profile(
                 state,
                 project.project.id,
                 &project.project.slug,
-                &route,
+                route,
                 request_id,
                 request,
                 timeout,

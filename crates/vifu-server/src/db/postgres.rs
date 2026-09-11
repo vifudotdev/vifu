@@ -3926,6 +3926,65 @@ pub async fn create_agent_gateway_enrollment(
     Ok(())
 }
 
+pub async fn revoke_agent_gateway_enrollment(
+    pool: &PgPool,
+    enrollment_id: Uuid,
+) -> Result<super::RevokedAgentGatewayEnrollment, ApiError> {
+    let mut transaction = pool.begin().await?;
+    let (project_id, deployment_id, gateway_id) =
+        sqlx::query_as::<_, (Uuid, Uuid, Option<String>)>(
+            "UPDATE agent_gateway_enrollments
+         SET revoked_at = COALESCE(revoked_at, NOW())
+         WHERE id = $1
+         RETURNING project_id, deployment_id, gateway_id",
+        )
+        .bind(enrollment_id)
+        .fetch_optional(&mut *transaction)
+        .await?
+        .ok_or(ApiError::NotFound)?;
+    let mut revoke_gateway = false;
+    if let Some(gateway_id) = gateway_id.as_deref() {
+        sqlx::query(
+            "DELETE FROM runtime_deployment_gateways
+             WHERE deployment_id = $1 AND gateway_id = $2",
+        )
+        .bind(deployment_id)
+        .bind(gateway_id)
+        .execute(&mut *transaction)
+        .await?;
+        sqlx::query(
+            "UPDATE projects
+             SET gateway_id = COALESCE((
+                   SELECT assignment.gateway_id
+                   FROM runtime_deployments AS deployment
+                   JOIN runtime_deployment_gateways AS assignment
+                     ON assignment.deployment_id = deployment.id
+                   WHERE deployment.project_id = $1 AND deployment.is_primary
+                   ORDER BY assignment.created_at ASC
+                   LIMIT 1
+                 ), ''),
+                 updated_at = NOW()
+             WHERE id = $1 AND gateway_id = $2",
+        )
+        .bind(project_id)
+        .bind(gateway_id)
+        .execute(&mut *transaction)
+        .await?;
+        let remaining_assignments = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM runtime_deployment_gateways WHERE gateway_id = $1",
+        )
+        .bind(gateway_id)
+        .fetch_one(&mut *transaction)
+        .await?;
+        revoke_gateway = remaining_assignments == 0;
+    }
+    transaction.commit().await?;
+    Ok(super::RevokedAgentGatewayEnrollment {
+        gateway_id,
+        revoke_gateway,
+    })
+}
+
 #[derive(Debug, FromRow)]
 struct AgentGatewayEnrollmentSecret {
     project_id: Uuid,

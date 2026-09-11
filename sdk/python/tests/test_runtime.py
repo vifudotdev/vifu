@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import json
 import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -14,6 +16,7 @@ from vifu import (
     VifuServer,
     VifuServerConfig,
 )
+from vifu.app import _notify_managed_ready
 from vifu.app_store import VifuAppRecord, VifuAppStore
 from vifu.gateway import (
     DEFAULT_LOCAL_BOOTSTRAP_TOKEN,
@@ -100,6 +103,69 @@ class VifuRuntimeTests(unittest.TestCase):
             self.assertEqual(handler.prepared, 1)
             self.assertEqual(handler.closed, 1)
 
+    def test_agent_uses_configuration_declared_by_the_handler(self) -> None:
+        class VoiceAgent:
+            vifu_name = "Example Voice Agent"
+            vifu_endpoint = "voice-transcript"
+            vifu_provider_id = "example-voice-service"
+            vifu_capability = "speech-to-text"
+            vifu_timeout_ms = 45_000
+            vifu_metadata = {"framework": "livekit-agents"}
+            vifu_instructions = "Emit final transcripts."
+
+            def __call__(self, _request):
+                return {}
+
+        app = Vifu("Composable App")
+        app.agent("voice", VoiceAgent())
+
+        _, _, options = app._registrations[0]
+        self.assertEqual(
+            options,
+            {
+                "name": "Example Voice Agent",
+                "endpoint": "voice-transcript",
+                "provider_id": "example-voice-service",
+                "capability": "speech-to-text",
+                "timeout_ms": 45_000,
+                "metadata": {"framework": "livekit-agents"},
+                "instructions": "Emit final transcripts.",
+            },
+        )
+
+    def test_agent_binds_and_runs_one_foreground_lifecycle(self) -> None:
+        class VoiceAgent:
+            def __init__(self):
+                self.bound = None
+                self.runs = 0
+                self.closed = 0
+
+            def __call__(self, _request):
+                return {}
+
+            def vifu_bind(self, app, *, agent_id, endpoint):
+                self.bound = (app, agent_id, endpoint)
+
+            def vifu_run(self):
+                self.runs += 1
+                return "voice-finished"
+
+            def close(self):
+                self.closed += 1
+
+        voice = VoiceAgent()
+        app = Vifu("Composable App")
+        app.agent("voice", voice, endpoint="voice-transcript")
+
+        self.assertEqual(voice.bound, (app, "voice", "voice-transcript"))
+        with mock.patch.object(app, "connect") as connect:
+            result = app.run(connect_timeout=2.0)
+
+        self.assertEqual(result, "voice-finished")
+        self.assertEqual(voice.runs, 1)
+        self.assertEqual(voice.closed, 1)
+        connect.assert_called_once_with(timeout=2.0)
+
     def test_high_level_app_context_connects_and_closes(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             app = Vifu("Context Lifecycle", data_dir=directory)
@@ -137,6 +203,150 @@ class VifuRuntimeTests(unittest.TestCase):
             connect.assert_called_once_with(timeout=2.0)
             terminal_input.assert_not_called()
             close.assert_called_once_with()
+
+    def test_managed_app_waits_for_one_endpoint_invocation_then_exits(self) -> None:
+        with mock.patch.dict(
+            "os.environ",
+            {"VIFU_GATEWAY_PAIRING_FILE": "/managed/pairing.json"},
+            clear=True,
+        ):
+            app = Vifu("Managed App")
+            app._managed_invocation_complete.set()
+            with mock.patch.object(app, "connect") as connect:
+                with mock.patch.object(app, "close") as close:
+                    result = app.run(connect_timeout=4.0)
+
+        self.assertIsNone(result)
+        connect.assert_called_once_with(timeout=4.0)
+        close.assert_called_once_with()
+
+    def test_managed_app_ignores_the_local_main_callback(self) -> None:
+        with mock.patch.dict(
+            "os.environ",
+            {"VIFU_GATEWAY_PAIRING_FILE": "/managed/pairing.json"},
+            clear=True,
+        ):
+            app = Vifu("Managed App")
+            app._managed_invocation_complete.set()
+            local_main = mock.Mock()
+            with mock.patch.object(app, "connect"):
+                with mock.patch.object(app, "close"):
+                    result = app.run(local_main)
+
+        self.assertIsNone(result)
+        local_main.assert_not_called()
+
+    def test_managed_app_runs_the_same_foreground_agent_lifecycle(self) -> None:
+        class VoiceAgent:
+            def __init__(self):
+                self.runs = 0
+
+            def __call__(self, _request):
+                return {}
+
+            def vifu_run(self):
+                self.runs += 1
+                return "managed-voice-finished"
+
+        with mock.patch.dict(
+            "os.environ",
+            {
+                "VIFU_GATEWAY_PAIRING_FILE": "/managed/pairing.json",
+                "VIFU_APP_ID": APP_ID,
+            },
+            clear=True,
+        ):
+            voice = VoiceAgent()
+            app = Vifu("Managed Voice App")
+            app.agent("voice", voice)
+            with mock.patch.object(app, "connect") as connect:
+                with mock.patch.object(app, "close") as close:
+                    result = app.run(connect_timeout=4.0)
+
+        self.assertEqual(result, "managed-voice-finished")
+        self.assertEqual(voice.runs, 1)
+        connect.assert_called_once_with(timeout=4.0)
+        close.assert_called_once_with()
+
+    def test_provider_completion_signals_managed_app_lifecycle(self) -> None:
+        completed = threading.Event()
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = VifuRuntime("managed-lifecycle", data_dir=directory)
+            runtime.agent(
+                "assistant",
+                lambda request: {"text": request.input["text"]},
+                _on_complete=completed.set,
+            )
+
+            result = runtime.invoke("assistant", {"text": "done"})
+
+        self.assertEqual(result.output, {"text": "done"})
+        self.assertTrue(completed.is_set())
+
+    def test_managed_ready_notification_uses_scoped_control_file(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            pairing_path = root / "pairing.json"
+            pairing_path.write_text(
+                json.dumps(
+                    {
+                        "pairingCode": (
+                            "vifu://gateway/enroll?"
+                            "server=https%3A%2F%2Fruntime.example&token=vifu_ge_test"
+                        )
+                    }
+                )
+            )
+            control_path = root / "control.json"
+            control_path.write_text(
+                json.dumps(
+                    {
+                        "readyUrl": "https://api.example/v1/vifu/managed/ready",
+                        "token": "ready-only-token",
+                        "executionId": "execution-123",
+                    }
+                )
+            )
+            environment = {
+                "VIFU_APP_ID": "managed-app",
+                "VIFU_GATEWAY_PAIRING_FILE": str(pairing_path),
+                "VIFU_MANAGED_CONTROL_FILE": str(control_path),
+            }
+            response = mock.MagicMock()
+            response.__enter__.return_value.status = 204
+            with mock.patch.dict("os.environ", environment, clear=True):
+                app = Vifu("Managed App", data_dir=root / "runtime")
+                runtime = mock.Mock()
+                gateway = mock.Mock()
+                runtime.connect.return_value = gateway
+                app._runtime = runtime
+                with mock.patch("vifu.app.urlopen", return_value=response) as post:
+                    app.connect(timeout=4.0)
+
+            request = post.call_args.args[0]
+            self.assertEqual(request.full_url, "https://api.example/v1/vifu/managed/ready")
+            self.assertEqual(json.loads(request.data), {"executionId": "execution-123"})
+            self.assertEqual(request.get_header("Authorization"), "Bearer ready-only-token")
+
+    def test_managed_ready_notification_rejects_non_http_loopback_urls(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            control_path = Path(directory) / "control.json"
+            control_path.write_text(
+                json.dumps(
+                    {
+                        "readyUrl": "ftp://localhost/v1/vifu/managed/ready",
+                        "token": "ready-only-token",
+                        "executionId": "execution-123",
+                    }
+                )
+            )
+            with mock.patch.dict(
+                "os.environ",
+                {"VIFU_MANAGED_CONTROL_FILE": str(control_path)},
+                clear=True,
+            ):
+                with self.assertRaisesRegex(ValueError, "HTTPS"):
+                    _notify_managed_ready()
 
     def test_python_provider_invocation_produces_a_trace(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

@@ -279,6 +279,7 @@ dispatch! {
     pub async fn resolve_agent_gateway_pairing(storage: &Storage, id: Uuid, status: &str, owner_user_id: Option<&str>) -> Result<AgentGatewayPairingRequest, ApiError>;
     pub async fn register_agent_gateway_credential(storage: &Storage, gateway_id: &str, owner_user_id: Option<&str>, credential_prefix: &str, credential_hash: &[u8]) -> Result<AgentGatewayRegistration, ApiError>;
     pub async fn create_agent_gateway_enrollment(storage: &Storage, input: NewAgentGatewayEnrollment<'_>) -> Result<(), ApiError>;
+    pub async fn revoke_agent_gateway_enrollment(storage: &Storage, enrollment_id: Uuid) -> Result<RevokedAgentGatewayEnrollment, ApiError>;
     pub async fn consume_agent_gateway_enrollment(storage: &Storage, token_hash: &[u8], gateway_id: &str, credential_prefix: &str, credential_hash: &[u8]) -> Result<AgentGatewayRegistration, ApiError>;
     pub async fn authenticate_agent_gateway_credential(storage: &Storage, credential_hash: &[u8]) -> Result<String, ApiError>;
     pub async fn revoke_agent_gateway_credential(storage: &Storage, gateway_id: &str) -> Result<AgentGatewayCredential, ApiError>;
@@ -307,6 +308,12 @@ dispatch! {
     pub async fn list_trace_spans(storage: &Storage, trace_id: Uuid) -> Result<Vec<TraceSpan>, ApiError>;
     pub async fn list_trace_scores(storage: &Storage, trace_id: Uuid) -> Result<Vec<TraceScore>, ApiError>;
     pub async fn trace_feedback_target(storage: &Storage, project_id: Uuid, request_id: Uuid) -> Result<TraceFeedbackTarget, ApiError>;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RevokedAgentGatewayEnrollment {
+    pub gateway_id: Option<String>,
+    pub revoke_gateway: bool,
 }
 
 pub async fn refresh_discovered_binding(
@@ -1966,10 +1973,11 @@ mod tests {
         )
         .await
         .expect("project should be created");
+        let enrollment_id = Uuid::new_v4();
         create_agent_gateway_enrollment(
             &storage,
             NewAgentGatewayEnrollment {
-                id: Uuid::new_v4(),
+                id: enrollment_id,
                 project_id,
                 deployment_id: primary_deployment_id(&storage, project_id).await,
                 owner_user_id: "user-123",
@@ -2029,6 +2037,69 @@ mod tests {
             .await,
             Err(ApiError::Unauthorized)
         ));
+
+        let secondary_deployment_id = Uuid::new_v4();
+        create_runtime_deployment(
+            &storage,
+            NewRuntimeDeployment {
+                id: secondary_deployment_id,
+                project_id,
+                name: "shared-gateway",
+                is_primary: false,
+                config_sync_enabled: true,
+                trace_mode: "summary",
+                remote_invocation_enabled: false,
+            },
+        )
+        .await
+        .expect("secondary deployment should be created");
+        assign_runtime_deployment_gateway(
+            &storage,
+            project_id,
+            secondary_deployment_id,
+            "gateway-remote",
+        )
+        .await
+        .expect("gateway should be shared with the secondary deployment");
+
+        assert_eq!(
+            revoke_agent_gateway_enrollment(&storage, enrollment_id)
+                .await
+                .expect("enrollment should be revoked"),
+            RevokedAgentGatewayEnrollment {
+                gateway_id: Some("gateway-remote".to_string()),
+                revoke_gateway: false,
+            }
+        );
+        assert_eq!(
+            list_runtime_deployment_gateway_ids(
+                &storage,
+                primary_deployment_id(&storage, project_id).await,
+            )
+            .await
+            .expect("deployment gateways should load"),
+            vec!["project-remote-project".to_string()],
+        );
+        assert_eq!(
+            get_project(&storage, project_id)
+                .await
+                .expect("project should load")
+                .project
+                .gateway_id,
+            "project-remote-project"
+        );
+        assert_eq!(
+            list_runtime_deployment_gateway_ids(&storage, secondary_deployment_id)
+                .await
+                .expect("secondary deployment gateways should load"),
+            vec!["gateway-remote".to_string()],
+        );
+        assert_eq!(
+            authenticate_agent_gateway_credential(&storage, b"remote-credential-hash")
+                .await
+                .expect("shared gateway credential should remain active"),
+            "gateway-remote"
+        );
 
         revoke_agent_gateway_credential(&storage, "gateway-remote")
             .await
