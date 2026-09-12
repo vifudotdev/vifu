@@ -137,7 +137,10 @@ jobs:
           name: embedded-dashboard-assets
           path: target/vifu-console-assets
       - name: Install native binding toolchain
-        run: dnf install -y clang-libs
+        run: |
+          dnf install -y clang
+          printf 'BINDGEN_EXTRA_CLANG_ARGS=-isystem %s/include\n' \
+            "$(clang --print-resource-dir)" >> "$GITHUB_ENV"
       - uses: dtolnay/rust-toolchain@1.95.0
       - uses: Swatinem/rust-cache@v2
         with:
