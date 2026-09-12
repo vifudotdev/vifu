@@ -2,10 +2,6 @@
 
 set -euo pipefail
 
-# Release wheels use whisper-rs' checked-in bindings so cross-platform builds do
-# not depend on a host libclang installation.
-export WHISPER_DONT_GENERATE_BINDINGS="${WHISPER_DONT_GENERATE_BINDINGS:-1}"
-
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 MACHINE="$(uname -m)"
