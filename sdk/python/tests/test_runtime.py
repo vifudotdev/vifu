@@ -279,6 +279,7 @@ class VifuRuntimeTests(unittest.TestCase):
             )
 
             result = runtime.invoke("assistant", {"text": "done"})
+            runtime.close()
 
         self.assertEqual(result.output, {"text": "done"})
         self.assertTrue(completed.is_set())
