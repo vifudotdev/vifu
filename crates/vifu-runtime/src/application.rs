@@ -23,6 +23,7 @@ use crate::{
 const SNAPSHOT_VERSION: u32 = 1;
 const DEFAULT_TIMEOUT_MS: u64 = 30_000;
 const DEFAULT_EFFECT_LIMIT: usize = 64;
+const PROVIDER_CANCELLATION_GRACE_MS: u64 = 5_000;
 #[cfg(not(target_arch = "wasm32"))]
 const MAX_IN_FLIGHT_INVOCATIONS: usize = 64;
 const MAX_RETAINED_INVOCATIONS: usize = 256;
@@ -1408,7 +1409,17 @@ impl RuntimeCore {
             tokio::pin!(idle_deadline);
             tokio::select! {
                 biased;
-                _ = cancellation.cancelled() => return Err(RuntimeError::Cancelled),
+                _ = cancellation.cancelled() => {
+                    let cleanup_deadline = runtime_sleep(Duration::from_millis(
+                        PROVIDER_CANCELLATION_GRACE_MS,
+                    ));
+                    tokio::pin!(cleanup_deadline);
+                    tokio::select! {
+                        _ = &mut provider_call => {}
+                        _ = &mut cleanup_deadline => {}
+                    }
+                    return Err(RuntimeError::Cancelled);
+                },
                 response = &mut provider_call => break response?,
                 changed = activity_receiver.changed(), if activity_open => {
                     if changed.is_err() {
@@ -1417,6 +1428,14 @@ impl RuntimeCore {
                 }
                 _ = &mut idle_deadline => {
                     cancellation.cancel();
+                    let cleanup_deadline = runtime_sleep(Duration::from_millis(
+                        PROVIDER_CANCELLATION_GRACE_MS,
+                    ));
+                    tokio::pin!(cleanup_deadline);
+                    tokio::select! {
+                        _ = &mut provider_call => {}
+                        _ = &mut cleanup_deadline => {}
+                    }
                     return Err(RuntimeError::Timeout(endpoint.timeout_ms));
                 }
             }
@@ -1758,6 +1777,7 @@ impl RuntimeWorker {
                     return;
                 };
                 runtime.block_on(async move {
+                    let mut invocations = tokio::task::JoinSet::new();
                     while let Some(command) = receiver.recv().await {
                         match command {
                             WorkerCommand::Start {
@@ -1766,7 +1786,7 @@ impl RuntimeWorker {
                                 cancellation,
                             } => {
                                 let invocation_core = Arc::clone(&core);
-                                tokio::spawn(async move {
+                                invocations.spawn(async move {
                                     invocation_core.update_poll(
                                         &handle,
                                         InvocationStatus::Running,
@@ -1805,7 +1825,9 @@ impl RuntimeWorker {
                                 });
                             }
                         }
+                        while invocations.try_join_next().is_some() {}
                     }
+                    while invocations.join_next().await.is_some() {}
                 });
             })
             .map_err(|_error| RuntimeError::Internal)?;
@@ -2517,6 +2539,8 @@ const fn is_terminal_status(status: InvocationStatus) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
+
     use super::*;
 
     struct TestProvider {
@@ -2639,6 +2663,53 @@ mod tests {
                     }
                 }
                 Ok(ProviderResponse::json(json!({ "ok": true })))
+            })
+        }
+    }
+
+    struct ShutdownCompletionProvider {
+        completed: Arc<AtomicBool>,
+    }
+
+    impl AgentProvider for ShutdownCompletionProvider {
+        fn supports(&self, capability: &str) -> bool {
+            capability == "chat"
+        }
+
+        fn invoke<'a>(
+            &'a self,
+            _request: ProviderRequest,
+            _cancellation: CancellationToken,
+        ) -> ProviderFuture<'a> {
+            let completed = Arc::clone(&self.completed);
+            Box::pin(async move {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                completed.store(true, AtomicOrdering::Release);
+                Ok(ProviderResponse::json(json!({ "ok": true })))
+            })
+        }
+    }
+
+    struct CancellationCleanupProvider {
+        completed: Arc<AtomicBool>,
+    }
+
+    impl AgentProvider for CancellationCleanupProvider {
+        fn supports(&self, capability: &str) -> bool {
+            capability == "chat"
+        }
+
+        fn invoke<'a>(
+            &'a self,
+            _request: ProviderRequest,
+            cancellation: CancellationToken,
+        ) -> ProviderFuture<'a> {
+            let completed = Arc::clone(&self.completed);
+            Box::pin(async move {
+                cancellation.cancelled().await;
+                tokio::time::sleep(Duration::from_millis(10)).await;
+                completed.store(true, AtomicOrdering::Release);
+                Err(RuntimeError::Cancelled)
             })
         }
     }
@@ -2882,6 +2953,48 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn runtime_timeout_waits_for_provider_cancellation_cleanup() {
+        let completed = Arc::new(AtomicBool::new(false));
+        let runtime = VifuRuntime::new("timeout-cleanup-project").expect("runtime should start");
+        runtime
+            .register_provider(
+                "cleanup",
+                Arc::new(CancellationCleanupProvider {
+                    completed: Arc::clone(&completed),
+                }),
+            )
+            .expect("provider should register");
+        runtime
+            .register_agent(AgentDefinition {
+                id: "cleanup-agent".to_string(),
+                name: "Cleanup agent".to_string(),
+                provider: "cleanup".to_string(),
+                capabilities: vec!["chat".to_string()],
+                metadata: json!({}),
+            })
+            .expect("agent should register");
+        runtime
+            .register_endpoint(EndpointDefinition {
+                name: "cleanup-chat".to_string(),
+                agent: "cleanup-agent".to_string(),
+                capability: "chat".to_string(),
+                timeout_ms: 10,
+            })
+            .expect("endpoint should register");
+
+        let error = runtime
+            .invoke(InvocationInput::json("cleanup-chat", json!({})))
+            .await
+            .expect_err("slow invocation should time out");
+
+        assert!(matches!(error, RuntimeError::Timeout(10)));
+        assert!(
+            completed.load(AtomicOrdering::Acquire),
+            "runtime returned before provider cancellation cleanup completed"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn provider_activity_resets_the_runtime_idle_timeout() {
         let runtime = VifuRuntime::new("active-project").expect("runtime should start");
         runtime
@@ -2953,6 +3066,35 @@ mod tests {
             );
             std::thread::sleep(Duration::from_millis(5));
         }
+    }
+
+    #[test]
+    fn dropping_runtime_waits_for_in_flight_worker_invocations() {
+        let completed = Arc::new(AtomicBool::new(false));
+        let runtime = configured_runtime(Arc::new(ShutdownCompletionProvider {
+            completed: Arc::clone(&completed),
+        }));
+        let handle = runtime
+            .start_invoke(InvocationInput::json("chat", json!({})))
+            .expect("invocation should start");
+        let deadline = Instant::now() + Duration::from_secs(1);
+        loop {
+            let poll = runtime
+                .poll_invocation(&handle)
+                .expect("invocation should remain pollable");
+            if poll.status == InvocationStatus::Running {
+                break;
+            }
+            assert!(Instant::now() < deadline, "invocation did not start");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+
+        drop(runtime);
+
+        assert!(
+            completed.load(AtomicOrdering::Acquire),
+            "runtime shutdown cancelled an in-flight invocation"
+        );
     }
 
     #[test]

@@ -665,7 +665,12 @@ impl AgentProvider for LlamaProvider {
             });
             tokio::select! {
                 biased;
-                _ = cancellation.cancelled() => Err(RuntimeError::Cancelled),
+                _ = cancellation.cancelled() => {
+                    let _ = task.await.map_err(|_error| {
+                        RuntimeError::provider("llama", "local model task stopped")
+                    })?;
+                    Err(RuntimeError::Cancelled)
+                },
                 result = &mut task => result.map_err(|_error| {
                     RuntimeError::provider("llama", "local model task stopped")
                 })?,
@@ -1982,6 +1987,37 @@ mod tests {
             .expect("cancelled queue wait should finish promptly");
 
         assert!(matches!(result, Err(RuntimeError::Cancelled)));
+    }
+
+    #[tokio::test]
+    async fn cancellation_waits_for_blocking_inference_cleanup() {
+        let cancellation = CancellationToken::default();
+        let blocking_cancellation = cancellation.clone();
+        let completed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let task_completed = Arc::clone(&completed);
+        let mut task = tokio::task::spawn_blocking(move || {
+            while !blocking_cancellation.is_cancelled() {
+                std::thread::yield_now();
+            }
+            task_completed.store(true, std::sync::atomic::Ordering::Release);
+            Ok(ProviderResponse::json(json!({ "ok": true })))
+        });
+        cancellation.cancel();
+
+        let result = tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => {
+                let _ = task.await.expect("blocking task should join");
+                Err(RuntimeError::Cancelled)
+            },
+            result = &mut task => result.expect("blocking task should join"),
+        };
+
+        assert!(matches!(result, Err(RuntimeError::Cancelled)));
+        assert!(
+            completed.load(std::sync::atomic::Ordering::Acquire),
+            "cancellation returned before blocking inference cleanup completed"
+        );
     }
 
     #[test]

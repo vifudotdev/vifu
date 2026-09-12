@@ -203,7 +203,7 @@ not download a model or require a third-party credential:
 PYTHONPATH=target/python-sdk:examples/google-adk-python \
   python3 examples/google-adk-python/test_vifu_tool.py
 PYTHONPATH=target/python-sdk:examples/foundry-local-python \
-  python3 examples/foundry-local-python/test_provider.py
+  python3 examples/foundry-local-python/test_web_search.py
 bun examples/google-adk-typescript/test.ts
 bun examples/foundry-local-typescript/test.ts
 ```

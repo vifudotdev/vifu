@@ -48,6 +48,9 @@ class _CompletedRuntime:
 
 
 class LocalProviderTests(unittest.TestCase):
+    def test_local_llama_advertises_safe_accelerator_shutdown(self) -> None:
+        self.assertTrue(LocalLlama.supports_safe_accelerator_shutdown)
+
     def test_local_whisper_invokes_the_embedded_binary_provider(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             model = Path(directory) / "ggml-base.bin"

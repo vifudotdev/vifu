@@ -112,6 +112,7 @@ class LocalLlama:
     """Resident llama.cpp chat Provider backed by the Vifu Runtime."""
 
     provider = "vifu-local-llama"
+    supports_safe_accelerator_shutdown = True
 
     def __init__(
         self,

@@ -15,6 +15,7 @@ test-results/
 *.tsbuildinfo
 __pycache__/
 *.py[cod]
+*.egg-info/
 .env
 .env.*
 !.env.example
