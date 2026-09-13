@@ -26,6 +26,128 @@ from vifu.gateway import (
 
 
 class VifuRuntimeTests(unittest.TestCase):
+    def test_app_provider_requires_an_executable_implementation(self) -> None:
+        app = Vifu("Provider App")
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "requires an implementation",
+        ):
+            app.provider(
+                "missing-provider",
+                None,
+                provider_type="openai-compatible",
+                capabilities=("chat",),
+            )
+
+    def test_app_declares_private_providers_and_binds_them_to_agent_profiles(self) -> None:
+        class FixtureProvider:
+            vifu_provider_type = "fixture-chat"
+            vifu_capabilities = ("chat",)
+            vifu_settings = {"model": "fixture-model"}
+
+            def complete(self, request, *, session_id):
+                return {"request": request, "sessionId": session_id}
+
+        app = Vifu("Provider App")
+        provider = app.provider(
+            "shared-reasoning",
+            FixtureProvider(),
+            name="Shared Reasoning",
+        )
+        app.agent(
+            "reply",
+            lambda _request: {},
+            implementation="strands-agents",
+            providers={"reasoning": provider},
+        )
+
+        self.assertIs(app.providers["shared-reasoning"], provider)
+        self.assertEqual(provider.provider_type, "fixture-chat")
+        self.assertEqual(provider.capabilities, ("chat",))
+        metadata = app._registrations[0][2]["metadata"]
+        self.assertEqual(metadata["implementation"], "strands-agents")
+        self.assertEqual(
+            metadata["providerBindings"],
+            {
+                "reasoning": {
+                    "providerKey": "shared-reasoning",
+                    "capability": "chat",
+                }
+            },
+        )
+
+    def test_app_provider_descriptors_do_not_expose_provider_credentials(self) -> None:
+        class CredentialProvider:
+            vifu_provider_type = "openai-compatible"
+            vifu_capabilities = ("chat",)
+            vifu_settings = {
+                "model": "gpt-test",
+                "apiKey": "must-not-escape",
+                "headers": {"Authorization": "Bearer must-not-escape-header"},
+            }
+            vifu_resources = {
+                "model": "model:gpt-test",
+                "accessToken": "must-not-escape-resource",
+            }
+
+            def complete(self, request, *, session_id):
+                return {"request": request, "sessionId": session_id}
+
+        app = Vifu("Provider Metadata")
+        app.provider("private-model", CredentialProvider())
+
+        descriptors = app._provider_descriptors()
+
+        self.assertEqual(len(descriptors), 1)
+        self.assertEqual(descriptors[0]["id"], "private-model")
+        self.assertEqual(descriptors[0]["localProviderType"], "openai-compatible")
+        self.assertEqual(descriptors[0]["resources"], {"model": "model:gpt-test"})
+        self.assertNotIn("apiKey", json.dumps(descriptors))
+        self.assertNotIn("Authorization", json.dumps(descriptors))
+        self.assertNotIn("token", json.dumps(descriptors).lower())
+
+    def test_app_provider_does_not_become_an_extra_agent_implementation(self) -> None:
+        class FixtureProvider:
+            vifu_provider_type = "fixture-chat"
+            vifu_capabilities = ("chat",)
+
+            def complete(self, request, *, session_id):
+                return {"request": request, "sessionId": session_id}
+
+        with tempfile.TemporaryDirectory() as directory:
+            app = Vifu("Provider Runtime", data_dir=directory, workspace=directory)
+            provider = app.provider("shared-reasoning", FixtureProvider())
+            app.agent(
+                "reply",
+                lambda _request: {},
+                implementation="strands-agents",
+                providers={"reasoning": provider},
+            )
+
+            runtime = mock.Mock()
+            with (
+                mock.patch.object(VifuServer, "ensure", return_value=None),
+                mock.patch.object(
+                    VifuAppStore,
+                    "open",
+                    return_value=VifuAppRecord(
+                        APP_ID,
+                        "provider-runtime",
+                        "Provider Runtime",
+                    ),
+                ),
+                mock.patch("vifu.app.VifuRuntime", return_value=runtime),
+            ):
+                _ = app.runtime
+
+            self.assertEqual(len(runtime.method_calls), 1)
+            self.assertEqual(
+                runtime.method_calls[0].args[:2],
+                ("reply", app._registrations[0][1]),
+            )
+            app.close()
+
     def test_high_level_app_registers_and_invokes_a_decorated_agent(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             app = Vifu("Python App Test", data_dir=directory, workspace=directory)

@@ -7,7 +7,7 @@ from pathlib import Path
 from unittest import mock
 
 from vifu import vifu_mobile_ffi as native
-from vifu.providers import LocalLlama, LocalWhisper
+from vifu.providers import LocalLlama, LocalWhisper, OpenAICompatible
 
 
 class _CompletedRuntime:
@@ -48,6 +48,37 @@ class _CompletedRuntime:
 
 
 class LocalProviderTests(unittest.TestCase):
+    def test_openai_compatible_provider_is_code_configured_and_secret_safe(self) -> None:
+        response = mock.MagicMock()
+        response.read.return_value = json.dumps(
+            {"choices": [{"message": {"role": "assistant", "content": "ok"}}]}
+        ).encode()
+        response.__enter__.return_value = response
+        provider = OpenAICompatible(
+            url="https://provider.example.com/openai/v1/chat/completions",
+            model="gpt-test",
+            api_key="private-token",
+        )
+
+        with mock.patch("vifu.providers.urllib.request.urlopen", return_value=response) as send:
+            result = provider.complete(
+                {
+                    "messages": [{"role": "user", "content": "hello"}],
+                    "stream": True,
+                },
+                session_id="call-1",
+            )
+
+        self.assertEqual(result["choices"][0]["message"]["content"], "ok")
+        request = send.call_args.args[0]
+        self.assertEqual(request.get_header("Authorization"), "Bearer private-token")
+        body = json.loads(request.data)
+        self.assertEqual(body["model"], "gpt-test")
+        self.assertEqual(body["user"], "call-1")
+        self.assertFalse(body["stream"])
+        self.assertNotIn("private-token", repr(provider))
+        self.assertNotIn("private-token", json.dumps(provider.vifu_settings))
+
     def test_local_llama_advertises_safe_accelerator_shutdown(self) -> None:
         self.assertTrue(LocalLlama.supports_safe_accelerator_shutdown)
 

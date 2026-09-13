@@ -10,12 +10,14 @@ import tempfile
 import threading
 import time
 from pathlib import Path
-from typing import Any, Callable
+from types import MappingProxyType
+from typing import Any, Callable, Mapping
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
 from .app_store import VifuAppRecord, VifuAppStore
 from .gateway import DEFAULT_LOCAL_SERVER_URL, GatewayPairing, VifuGateway
+from .providers import AppProvider, app_provider
 from .runtime import AgentHandler, Invocation, JsonValue, VifuRuntime
 from .server import VifuServer, VifuServerConfig
 
@@ -47,6 +49,7 @@ class Vifu:
         self._store = VifuAppStore(workspace)
         self._app: VifuAppRecord | None = None
         self._runtime: VifuRuntime | None = None
+        self._providers: dict[str, AppProvider] = {}
         self._registrations: list[tuple[str, AgentHandler, dict[str, Any]]] = []
         self._gateway: VifuGateway | None = None
         self._server: VifuServer | None = None
@@ -56,6 +59,39 @@ class Vifu:
         self._cloud_app_id = os.environ.get("VIFU_APP_ID", "").strip() or None
         self._cloud_app_slug = os.environ.get("VIFU_APP_SLUG", "").strip() or None
         self._managed_invocation_complete = threading.Event()
+
+    @property
+    def providers(self) -> Mapping[str, AppProvider]:
+        """Returns this App's declared private Providers."""
+        return MappingProxyType(self._providers)
+
+    def provider(
+        self,
+        provider_id: str,
+        implementation: Any,
+        *,
+        name: str | None = None,
+        provider_type: str | None = None,
+        capabilities: tuple[str, ...] | list[str] | None = None,
+        settings: Mapping[str, Any] | None = None,
+        resources: Mapping[str, str] | None = None,
+    ) -> AppProvider:
+        """Declares one reusable Provider in this Vifu App."""
+        provider = app_provider(
+            provider_id,
+            implementation,
+            name=name,
+            provider_type=provider_type,
+            capabilities=capabilities,
+            settings=settings,
+            resources=resources,
+        )
+        if provider.key in self._providers:
+            raise ValueError(f"App Provider {provider.key} is already declared")
+        self._providers[provider.key] = provider
+        if all(existing is not provider for existing in self._resources):
+            self._resources.append(provider)
+        return provider
 
     def agent(
         self,
@@ -69,6 +105,8 @@ class Vifu:
         timeout_ms: int | None = None,
         metadata: JsonValue = None,
         instructions: str | None = None,
+        implementation: str | None = None,
+        providers: Mapping[str, AppProvider | str] | None = None,
     ) -> Callable[[AgentHandler], AgentHandler] | AgentHandler:
         """Registers a function or integration as an Agent."""
 
@@ -80,6 +118,27 @@ class Vifu:
                     "vifu_metadata",
                     getattr(handler, "metadata", None),
                 )
+            resolved_implementation = implementation or getattr(
+                handler,
+                "vifu_implementation",
+                None,
+            )
+            provider_bindings = self._agent_provider_bindings(providers)
+            if resolved_implementation is not None or provider_bindings:
+                if agent_metadata is None:
+                    agent_metadata = {}
+                if not isinstance(agent_metadata, dict):
+                    raise ValueError(
+                        "Agent metadata must be an object when implementation or Providers are set"
+                    )
+                agent_metadata = dict(agent_metadata)
+                if resolved_implementation is not None:
+                    resolved_implementation = resolved_implementation.strip()
+                    if not resolved_implementation:
+                        raise ValueError("Agent implementation must not be empty")
+                    agent_metadata["implementation"] = resolved_implementation
+                if provider_bindings:
+                    agent_metadata["providerBindings"] = provider_bindings
             resolved_endpoint = endpoint or getattr(handler, "vifu_endpoint", None)
             options = {
                 "name": name or getattr(handler, "vifu_name", None),
@@ -120,6 +179,45 @@ class Vifu:
 
         return register if handler is None else register(handler)
 
+    def _agent_provider_bindings(
+        self,
+        providers: Mapping[str, AppProvider | str] | None,
+    ) -> dict[str, dict[str, str]]:
+        bindings: dict[str, dict[str, str]] = {}
+        for role, selected in (providers or {}).items():
+            role = role.strip()
+            if not role:
+                raise ValueError("Agent Provider role must not be empty")
+            provider = (
+                self._providers.get(selected)
+                if isinstance(selected, str)
+                else selected
+            )
+            if provider is None or self._providers.get(provider.key) is not provider:
+                raise ValueError(
+                    f"Agent Provider {selected!r} must be declared by this App first"
+                )
+            capability = (
+                role
+                if role in provider.capabilities
+                else provider.capabilities[0]
+                if len(provider.capabilities) == 1
+                else None
+            )
+            if capability is None:
+                raise ValueError(
+                    f"Provider {provider.key} has multiple capabilities; "
+                    f"bind one of {', '.join(provider.capabilities)}"
+                )
+            bindings[role] = {
+                "providerKey": provider.key,
+                "capability": capability,
+            }
+        return bindings
+
+    def _provider_descriptors(self) -> list[dict[str, Any]]:
+        return [provider.descriptor() for provider in self._providers.values()]
+
     def invoke(
         self,
         endpoint: str,
@@ -154,6 +252,7 @@ class Vifu:
                         pairing_code,
                         name=f"Python: {self.name}",
                         capture_trace_content=self.capture_trace_content,
+                        providers=self._provider_descriptors(),
                     )
                 else:
                     if _is_loopback_server(self.server_url):
@@ -163,6 +262,7 @@ class Vifu:
                         name=f"Python: {self.name}",
                         capture_trace_content=self.capture_trace_content,
                         app_id=self._app.app_id if self._app is not None else None,
+                        providers=self._provider_descriptors(),
                     )
             self._gateway.wait_until_connected(timeout)
             _notify_managed_ready()

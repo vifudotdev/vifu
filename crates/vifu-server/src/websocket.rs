@@ -164,6 +164,9 @@ async fn run_socket(
     )
     .await
     .map_err(|error| error.to_string())?;
+    reconcile_project_declared_providers(state, gateway_id, &metadata)
+        .await
+        .map_err(|error| error.to_string())?;
     reconcile_project_agents(state, gateway_id, &agents)
         .await
         .map_err(|error| error.to_string())?;
@@ -841,6 +844,7 @@ async fn reconcile_project_agents(
 ) -> Result<(), crate::error::ApiError> {
     let gateway_projects = db::list_projects_for_gateway(&state.pool, gateway_id).await?;
     for agent in agents {
+        let agent_runtime = discovered_agent_runtime(&agent.metadata, gateway_id);
         let Some(runtime_provider_key) = agent
             .metadata
             .get("providerKey")
@@ -918,6 +922,7 @@ async fn reconcile_project_agents(
                         gateway_id,
                         &agent.name,
                         agent.metadata.get("persona"),
+                        Some(&agent_runtime),
                     )
                     .await?;
                 }
@@ -937,6 +942,7 @@ async fn reconcile_project_agents(
                                 .get("persona")
                                 .cloned()
                                 .unwrap_or_else(|| serde_json::json!({ "files": {} })),
+                            runtime: agent_runtime.clone(),
                         },
                     )
                     .await?;
@@ -945,6 +951,178 @@ async fn reconcile_project_agents(
         }
     }
     Ok(())
+}
+
+pub(crate) fn discovered_agent_runtime(metadata: &Value, gateway_id: &str) -> Value {
+    let implementation = metadata
+        .get("implementation")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| {
+            vifu_gateway::protocol::validate_identifier("agent implementation", value).is_ok()
+        });
+    let mut bindings = serde_json::Map::new();
+    if let Some(reported) = metadata.get("providerBindings").and_then(Value::as_object) {
+        for (role, binding) in reported {
+            if vifu_gateway::protocol::validate_identifier("provider role", role).is_err() {
+                continue;
+            }
+            let Some(runtime_provider_key) = binding
+                .get("providerKey")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| {
+                    vifu_gateway::protocol::validate_identifier("provider key", value).is_ok()
+                })
+            else {
+                continue;
+            };
+            let Some(capability) = binding
+                .get("capability")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| {
+                    vifu_gateway::protocol::validate_identifier("provider capability", value)
+                        .is_ok()
+                })
+            else {
+                continue;
+            };
+            bindings.insert(
+                role.clone(),
+                json!({
+                    "providerKey": scoped_provider_key(gateway_id, runtime_provider_key),
+                    "runtimeProviderKey": runtime_provider_key,
+                    "capability": capability,
+                }),
+            );
+        }
+    }
+    let mut runtime = serde_json::Map::new();
+    if let Some(implementation) = implementation {
+        runtime.insert(
+            "implementation".to_string(),
+            Value::String(implementation.to_string()),
+        );
+    }
+    if !bindings.is_empty() {
+        runtime.insert("providerBindings".to_string(), Value::Object(bindings));
+    }
+    Value::Object(runtime)
+}
+
+async fn reconcile_project_declared_providers(
+    state: &AppState,
+    gateway_id: &str,
+    metadata: &Value,
+) -> Result<(), crate::error::ApiError> {
+    let Some(providers) = metadata.get("appProviders").and_then(Value::as_array) else {
+        return Ok(());
+    };
+    let projects = db::list_projects_for_gateway(&state.pool, gateway_id).await?;
+    for provider in providers {
+        let Some(runtime_provider_key) = provider
+            .get("id")
+            .or_else(|| provider.get("key"))
+            .or_else(|| provider.get("providerKey"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| {
+                vifu_gateway::protocol::validate_identifier("provider key", value).is_ok()
+            })
+        else {
+            continue;
+        };
+        let reported_type = provider
+            .get("type")
+            .or_else(|| provider.get("providerType"))
+            .and_then(Value::as_str)
+            .unwrap_or("vifu-runtime");
+        if reported_type != "vifu-runtime" {
+            continue;
+        }
+        let provider_key = scoped_provider_key(gateway_id, runtime_provider_key);
+        let name = provider
+            .get("name")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| {
+                !value.is_empty()
+                    && value.chars().count() <= 128
+                    && !value.chars().any(char::is_control)
+            })
+            .unwrap_or(runtime_provider_key);
+        let config = declared_provider_config(provider, gateway_id, runtime_provider_key);
+        let encrypted_secret_json = encrypt_secret_json("{}", &state.config.provider_secret_key)?;
+        for (_project_id, project_slug) in &projects {
+            db::upsert_provider_connection(
+                &state.pool,
+                project_slug,
+                db::NewProviderConnection {
+                    provider_key: &provider_key,
+                    source_kind: "custom",
+                    source_key: runtime_provider_key,
+                    name,
+                    provider_type: "vifu-runtime",
+                    base_url: "",
+                    config: &config,
+                    encrypted_secret_json: &encrypted_secret_json,
+                    secret_keys: &[],
+                    display_secret: None,
+                    status: "online",
+                },
+            )
+            .await?;
+        }
+    }
+    Ok(())
+}
+
+fn declared_provider_config(
+    provider: &Value,
+    gateway_id: &str,
+    runtime_provider_key: &str,
+) -> Value {
+    let runtime_provider_type = provider
+        .get("localProviderType")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| vifu_gateway::protocol::validate_identifier("provider type", value).is_ok())
+        .unwrap_or("vifu-runtime");
+    let settings = provider
+        .get("settings")
+        .map(crate::trace_redaction::redact_trace_value)
+        .filter(Value::is_object)
+        .unwrap_or_else(|| json!({}));
+    let resources = provider
+        .get("resources")
+        .map(crate::trace_redaction::redact_trace_value)
+        .and_then(|value| {
+            serde_json::from_value::<std::collections::BTreeMap<String, String>>(value).ok()
+        })
+        .unwrap_or_default();
+    let mut capabilities = provider
+        .get("capabilities")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .filter(|capability| {
+            vifu_gateway::protocol::validate_identifier("provider capability", capability).is_ok()
+        })
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    capabilities.sort();
+    capabilities.dedup();
+    json!({
+        "gatewayId": gateway_id,
+        "source": "agent-gateway",
+        "runtimeProviderKey": runtime_provider_key,
+        "runtimeProviderType": runtime_provider_type,
+        "capabilities": capabilities,
+        "settings": settings,
+        "resources": resources,
+    })
 }
 
 fn discovered_provider_config(
@@ -1121,8 +1299,8 @@ mod tests {
         authorize_gateway_machine, authorize_gateway_machine_with_local_access,
         can_recover_missing_guest_token, decode_command, discovered_provider_config,
         encode_command, gateway_pairing_url, reconcile_project_agents,
-        runtime_trace_profile_identity, runtime_trace_provider_name, scoped_provider_key,
-        GatewayAuthorizationOutcome,
+        reconcile_project_declared_providers, runtime_trace_profile_identity,
+        runtime_trace_provider_name, scoped_provider_key, GatewayAuthorizationOutcome,
     };
     use crate::auth::{encrypt_secret_json, hash_api_key};
     use crate::config::Config;
@@ -1441,6 +1619,123 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn gateway_declared_providers_become_app_private_without_extra_profiles() {
+        let Some(pool) = maybe_test_pool().await else {
+            return;
+        };
+        let gateway_id = format!("provider-gateway-{}", Uuid::new_v4().simple());
+        let project_id = Uuid::new_v4();
+        let project_slug = format!("provider-project-{}", Uuid::new_v4().simple());
+        db::create_project(
+            &pool,
+            NewProject {
+                id: project_id,
+                owner_user_id: None,
+                slug: &project_slug,
+                name: "Provider project",
+                description: None,
+                gateway_id: &gateway_id,
+                binding_ids: &[],
+            },
+        )
+        .await
+        .unwrap();
+        let state = state_with_storage(Config::from_env().unwrap(), pool);
+
+        reconcile_project_declared_providers(
+            &state,
+            &gateway_id,
+            &json!({
+                "appProviders": [{
+                    "id": "shared-reasoning",
+                    "name": "Shared Reasoning",
+                    "type": "vifu-runtime",
+                    "localProviderType": "openai-compatible",
+                    "capabilities": ["chat"],
+                    "settings": {
+                        "model": "gpt-test",
+                        "apiKey": "must-not-be-stored"
+                    },
+                    "resources": {
+                        "model": "model:gpt-test",
+                        "accessToken": "must-not-be-stored-resource"
+                    },
+                }]
+            }),
+        )
+        .await
+        .unwrap();
+
+        let providers = db::list_provider_connections(&state.pool, &project_slug)
+            .await
+            .unwrap();
+        assert_eq!(providers.len(), 1);
+        assert_eq!(providers[0].source_key, "shared-reasoning");
+        assert_eq!(providers[0].provider_type, "vifu-runtime");
+        assert_eq!(
+            providers[0].provider_key,
+            scoped_provider_key(&gateway_id, "shared-reasoning")
+        );
+        assert_eq!(
+            providers[0].config["runtimeProviderType"],
+            "openai-compatible"
+        );
+        assert_eq!(providers[0].config["settings"]["model"], "gpt-test");
+        assert_eq!(providers[0].config["resources"]["model"], "model:gpt-test");
+        assert!(!providers[0]
+            .config
+            .to_string()
+            .contains("must-not-be-stored"));
+        assert!(db::list_project_profiles(&state.pool, project_id)
+            .await
+            .unwrap()
+            .is_empty());
+
+        reconcile_project_agents(
+            &state,
+            &gateway_id,
+            &[AgentDescriptor {
+                id: "reply-agent".to_string(),
+                name: "Reply Agent".to_string(),
+                metadata: json!({
+                    "providerKey": "reply-agent-provider",
+                    "providerType": "vifu-runtime",
+                    "implementation": "strands-agents",
+                    "providerBindings": {
+                        "reasoning": {
+                            "providerKey": "shared-reasoning",
+                            "capability": "chat"
+                        }
+                    }
+                }),
+            }],
+        )
+        .await
+        .unwrap();
+
+        let profiles = db::list_project_profiles(&state.pool, project_id)
+            .await
+            .unwrap();
+        assert_eq!(profiles.len(), 1);
+        let version = db::get_profile_version(
+            &state.pool,
+            profiles[0].id,
+            profiles[0].active_version_id.unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(version.runtime["implementation"], "strands-agents");
+        assert_eq!(
+            version.runtime["providerBindings"]["reasoning"]["providerKey"],
+            scoped_provider_key(&gateway_id, "shared-reasoning")
+        );
+        assert_eq!(
+            version.runtime["providerBindings"]["reasoning"]["runtimeProviderKey"],
+            "shared-reasoning"
+        );
+    }
+
+    #[tokio::test]
     async fn gateway_reconnect_refreshes_discovered_provider_metadata() {
         let Some(pool) = maybe_test_pool().await else {
             return;
@@ -1578,6 +1873,7 @@ mod tests {
                 runtime_provider_key: "android-llama",
                 provider_type: "vifu-runtime",
                 persona: json!({ "files": {} }),
+                runtime: json!({}),
             },
         )
         .await

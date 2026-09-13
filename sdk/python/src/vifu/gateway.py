@@ -86,6 +86,7 @@ class VifuGateway:
         capture_trace_content: bool,
         local_server_url: str | None = None,
         local_app_id: str | None = None,
+        providers: list[dict[str, Any]] | None = None,
     ) -> VifuGateway:
         credentials_path = runtime.data_dir / "gateway.json"
         stored = _load_credentials(credentials_path)
@@ -120,6 +121,8 @@ class VifuGateway:
             "runtime": "python",
             "sdkVersion": __version__,
         }
+        if providers:
+            metadata["appProviders"] = providers
         gateway = native.VifuEmbeddedGateway(
             runtime._native_runtime(),
             native.VifuEmbeddedGatewayConfig(

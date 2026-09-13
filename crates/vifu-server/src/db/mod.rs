@@ -322,6 +322,7 @@ pub async fn refresh_discovered_binding(
     gateway_id: &str,
     agent_name: &str,
     discovered_persona: Option<&Value>,
+    discovered_runtime: Option<&Value>,
 ) -> Result<(), ApiError> {
     refresh_discovered_binding_record(storage, binding_id, gateway_id, agent_name).await?;
 
@@ -388,6 +389,23 @@ pub async fn refresh_discovered_binding(
         changed = true;
     }
 
+    let mut runtime = active_version.runtime.clone();
+    if let (Some(active), Some(discovered)) = (
+        runtime.as_object_mut(),
+        discovered_runtime.and_then(Value::as_object),
+    ) {
+        for key in ["implementation", "providerBindings"] {
+            match discovered.get(key) {
+                Some(value) if active.get(key) != Some(value) => {
+                    active.insert(key.to_string(), value.clone());
+                    changed = true;
+                }
+                None if active.remove(key).is_some() => changed = true,
+                _ => {}
+            }
+        }
+    }
+
     let capabilities = list_profile_capabilities(storage, active_version_id).await?;
     let capability_drafts = capabilities
         .into_iter()
@@ -424,7 +442,7 @@ pub async fn refresh_discovered_binding(
         profile.id,
         NewProfileVersion {
             persona: &persona,
-            runtime: &active_version.runtime,
+            runtime: &runtime,
             presentation: &active_version.presentation,
             source: &source,
             capabilities: &capability_drafts,
@@ -673,6 +691,15 @@ mod tests {
                 persona: serde_json::json!({
                     "systemPrompt": "Help the player understand the garden."
                 }),
+                runtime: json!({
+                    "implementation": "strands-agents",
+                    "providerBindings": {
+                        "reasoning": {
+                            "providerKey": "local-qwen",
+                            "capability": "chat"
+                        }
+                    }
+                }),
             },
         )
         .await
@@ -718,6 +745,15 @@ mod tests {
             "gateway-new",
             "Renamed Android Resource",
             None,
+            Some(&json!({
+                "implementation": "strands-agents",
+                "providerBindings": {
+                    "reasoning": {
+                        "providerKey": "cloudflare-reasoning",
+                        "capability": "chat"
+                    }
+                }
+            })),
         )
         .await
         .expect("discovered binding should refresh");
@@ -727,6 +763,15 @@ mod tests {
             "gateway-new",
             "Renamed Android Resource",
             None,
+            Some(&json!({
+                "implementation": "strands-agents",
+                "providerBindings": {
+                    "reasoning": {
+                        "providerKey": "cloudflare-reasoning",
+                        "capability": "chat"
+                    }
+                }
+            })),
         )
         .await
         .expect("repeated refresh should be idempotent");
@@ -738,6 +783,19 @@ mod tests {
             .await
             .expect("profile should still exist");
         assert_eq!(refreshed_profile.name, "Village Guide");
+        let refreshed_version = get_profile_version(
+            &storage,
+            refreshed_profile.id,
+            refreshed_profile
+                .active_version_id
+                .expect("refreshed profile should have a live version"),
+        )
+        .await
+        .expect("refreshed profile version should exist");
+        assert_eq!(
+            refreshed_version.runtime["providerBindings"]["reasoning"]["providerKey"],
+            "cloudflare-reasoning"
+        );
         assert_eq!(
             (
                 route.source.get("gatewayId").and_then(Value::as_str),
@@ -767,6 +825,7 @@ mod tests {
                 runtime_provider_key: "legacy-local-model",
                 provider_type: "vifu-runtime",
                 persona: json!({ "files": {} }),
+                runtime: json!({}),
             },
         )
         .await
@@ -777,6 +836,7 @@ mod tests {
             "gateway-legacy",
             "Legacy Researcher",
             Some(&json!({ "systemPrompt": "Use only the supplied sources." })),
+            None,
         )
         .await
         .expect("legacy Agent prompt should be backfilled");
@@ -1517,6 +1577,7 @@ mod tests {
             binding_id,
             "gateway-local",
             "Mizuki Tsukishiro",
+            None,
             None,
         )
         .await

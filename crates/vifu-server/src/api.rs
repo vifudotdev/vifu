@@ -3584,6 +3584,7 @@ pub async fn import_project_agent(
         .get("providerType")
         .and_then(Value::as_str)
         .unwrap_or("openclaw");
+    let agent_runtime = crate::websocket::discovered_agent_runtime(&agent.metadata, gateway_id);
     let profile = if let Some((profile_id, archived, binding_id)) =
         db::find_project_profile_by_provider_resource(
             &state.pool,
@@ -3600,6 +3601,7 @@ pub async fn import_project_agent(
             gateway_id,
             &agent.name,
             agent.metadata.get("persona"),
+            Some(&agent_runtime),
         )
         .await?;
         if archived {
@@ -3624,6 +3626,7 @@ pub async fn import_project_agent(
                     .get("persona")
                     .cloned()
                     .unwrap_or_else(|| json!({ "files": {} })),
+                runtime: agent_runtime,
             },
         )
         .await?;
@@ -7798,24 +7801,27 @@ fn collect_session_declared_providers(
     providers: &mut BTreeMap<String, CustomProvider>,
     session: &AgentGatewaySession,
 ) -> Result<(), ApiError> {
-    let Some(items) = session.metadata.get("providers").and_then(Value::as_array) else {
-        return Ok(());
-    };
-    for item in items {
-        let Some(provider_key) = json_text(item, &["id", "key", "providerKey"]) else {
+    for metadata_key in ["providers", "appProviders"] {
+        let Some(items) = session.metadata.get(metadata_key).and_then(Value::as_array) else {
             continue;
         };
-        let provider_type = json_text(item, &["type", "providerType"]).unwrap_or("vifu-runtime");
-        let name = json_text(item, &["name"]).unwrap_or(provider_key);
-        upsert_available_provider(
-            providers,
-            session,
-            provider_key,
-            provider_type,
-            name,
-            json_text(item, &["localProviderType"]),
-            provider_capabilities(item),
-        )?;
+        for item in items {
+            let Some(provider_key) = json_text(item, &["id", "key", "providerKey"]) else {
+                continue;
+            };
+            let provider_type =
+                json_text(item, &["type", "providerType"]).unwrap_or("vifu-runtime");
+            let name = json_text(item, &["name"]).unwrap_or(provider_key);
+            upsert_available_provider(
+                providers,
+                session,
+                provider_key,
+                provider_type,
+                name,
+                json_text(item, &["localProviderType"]),
+                provider_capabilities(item),
+            )?;
+        }
     }
     Ok(())
 }
@@ -8218,6 +8224,8 @@ async fn reconcile_project_provider_agents(
                 == Some(runtime_provider_key)
             && agent.status == "connected"
     }) {
+        let agent_runtime =
+            crate::websocket::discovered_agent_runtime(&agent.metadata, &agent.gateway_id);
         let provider_type = agent
             .metadata
             .get("providerType")
@@ -8239,6 +8247,7 @@ async fn reconcile_project_provider_agents(
                     &agent.gateway_id,
                     &agent.name,
                     agent.metadata.get("persona"),
+                    Some(&agent_runtime),
                 )
                 .await?;
             }
@@ -8249,6 +8258,7 @@ async fn reconcile_project_provider_agents(
                     &agent.gateway_id,
                     &agent.name,
                     agent.metadata.get("persona"),
+                    Some(&agent_runtime),
                 )
                 .await?;
                 db::assign_project_binding(&state.pool, project.project.id, binding_id).await?;
@@ -8269,6 +8279,7 @@ async fn reconcile_project_provider_agents(
                             .get("persona")
                             .cloned()
                             .unwrap_or_else(|| json!({ "files": {} })),
+                        runtime: agent_runtime,
                     },
                 )
                 .await?;
@@ -8289,7 +8300,9 @@ async fn refresh_project_provider(
         let gateway_id = provider_connection_gateway_id(&connection.config)
             .unwrap_or(&project.project.gateway_id);
         let (status, message) =
-            match available_provider(state, Some(gateway_id), &connection.source_key).await {
+            match available_provider_for_source(state, Some(gateway_id), &connection.source_key)
+                .await
+            {
                 Ok(_) => ("online", None),
                 Err(ApiError::NotFound) => (
                     "offline",
@@ -8958,19 +8971,19 @@ pub async fn fallback() -> impl IntoResponse {
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
+    use std::{collections::BTreeMap, time::Duration};
 
     use serde_json::json;
 
     use super::{
         agent_gateway_pairing, api_error_trace_status, apply_runtime_provider_configuration,
-        chat_request_summary, chat_trace_request, embedding_request_summary, embedding_response,
-        feedback_endpoint_permission_allowed, gateway_binding_config,
-        hydrate_trace_gateway_identities, invocation_json_response,
+        chat_request_summary, chat_trace_request, collect_session_declared_providers,
+        embedding_request_summary, embedding_response, feedback_endpoint_permission_allowed,
+        gateway_binding_config, hydrate_trace_gateway_identities, invocation_json_response,
         list_invocable_public_chat_agents, merge_json_objects, optional_feedback_message,
         optional_feedback_path, optional_feedback_text, patch_text,
         prepare_project_provider_assignment_with_secret_key, profile_slug, profile_timeout,
-        project_slug, runtime_provider_generation, trace_model_parameters,
+        project_slug, runtime_provider_generation, scoped_provider_key, trace_model_parameters,
         validate_chat_completion_request, validate_embedding_request,
         validate_profile_version_input, validate_safe_generation_settings, validate_timeout,
         validated_provider_base_url, AppFeedbackInput, TraceQuery,
@@ -8981,6 +8994,48 @@ mod tests {
         ProfileCapabilityDraft,
     };
     use crate::ServerEndpointIdentity;
+
+    #[test]
+    fn app_declared_providers_are_available_catalog_sources() {
+        let now = chrono::Utc::now();
+        let gateway_id = "gateway-app-providers";
+        let session = AgentGatewaySession {
+            id: uuid::Uuid::new_v4(),
+            gateway_id: gateway_id.to_string(),
+            session_id: uuid::Uuid::new_v4(),
+            status: "connected".to_string(),
+            agents: json!([]),
+            metadata: json!({
+                "providers": [{
+                    "id": "native-provider",
+                    "type": "vifu-runtime",
+                    "capabilities": ["chat"]
+                }],
+                "appProviders": [{
+                    "id": "app-reasoning",
+                    "name": "App Reasoning",
+                    "type": "vifu-runtime",
+                    "localProviderType": "llama",
+                    "capabilities": ["chat"]
+                }]
+            }),
+            connected_at: now,
+            last_seen_at: now,
+            disconnected_at: None,
+        };
+        let mut providers = BTreeMap::new();
+
+        collect_session_declared_providers(&mut providers, &session)
+            .expect("declared Providers should be collected");
+
+        assert_eq!(providers.len(), 2);
+        let app_provider = providers
+            .get(&scoped_provider_key(gateway_id, "app-reasoning"))
+            .expect("App Provider should be available");
+        assert_eq!(app_provider.name, "App Reasoning");
+        assert_eq!(app_provider.config["localProviderType"], "llama");
+        assert_eq!(app_provider.config["capabilities"], json!(["chat"]));
+    }
 
     #[tokio::test]
     async fn model_discovery_omits_a_profile_after_its_gateway_is_detached() {
@@ -9038,6 +9093,7 @@ mod tests {
                 runtime_provider_key: "android-llama",
                 provider_type: "vifu-runtime",
                 persona: json!({ "files": {} }),
+                runtime: json!({}),
             },
         )
         .await

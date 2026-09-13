@@ -23,7 +23,13 @@ from ._version import __version__
 from ._runtime_version import __runtime_version__
 from .app import Vifu
 from .gateway import GatewayPairing, VifuGateway
-from .providers import LocalLlama, LocalProviderError, LocalWhisper
+from .providers import (
+    AppProvider,
+    LocalLlama,
+    LocalProviderError,
+    LocalWhisper,
+    OpenAICompatible,
+)
 from .runtime import (
     AgentRequest,
     AgentResponse,
@@ -37,11 +43,13 @@ __all__ = [
     "AgentRequest",
     "AgentResponse",
     "AgentTrace",
+    "AppProvider",
     "GatewayPairing",
     "Invocation",
     "LocalLlama",
     "LocalProviderError",
     "LocalWhisper",
+    "OpenAICompatible",
     "Vifu",
     "VifuGateway",
     "VifuRuntime",

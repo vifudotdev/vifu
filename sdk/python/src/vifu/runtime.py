@@ -262,6 +262,7 @@ class VifuRuntime:
         *,
         name: str | None = None,
         capture_trace_content: bool = False,
+        providers: list[dict[str, Any]] | None = None,
     ) -> "VifuGateway":
         from .gateway import VifuGateway
 
@@ -270,6 +271,7 @@ class VifuRuntime:
             pairing_code=pairing_code,
             name=name,
             capture_trace_content=capture_trace_content,
+            providers=providers,
         )
 
     def connect_local(
@@ -279,6 +281,7 @@ class VifuRuntime:
         name: str | None = None,
         capture_trace_content: bool = False,
         app_id: str | None = None,
+        providers: list[dict[str, Any]] | None = None,
     ) -> "VifuGateway":
         """Connects this Runtime to an App on a loopback Vifu Server."""
         from .gateway import VifuGateway
@@ -290,6 +293,7 @@ class VifuRuntime:
             capture_trace_content=capture_trace_content,
             local_server_url=server_url,
             local_app_id=app_id,
+            providers=providers,
         )
 
 

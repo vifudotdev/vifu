@@ -29,8 +29,10 @@ The public API provides:
 - `VifuGateway` for explicit remote enrollment and advanced Gateway control.
 - `VifuServer` for advanced control of the bundled Vifu Server process.
 - `VifuServerConfig` for typed local Server startup configuration from Python.
-- `LocalWhisper` and `LocalLlama` for code-configured, in-process speech and
-  language-model Providers.
+- `AppProvider` and `Vifu.provider()` for declaring reusable App-private
+  Providers and binding them to Agent roles.
+- `LocalWhisper`, `LocalLlama`, and `OpenAICompatible` for code-configured
+  speech and language-model Providers.
 - `Vifu.run()` for the same registered Agent App lifecycle locally and on a
   compatible managed host.
 
@@ -54,6 +56,27 @@ app.agent("voice", voice_agent)
 app.agent("assistant", assistant_agent)
 app.run()
 ```
+
+Keep an Agent's implementation separate from the Provider it uses:
+
+```python
+from vifu import LocalLlama, Vifu
+
+app = Vifu("support-call")
+reasoning = app.provider(
+    "reasoning",
+    LocalLlama(model="qwen2.5-3b-instruct-q4_k_m.gguf"),
+)
+app.agent(
+    "reply-agent",
+    reply_agent,
+    implementation="strands-agents",
+    providers={"reasoning": reasoning},
+)
+```
+
+The App reports the Provider as an App-private resource. Vifu creates an Agent
+Profile only for `reply-agent`; it does not turn `reasoning` into another Agent.
 
 Install the optional Strands integration, then select an OpenAI-compatible
 Provider directly in Python, including hosted and loopback model servers:

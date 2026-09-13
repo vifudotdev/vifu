@@ -3050,6 +3050,8 @@ mod tests {
             crate::gateway_identity::scoped_provider_key("gateway-project", "local-llama");
         let local_whisper =
             crate::gateway_identity::scoped_provider_key("gateway-project", "local-whisper");
+        let app_reasoning =
+            crate::gateway_identity::scoped_provider_key("gateway-project", "app-reasoning");
         let other_openai =
             crate::gateway_identity::scoped_provider_key("gateway-other", "other-openai");
         let keys = providers
@@ -3059,6 +3061,7 @@ mod tests {
         assert!(keys.contains(&local_openai.as_str()));
         assert!(keys.contains(&local_llama.as_str()));
         assert!(keys.contains(&local_whisper.as_str()));
+        assert!(keys.contains(&app_reasoning.as_str()));
         assert!(!keys.contains(&other_openai.as_str()));
         let openai = providers
             .iter()
@@ -3073,6 +3076,13 @@ mod tests {
             openai["config"]["capabilities"],
             json!(["chat", "embedding"])
         );
+        let app_provider = providers
+            .iter()
+            .find(|provider| provider["providerKey"] == app_reasoning)
+            .unwrap();
+        assert_eq!(app_provider["name"], "App Reasoning");
+        assert_eq!(app_provider["config"]["localProviderType"], "llama");
+        assert_eq!(app_provider["config"]["capabilities"], json!(["chat"]));
 
         close_temp_storage(storage, path).await;
     }
@@ -3191,6 +3201,23 @@ mod tests {
         let payload = response_json(listed).await;
         assert_eq!(payload["providers"][0]["status"], "online");
         assert_eq!(payload["providers"][0]["sourceKey"], provider_key);
+
+        let tested = runtime_app
+            .clone()
+            .oneshot(
+                Request::post(format!(
+                    "/v1/apps/provider-legacy-source-project/providers/{provider_key}/test"
+                ))
+                .header("authorization", admin.clone())
+                .header("content-type", "application/json")
+                .body(Body::from("{}"))
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(tested.status(), StatusCode::OK);
+        let payload = response_json(tested).await;
+        assert_eq!(payload["provider"]["status"], "online");
 
         let updated = runtime_app
             .oneshot(
@@ -3695,6 +3722,15 @@ mod tests {
                     {"id": "local-openai", "type": "vifu-runtime"},
                     {"id": "local-llama", "type": "vifu-runtime"},
                     {"id": "local-whisper", "type": "vifu-runtime"}
+                ],
+                "appProviders": [
+                    {
+                        "id": "app-reasoning",
+                        "name": "App Reasoning",
+                        "type": "vifu-runtime",
+                        "localProviderType": "llama",
+                        "capabilities": ["chat"]
+                    }
                 ]
             }),
         )

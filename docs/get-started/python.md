@@ -110,6 +110,31 @@ Create another directory with another `Vifu("name")` program to create another
 App. Both Apps stay available in the same personal Dashboard and keep separate
 Agents, sessions, endpoints, Devices, and traces.
 
+## Bind Agent Implementations To App Providers
+
+An Agent implementation and its model or speech Provider are different
+resources. Declare a reusable Provider once, then bind it to an Agent role:
+
+```python
+from vifu import LocalLlama, Vifu
+
+app = Vifu("support-call")
+reasoning = app.provider(
+    "reasoning",
+    LocalLlama(model="qwen2.5-3b-instruct-q4_k_m.gguf"),
+)
+app.agent(
+    "reply-agent",
+    reply_agent,
+    implementation="strands-agents",
+    providers={"reasoning": reasoning},
+)
+```
+
+Vifu creates one Agent Profile for `reply-agent`. The Profile records Strands
+as the implementation and `reasoning` as its Provider binding. The Provider is
+listed as an App-private resource and does not become another Agent Profile.
+
 ## Configure Local Server Startup From Python
 
 The default `Vifu("name")` path needs no Server configuration. When an App

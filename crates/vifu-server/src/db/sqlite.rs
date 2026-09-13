@@ -2763,6 +2763,7 @@ pub async fn ensure_discovered_binding(
         runtime_provider_key,
         provider_type,
         persona,
+        runtime,
     } = input;
     if let Some(binding) =
         find_binding_by_agent_gateway_agent(pool, project_id, gateway_id, agent_id, provider_key)
@@ -2812,7 +2813,11 @@ pub async fn ensure_discovered_binding(
     } else {
         json!({ "files": {} })
     };
-    let runtime = json!({});
+    let runtime = if runtime.is_object() {
+        runtime
+    } else {
+        json!({})
+    };
     let presentation = json!({});
     let source = json!({
         "type": provider_type,

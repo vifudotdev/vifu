@@ -97,6 +97,7 @@ pub struct NewDiscoveredBinding<'a> {
     pub runtime_provider_key: &'a str,
     pub provider_type: &'a str,
     pub persona: Value,
+    pub runtime: Value,
 }
 
 pub struct ProfilePatch<'a> {

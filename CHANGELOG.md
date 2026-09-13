@@ -8,6 +8,8 @@ All notable changes to Vifu are documented here.
   that stay out of managed Endpoint execution.
 - Added code-configured local Whisper and llama.cpp Providers, plus a Strands
   model adapter for local, OpenAI-compatible, and Vifu Agent Profile inference.
+- Added Python App Provider declarations so Agent implementations and their
+  App-private model or speech Providers remain separate in code and Profiles.
 - Added an administrator-only, enrollment-scoped Gateway revocation endpoint so
   ephemeral cloud Runners can detach cleanly without changing other Gateways.
 
