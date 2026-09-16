@@ -27,8 +27,8 @@ use vifu_runtime::{
 use crate::auth::{
     bearer_token, decrypt_secret_json, deployment_credential, derive_guest_claim_token,
     derive_guest_project_key, encrypt_secret_json, hash_agent_gateway_credential,
-    hash_agent_gateway_enrollment, hash_api_key, hash_guest_claim_token, is_secret_match, Identity,
-    Operation,
+    hash_agent_gateway_enrollment, hash_api_key, hash_guest_claim_token, is_secret_match,
+    require_project_operation, Identity, Operation,
 };
 use crate::config::DeploymentMode;
 use crate::db::{self, EndpointPatch, NewEndpoint, NewProject, ProfilePatch, ProjectPatch};
@@ -3591,6 +3591,7 @@ pub async fn import_project_agent(
             project.project.id,
             gateway_id,
             provider_key,
+            runtime_provider_key,
             agent_id,
         )
         .await?
@@ -4243,8 +4244,8 @@ pub async fn create_app_feedback(
     Path((project_slug, invocation_id)): Path<(String, Uuid)>,
     Json(input): Json<AppFeedbackInput>,
 ) -> Result<(StatusCode, Json<Value>), ApiError> {
-    let authority = api_request_authority(&state, &headers).await?;
-    let project = db::get_project_by_slug(&state.pool, &project_slug).await?;
+    let (authority, project) =
+        project_api_request_authority(&state, &headers, &project_slug).await?;
     let target = db::trace_feedback_target(&state.pool, project.project.id, invocation_id).await?;
     match &authority {
         ApiRequestAuthority::Admin => {}
@@ -4525,8 +4526,8 @@ pub async fn list_project_openai_models(
     headers: HeaderMap,
     Path(project_slug): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
-    let authority = api_request_authority(&state, &headers).await?;
-    let project = db::get_project_by_slug(&state.pool, &project_slug).await?;
+    let (authority, project) =
+        project_api_request_authority(&state, &headers, &project_slug).await?;
     let allowed_profile_ids = match &authority {
         ApiRequestAuthority::Admin => None,
         ApiRequestAuthority::Key(key) => {
@@ -5104,8 +5105,7 @@ async fn resolve_authorized_profile_route(
     ),
     ApiError,
 > {
-    let authority = api_request_authority(state, headers).await?;
-    let project = db::get_project_by_slug(&state.pool, project_slug).await?;
+    let (authority, project) = project_api_request_authority(state, headers, project_slug).await?;
     assert_endpoint_permission(&authority, project.project.id, permission)?;
     let route = resolve_profile_route_for_authority(
         state,
@@ -5992,7 +5992,14 @@ async fn create_chat_completion_for_project(
     project_slug: Option<String>,
     mut request: Value,
 ) -> Result<Response, ApiError> {
-    let authority = api_request_authority(&state, &headers).await?;
+    let (authority, project) = match project_slug.as_deref() {
+        Some(slug) => {
+            let (authority, project) =
+                project_api_request_authority(&state, &headers, slug).await?;
+            (authority, Some(project))
+        }
+        None => (api_request_authority(&state, &headers).await?, None),
+    };
     validate_chat_completion_request(&request)?;
     let model = request
         .get("model")
@@ -6009,8 +6016,8 @@ async fn create_chat_completion_for_project(
         object.insert("stream".to_string(), Value::Bool(false));
     }
 
-    let project = match (project_slug.as_deref(), &authority) {
-        (Some(slug), _) => Some(db::get_project_by_slug(&state.pool, slug).await?),
+    let project = match (project, &authority) {
+        (Some(project), _) => Some(project),
         (None, ApiRequestAuthority::Key(key)) => {
             Some(db::get_project(&state.pool, key.project_id).await?)
         }
@@ -6897,6 +6904,31 @@ async fn api_request_authority(
     Ok(ApiRequestAuthority::Key(
         db::active_api_key_by_hash(&state.pool, &key_hash).await?,
     ))
+}
+
+async fn project_api_request_authority(
+    state: &AppState,
+    headers: &HeaderMap,
+    project_slug: &str,
+) -> Result<(ApiRequestAuthority, crate::models::ProjectWithBindings), ApiError> {
+    if bearer_token(headers).is_none() {
+        if let Some(credential) = deployment_credential(headers) {
+            let identity = state
+                .auth
+                .authorize_token(credential, Operation::ProjectRead)
+                .await?;
+            let project = db::get_project_by_slug(&state.pool, project_slug).await?;
+            require_project_operation(
+                &identity,
+                Operation::ProjectRead,
+                project.project.owner_user_id.as_deref(),
+            )?;
+            return Ok((ApiRequestAuthority::Admin, project));
+        }
+    }
+    let authority = api_request_authority(state, headers).await?;
+    let project = db::get_project_by_slug(&state.pool, project_slug).await?;
+    Ok((authority, project))
 }
 
 async fn resolve_chat_route(
@@ -8236,6 +8268,7 @@ async fn reconcile_project_provider_agents(
             project.project.id,
             gateway_id,
             &connection.provider_key,
+            runtime_provider_key,
             &agent.id,
         )
         .await?

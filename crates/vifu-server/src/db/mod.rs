@@ -213,7 +213,7 @@ dispatch! {
     pub async fn list_archived_project_agent_sources(storage: &Storage, project_id: Uuid) -> Result<Vec<ArchivedProjectAgentSource>, ApiError>;
     pub async fn archive_legacy_discovered_provider(storage: &Storage, project_id: Uuid, runtime_provider_key: &str) -> Result<u64, ApiError>;
     pub async fn restore_project_profile(storage: &Storage, project_id: Uuid, profile_id: Uuid) -> Result<AgentProfile, ApiError>;
-    pub async fn find_project_profile_by_provider_resource(storage: &Storage, project_id: Uuid, gateway_id: &str, provider_key: &str, agent_id: &str) -> Result<Option<(Uuid, bool, Uuid)>, ApiError>;
+    pub async fn find_project_profile_by_provider_resource(storage: &Storage, project_id: Uuid, gateway_id: &str, provider_key: &str, runtime_provider_key: &str, agent_id: &str) -> Result<Option<(Uuid, bool, Uuid)>, ApiError>;
     pub async fn refresh_discovered_binding_record(storage: &Storage, binding_id: Uuid, gateway_id: &str, agent_name: &str) -> Result<(), ApiError>;
     pub async fn unassign_project_provider(storage: &Storage, project_id: Uuid, provider_key: &str) -> Result<(), ApiError>;
     pub async fn assign_project_binding(storage: &Storage, project_id: Uuid, binding_id: Uuid) -> Result<(), ApiError>;
@@ -658,6 +658,71 @@ mod tests {
         );
 
         close_and_remove(storage, &path).await;
+    }
+
+    #[tokio::test]
+    async fn sqlite_discovered_binding_matches_a_replacement_gateway_in_the_same_deployment() {
+        let (storage, path) = sqlite_storage().await;
+        let project_id = Uuid::new_v4();
+        create_project(
+            &storage,
+            NewProject {
+                id: project_id,
+                owner_user_id: None,
+                slug: "replacement-gateway-agent",
+                name: "Replacement gateway agent",
+                description: None,
+                gateway_id: "gateway-old",
+                binding_ids: &[],
+            },
+        )
+        .await
+        .expect("project should be created");
+        let deployment_id = primary_deployment_id(&storage, project_id).await;
+        assign_runtime_deployment_gateway(&storage, project_id, deployment_id, "gateway-old")
+            .await
+            .expect("old gateway should be assigned");
+        assign_runtime_deployment_gateway(&storage, project_id, deployment_id, "gateway-new")
+            .await
+            .expect("new gateway should be assigned");
+        let binding_id = ensure_discovered_binding(
+            &storage,
+            NewDiscoveredBinding {
+                project_id,
+                gateway_id: "gateway-old",
+                agent_id: "echo",
+                agent_name: "Echo",
+                provider_key: "echo-provider--old",
+                runtime_provider_key: "echo-provider",
+                provider_type: "vifu-runtime",
+                persona: json!({ "files": {} }),
+                runtime: json!({}),
+            },
+        )
+        .await
+        .expect("discovered binding should be created");
+        let (old_session_id, _) =
+            open_agent_gateway_session(&storage, "gateway-old", None, &json!([]), &json!({}))
+                .await
+                .expect("old gateway session should open");
+        close_agent_gateway_session(&storage, old_session_id)
+            .await
+            .expect("old gateway session should close");
+
+        let matched = find_project_profile_by_provider_resource(
+            &storage,
+            project_id,
+            "gateway-new",
+            "echo-provider--new",
+            "echo-provider",
+            "echo",
+        )
+        .await
+        .expect("replacement gateway lookup should succeed")
+        .map(|(_, _, matched_binding_id)| matched_binding_id);
+        close_and_remove(storage, &path).await;
+
+        assert_eq!(matched, Some(binding_id));
     }
 
     #[tokio::test]

@@ -1416,6 +1416,94 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn project_chat_accepts_the_owner_deployment_credential() {
+        let (storage, path) = temp_sqlite_storage("owned-project-chat").await;
+        crate::db::create_project(
+            &storage,
+            crate::db::NewProject {
+                id: uuid::Uuid::new_v4(),
+                owner_user_id: Some("user-123"),
+                slug: "owned-project-chat",
+                name: "Owned project chat",
+                description: None,
+                gateway_id: "gateway-owned-project-chat",
+                binding_ids: &[],
+            },
+        )
+        .await
+        .unwrap();
+        let config = Config::from_env().unwrap();
+        let (owner_state, owner_credential) = state_with_storage_access_token_auth(
+            config,
+            storage.clone(),
+            "user-123",
+            vec![Operation::ProjectRead],
+        )
+        .await;
+
+        let response = app(owner_state)
+            .oneshot(
+                Request::post("/owned-project-chat/v1/chat/completions")
+                    .header("authorization", format!("Vifu {owner_credential}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"model":"missing-agent","messages":[{"role":"user","content":"hello"}]}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        close_temp_storage(storage, path).await;
+
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn project_chat_rejects_another_owners_deployment_credential() {
+        let (storage, path) = temp_sqlite_storage("other-owner-project-chat").await;
+        crate::db::create_project(
+            &storage,
+            crate::db::NewProject {
+                id: uuid::Uuid::new_v4(),
+                owner_user_id: Some("user-123"),
+                slug: "other-owner-project-chat",
+                name: "Other owner project chat",
+                description: None,
+                gateway_id: "gateway-other-owner-project-chat",
+                binding_ids: &[],
+            },
+        )
+        .await
+        .unwrap();
+        let config = Config::from_env().unwrap();
+        let (other_state, other_credential) = state_with_storage_access_token_auth(
+            config,
+            storage.clone(),
+            "user-456",
+            vec![Operation::ProjectRead],
+        )
+        .await;
+
+        let response = app(other_state)
+            .oneshot(
+                Request::post("/other-owner-project-chat/v1/chat/completions")
+                    .header("authorization", format!("Vifu {other_credential}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"model":"missing-agent","messages":[{"role":"user","content":"hello"}]}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        close_temp_storage(storage, path).await;
+
+        assert_eq!(status, StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
     async fn account_projects_are_created_and_listed_under_the_canonical_user() {
         let path = std::env::temp_dir().join(format!(
             "vifu-account-projects-{}.sqlite",

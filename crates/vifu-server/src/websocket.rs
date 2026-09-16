@@ -911,6 +911,7 @@ async fn reconcile_project_agents(
                 project_id,
                 gateway_id,
                 &provider_key,
+                runtime_provider_key,
                 &agent.id,
             )
             .await?

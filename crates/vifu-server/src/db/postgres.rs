@@ -1761,6 +1761,7 @@ pub async fn find_project_profile_by_provider_resource(
     project_id: Uuid,
     gateway_id: &str,
     provider_key: &str,
+    runtime_provider_key: &str,
     agent_id: &str,
 ) -> Result<Option<(Uuid, bool, Uuid)>, ApiError> {
     sqlx::query_as::<_, (Uuid, bool, Uuid)>(
@@ -1771,15 +1772,45 @@ pub async fn find_project_profile_by_provider_resource(
          JOIN agent_bindings AS binding ON binding.profile_id = profile.id
          WHERE profile.project_id = $1
            AND binding.agent_id = $2
-           AND COALESCE(NULLIF(binding.config->>'providerKey', ''), binding.provider) = $3
-           AND binding.gateway_id = $4
-         ORDER BY profile.archived_at NULLS FIRST, profile.created_at ASC
+           AND (
+             (
+               COALESCE(NULLIF(binding.config->>'providerKey', ''), binding.provider) = $3
+               AND binding.gateway_id = $4
+             )
+             OR (
+               binding.config->>'runtimeProviderKey' = $5
+               AND EXISTS (
+                 SELECT 1
+                 FROM runtime_deployment_gateways AS previous_assignment
+                 JOIN runtime_deployment_gateways AS current_assignment
+                   ON current_assignment.deployment_id = previous_assignment.deployment_id
+                 WHERE previous_assignment.gateway_id = binding.gateway_id
+                   AND current_assignment.gateway_id = $4
+               )
+               AND EXISTS (
+                 SELECT 1
+                 FROM agent_gateway_sessions AS previous_session
+                 WHERE previous_session.gateway_id = binding.gateway_id
+               )
+               AND NOT EXISTS (
+                 SELECT 1
+                 FROM agent_gateway_sessions AS active_session
+                 WHERE active_session.gateway_id = binding.gateway_id
+                   AND active_session.status = 'connected'
+               )
+             )
+           )
+         ORDER BY
+           (binding.gateway_id = $4) DESC,
+           profile.archived_at NULLS FIRST,
+           profile.created_at ASC
          LIMIT 1",
     )
     .bind(project_id)
     .bind(agent_id)
     .bind(provider_key)
     .bind(gateway_id)
+    .bind(runtime_provider_key)
     .fetch_optional(pool)
     .await
     .map_err(ApiError::from)
