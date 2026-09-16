@@ -15,6 +15,7 @@ from typing import Any, Callable, Mapping
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
+from ._version import __version__
 from .app_store import VifuAppRecord, VifuAppStore
 from .gateway import DEFAULT_LOCAL_SERVER_URL, GatewayPairing, VifuGateway
 from .providers import AppProvider, app_provider
@@ -534,6 +535,7 @@ def _notify_managed_ready() -> None:
         headers={
             "Authorization": f"Bearer {token}",
             "Content-Type": "application/json",
+            "User-Agent": f"Vifu-Python-SDK/{__version__}",
         },
     )
     try:

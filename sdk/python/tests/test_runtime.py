@@ -450,6 +450,7 @@ class VifuRuntimeTests(unittest.TestCase):
             self.assertEqual(request.full_url, "https://api.example/v1/vifu/managed/ready")
             self.assertEqual(json.loads(request.data), {"executionId": "execution-123"})
             self.assertEqual(request.get_header("Authorization"), "Bearer ready-only-token")
+            self.assertEqual(request.get_header("User-agent"), "Vifu-Python-SDK/0.1.8")
 
     def test_managed_ready_notification_rejects_non_http_loopback_urls(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
