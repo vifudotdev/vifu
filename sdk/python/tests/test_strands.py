@@ -230,7 +230,7 @@ class VifuStrandsTests(unittest.TestCase):
             self.assertEqual(_post_json(target, {"messages": []}), {})
 
         request = post.call_args.args[0]
-        self.assertEqual(request.get_header("User-agent"), "Vifu-Python-SDK/0.1.8")
+        self.assertEqual(request.get_header("User-agent"), "Vifu-Python-SDK/0.1.9")
         self.assertEqual(request.get_header("Authorization"), "Bearer short-lived-token")
 
 

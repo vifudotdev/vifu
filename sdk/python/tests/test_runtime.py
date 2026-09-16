@@ -326,17 +326,17 @@ class VifuRuntimeTests(unittest.TestCase):
             terminal_input.assert_not_called()
             close.assert_called_once_with()
 
-    def test_managed_app_waits_for_one_endpoint_invocation_then_exits(self) -> None:
+    def test_managed_app_stays_available_until_the_controller_stops_it(self) -> None:
         with mock.patch.dict(
             "os.environ",
             {"VIFU_GATEWAY_PAIRING_FILE": "/managed/pairing.json"},
             clear=True,
         ):
             app = Vifu("Managed App")
-            app._managed_invocation_complete.set()
             with mock.patch.object(app, "connect") as connect:
                 with mock.patch.object(app, "close") as close:
-                    result = app.run(connect_timeout=4.0)
+                    with mock.patch("vifu.app.time.sleep", side_effect=KeyboardInterrupt):
+                        result = app.run(connect_timeout=4.0)
 
         self.assertIsNone(result)
         connect.assert_called_once_with(timeout=4.0)
@@ -349,11 +349,11 @@ class VifuRuntimeTests(unittest.TestCase):
             clear=True,
         ):
             app = Vifu("Managed App")
-            app._managed_invocation_complete.set()
             local_main = mock.Mock()
             with mock.patch.object(app, "connect"):
                 with mock.patch.object(app, "close"):
-                    result = app.run(local_main)
+                    with mock.patch("vifu.app.time.sleep", side_effect=KeyboardInterrupt):
+                        result = app.run(local_main)
 
         self.assertIsNone(result)
         local_main.assert_not_called()
@@ -450,7 +450,7 @@ class VifuRuntimeTests(unittest.TestCase):
             self.assertEqual(request.full_url, "https://api.example/v1/vifu/managed/ready")
             self.assertEqual(json.loads(request.data), {"executionId": "execution-123"})
             self.assertEqual(request.get_header("Authorization"), "Bearer ready-only-token")
-            self.assertEqual(request.get_header("User-agent"), "Vifu-Python-SDK/0.1.8")
+            self.assertEqual(request.get_header("User-agent"), "Vifu-Python-SDK/0.1.9")
 
     def test_managed_ready_notification_rejects_non_http_loopback_urls(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

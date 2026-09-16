@@ -7,7 +7,6 @@ import inspect
 import json
 import os
 import tempfile
-import threading
 import time
 from pathlib import Path
 from types import MappingProxyType
@@ -59,7 +58,6 @@ class Vifu:
         self._foreground_lifecycles: list[Any] = []
         self._cloud_app_id = os.environ.get("VIFU_APP_ID", "").strip() or None
         self._cloud_app_slug = os.environ.get("VIFU_APP_SLUG", "").strip() or None
-        self._managed_invocation_complete = threading.Event()
 
     @property
     def providers(self) -> Mapping[str, AppProvider]:
@@ -166,7 +164,6 @@ class Vifu:
                 self._runtime.agent(
                     agent_id,
                     handler,
-                    _on_complete=self._managed_invocation_complete.set,
                     **options,
                 )
             if callable(getattr(handler, "vifu_run", None)):
@@ -284,7 +281,7 @@ class Vifu:
         *,
         connect_timeout: float = 20.0,
     ) -> Any:
-        """Runs a local entrypoint or serves one managed Endpoint invocation."""
+        """Runs a local entrypoint or serves registered Agent endpoints."""
         self.connect(timeout=connect_timeout)
         managed = bool(os.environ.get("VIFU_GATEWAY_PAIRING_FILE", "").strip())
         if not managed:
@@ -305,10 +302,6 @@ class Vifu:
                 if inspect.isawaitable(result):
                     result = asyncio.run(result)
                 return result
-            if managed:
-                while not self._managed_invocation_complete.wait(3_600):
-                    pass
-                return None
             while True:
                 time.sleep(3_600)
         except KeyboardInterrupt:
@@ -398,12 +391,7 @@ class Vifu:
                 runtime_data_dir = root / (execution_id or "managed")
             self._runtime = VifuRuntime(self._cloud_app_id, data_dir=runtime_data_dir)
             for agent_id, handler, options in self._registrations:
-                self._runtime.agent(
-                    agent_id,
-                    handler,
-                    _on_complete=self._managed_invocation_complete.set,
-                    **options,
-                )
+                self._runtime.agent(agent_id, handler, **options)
             return
         if not _is_loopback_server(self.server_url):
             raise ValueError(
