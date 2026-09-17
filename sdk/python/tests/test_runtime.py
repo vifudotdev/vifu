@@ -16,7 +16,7 @@ from vifu import (
     VifuServer,
     VifuServerConfig,
 )
-from vifu.app import _notify_managed_ready
+from vifu.app import _notify_managed_ready, _write_private_json
 from vifu.app_store import VifuAppRecord, VifuAppStore
 from vifu.gateway import (
     DEFAULT_LOCAL_BOOTSTRAP_TOKEN,
@@ -342,6 +342,60 @@ class VifuRuntimeTests(unittest.TestCase):
         connect.assert_called_once_with(timeout=4.0)
         close.assert_called_once_with()
 
+    def test_cloud_service_starts_http_before_connecting_to_gateway(self) -> None:
+        with mock.patch.dict("os.environ", {
+            "VIFU_CLOUD_SERVICE": "1", "VIFU_APP_ID": "app-123", "VIFU_APP_SLUG": "test-app",
+        }, clear=True):
+            app = Vifu("Cloud App")
+            with mock.patch.object(app, "_run_cloud_service") as serve:
+                with mock.patch.object(app, "connect") as connect:
+                    app.run(connect_timeout=7.0)
+        serve.assert_called_once_with(connect_timeout=7.0)
+        connect.assert_not_called()
+
+    def test_cloud_service_keeps_local_foreground_agent_dormant(self) -> None:
+        with mock.patch.dict("os.environ", {
+            "VIFU_CLOUD_SERVICE": "1", "VIFU_APP_ID": "app-123", "VIFU_APP_SLUG": "test-app",
+        }, clear=True):
+            app = Vifu("Cloud App")
+            foreground = mock.Mock()
+            app._foreground_lifecycles.append(foreground)
+            with mock.patch("vifu.app.ThreadingHTTPServer") as server:
+                with mock.patch.object(app, "close"):
+                    app.run()
+            server.assert_called_once()
+            foreground.vifu_run.assert_not_called()
+
+    def test_cloud_credential_file_is_private_and_atomic(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            credential = Path(directory) / "credential.json"
+            _write_private_json(credential, {"token": "test-only"})
+            self.assertEqual(json.loads(credential.read_text()), {"token": "test-only"})
+            self.assertFalse(credential.with_suffix(".json.tmp").exists())
+            if sys.platform != "win32":
+                self.assertEqual(credential.stat().st_mode & 0o777, 0o600)
+
+    def test_cloud_wake_replaces_gateway_before_using_new_credentials(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            with mock.patch.dict("os.environ", {
+                "VIFU_CLOUD_SERVICE": "1", "VIFU_APP_ID": "app-123", "VIFU_APP_SLUG": "test-app",
+            }, clear=True):
+                app = Vifu("Cloud App")
+                previous = mock.Mock()
+                app._gateway = previous
+                provider = {
+                    "url": "https://api.example.test/inference",
+                    "token": "test-only",
+                    "invocationId": "invocation-2",
+                    "expiresAt": "2026-09-18T00:00:00Z",
+                }
+                with mock.patch.object(app, "connect") as connect:
+                    app._connect_cloud_wake(Path(directory), "pairing-2", provider, 7.0)
+                    previous.close.assert_called_once_with()
+                    self.assertIsNone(app._gateway)
+                    self.assertEqual(json.loads((Path(directory) / "provider-credential.json").read_text()), provider)
+                    connect.assert_called_once_with(timeout=7.0)
+
     def test_managed_app_ignores_the_local_main_callback(self) -> None:
         with mock.patch.dict(
             "os.environ",
@@ -424,7 +478,7 @@ class VifuRuntimeTests(unittest.TestCase):
             control_path.write_text(
                 json.dumps(
                     {
-                        "readyUrl": "https://api.example/v1/vifu/managed/ready",
+                        "readyUrl": "https://api.example/v1/vifu/ready",
                         "token": "ready-only-token",
                         "executionId": "execution-123",
                     }
@@ -447,10 +501,10 @@ class VifuRuntimeTests(unittest.TestCase):
                     app.connect(timeout=4.0)
 
             request = post.call_args.args[0]
-            self.assertEqual(request.full_url, "https://api.example/v1/vifu/managed/ready")
+            self.assertEqual(request.full_url, "https://api.example/v1/vifu/ready")
             self.assertEqual(json.loads(request.data), {"executionId": "execution-123"})
             self.assertEqual(request.get_header("Authorization"), "Bearer ready-only-token")
-            self.assertEqual(request.get_header("User-agent"), "Vifu-Python-SDK/0.1.9")
+            self.assertEqual(request.get_header("User-agent"), "Vifu-Python-SDK/0.1.10")
 
     def test_managed_ready_notification_rejects_non_http_loopback_urls(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -458,7 +512,7 @@ class VifuRuntimeTests(unittest.TestCase):
             control_path.write_text(
                 json.dumps(
                     {
-                        "readyUrl": "ftp://localhost/v1/vifu/managed/ready",
+                        "readyUrl": "ftp://localhost/v1/vifu/ready",
                         "token": "ready-only-token",
                         "executionId": "execution-123",
                     }

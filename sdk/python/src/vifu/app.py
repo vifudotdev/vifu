@@ -7,7 +7,9 @@ import inspect
 import json
 import os
 import tempfile
+import threading
 import time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Callable, Mapping
@@ -282,6 +284,8 @@ class Vifu:
         connect_timeout: float = 20.0,
     ) -> Any:
         """Runs a local entrypoint or serves registered Agent endpoints."""
+        if os.environ.get("VIFU_CLOUD_SERVICE") == "1":
+            return self._run_cloud_service(connect_timeout=connect_timeout)
         self.connect(timeout=connect_timeout)
         managed = bool(os.environ.get("VIFU_GATEWAY_PAIRING_FILE", "").strip())
         if not managed:
@@ -308,6 +312,95 @@ class Vifu:
             pass
         finally:
             self.close()
+
+    def _run_cloud_service(self, *, connect_timeout: float) -> None:
+        """Serve a private HTTP wake endpoint for a scale-to-zero cloud Service."""
+        if self._cloud_app_id is None or self._cloud_app_slug is None:
+            raise ValueError("VIFU_APP_ID and VIFU_APP_SLUG are required in cloud Service mode")
+        # A local audio lifecycle may coexist with cloud-invokable Agents. It is
+        # started only by local run(); Cloud Run serves the registered endpoints.
+        port_text = os.environ.get("PORT", "8080")
+        if not port_text.isdecimal() or not 1 <= int(port_text) <= 65535:
+            raise ValueError("PORT must be a valid TCP port")
+        workspace = Path(os.environ.get("VIFU_EPHEMERAL_WORKSPACE", "/tmp/vifu-cloud"))
+        workspace.mkdir(parents=True, exist_ok=True)
+        if os.name != "nt":
+            workspace.chmod(0o700)
+        wake_lock = threading.Lock()
+        application = self
+
+        class CloudHandler(BaseHTTPRequestHandler):
+            def do_GET(self) -> None:
+                if self.path != "/__vifu/health":
+                    self.send_error(404)
+                    return
+                self._send_json(200, {"ready": True})
+
+            def do_POST(self) -> None:
+                if self.path != "/__vifu/wake":
+                    self.send_error(404)
+                    return
+                try:
+                    length = int(self.headers.get("Content-Length", "-1"))
+                    if not 0 < length <= 64 * 1024:
+                        raise ValueError("wake request size is invalid")
+                    value = json.loads(self.rfile.read(length))
+                    if not isinstance(value, dict):
+                        raise ValueError("wake request must be an object")
+                    pairing = value.get("pairingCode")
+                    provider = value.get("providerCredential")
+                    if not isinstance(pairing, str) or not pairing.strip():
+                        raise ValueError("wake request has no Gateway pairing")
+                    if not isinstance(provider, dict):
+                        raise ValueError("wake request has no Provider credential")
+                    if not all(isinstance(provider.get(key), str) and provider[key]
+                               for key in ("url", "token", "invocationId", "expiresAt")):
+                        raise ValueError("Provider credential is incomplete")
+                    with wake_lock:
+                        application._connect_cloud_wake(workspace, pairing, provider, connect_timeout)
+                    self._send_json(200, {"ready": True})
+                except (ValueError, json.JSONDecodeError) as error:
+                    self._send_json(400, {"error": str(error)})
+                except Exception as error:
+                    self._send_json(503, {"error": type(error).__name__})
+
+            def _send_json(self, status: int, value: dict[str, Any]) -> None:
+                body = json.dumps(value, separators=(",", ":")).encode("utf-8")
+                self.send_response(status)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, _format: str, *_args: Any) -> None:
+                return
+
+        server = ThreadingHTTPServer(("0.0.0.0", int(port_text)), CloudHandler)
+        try:
+            server.serve_forever()
+        finally:
+            server.server_close()
+            self.close()
+
+    def _connect_cloud_wake(
+        self,
+        workspace: Path,
+        pairing: str,
+        provider: dict[str, str],
+        connect_timeout: float,
+    ) -> None:
+        if self._gateway is not None:
+            previous = self._gateway
+            self._gateway = None
+            previous.close()
+        pairing_file = workspace / "gateway-pairing.json"
+        credential_file = workspace / "provider-credential.json"
+        _write_private_json(pairing_file, {"pairingCode": pairing})
+        _write_private_json(credential_file, provider)
+        os.environ["VIFU_GATEWAY_PAIRING_FILE"] = str(pairing_file)
+        os.environ["VIFU_PROVIDER_CREDENTIAL_FILE"] = str(credential_file)
+        self.connect(timeout=connect_timeout)
 
     def close(self) -> None:
         """Stops resources that this Vifu application owns."""
@@ -380,7 +473,7 @@ class Vifu:
         if self._runtime is not None:
             return
         pairing_path = os.environ.get("VIFU_GATEWAY_PAIRING_FILE", "").strip()
-        if pairing_path:
+        if pairing_path or os.environ.get("VIFU_CLOUD_SERVICE") == "1":
             if self._cloud_app_id is None:
                 raise ValueError("VIFU_APP_ID is required for a managed App")
             runtime_data_dir = self._data_dir
@@ -487,6 +580,17 @@ def _read_pairing_file(path: str | Path) -> str:
         if not text:
             raise ValueError("VIFU_GATEWAY_PAIRING_FILE is missing pairingCode")
     return text
+
+
+def _write_private_json(path: Path, value: dict[str, Any]) -> None:
+    encoded = json.dumps(value, ensure_ascii=False, allow_nan=False, separators=(",", ":")).encode("utf-8")
+    if len(encoded) > 64 * 1024:
+        raise ValueError("cloud credential exceeds 64 KiB")
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_bytes(encoded)
+    if os.name != "nt":
+        temporary.chmod(0o600)
+    temporary.replace(path)
 
 
 def _notify_managed_ready() -> None:

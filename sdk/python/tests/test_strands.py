@@ -111,7 +111,7 @@ class VifuStrandsTests(unittest.TestCase):
             path.write_text(
                 json.dumps(
                     {
-                        "url": "https://api.example/v1/vifu/managed/inference",
+                        "url": "https://api.example/v1/vifu/inference",
                         "token": "short-lived-token",
                         "invocationId": "invocation-123",
                         "expiresAt": "2030-01-01T00:00:00Z",
@@ -230,7 +230,7 @@ class VifuStrandsTests(unittest.TestCase):
             self.assertEqual(_post_json(target, {"messages": []}), {})
 
         request = post.call_args.args[0]
-        self.assertEqual(request.get_header("User-agent"), "Vifu-Python-SDK/0.1.9")
+        self.assertEqual(request.get_header("User-agent"), "Vifu-Python-SDK/0.1.10")
         self.assertEqual(request.get_header("Authorization"), "Bearer short-lived-token")
 
 
