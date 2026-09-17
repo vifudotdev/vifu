@@ -1,5 +1,6 @@
 pub mod api;
 pub mod auth;
+pub mod code_releases;
 pub mod comparisons;
 pub mod config;
 pub mod console;
@@ -521,6 +522,22 @@ pub fn app(state: AppState) -> Router {
         .route(
             "/v1/apps/{slug}/runtime-releases",
             get(api::list_project_runtime_releases).post(api::publish_project_runtime_release),
+        )
+        .route(
+            "/v1/apps/{slug}/code-releases",
+            get(code_releases::list).post(code_releases::create),
+        )
+        .route(
+            "/v1/apps/{slug}/code-releases/{release_id}",
+            get(code_releases::get).patch(code_releases::update),
+        )
+        .route(
+            "/v1/apps/{slug}/code-releases/{release_id}/activate",
+            post(code_releases::activate),
+        )
+        .route(
+            "/v1/apps/{slug}/code-releases/{release_id}/activate-if-pending",
+            post(code_releases::activate_if_pending),
         )
         .route(
             "/v1/apps/{slug}/runtime-releases/{version}",
