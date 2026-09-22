@@ -12,11 +12,18 @@ import { RuntimeAgentsView } from "./runtime-agents";
 import { providerDisplayName } from "./runtime-profile-workbench";
 
 const project = { id: "project-1", slug: "example", name: "Example" } as RuntimeProject;
+const timestamp = "2026-09-22T00:00:00Z";
 const profile = {
   id: "profile-1",
+  projectId: project.id,
+  slug: "voice-agent",
   name: "Voice Agent",
+  description: null,
   activeVersionId: "version-1",
-} as AgentProfile;
+  archivedAt: null,
+  createdAt: timestamp,
+  updatedAt: timestamp,
+} satisfies AgentProfile;
 const oldProviderKey = "voice-provider--aaaaaaaaaaaaaaaaaaaaaaaa";
 const currentProviderKey = "voice-provider--bbbbbbbbbbbbbbbbbbbbbbbb";
 const detail = {
@@ -24,21 +31,45 @@ const detail = {
   versions: [{
     version: {
       id: "version-1",
+      profileId: profile.id,
       versionNumber: 1,
       persona: {},
+      runtime: {},
+      presentation: {},
       source: { providerKey: oldProviderKey },
+      contentHash: "test-content-hash",
+      changeSummary: null,
+      archivedAt: null,
+      createdAt: timestamp,
     },
-    capabilities: [{ kind: "chat", providerKey: oldProviderKey }],
+    capabilities: [{
+      id: "capability-1",
+      profileVersionId: "version-1",
+      kind: "chat",
+      providerType: "agent-gateway",
+      providerKey: oldProviderKey,
+      resourceId: null,
+      config: {},
+      inputSchema: {},
+      outputSchema: {},
+      createdAt: timestamp,
+    }],
   }],
-} as AgentProfileDetail;
+  rollout: [],
+} satisfies AgentProfileDetail;
 const binding = {
+  id: "binding-1",
   profileId: profile.id,
+  provider: "agent-gateway",
   gatewayId: "current-gateway",
   agentId: "voice",
   config: { providerKey: oldProviderKey },
-} as AgentBinding;
+  createdAt: timestamp,
+  updatedAt: timestamp,
+} satisfies AgentBinding;
 const currentProvider = {
   id: "provider-current",
+  projectId: project.id,
   providerKey: currentProviderKey,
   providerType: "agent-gateway",
   name: "Current Voice Provider",
@@ -48,7 +79,14 @@ const currentProvider = {
     gatewayId: "current-gateway",
     runtimeProviderKey: "voice-provider",
   },
-} as ProjectProvider;
+  secretKeys: [],
+  displaySecret: null,
+  lastCheckedAt: null,
+  sourceKind: "registry",
+  sourceKey: "agent-gateway",
+  createdAt: timestamp,
+  updatedAt: timestamp,
+} satisfies ProjectProvider;
 
 function render(availableAgents: AvailableAgent[]) {
   return renderToStaticMarkup(
@@ -82,9 +120,10 @@ describe("Agent gateway Provider rotation", () => {
     const html = render([{
       gatewayId: "current-gateway",
       id: "voice",
+      name: "Voice Agent",
       status: "connected",
       metadata: { providerKey: currentProviderKey },
-    } as AvailableAgent]);
+    } satisfies AvailableAgent]);
     expect(html).toContain("Current Voice Provider");
     expect(html).toContain("Online");
     expect(html).not.toContain("Unavailable");
