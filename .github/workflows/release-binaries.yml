@@ -246,7 +246,7 @@ jobs:
 
       - name: Create VifuGodot release token
         id: vifugodot-token
-        uses: actions/create-github-app-token@v2
+        uses: actions/create-github-app-token@v3
         with:
           app-id: ${{ steps.app-config.outputs.app-id }}
           private-key: ${{ secrets.VIFU_RELEASE_APP_PRIVATE_KEY }}
