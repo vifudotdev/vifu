@@ -33,6 +33,7 @@ type ProvidersViewProps = {
   catalog: ProviderCatalog;
   providers: ProjectProvider[];
   availableAgents: AvailableAgent[];
+  gatewayStartsOnRequest?: boolean;
 };
 
 type ProviderChoice = {
@@ -47,7 +48,7 @@ type ProviderChoice = {
   secretKeys: string[];
 };
 
-export function RuntimeProvidersView({ project, catalog, providers, availableAgents }: ProvidersViewProps) {
+export function RuntimeProvidersView({ project, catalog, providers, availableAgents, gatewayStartsOnRequest = false }: ProvidersViewProps) {
   const [dialog, setDialog] = useState<{ provider?: ProjectProvider } | null>(null);
   return (
     <div className="providers-page providers-page-simple">
@@ -70,6 +71,7 @@ export function RuntimeProvidersView({ project, catalog, providers, availableAge
               provider={provider}
               adapter={catalog.registry.find((adapter) => adapter.id === provider.providerType) ?? fallbackAdapter(provider.providerType)}
               online={providerOnline(provider, availableAgents)}
+              gatewayStartsOnRequest={gatewayStartsOnRequest}
               onConfigure={() => setDialog({ provider })}
             />
           ))}
@@ -100,12 +102,14 @@ function ProjectProviderCard({
   provider,
   adapter,
   online,
+  gatewayStartsOnRequest,
   onConfigure,
 }: {
   project: RuntimeProject;
   provider: ProjectProvider;
   adapter?: ProviderAdapter;
   online: boolean;
+  gatewayStartsOnRequest: boolean;
   onConfigure: () => void;
 }) {
   const host = useRuntimeConsoleHost();
@@ -128,7 +132,8 @@ function ProjectProviderCard({
     }
   }
 
-  const status = online ? "Online" : provider.status === "configured" ? "Configured" : titleCase(provider.status);
+  const idle = !online && gatewayStartsOnRequest && Boolean(stringValue(provider.config.gatewayId));
+  const status = online ? "Online" : idle ? "Idle" : provider.status === "configured" ? "Configured" : titleCase(provider.status);
   const configuration = providerConfigurationSummary(provider);
   return (
     <article className="provider-resource-card project-provider-card">
@@ -138,7 +143,7 @@ function ProjectProviderCard({
           <strong>{provider.name}</strong>
           <p>{configuration ?? adapter?.description ?? provider.baseUrl}</p>
         </div>
-        <span className={`provider-health ${online ? "online" : provider.status === "configured" ? "configured" : "offline"}`}>
+        <span className={`provider-health ${online ? "online" : idle || provider.status === "configured" ? "configured" : "offline"}`}>
           <i />{status}
         </span>
       </button>

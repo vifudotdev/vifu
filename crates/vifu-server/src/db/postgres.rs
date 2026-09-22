@@ -4335,57 +4335,30 @@ pub async fn list_agent_gateway_sessions(
     .map_err(ApiError::from)
 }
 
-pub async fn list_available_agents(pool: &PgPool) -> Result<Vec<AvailableAgent>, ApiError> {
-    let sessions = list_agent_gateway_sessions(pool).await?;
-    let mut seen = HashSet::new();
-    let mut agents = Vec::new();
-
-    for session in sessions {
-        let Some(items) = session.agents.as_array() else {
-            continue;
-        };
-        for item in items {
-            let Some(id) = item.get("id").and_then(Value::as_str).map(str::trim) else {
-                continue;
-            };
-            if id.is_empty() {
-                continue;
-            }
-            let name = item
-                .get("name")
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .unwrap_or(id)
-                .to_string();
-            let metadata = item
-                .get("metadata")
-                .cloned()
-                .filter(Value::is_object)
-                .unwrap_or_else(|| json!({}));
-            let provider_key = metadata
-                .get("providerKey")
-                .and_then(Value::as_str)
-                .unwrap_or("");
-            let key = (
-                session.gateway_id.clone(),
-                provider_key.to_string(),
-                id.to_string(),
-            );
-            if !seen.insert(key) {
-                continue;
-            }
-            agents.push(AvailableAgent {
-                gateway_id: session.gateway_id.clone(),
-                id: id.to_string(),
-                name,
-                status: session.status.clone(),
-                metadata,
-            });
-        }
+pub async fn list_agent_gateway_sessions_for_gateways(
+    pool: &PgPool,
+    gateway_ids: &[String],
+) -> Result<Vec<AgentGatewaySession>, ApiError> {
+    if gateway_ids.is_empty() {
+        return Ok(Vec::new());
     }
+    sqlx::query_as::<_, AgentGatewaySession>(
+        "SELECT id, gateway_id, session_id, status, agents, metadata,
+                connected_at, last_seen_at, disconnected_at
+         FROM agent_gateway_sessions
+         WHERE gateway_id = ANY($1)
+         ORDER BY connected_at DESC LIMIT 200",
+    )
+    .bind(gateway_ids)
+    .fetch_all(pool)
+    .await
+    .map_err(ApiError::from)
+}
 
-    Ok(agents)
+pub async fn list_available_agents(pool: &PgPool) -> Result<Vec<AvailableAgent>, ApiError> {
+    Ok(super::available_agents_from_sessions(
+        list_agent_gateway_sessions(pool).await?,
+    ))
 }
 
 pub async fn create_trace(pool: &PgPool, trace: NewTrace<'_>) -> Result<Uuid, ApiError> {

@@ -115,14 +115,7 @@ class VifuGateway:
             if stored.certificate_der_base64 is not None
             else None
         )
-        metadata = {
-            "name": name or f"Python on {platform.node() or 'local device'}",
-            "platform": platform.system().lower(),
-            "runtime": "python",
-            "sdkVersion": __version__,
-        }
-        if providers:
-            metadata["appProviders"] = providers
+        metadata = _gateway_metadata(name=name, providers=providers)
         gateway = native.VifuEmbeddedGateway(
             runtime._native_runtime(),
             native.VifuEmbeddedGatewayConfig(
@@ -185,6 +178,25 @@ class VifuGateway:
 
     def __exit__(self, *_args: Any) -> None:
         self.close()
+
+
+def _gateway_metadata(
+    *,
+    name: str | None,
+    providers: list[dict[str, Any]] | None,
+) -> dict[str, Any]:
+    metadata: dict[str, Any] = {
+        "name": name or f"Python on {platform.node() or 'local device'}",
+        "platform": platform.system().lower(),
+        "runtime": "python",
+        "sdkVersion": __version__,
+    }
+    code_release_id = os.environ.get("VIFU_CODE_RELEASE_ID", "").strip()
+    if code_release_id:
+        metadata["codeReleaseId"] = code_release_id
+    if providers:
+        metadata["appProviders"] = providers
+    return metadata
 
 
 def _one(values: dict[str, list[str]], key: str) -> str:

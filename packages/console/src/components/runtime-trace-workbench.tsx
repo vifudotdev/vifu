@@ -41,6 +41,12 @@ import {
   type TraceStatusGroup,
 } from "../trace-model";
 import { decodeTracePayload } from "../trace-payload";
+import {
+  isTraceRateLimited,
+  shouldPollTraceObservations,
+  TRACE_POLL_MS,
+  tracePollDelay,
+} from "../trace-polling";
 import { traceDateWindowChanged } from "../trace-window";
 import type {
   AgentProfileDetail,
@@ -54,7 +60,6 @@ import type {
 
 const TRACE_PAGE_SIZE = 100;
 const ROW_HEIGHT = 42;
-const TRACE_POLL_MS = 2_000;
 const TRACE_REQUEST_TIMEOUT_MS = 8_000;
 
 type RuntimeTraceWorkbenchProps = {
@@ -130,6 +135,7 @@ export function RuntimeTraceWorkbench({
   const pausedTracesRef = useRef(pausedTraces);
   const pausedRef = useRef(paused);
   const selectedTraceIdRef = useRef(selectedTraceId);
+  const observationTraceKeyRef = useRef<string | null>(null);
   const initialPageLoadedRef = useRef(false);
   const dateWindow = useMemo(() => localDateWindow(dateFrom, dateTo), [dateFrom, dateTo]);
   const previousProjectRef = useRef({ projectId, projectSlug });
@@ -351,9 +357,14 @@ export function RuntimeTraceWorkbench({
     let timer: number | undefined;
 
     async function poll() {
+      if (document.visibilityState === "hidden") {
+        timer = window.setTimeout(poll, TRACE_POLL_MS);
+        return;
+      }
       const requestController = new AbortController();
       const abortRequest = () => requestController.abort();
       let timedOut = false;
+      let nextDelay = TRACE_POLL_MS;
       const timeout = window.setTimeout(() => {
         timedOut = true;
         requestController.abort();
@@ -392,9 +403,12 @@ export function RuntimeTraceWorkbench({
         }
       } catch (error) {
         if (!controller.signal.aborted) {
+          nextDelay = tracePollDelay(error);
           const message = timedOut
             ? "Trace polling request timed out."
-            : error instanceof Error ? error.message : "Failed to load traces.";
+            : isTraceRateLimited(error)
+              ? "Trace updates are paused because the server is busy. Retrying shortly."
+              : error instanceof Error ? error.message : "Failed to load traces.";
           setPollError((current) => current === message ? current : message);
         }
       } finally {
@@ -402,7 +416,7 @@ export function RuntimeTraceWorkbench({
         controller.signal.removeEventListener("abort", abortRequest);
         if (!controller.signal.aborted) {
           setTraceListLoading(false);
-          timer = window.setTimeout(poll, TRACE_POLL_MS);
+          timer = window.setTimeout(poll, nextDelay);
         }
       }
     }
@@ -453,6 +467,7 @@ export function RuntimeTraceWorkbench({
 
   const traceById = useMemo(() => new Map(traces.map((trace) => [trace.id, trace])), [traces]);
   const selectedTrace = selectedTraceId ? traceById.get(selectedTraceId) ?? null : null;
+  const pollSelectedObservations = shouldPollTraceObservations(selectedTrace);
   const selectedProfileVersion = useMemo(() => {
     if (!selectedTrace?.profileId || !selectedTrace.profileVersionId) return null;
     return [...loadedProfileDetails, ...profileDetails]
@@ -484,21 +499,32 @@ export function RuntimeTraceWorkbench({
     const controller = new AbortController();
     let timer: number | undefined;
     if (!selectedTraceId) {
+      observationTraceKeyRef.current = null;
       setSelectedSpans([]);
       setSelectedScores([]);
       setSpansError(null);
       setSpansLoading(false);
       return () => controller.abort();
     }
-    setSelectedSpans([]);
-    setSelectedScores([]);
-    setSpansError(null);
-    setSpansLoading(true);
+    const traceKey = `${projectSlug}:${selectedTraceId}`;
+    if (observationTraceKeyRef.current !== traceKey) {
+      observationTraceKeyRef.current = traceKey;
+      setSelectedSpans([]);
+      setSelectedScores([]);
+      setSpansError(null);
+      setSpansLoading(true);
+    }
     let loaded = false;
     const loadObservations = async () => {
+      if (document.visibilityState === "hidden") {
+        timer = window.setTimeout(loadObservations, TRACE_POLL_MS);
+        return;
+      }
       const requestController = new AbortController();
       const abortRequest = () => requestController.abort();
       let timedOut = false;
+      let nextDelay = TRACE_POLL_MS;
+      let succeeded = false;
       const timeout = window.setTimeout(() => {
         timedOut = true;
         requestController.abort();
@@ -509,17 +535,25 @@ export function RuntimeTraceWorkbench({
         const [spanPayload, scorePayload] = await Promise.all([
           request<RuntimeTraceSpansResponse>(`${tracePath}/spans`, "GET", undefined, requestController.signal),
           request<RuntimeTraceScoresResponse>(`${tracePath}/scores`, "GET", undefined, requestController.signal)
-            .catch(() => null),
+            .catch((error: unknown) => {
+              if (isTraceRateLimited(error)) throw error;
+              return null;
+            }),
         ]);
+        if (controller.signal.aborted) return;
         setSelectedSpans((current) => reconcileSpans(spanPayload.spans ?? [], current));
         const scores = scorePayload?.scores ?? spanPayload.scores;
         if (scores) setSelectedScores((current) => reconcileScores(scores, current));
         setSpansError((current) => current === null ? current : null);
+        succeeded = true;
       } catch (error: unknown) {
         if (!controller.signal.aborted) {
+          nextDelay = tracePollDelay(error);
           const message = timedOut
             ? "Trace observation polling request timed out."
-            : error instanceof Error ? error.message : "Failed to load trace observations.";
+            : isTraceRateLimited(error)
+              ? "Trace details are paused because the server is busy. Retrying shortly."
+              : error instanceof Error ? error.message : "Failed to load trace observations.";
           setSpansError((current) => current === message ? current : message);
         }
       } finally {
@@ -529,8 +563,8 @@ export function RuntimeTraceWorkbench({
           loaded = true;
           setSpansLoading(false);
         }
-        if (!controller.signal.aborted) {
-          timer = window.setTimeout(loadObservations, TRACE_POLL_MS);
+        if (!controller.signal.aborted && (pollSelectedObservations || !succeeded)) {
+          timer = window.setTimeout(loadObservations, nextDelay);
         }
       }
     };
@@ -539,7 +573,7 @@ export function RuntimeTraceWorkbench({
       controller.abort();
       if (timer !== undefined) window.clearTimeout(timer);
     };
-  }, [projectSlug, request, selectedTraceId]);
+  }, [pollSelectedObservations, projectSlug, request, selectedTraceId]);
 
   useEffect(() => {
     if (spansLoading || !selectedObservationId || selectedSpans.length === 0) return;

@@ -3469,16 +3469,14 @@ pub async fn list_project_agent_candidates(
     Path(slug): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
     let project = authorized_project_by_slug(&state, &headers, &slug, ProjectAccess::Read).await?;
-    let gateway_ids = project_runtime_gateway_ids(&state, &project).await?;
     let mut available_provider_keys = db::list_provider_connections(&state.pool, &slug)
         .await?
         .into_iter()
         .map(|provider| provider.provider_key)
         .collect::<HashSet<_>>();
-    let available_agents = db::list_available_agents(&state.pool)
+    let available_agents = project_available_agents(&state, &project)
         .await?
         .into_iter()
-        .filter(|agent| gateway_ids.contains(&agent.gateway_id))
         .map(scope_available_agent)
         .collect::<Vec<_>>();
     available_provider_keys.extend(available_agents.iter().filter_map(|agent| {
@@ -3559,7 +3557,7 @@ pub async fn import_project_agent(
     {
         return Err(ApiError::Forbidden);
     }
-    let agent = db::list_available_agents(&state.pool)
+    let agent = project_available_agents(&state, &project)
         .await?
         .into_iter()
         .find(|agent| {
@@ -4117,12 +4115,7 @@ pub async fn list_project_agent_gateways(
     Path(slug): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
     let project = authorized_project_by_slug(&state, &headers, &slug, ProjectAccess::Read).await?;
-    let gateway_ids = project_runtime_gateway_ids(&state, &project).await?;
-    let sessions = db::list_agent_gateway_sessions(&state.pool)
-        .await?
-        .into_iter()
-        .filter(|session| gateway_ids.contains(&session.gateway_id))
-        .collect::<Vec<_>>();
+    let sessions = project_agent_gateway_sessions(&state, &project).await?;
     Ok(Json(json!({ "agentGateways": sessions })))
 }
 
@@ -4132,11 +4125,9 @@ pub async fn list_project_available_agents(
     Path(slug): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
     let project = authorized_project_by_slug(&state, &headers, &slug, ProjectAccess::Read).await?;
-    let gateway_ids = project_runtime_gateway_ids(&state, &project).await?;
-    let agents = db::list_available_agents(&state.pool)
+    let agents = project_available_agents(&state, &project)
         .await?
         .into_iter()
-        .filter(|agent| gateway_ids.contains(&agent.gateway_id))
         .map(scope_available_agent)
         .collect::<Vec<_>>();
     Ok(Json(json!({ "agents": agents })))
@@ -4156,6 +4147,26 @@ async fn project_runtime_gateway_ids(
         gateway_ids.insert(project.project.gateway_id.clone());
     }
     Ok(gateway_ids)
+}
+
+async fn project_agent_gateway_sessions(
+    state: &AppState,
+    project: &crate::models::ProjectWithBindings,
+) -> Result<Vec<crate::models::AgentGatewaySession>, ApiError> {
+    let gateway_ids = project_runtime_gateway_ids(state, project)
+        .await?
+        .into_iter()
+        .collect::<Vec<_>>();
+    db::list_agent_gateway_sessions_for_gateways(&state.pool, &gateway_ids).await
+}
+
+async fn project_available_agents(
+    state: &AppState,
+    project: &crate::models::ProjectWithBindings,
+) -> Result<Vec<crate::models::AvailableAgent>, ApiError> {
+    Ok(db::available_agents_from_sessions(
+        project_agent_gateway_sessions(state, project).await?,
+    ))
 }
 
 pub async fn list_project_traces(
@@ -4194,12 +4205,7 @@ pub async fn list_project_traces(
         },
     )
     .await?;
-    let gateway_ids = project_runtime_gateway_ids(&state, project).await?;
-    let sessions = db::list_agent_gateway_sessions(&state.pool)
-        .await?
-        .into_iter()
-        .filter(|session| gateway_ids.contains(&session.gateway_id))
-        .collect::<Vec<_>>();
+    let sessions = project_agent_gateway_sessions(&state, project).await?;
     hydrate_trace_gateway_identities(&mut traces, &sessions);
     Ok(Json(trace_page_payload(traces, limit)))
 }

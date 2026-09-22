@@ -349,6 +349,7 @@ export function RuntimeProfileWorkbench({
                 project={project}
                 detail={detail}
                 activeVersion={activeVersion}
+                providerConnections={providerConnections}
                 pending={pending}
                 onUpdateProfile={updateProfile}
                 onRemove={() => setConfirmingRemoval(true)}
@@ -492,6 +493,7 @@ function OverviewPanel({
   project,
   detail,
   activeVersion,
+  providerConnections,
   pending,
   onUpdateProfile,
   onRemove,
@@ -502,6 +504,7 @@ function OverviewPanel({
   project: RuntimeProject;
   detail: AgentProfileDetail;
   activeVersion?: ProfileVersionWithCapabilities;
+  providerConnections: ProjectProvider[];
   pending: string | null;
   onUpdateProfile: (name: string, description: string) => void;
   onRemove: () => void;
@@ -510,7 +513,9 @@ function OverviewPanel({
   onPresentationChange: (presentation: Record<string, unknown>) => void;
 }) {
   const source = activeVersion?.version.source ?? {};
-  const sourceName = source.type === "openclaw" ? "OpenClaw" : stringValue(source.providerKey) || "Custom provider";
+  const sourceName = source.type === "openclaw"
+    ? "OpenClaw"
+    : providerDisplayName(providerConnections, stringValue(source.providerKey));
   const [name, setName] = useState(detail.profile.name);
   const [description, setDescription] = useState(detail.profile.description ?? "");
   useEffect(() => {
@@ -1085,6 +1090,17 @@ function testResponseText(output: unknown): string {
 
 function recordValue(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+}
+
+export function providerDisplayName(connections: ProjectProvider[], providerKey: string): string {
+  if (!providerKey) return "Custom provider";
+  const exact = connections.find((connection) => connection.providerKey === providerKey);
+  if (exact) return exact.name;
+  const runtimeProviderKey = providerKey.replace(/--[0-9a-f]{24}$/i, "");
+  const matches = connections.filter((connection) => (
+    stringValue(connection.config.runtimeProviderKey) === runtimeProviderKey
+  ));
+  return matches.length === 1 ? matches[0]!.name : providerKey;
 }
 
 function stringValue(value: unknown): string {

@@ -25,6 +25,7 @@ type AgentsViewProps = {
   candidates: ProjectAgentCandidate[];
   providerAdapters: ProviderAdapter[];
   projectProviders: ProjectProvider[];
+  gatewayStartsOnRequest?: boolean;
 };
 
 export function RuntimeAgentsView(props: AgentsViewProps) {
@@ -52,6 +53,7 @@ export function RuntimeAgentsView(props: AgentsViewProps) {
                 binding={props.bindings.find((binding) => binding.profileId === profile.id)}
                 providers={props.projectProviders}
                 availableAgents={props.availableAgents}
+                gatewayStartsOnRequest={props.gatewayStartsOnRequest}
                 onSelect={() => setSelectedId(profile.id)}
               />
             ))}
@@ -93,6 +95,7 @@ function AgentCard({
   binding,
   providers,
   availableAgents,
+  gatewayStartsOnRequest,
   onSelect,
 }: {
   profile: AgentProfile;
@@ -100,6 +103,7 @@ function AgentCard({
   binding?: AgentBinding;
   providers: ProjectProvider[];
   availableAgents: AvailableAgent[];
+  gatewayStartsOnRequest?: boolean;
   onSelect: () => void;
 }) {
   const active = detail?.versions.find((item) => item.version.id === profile.activeVersionId) ?? detail?.versions[0];
@@ -108,16 +112,20 @@ function AgentCard({
     || active?.capabilities[0]?.providerKey
     || binding?.provider
     || "unassigned";
-  const provider = providers.find((item) => item.providerKey === providerKey);
+  const provider = providerForBinding(providers, providerKey, binding);
   const gatewayOnline = binding ? availableAgents.some((agent) => (
     agent.gatewayId === binding.gatewayId
     && agent.id === binding.agentId
-    && stringValue(agent.metadata.providerKey) === providerKey
+    && [providerKey, provider?.providerKey].includes(stringValue(agent.metadata.providerKey))
     && agent.status === "connected"
   )) : false;
   const gatewayManaged = Boolean(provider && stringValue(provider.config.gatewayId));
   const availability = gatewayManaged
-    ? (gatewayOnline ? { label: "Online", className: "online" } : { label: "Unavailable", className: "offline" })
+    ? (gatewayOnline
+      ? { label: "Online", className: "online" }
+      : gatewayStartsOnRequest
+        ? { label: "Idle", className: "configured" }
+        : { label: "Unavailable", className: "offline" })
     : provider?.status === "online"
       ? { label: "Online", className: "online" }
       : provider?.status === "configured"
@@ -147,6 +155,22 @@ function AgentCard({
       </footer>
     </button>
   );
+}
+
+function providerForBinding(
+  providers: ProjectProvider[],
+  providerKey: string,
+  binding?: AgentBinding,
+): ProjectProvider | undefined {
+  const currentGateway = binding?.gatewayId;
+  const exact = providers.find((provider) => provider.providerKey === providerKey);
+  if (!currentGateway) return exact;
+  if (exact && stringValue(exact.config.gatewayId) === currentGateway) return exact;
+  const runtimeProviderKey = providerKey.replace(/--[0-9a-f]{24}$/i, "");
+  return providers.find((provider) => (
+    stringValue(provider.config.gatewayId) === currentGateway
+    && stringValue(provider.config.runtimeProviderKey) === runtimeProviderKey
+  )) ?? exact;
 }
 
 function AddAgentDialog({

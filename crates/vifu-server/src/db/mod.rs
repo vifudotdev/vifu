@@ -7,6 +7,7 @@ use serde_json::Value;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};
 use sqlx::{PgPool, SqlitePool};
+use std::collections::HashSet;
 use std::str::FromStr;
 use std::time::Duration;
 use uuid::Uuid;
@@ -287,6 +288,7 @@ dispatch! {
     pub async fn touch_agent_gateway_session(storage: &Storage, session_id: Uuid) -> Result<(), ApiError>;
     pub async fn close_agent_gateway_session(storage: &Storage, session_id: Uuid) -> Result<(), ApiError>;
     pub async fn list_agent_gateway_sessions(storage: &Storage) -> Result<Vec<AgentGatewaySession>, ApiError>;
+    pub async fn list_agent_gateway_sessions_for_gateways(storage: &Storage, gateway_ids: &[String]) -> Result<Vec<AgentGatewaySession>, ApiError>;
     pub async fn list_available_agents(storage: &Storage) -> Result<Vec<AvailableAgent>, ApiError>;
     pub async fn create_trace(storage: &Storage, trace: NewTrace<'_>) -> Result<Uuid, ApiError>;
     pub async fn create_uploaded_runtime_trace(storage: &Storage, trace: NewUploadedRuntimeTrace<'_>) -> Result<bool, ApiError>;
@@ -308,6 +310,58 @@ dispatch! {
     pub async fn list_trace_spans(storage: &Storage, trace_id: Uuid) -> Result<Vec<TraceSpan>, ApiError>;
     pub async fn list_trace_scores(storage: &Storage, trace_id: Uuid) -> Result<Vec<TraceScore>, ApiError>;
     pub async fn trace_feedback_target(storage: &Storage, project_id: Uuid, request_id: Uuid) -> Result<TraceFeedbackTarget, ApiError>;
+}
+
+pub fn available_agents_from_sessions(
+    sessions: impl IntoIterator<Item = AgentGatewaySession>,
+) -> Vec<AvailableAgent> {
+    let mut seen = HashSet::new();
+    let mut agents = Vec::new();
+    for session in sessions {
+        let Some(items) = session.agents.as_array() else {
+            continue;
+        };
+        for item in items {
+            let Some(id) = item.get("id").and_then(Value::as_str).map(str::trim) else {
+                continue;
+            };
+            if id.is_empty() {
+                continue;
+            }
+            let name = item
+                .get("name")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .unwrap_or(id)
+                .to_string();
+            let metadata = item
+                .get("metadata")
+                .cloned()
+                .filter(Value::is_object)
+                .unwrap_or_else(|| serde_json::json!({}));
+            let provider_key = metadata
+                .get("providerKey")
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            let key = (
+                session.gateway_id.clone(),
+                provider_key.to_string(),
+                id.to_string(),
+            );
+            if !seen.insert(key) {
+                continue;
+            }
+            agents.push(AvailableAgent {
+                gateway_id: session.gateway_id.clone(),
+                id: id.to_string(),
+                name,
+                status: session.status.clone(),
+                metadata,
+            });
+        }
+    }
+    agents
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2723,6 +2777,58 @@ mod tests {
                 .len(),
             3
         );
+
+        close_and_remove(storage, &path).await;
+    }
+
+    #[tokio::test]
+    async fn sqlite_scopes_gateway_sessions_before_applying_the_global_page_size() {
+        let (storage, path) = sqlite_storage().await;
+        let (target_session, _) = open_agent_gateway_session(
+            &storage,
+            "gateway-project-target",
+            None,
+            &json!([{"id": "target-agent"}]),
+            &json!({"codeReleaseId": "rel_target"}),
+        )
+        .await
+        .expect("target gateway session should open");
+        if let Storage::Sqlite(pool) = &storage {
+            sqlx::query(
+                "UPDATE agent_gateway_sessions
+                 SET connected_at = '2000-01-01T00:00:00.000Z'
+                 WHERE session_id = $1",
+            )
+            .bind(target_session)
+            .execute(pool)
+            .await
+            .expect("target session timestamp should update");
+        }
+        for index in 0..200 {
+            open_agent_gateway_session(
+                &storage,
+                &format!("gateway-unrelated-{index}"),
+                None,
+                &json!([]),
+                &json!({}),
+            )
+            .await
+            .expect("unrelated gateway session should open");
+        }
+
+        assert!(list_agent_gateway_sessions(&storage)
+            .await
+            .expect("global sessions should list")
+            .iter()
+            .all(|session| session.gateway_id != "gateway-project-target"));
+        let scoped = list_agent_gateway_sessions_for_gateways(
+            &storage,
+            &["gateway-project-target".to_owned()],
+        )
+        .await
+        .expect("project gateway sessions should list");
+        assert_eq!(scoped.len(), 1);
+        assert_eq!(scoped[0].session_id, target_session);
 
         close_and_remove(storage, &path).await;
     }
