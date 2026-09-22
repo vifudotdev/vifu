@@ -68,7 +68,7 @@ jobs:
           - os: windows-2022
             platform: Windows-x86_64
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 45
+    timeout-minutes: 75
     steps:
       - uses: actions/checkout@v7
         with:
